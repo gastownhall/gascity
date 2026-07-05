@@ -437,8 +437,8 @@ func TestFormulaCacheServesWithinTTL(t *testing.T) {
 	m := newEnrichmentManager(t, ts.URL)
 	ctx := context.Background()
 
-	d1, f1, ok1 := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
-	d2, f2, ok2 := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
+	d1, f1, _, ok1 := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
+	d2, f2, _, ok2 := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
 	if !ok1 || !ok2 {
 		t.Fatalf("both formula reads must succeed: %v %v (failures %q %q)", ok1, ok2, f1, f2)
 	}
@@ -467,7 +467,7 @@ func TestFormulaCacheSingleFlight(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			if _, _, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); ok {
+			if _, _, _, ok := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); ok {
 				okCount.Add(1)
 			}
 		}()
@@ -506,7 +506,7 @@ func TestFormulaCacheNotFoundReCheckedOnShortTTL(t *testing.T) {
 	ctx := context.Background()
 
 	// First read: 404 -> not_found, cached.
-	_, failure, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
+	_, failure, _, ok := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
 	if ok {
 		t.Fatal("a 404 formula fetch must not report ok")
 	}
@@ -515,7 +515,7 @@ func TestFormulaCacheNotFoundReCheckedOnShortTTL(t *testing.T) {
 	}
 	// Second read inside the short TTL: served from the cached not-found entry, no
 	// new upstream hit.
-	if _, f2, ok2 := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); ok2 || f2 != runproj.FormulaDetailNotFound {
+	if _, f2, _, ok2 := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); ok2 || f2 != runproj.FormulaDetailNotFound {
 		t.Fatalf("cached not-found read: ok=%v failure=%q, want not_found", ok2, f2)
 	}
 	if got := srv.formulaHits.Load(); got != 1 {
@@ -525,7 +525,7 @@ func TestFormulaCacheNotFoundReCheckedOnShortTTL(t *testing.T) {
 	// After the SHORT not-found TTL lapses, the formula becomes available upstream.
 	time.Sleep(40 * time.Millisecond)
 	srv.formulaStatus.Store(0) // 200 canonical body
-	d, _, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
+	d, _, _, ok := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
 	if !ok || d == nil {
 		t.Fatalf("after the short not-found TTL the newly-added formula must resolve: ok=%v d=%+v", ok, d)
 	}
@@ -544,7 +544,7 @@ func TestFormulaCacheColdFailureDegrades(t *testing.T) {
 	defer ts.Close()
 
 	m := newEnrichmentManager(t, ts.URL)
-	d, failure, ok := m.fetchFormulaDetail(context.Background(), "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
+	d, failure, _, ok := m.fetchFormulaDetailVersioned(context.Background(), "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
 	if ok || d != nil {
 		t.Fatalf("cold upstream error must degrade to (nil,...,false); got d=%+v ok=%v", d, ok)
 	}
@@ -715,14 +715,14 @@ func TestFormulaCacheKeyedByScope(t *testing.T) {
 	m := newEnrichmentManager(t, ts.URL)
 	ctx := context.Background()
 
-	if _, _, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); !ok {
+	if _, _, _, ok := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); !ok {
 		t.Fatal("first scope must resolve")
 	}
-	if _, _, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:other", "rig", "other"); !ok {
+	if _, _, _, ok := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:other", "rig", "other"); !ok {
 		t.Fatal("second scope must resolve")
 	}
 	// Same key as the first read -> cached, no new hit.
-	if _, _, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); !ok {
+	if _, _, _, ok := m.fetchFormulaDetailVersioned(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); !ok {
 		t.Fatal("repeat of the first scope must resolve")
 	}
 	if got := hits.Load(); got != 2 {

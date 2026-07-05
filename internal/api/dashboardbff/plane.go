@@ -206,6 +206,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeJSONBytes writes pre-marshaled JSON with the same headers and status as
+// writeJSON, for a caller that already holds json.Marshal(v) (the run-detail memo
+// serving its cached bytes). It appends the single trailing newline
+// json.Encoder.Encode emits, so the response is byte-identical to
+// writeJSON(w, status, v) for the same value.
+func writeJSONBytes(w http.ResponseWriter, status int, body []byte) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+	_, _ = w.Write([]byte{'\n'})
+}
+
 // apiHealthResponse is the GET /api/health body. Typed (not map[string]any) so
 // every knowable wire shape on this non-typed plane is still a named struct;
 // the genuinely-dynamic supervisor-status pass-through (samplers.go) is the

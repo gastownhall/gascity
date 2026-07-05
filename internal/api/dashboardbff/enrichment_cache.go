@@ -70,6 +70,13 @@ type cacheEntry[V any] struct {
 	// stale: once it expires, an errored refetch falls through to the caller's
 	// cold-miss degrade so a stale not-found never masks a later upstream error.
 	staleServeable bool
+	// version is a monotonic counter that bumps by one on every successful
+	// compute-and-store (a refetch that publishes a new value), and NOT on a
+	// within-TTL hit or a degrade-to-last-good. It lets a downstream memo (the
+	// run-detail cache) detect that a cached enrichment value changed underneath
+	// it: a bumped version invalidates the memo key even when the raw value is
+	// equal, so the memo never serves a stale detail after an enrichment refresh.
+	version uint64
 	// inflight is non-nil while exactly one caller computes this key; joiners wait
 	// on its done channel and then return its published result (never re-electing),
 	// so a burst of concurrent callers collapses onto ONE upstream fetch even when
@@ -84,13 +91,17 @@ type cacheEntry[V any] struct {
 // last-good, or a transient cold/expired-negative failure. Sharing one flight's
 // result is what collapses a concurrent burst onto ONE upstream fetch even when
 // the fetch fails — the failure is NOT written to the cache entry, so a LATER
-// request still re-elects and refetches. value/ok are written once (under the
-// cache lock, before done is closed) and read by joiners only after done closes,
-// so the channel close supplies the happens-before with no extra locking.
+// request still re-elects and refetches. value/version/ok are written once (under
+// the cache lock, before done is closed) and read by joiners only after done
+// closes, so the channel close supplies the happens-before with no extra locking.
+// version is the served value's monotonic generation (see cacheEntry.version); it
+// travels with the shared result so a joining getWithVersion caller returns the
+// same version the elector does.
 type flight[V any] struct {
-	done  chan struct{}
-	value V
-	ok    bool
+	done    chan struct{}
+	value   V
+	version uint64
+	ok      bool
 }
 
 // singleFlightCache is a small per-key TTL cache with single-flight: concurrent
@@ -135,6 +146,19 @@ func newSingleFlightCache[K comparable, V any]() *singleFlightCache[K, V] {
 // for a cold miss whose fetch failed and left no last-good, or an expired
 // negative whose refetch failed.
 func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(context.Context) (V, time.Duration, bool, bool)) (V, bool) {
+	v, _, ok := c.getWithVersion(ctx, key, compute)
+	return v, ok
+}
+
+// getWithVersion is get with the served value's monotonic version. The version
+// bumps by one on each successful compute-and-store and stays fixed across a
+// within-TTL hit or a served-stale last-good, so a downstream memo can key on it
+// to detect a refresh even when the raw value is unchanged. The returned version
+// is meaningful only when ok is true (a served value); on a cold-miss degrade it
+// is zero. Every serve-stale, single-flight, and context-detach rule get
+// documents holds here unchanged — this is the full implementation get delegates
+// to.
+func (c *singleFlightCache[K, V]) getWithVersion(ctx context.Context, key K, compute func(context.Context) (V, time.Duration, bool, bool)) (V, uint64, bool) {
 	c.mu.Lock()
 	e, ok := c.entries[key]
 	if !ok {
@@ -143,9 +167,9 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 	}
 	// Fresh hit: serve without touching the upstream.
 	if e.hasValue && e.inflight == nil && time.Since(e.computed) < e.ttl {
-		v := e.value
+		v, ver := e.value, e.version
 		c.mu.Unlock()
-		return v, true
+		return v, ver, true
 	}
 	// Someone is already computing this key: join that flight and return its
 	// shared result instead of re-electing. A failed cold or expired-negative
@@ -158,7 +182,7 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 		c.mu.Unlock()
 		select {
 		case <-fl.done:
-			return fl.value, fl.ok
+			return fl.value, fl.version, fl.ok
 		case <-ctx.Done():
 			// The caller gave up. Serve the last-good if we have one (never block a
 			// canceled caller on an in-flight fetch); otherwise degrade.
@@ -200,6 +224,7 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 		computeOK      bool
 		staleServeable bool
 		resultValue    V
+		resultVersion  uint64
 		resultOK       bool
 	)
 	func() {
@@ -211,6 +236,9 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 				e.ttl = ttl
 				e.hasValue = true
 				e.staleServeable = staleServeable
+				// A successful store is a new generation of this value: bump the
+				// version so a downstream memo keyed on it rebuilds.
+				e.version++
 			}
 			// else: keep the prior last-good (if any) untouched — degrade,
 			// don't blank.
@@ -219,22 +247,24 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 			// (the elector and all current waiters): a fresh success, a served-stale
 			// positive last-good, or an honest degrade. Because a failure is never
 			// written to the entry above, a LATER request re-elects and refetches —
-			// only the concurrent burst is collapsed.
+			// only the concurrent burst is collapsed. The published version is the
+			// served value's own generation, so a joining getWithVersion caller
+			// returns the same version the elector does.
 			switch {
 			case computeOK:
-				resultValue, resultOK = value, true
+				resultValue, resultVersion, resultOK = e.value, e.version, true
 			case e.hasValue && e.staleServeable:
 				// A failed refetch with a serveable positive last-good: serve it stale.
 				// A negative last-good is NOT serveable stale, so it falls through to
 				// the degrade below rather than masking this upstream error.
-				resultValue, resultOK = e.value, true
+				resultValue, resultVersion, resultOK = e.value, e.version, true
 			default:
 				// Cold miss (or expired negative), fetch failed, no serveable
 				// last-good: honest degrade to the zero value.
 				var zero V
-				resultValue, resultOK = zero, false
+				resultValue, resultVersion, resultOK = zero, 0, false
 			}
-			fl.value, fl.ok = resultValue, resultOK
+			fl.value, fl.version, fl.ok = resultValue, resultVersion, resultOK
 			e.inflight = nil
 			c.mu.Unlock()
 			close(fl.done)
@@ -255,23 +285,24 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 		value, ttl, computeOK, staleServeable = compute(computeCtx)
 	}()
 
-	return resultValue, resultOK
+	return resultValue, resultVersion, resultOK
 }
 
-// lastGoodOrZero returns the entry's serveable last-good value (available) if one
-// exists, else the zero value (unavailable). Used when a caller's ctx is canceled
-// while joining an in-flight fetch: a canceled caller must never block, but should
-// still serve a serveable last-good if the cache holds one. A cached negative is
-// not serveable stale (see cacheEntry.staleServeable), so it degrades here too
-// rather than surfacing a stale not-found on cancellation.
-func (c *singleFlightCache[K, V]) lastGoodOrZero(key K) (V, bool) {
+// lastGoodOrZero returns the entry's serveable last-good value and its version
+// (available) if one exists, else the zero value (unavailable). Used when a
+// caller's ctx is canceled while joining an in-flight fetch: a canceled caller
+// must never block, but should still serve a serveable last-good if the cache
+// holds one. A cached negative is not serveable stale (see
+// cacheEntry.staleServeable), so it degrades here too rather than surfacing a
+// stale not-found on cancellation.
+func (c *singleFlightCache[K, V]) lastGoodOrZero(key K) (V, uint64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.entries[key]; ok && e.hasValue && e.staleServeable {
-		return e.value, true
+		return e.value, e.version, true
 	}
 	var zero V
-	return zero, false
+	return zero, 0, false
 }
 
 // ── Cached payload shapes ─────────────────────────────────────────────────
