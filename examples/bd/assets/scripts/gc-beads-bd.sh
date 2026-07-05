@@ -2542,16 +2542,18 @@ doltlite_maintenance_due() {
     [ $((now - last)) -ge "$interval" ]
 }
 
-# run_doltlite_reindex rebuilds the SQLite secondary indexes for the store's
-# DoltLite database. `bd flatten`/`bd gc` rewrite the store (like a clone/pull)
-# and leave the secondary indexes stale, so index-path reads (count/status/list)
-# silently return wrong results until a REINDEX. Best-effort and non-fatal.
+# run_doltlite_reindex rebuilds the DoltLite store's secondary indexes.
+# `bd flatten`/`bd gc` rewrite the store (like a clone/pull) and leave the
+# secondary indexes stale, so index-path reads (count/status/list) silently
+# return wrong results until a REINDEX (ga-7hei). It runs through the same
+# libdoltlite-linked bd used for flatten/gc above, so bd resolves the store's
+# .db from .beads/metadata.json and REINDEX targets exactly the database the
+# read path opens (no glob that could pick the wrong file). Best-effort and
+# non-fatal: stdout ("OK, 0 rows affected") is suppressed, but any SQL error
+# reaches the maintenance log via stderr and the caller warns on non-zero exit.
 run_doltlite_reindex() {
     local dir="$1"
-    local db
-    db=$(ls "$dir"/.beads/doltlite/*.db 2>/dev/null | head -n1)
-    [ -n "$db" ] || return 0
-    "${DOLTLITE_CLIENT_BIN:-doltlite-client}" -db "$db" exec 'REINDEX' >/dev/null 2>&1
+    run_bd_doltlite "$dir" sql 'REINDEX' >/dev/null
 }
 
 run_doltlite_existing_db_maintenance() {

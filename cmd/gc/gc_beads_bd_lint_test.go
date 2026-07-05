@@ -181,6 +181,36 @@ func TestDoltliteMaintenanceDueUsesPortableStatFallback(t *testing.T) {
 	}
 }
 
+// TestDoltliteReindexUsesBdSQL pins the ga-7hei maintenance-path heal to the
+// shipped, libdoltlite-linked bd. `bd flatten`/`bd gc` rewrite the DoltLite
+// store and leave its secondary indexes stale, so run_doltlite_reindex must
+// rebuild them with `bd sql 'REINDEX'` through run_bd_doltlite (the same
+// wrapper flatten/gc use, which resolves the store's .db from metadata.json).
+// It must NOT reach for a standalone doltlite-client (a debug tool not shipped
+// on stock deployments) or stock sqlite3 (cannot open the CTLD-format DoltLite
+// .db — "file is not a database"): either exits non-zero, silently no-ops, and
+// leaves the stale-index corruption live everywhere the tool is absent.
+func TestDoltliteReindexUsesBdSQL(t *testing.T) {
+	root := repoRootForLint(t)
+	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	fn := extractShellFunction(t, string(data), "run_doltlite_reindex")
+
+	if !strings.Contains(fn, `run_bd_doltlite "$dir" sql 'REINDEX'`) {
+		t.Fatalf("run_doltlite_reindex must reindex via run_bd_doltlite \"$dir\" sql 'REINDEX' (ga-7hei):\n%s", fn)
+	}
+	for _, forbidden := range []string{"doltlite-client", "DOLTLITE_CLIENT_BIN", "sqlite3"} {
+		if strings.Contains(fn, forbidden) {
+			t.Fatalf("run_doltlite_reindex must not use %q: doltlite-client is not shipped on stock "+
+				"deployments and stock sqlite3 cannot open the CTLD-format DoltLite .db, so either "+
+				"silently no-ops and leaves the stale-index corruption live (ga-7hei):\n%s", forbidden, fn)
+		}
+	}
+}
+
 func countShellFunctionDefinitions(script, name string) int {
 	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\(\) \{`)
 	return len(pattern.FindAllStringIndex(script, -1))
