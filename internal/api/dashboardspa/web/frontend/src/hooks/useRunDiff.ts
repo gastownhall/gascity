@@ -49,12 +49,15 @@ export function useRunDiff(
     key,
     () => loadRunDiff(runId, executionPath, scopeKind, scopeRef),
     {
-      // The manual Refresh button bypasses the server diff TTL (refresh=true):
-      // the operator explicitly asked for fresh local git state.
+      // refresh=true/false is a forward-compat CLIENT contract for a future
+      // server-side diff cache: the manual Refresh button takes the bypass lane
+      // (refresh=true), event-driven nudges take the cheap lane (refresh=false).
+      // NOTE: today the diff endpoint has NO cache and runQuery drops the flag,
+      // so both lanes issue an identical git read on the wire — this phase's live
+      // win is the tab-gating in FormulaRunDetail (the diff refetches only while
+      // the Diff tab is open), not the flag. When a server diff cache lands, the
+      // cheap lane already lets it absorb bursts with no client change.
       refreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, true),
-      // Event-driven nudges route here (cheapRefresh) with refresh=false so the
-      // server's diff TTL absorbs a burst rather than re-running the git-exec
-      // chain per event. Same read as first paint, kept off the bypass lane.
       sseRefreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, false),
       onError: (err) => {
         if (runId !== undefined) reportRunDiffError('load diff', runId, err);

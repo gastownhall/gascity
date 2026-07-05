@@ -83,7 +83,7 @@ describe('useRunDiff', () => {
     );
   });
 
-  it('bypasses the diff TTL on an explicit refresh (operator asked for fresh)', async () => {
+  it('sends refresh=true on an explicit manual refresh (the bypass-lane client contract)', async () => {
     mockRunDiff.mockResolvedValue(okDiff());
 
     const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
@@ -102,7 +102,7 @@ describe('useRunDiff', () => {
     );
   });
 
-  it('absorbs event-driven refreshes into the diff TTL via cheapRefresh (refresh=false)', async () => {
+  it('sends refresh=false on cheapRefresh (the event-driven cheap-lane client contract)', async () => {
     mockRunDiff.mockResolvedValue(okDiff());
 
     const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
@@ -114,8 +114,10 @@ describe('useRunDiff', () => {
       await result.current.cheapRefresh();
     });
 
-    // No `refresh: true` param — the server's diff TTL absorbs the burst so the
-    // git-exec chain does not re-run on every nudge.
+    // cheapRefresh omits `refresh: true` — the cheap-lane client contract for a
+    // future server-side diff cache. It is inert on the wire today (runQuery
+    // drops the flag, no cache exists); the live burst protection is the
+    // tab-gating + useGcEventRefresh coalescing, not this flag.
     expect(mockRunDiff).toHaveBeenCalledWith('wf-1', { executionPath: knownPath() }, {});
   });
 });
