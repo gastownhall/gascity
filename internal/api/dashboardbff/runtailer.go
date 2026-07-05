@@ -46,6 +46,12 @@ type runTailerManager struct {
 	deps  Deps
 	httpc *http.Client
 
+	// sessionsCache and formulaCache absorb the two per-request loopback reads so
+	// a burst of detail/summary GETs collapses onto one upstream fetch per key
+	// (single-flight + TTL). See enrichment_cache.go for the contract.
+	sessionsCache *singleFlightCache[string, cachedSessions]
+	formulaCache  *singleFlightCache[formulaCacheKey, cachedFormulaDetail]
+
 	mu      sync.Mutex
 	cities  map[string]*cityRunTailer
 	ctx     context.Context
@@ -55,9 +61,11 @@ type runTailerManager struct {
 
 func newRunTailerManager(deps Deps) *runTailerManager {
 	return &runTailerManager{
-		deps:   deps,
-		httpc:  &http.Client{Timeout: runSessionsFetchTimeout},
-		cities: make(map[string]*cityRunTailer),
+		deps:          deps,
+		httpc:         &http.Client{Timeout: runSessionsFetchTimeout},
+		cities:        make(map[string]*cityRunTailer),
+		sessionsCache: newSingleFlightCache[string, cachedSessions](),
+		formulaCache:  newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
 	}
 }
 
@@ -398,11 +406,32 @@ func (t *cityRunTailer) enrichedSummary(ctx context.Context) runproj.RunSummary 
 	return enriched
 }
 
-// fetchSessions reads GET {base}/v0/city/{name}/sessions over loopback and
-// projects the items into the dashboard session shape (equivalent to the
-// frontend normalizeSessions). Any failure returns (nil, false) so health
-// degrades to unavailable rather than failing the load.
+// fetchSessions returns the projected dashboard sessions for a city, served from
+// the per-city sessions cache (TTL + single-flight). A cache hit within the TTL
+// does no upstream work; concurrent cold-miss callers collapse to one upstream
+// fetch; a failed refetch serves the last-good with available=true; a cold miss
+// whose fetch fails degrades to (nil, false) exactly as the uncached path did, so
+// the caller's honest partial/warming states are preserved. detail() and
+// enrichedSummary() consume this.
 func (m *runTailerManager) fetchSessions(ctx context.Context, name string) ([]runproj.DashboardSession, bool) {
+	got, ok := m.sessionsCache.get(ctx, name, func(ctx context.Context) (cachedSessions, time.Duration, bool) {
+		items, upstreamOK := m.fetchSessionsUpstream(ctx, name)
+		if !upstreamOK {
+			return cachedSessions{}, 0, false
+		}
+		return cachedSessions{items: items}, sessionsCacheTTL, true
+	})
+	if !ok {
+		return nil, false
+	}
+	return got.items, true
+}
+
+// fetchSessionsUpstream reads GET {base}/v0/city/{name}/sessions over loopback
+// and projects the items into the dashboard session shape (equivalent to the
+// frontend normalizeSessions). Any failure returns (nil, false) so the cache
+// degrades to unavailable (or serves last-good) rather than failing the load.
+func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name string) ([]runproj.DashboardSession, bool) {
 	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
 	if base == "" {
 		return nil, false
@@ -442,19 +471,60 @@ type formulaNodeRef struct {
 	ID string `json:"id"`
 }
 
-// fetchFormulaDetail reads
+// fetchFormulaDetail returns a run's compiled formula detail, served from the
+// per-city formula cache keyed by (name, formula, target, scopeKind, scopeRef).
+// A success is cached for formulaCacheTTL; a definitive 404 (genuinely-missing
+// formula) is cached as FormulaDetailNotFound for the shorter formulaNotFoundTTL
+// so a newly-added formula appears promptly; a transient upstream error is NOT
+// cached — it degrades like a cold miss so a real re-check happens on the next
+// GET. On success it returns (detail, "", true); on a failure it returns
+// (nil, reason, false), preserving the NotFound vs UpstreamError distinction
+// runproj renders as the operator diagnostic. detail() consumes this.
+func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
+	key := formulaCacheKey{name: name, formula: formula, target: target, scopeKind: scopeKind, scopeRef: scopeRef}
+	got, ok := m.formulaCache.get(ctx, key, func(ctx context.Context) (cachedFormulaDetail, time.Duration, bool) {
+		detail, failure, upstreamOK := m.fetchFormulaDetailUpstream(ctx, name, formula, target, scopeKind, scopeRef)
+		switch {
+		case upstreamOK:
+			return cachedFormulaDetail{detail: detail}, formulaCacheTTL, true
+		case failure == runproj.FormulaDetailNotFound:
+			// A definitive 404 is a real negative result: cache it briefly so a burst
+			// of GETs does not re-probe a known-missing formula, but re-check soon.
+			return cachedFormulaDetail{failure: runproj.FormulaDetailNotFound}, formulaNotFoundTTL, true
+		default:
+			// A transient upstream error is not cached; degrade like a cold miss.
+			return cachedFormulaDetail{}, 0, false
+		}
+	})
+	if !ok {
+		// Cold miss whose fetch failed with a non-404 error, or a canceled join
+		// with no last-good: the honest reason is upstream_error.
+		return nil, runproj.FormulaDetailUpstreamError, false
+	}
+	if got.detail == nil {
+		// A cached not-found (or a cached-then-served negative): not available, and
+		// the failure reason travels with the cached value.
+		failure := got.failure
+		if failure == "" {
+			failure = runproj.FormulaDetailUpstreamError
+		}
+		return nil, failure, false
+	}
+	return got.detail, "", true
+}
+
+// fetchFormulaDetailUpstream reads
 // GET {base}/v0/city/{name}/formulas/{formula}?target={target}&scope_kind={kind}&scope_ref={ref}
 // over loopback and projects the compiled formula's ordering-relevant preview
 // nodes and steps into runproj's FormulaOrderingDetail. The scope is required by
 // the endpoint and selects the formula search layer, so a rig-scoped run must
 // send its scope or the lookup resolves the wrong layer (or is rejected). On
 // success it returns (detail, "", true). On failure it returns (nil, reason,
-// false) so the detail falls back to the un-enriched projection: the reason is
-// FormulaDetailNotFound for a supervisor 404 (the compiled formula is genuinely
-// missing) and FormulaDetailUpstreamError for every other failure, preserving the
-// distinction runproj renders as the operator diagnostic. Mirrors fetchSessions;
-// the reason mapping ports the TS formulaDetailFetchFailure helper.
-func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
+// false): the reason is FormulaDetailNotFound for a supervisor 404 (the compiled
+// formula is genuinely missing) and FormulaDetailUpstreamError for every other
+// failure. Mirrors fetchSessionsUpstream; the reason mapping ports the TS
+// formulaDetailFetchFailure helper.
+func (m *runTailerManager) fetchFormulaDetailUpstream(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
 	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
 	if base == "" {
 		return nil, runproj.FormulaDetailUpstreamError, false
