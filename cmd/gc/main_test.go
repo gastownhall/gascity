@@ -7251,11 +7251,11 @@ base = "builtin:codex"`)
 	}
 }
 
-func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
-	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
-base = "builtin:claude"`)
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "gemini", `[providers.gemini]
+base = "builtin:gemini"`)
 	setPrimeHookStdinJSON(t, map[string]string{
-		"session_id":      "claude-provider-session",
+		"session_id":      "gemini-provider-session",
 		"hook_event_name": "SessionStart",
 		"source":          "startup",
 	})
@@ -7275,7 +7275,7 @@ base = "builtin:claude"`)
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
-		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+		t.Fatalf("session_key = %q, want empty for hook stdin session id from a provider outside the hook-stdin allowlist (gemini surfaces its id via env)", got)
 	}
 }
 
