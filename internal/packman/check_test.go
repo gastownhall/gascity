@@ -59,6 +59,11 @@ func TestSyncLockUsesBundledFallbackForPublicGastownWhenRemoteUnavailable(t *tes
 	runGit = func(_ string, args ...string) (string, error) {
 		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
 	}
+	oldRunNetworkGit := runNetworkGit
+	t.Cleanup(func() { runNetworkGit = oldRunNetworkGit })
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
 
 	imports := map[string]config.Import{
 		"gastown": {
@@ -115,6 +120,11 @@ func TestSyncLockUsesBundledFallbackForPublicGascityWhenRemoteUnavailable(t *tes
 	oldRunGit := runGit
 	t.Cleanup(func() { runGit = oldRunGit })
 	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+	oldRunNetworkGit := runNetworkGit
+	t.Cleanup(func() { runNetworkGit = oldRunNetworkGit })
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
 		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
 	}
 

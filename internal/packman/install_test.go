@@ -261,6 +261,7 @@ func TestSyncLockResolveIfNeededResolvesAndCaches(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	got, err := SyncLock(city, map[string]config.Import{
 		"a": {Source: "https://example.com/a.git", Version: "^1.0"},
@@ -314,6 +315,7 @@ func TestInstallLockedEnsuresEveryLockedRepo(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	lock, err := InstallLocked(city)
 	if err != nil {
@@ -450,6 +452,7 @@ func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	lock, err := SyncLock(city, map[string]config.Import{
 		"a": {Source: "https://example.com/a.git", Version: ">=1.0"},
@@ -500,6 +503,7 @@ func TestSyncLockSelectiveUpgradeMergesSameSourceConstraints(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	lock, err := SyncLockSelectiveUpgrade(city, map[string]config.Import{
 		"pack:shared":         {Source: "https://example.com/shared.git", Version: ">=1.0"},
@@ -619,6 +623,7 @@ version = "<2.0"
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	lock, err := SyncLock(city, map[string]config.Import{
 		"a_shared":   {Source: "https://example.com/shared.git", Version: ">=1.0"},
@@ -722,6 +727,7 @@ func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T)
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	lock, err := SyncLock(city, map[string]config.Import{
 		"a": {Source: "file:///tmp/repo.git//packs/a", Version: "^1.2"},
@@ -822,6 +828,7 @@ func TestEnsureBundledPacksCurrentSkipsNonBundledPacks(t *testing.T) {
 		return prev("", args...)
 	}
 	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
 
 	if err := EnsureBundledPacksCurrent(city); err != nil {
 		t.Fatalf("EnsureBundledPacksCurrent: %v", err)

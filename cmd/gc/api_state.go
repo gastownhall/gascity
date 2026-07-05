@@ -1187,6 +1187,18 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	return cs.cityBeadStore
 }
 
+// ScopedStoreLike implements api.State. See the interface doc comment for
+// the contract; scopedStoreLike (cmd/gc/scoped_store.go) does the actual
+// unwrap-and-rebuild work, reusing the same credential/env resolution as
+// every other bd-CLI store this package constructs.
+func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
+	cs.mu.RLock()
+	cityPath := cs.cityPath
+	cfg := cs.cfg
+	cs.mu.RUnlock()
+	return scopedStoreLike(ctx, cityPath, cfg, existing)
+}
+
 // NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
 // default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
 // to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class

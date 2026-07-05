@@ -80,7 +80,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 	}
 	t.Cleanup(func() { runGit = prev })
 
-	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	got, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 	}
 	t.Cleanup(func() { runGit = prev })
 
-	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	got, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestEnsureRepoInCacheRepairsExistingCloneCheckout(t *testing.T) {
 	}
 	t.Cleanup(func() { runGit = prev })
 
-	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	got, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}
@@ -224,7 +224,17 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 			return "abc123", nil
 		case "status":
 			return "", nil
-		case "clone":
+		case "checkout":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	prevNet := runNetworkGit
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "clone" {
 			target := args[len(args)-1]
 			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
 				return "", err
@@ -233,15 +243,12 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 				return "", err
 			}
 			return "", nil
-		case "checkout":
-			return "", nil
-		default:
-			return "", fmt.Errorf("unexpected git call: %v", args)
 		}
+		return "", fmt.Errorf("unexpected network git call: %v", args)
 	}
-	t.Cleanup(func() { runGit = prev })
+	t.Cleanup(func() { runNetworkGit = prevNet })
 
-	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	got, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}
@@ -271,12 +278,6 @@ func TestEnsureRepoInCacheCleansFreshCloneAfterPackValidationFailure(t *testing.
 	prev := runGit
 	runGit = func(_ string, args ...string) (string, error) {
 		switch args[0] {
-		case "clone":
-			target := args[len(args)-1]
-			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
-				return "", err
-			}
-			return "", nil
 		case "checkout":
 			return "", nil
 		default:
@@ -284,8 +285,20 @@ func TestEnsureRepoInCacheCleansFreshCloneAfterPackValidationFailure(t *testing.
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
+	prevNet := runNetworkGit
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		if args[0] == "clone" {
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			return "", nil
+		}
+		return "", fmt.Errorf("unexpected network git call: %v", args)
+	}
+	t.Cleanup(func() { runNetworkGit = prevNet })
 
-	if _, err := EnsureRepoInCache("https://github.com/example/repo", "abc123"); err == nil {
+	if _, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123"); err == nil {
 		t.Fatal("EnsureRepoInCache succeeded, want pack validation error")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -313,7 +326,17 @@ func TestEnsureRepoInCacheReclonesCacheDirWithoutGit(t *testing.T) {
 	runGit = func(_ string, args ...string) (string, error) {
 		calls = append(calls, append([]string(nil), args...))
 		switch args[0] {
-		case "clone":
+		case "checkout":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	prevNet := runNetworkGit
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "clone" {
 			target := args[len(args)-1]
 			if _, err := os.Stat(filepath.Join(target, "leftover.txt")); !os.IsNotExist(err) {
 				return "", fmt.Errorf("stale cache directory was not removed before clone")
@@ -325,15 +348,12 @@ func TestEnsureRepoInCacheReclonesCacheDirWithoutGit(t *testing.T) {
 				return "", err
 			}
 			return "", nil
-		case "checkout":
-			return "", nil
-		default:
-			return "", fmt.Errorf("unexpected git call: %v", args)
 		}
+		return "", fmt.Errorf("unexpected network git call: %v", args)
 	}
-	t.Cleanup(func() { runGit = prev })
+	t.Cleanup(func() { runNetworkGit = prevNet })
 
-	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	got, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}
@@ -367,7 +387,16 @@ func TestEnsureRepoInCacheReclonesCacheFileWithoutGit(t *testing.T) {
 	prev := runGit
 	runGit = func(_ string, args ...string) (string, error) {
 		switch args[0] {
-		case "clone":
+		case "checkout":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	prevNet := runNetworkGit
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		if args[0] == "clone" {
 			target := args[len(args)-1]
 			if _, err := os.Stat(target); !os.IsNotExist(err) {
 				return "", fmt.Errorf("stale cache file was not removed before clone")
@@ -379,15 +408,12 @@ func TestEnsureRepoInCacheReclonesCacheFileWithoutGit(t *testing.T) {
 				return "", err
 			}
 			return "", nil
-		case "checkout":
-			return "", nil
-		default:
-			return "", fmt.Errorf("unexpected git call: %v", args)
 		}
+		return "", fmt.Errorf("unexpected network git call: %v", args)
 	}
-	t.Cleanup(func() { runGit = prev })
+	t.Cleanup(func() { runNetworkGit = prevNet })
 
-	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	got, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123")
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}

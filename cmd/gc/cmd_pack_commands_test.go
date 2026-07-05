@@ -278,3 +278,75 @@ func TestSetupPackCityWritesExpectedLayout(t *testing.T) {
 		t.Fatalf("cityPath = %q, want testcity suffix", cityPath)
 	}
 }
+
+// TestIsCredentialHelperInvocation guards the fix for the credentialed-import
+// self-deadlock: git spawns `gc git-credential` mid-clone while a
+// `gc import install` already holds the repo-cache write lock, so the helper
+// must be detected and skip the config-loading pack-command discovery that
+// re-acquires that lock.
+func TestIsCredentialHelperInvocation(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"git invokes get", []string{"gc", "git-credential", "get"}, true},
+		{"absolute path store", []string{"/usr/local/bin/gc", "git-credential", "store"}, true},
+		{"leading boolean flag", []string{"gc", "--json", "git-credential", "get"}, true},
+		{"import install", []string{"gc", "import", "install"}, false},
+		{"import credential add", []string{"gc", "import", "credential", "add", "github.com"}, false},
+		{"plain status", []string{"gc", "status"}, false},
+		{"bare gc", []string{"gc"}, false},
+		{"empty argv", []string{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCredentialHelperInvocation(tc.argv); got != tc.want {
+				t.Errorf("isCredentialHelperInvocation(%v) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitCredentialInvocationSkipsPackDiscovery is the behavioral regression
+// guard: inside a city that defines a pack command, a `gc git-credential`
+// invocation must NOT trigger pack-command discovery (whose config load
+// re-takes the repo-cache lock a credentialed import holds), while a normal
+// invocation still discovers it (covered by TestNewRootCmdExposesRootPackCommands).
+func TestGitCredentialInvocationSkipsPackDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityDir, "commands", "hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"backstage\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "commands", "hello", "run.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	oldArgs := os.Args
+	os.Args = []string{"gc", "git-credential", "get"}
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	if findSubcommand(root, "backstage") != nil {
+		t.Fatal("git-credential invocation must skip pack-command discovery (its config load self-deadlocks a credentialed import)")
+	}
+	if findSubcommand(root, "git-credential") == nil {
+		t.Fatal("built-in git-credential command must still be present")
+	}
+}

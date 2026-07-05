@@ -247,3 +247,47 @@ func TestDoltBackupCheck_Name(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", got, want)
 	}
 }
+
+// writeScopeConfig writes a minimal .beads/config.yaml for a scope (city or rig).
+func writeScopeConfig(t *testing.T, scopePath, body string) {
+	t.Helper()
+	beadsDir := filepath.Join(scopePath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("create .beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+}
+
+// A rig whose Dolt lives on an external endpoint self-manages its backups on
+// that server; the local .dolt-backup / repo_state.json signals never apply, so
+// the check must not warn or emit a localhost fix hint. Regression for #3868.
+func TestDoltBackupCheck_ExternalEndpoint_NoWarn(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	rigPath := filepath.Join(cityPath, "rig")
+	if err := os.MkdirAll(rigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRigMetadata(t, rigPath, "extdb")
+	writeScopeConfig(t, cityPath, "issue_prefix: gc\ngc.endpoint_origin: managed_city\ndolt.auto-start: false\n")
+	writeScopeConfig(t, rigPath, "issue_prefix: fe\ngc.endpoint_origin: explicit\ndolt.host: db.example.com\ndolt.port: \"3307\"\ndolt.auto-start: false\n")
+
+	rig := config.Rig{Name: "extrig", Path: rigPath}
+	c := NewDoltBackupCheck(cityPath, rig, doltDataDir)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want StatusOK (external endpoint self-manages backups); msg=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "external") {
+		t.Errorf("Message should note the external endpoint: %s", r.Message)
+	}
+	if !strings.Contains(r.Message, "db.example.com") {
+		t.Errorf("Message should name the external host: %s", r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("external endpoint must not emit a localhost fix hint: %s", r.FixHint)
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -53,7 +56,7 @@ func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
 	if snapshot.NamedSessions[0].Status != "materialized" {
 		t.Fatalf("named session status = %q, want materialized", snapshot.NamedSessions[0].Status)
 	}
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -162,7 +165,7 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	snapshot := loadStatusSessionSnapshot(store, &stderr)
+	snapshot := loadStatusSessionSnapshot("/city", &config.City{}, store, &stderr)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("loadStatusSessionSnapshot elapsed %s, want bounded timeout", elapsed)
 	}
@@ -182,6 +185,55 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	if !strings.Contains(loadErr.Error(), "timed out") {
 		t.Fatalf("snapshot.LoadError() = %v, want timeout text", loadErr)
 	}
+}
+
+// TestLoadStatusSessionSnapshotKillsBdChildOnTimeout is the ga-cdmx6x
+// regression test for `gc status`'s session-snapshot read: a bd child
+// spawned via the store loadStatusSessionSnapshot builds internally must
+// be killed when its budget expires, instead of surviving to
+// bdCommandTimeout the way the pre-fix abandon-the-goroutine pattern let
+// it. Mirrors TestScopedBdStoreForCityKillsChildOnCtxCancel's pidfile
+// pattern, driven through loadStatusSessionSnapshot itself so the whole
+// call site — not just scopedBdStoreForCity in isolation — is covered.
+func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	oldTimeout := statusSessionSnapshotTimeout
+	statusSessionSnapshotTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { statusSessionSnapshotTimeout = oldTimeout })
+
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+
+	binDir := t.TempDir()
+	pidFile := filepath.Join(binDir, "bd-child.pid")
+	writeExecutable(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
+		"sleep 30 &\n"+
+		"echo \"$!\" > "+pidFile+"\n"+
+		"wait\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	realStore := bdStoreForCity(cityDir, cityDir)
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	_ = loadStatusSessionSnapshot(cityDir, &config.City{}, realStore, &stderr)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("loadStatusSessionSnapshot blocked %s; want bounded by statusSessionSnapshotTimeout", elapsed)
+	}
+
+	childPid := waitForNonEmptyFileContent(t, pidFile, 5*time.Second)
+	for range 50 {
+		if err := exec.Command("kill", "-0", childPid).Run(); err != nil {
+			return // child is gone
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = exec.Command("kill", "-KILL", childPid).Run()
+	t.Fatalf("bd child process %s survived loadStatusSessionSnapshot's timeout", childPid)
 }
 
 // TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded is the
@@ -610,7 +662,7 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want materialized", got)
 	}
 
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot("/home/user/city", cfg, store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

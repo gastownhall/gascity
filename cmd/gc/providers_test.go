@@ -451,6 +451,175 @@ func TestConfiguredACPRouteNames_IncludeLegacyObservedCustomACPProviderSessionsW
 	}
 }
 
+// TestResolveProviderForACPTransport_PrefersResolvedProviderCache proves the
+// cache-first path (ga-soqo5g): the raw ProviderSpec here has no ACP fields
+// at all, so a fresh chain-walk would never produce an ACP-capable result.
+// The populated ResolvedProviders cache entry deliberately diverges from the
+// raw spec — if the function returns ACP, it read the cache, not the spec.
+func TestResolveProviderForACPTransport_PrefersResolvedProviderCache(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "custom-cli"},
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"custom": {
+				Name:        "custom",
+				SupportsACP: true,
+				ACPCommand:  "/bin/echo",
+				ACPArgs:     []string{"acp"},
+			},
+		},
+	}
+	got := resolveProviderForACPTransport(cfg, "custom")
+	if got == nil || got.ProviderSessionCreateTransport() != "acp" {
+		t.Fatalf("resolveProviderForACPTransport = %+v, want cached ACP-capable provider", got)
+	}
+}
+
+// TestResolveProviderForACPTransport_FallsBackWhenNoCache keeps Phase A
+// configs working: when ResolvedProviders is unpopulated, the raw
+// config.ResolveProvider chain-walk still runs and produces the same answer
+// it always has.
+func TestResolveProviderForACPTransport_FallsBackWhenNoCache(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"opencode": {
+				Command:     "/bin/echo",
+				SupportsACP: boolPtr(true),
+				ACPCommand:  "/bin/echo",
+				ACPArgs:     []string{"acp"},
+			},
+		},
+	}
+	got := resolveProviderForACPTransport(cfg, "opencode")
+	if got == nil || got.ProviderSessionCreateTransport() != "acp" {
+		t.Fatalf("resolveProviderForACPTransport = %+v, want raw-resolved ACP-capable provider", got)
+	}
+}
+
+// TestAgentSessionCreateTransport_PrefersResolvedProviderCache mirrors
+// TestResolveProviderForACPTransport_PrefersResolvedProviderCache for the
+// agent-level entry point.
+func TestAgentSessionCreateTransport_PrefersResolvedProviderCache(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "custom-cli"},
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"custom": {
+				Name:        "custom",
+				SupportsACP: true,
+				ACPCommand:  "/bin/echo",
+				ACPArgs:     []string{"acp"},
+			},
+		},
+	}
+	got := agentSessionCreateTransport(cfg, config.Agent{Provider: "custom"})
+	if got != "acp" {
+		t.Fatalf("agentSessionCreateTransport = %q, want acp (from cache)", got)
+	}
+}
+
+// TestAgentSessionCreateTransport_UsesWorkspaceProviderWhenAgentHasNoOverride
+// proves the cache lookup falls back to the workspace-level provider name
+// (matching ResolveProvider's own name-resolution order) when the agent
+// itself has no per-agent Provider override.
+func TestAgentSessionCreateTransport_UsesWorkspaceProviderWhenAgentHasNoOverride(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "custom"},
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "custom-cli"},
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"custom": {
+				Name:        "custom",
+				SupportsACP: true,
+				ACPCommand:  "/bin/echo",
+				ACPArgs:     []string{"acp"},
+			},
+		},
+	}
+	got := agentSessionCreateTransport(cfg, config.Agent{})
+	if got != "acp" {
+		t.Fatalf("agentSessionCreateTransport = %q, want acp (from cache via workspace provider)", got)
+	}
+}
+
+// TestAgentSessionCreateTransport_FallsBackWhenNoCache is
+// TestResolveProviderForACPTransport_FallsBackWhenNoCache for the
+// agent-level entry point.
+func TestAgentSessionCreateTransport_FallsBackWhenNoCache(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"opencode": {
+				Command:     "/bin/echo",
+				SupportsACP: boolPtr(true),
+				ACPCommand:  "/bin/echo",
+				ACPArgs:     []string{"acp"},
+			},
+		},
+	}
+	got := agentSessionCreateTransport(cfg, config.Agent{Provider: "opencode"})
+	if got != "acp" {
+		t.Fatalf("agentSessionCreateTransport = %q, want acp (raw fallback)", got)
+	}
+}
+
+// TestAgentSessionCreateTransport_SkipsCacheForStartCommandEscapeHatch proves
+// an agent using the StartCommand escape hatch (ResolveProvider's step 1,
+// which bypasses provider-catalog/cache resolution entirely and constructs a
+// synthetic ResolvedProvider with SupportsACP left at its zero value) is not
+// short-circuited into reading an unrelated cache entry for its Provider
+// name. Session is left empty so the decision routes through the resolved
+// provider rather than an explicit per-agent override.
+func TestAgentSessionCreateTransport_SkipsCacheForStartCommandEscapeHatch(t *testing.T) {
+	cfg := &config.City{
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"custom": {Name: "custom", SupportsACP: true, ACPCommand: "/bin/echo", ACPArgs: []string{"acp"}},
+		},
+	}
+	got := agentSessionCreateTransport(cfg, config.Agent{Provider: "custom", StartCommand: "/bin/my-agent"})
+	if got != "" {
+		t.Fatalf("agentSessionCreateTransport = %q, want \"\" (StartCommand escape hatch must bypass provider/cache resolution)", got)
+	}
+}
+
+// TestAgentSessionCreateTransport_CachedMatchesRawForOverrideAgent is the
+// bead's equivalence check: the cached path and the raw config.ResolveProvider
+// path must agree for an agent with its own Provider override, given a cache
+// entry that mirrors what BuildResolvedProviderCache would actually produce
+// for the same spec.
+func TestAgentSessionCreateTransport_CachedMatchesRawForOverrideAgent(t *testing.T) {
+	providers := map[string]config.ProviderSpec{
+		"opencode": {
+			Command:     "/bin/echo",
+			SupportsACP: boolPtr(true),
+			ACPCommand:  "/bin/echo",
+			ACPArgs:     []string{"acp"},
+		},
+	}
+	agentCfg := config.Agent{Provider: "opencode", Name: "myagent"}
+
+	rawCfg := &config.City{Providers: providers}
+	rawGot := agentSessionCreateTransport(rawCfg, agentCfg)
+
+	cachedCfg := &config.City{
+		Providers: providers,
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"opencode": {Name: "opencode", SupportsACP: true, ACPCommand: "/bin/echo", ACPArgs: []string{"acp"}},
+		},
+	}
+	cachedGot := agentSessionCreateTransport(cachedCfg, agentCfg)
+
+	if rawGot != cachedGot {
+		t.Fatalf("cached path = %q, raw path = %q; want equal", cachedGot, rawGot)
+	}
+	if cachedGot != "acp" {
+		t.Fatalf("agentSessionCreateTransport = %q, want acp", cachedGot)
+	}
+}
+
 func TestNewSessionProvider_PreregistersACPBeadAndLegacyNames(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")

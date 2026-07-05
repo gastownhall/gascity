@@ -16,9 +16,10 @@ import (
 // A Projector is not safe for concurrent use; the tailer mutates it from its
 // single loop goroutine and publishes the built summary under its own lock.
 type Projector struct {
-	beads   map[string]beads.Bead
-	order   []string
-	lastSeq uint64
+	beads        map[string]beads.Bead
+	order        []string
+	lastSeq      uint64
+	decodeMisses int
 }
 
 // NewProjector returns an empty projector.
@@ -46,6 +47,8 @@ func (p *Projector) ColdLoad(path string) error {
 // snapshots and removing bead.deleted ones, preserving first-seen order for new
 // ids. It advances the cursor past every event (bead or not) and reports whether
 // any bead snapshot changed, so the caller can skip a rebuild on a no-op tick.
+// A bead.* event whose payload does not decode is counted (DecodeMisses) rather
+// than swallowed, so a silent projection starve is observable to the caller.
 func (p *Projector) Apply(evts []events.Event) (changed bool) {
 	for i := range evts {
 		e := &evts[i]
@@ -55,8 +58,9 @@ func (p *Projector) Apply(evts []events.Event) (changed bool) {
 		if !beadEventTypes[e.Type] {
 			continue
 		}
-		b, ok := decodeBead(e.Payload)
+		b, ok := decodeBead(*e)
 		if !ok {
+			p.decodeMisses++
 			continue
 		}
 		if e.Type == events.BeadDeleted {
@@ -91,6 +95,12 @@ func (p *Projector) Beads() []beads.Bead {
 // LastSeq returns the highest event seq applied — the cursor a live tail resumes
 // from.
 func (p *Projector) LastSeq() uint64 { return p.lastSeq }
+
+// DecodeMisses returns the cumulative count of bead.* events whose payload did
+// not decode to a bead with an id. It is monotonic across Apply calls; the
+// tailer watches the delta so a live projection starve (the run-view RCA
+// signature) surfaces as a log line instead of a blank view.
+func (p *Projector) DecodeMisses() int { return p.decodeMisses }
 
 func (p *Projector) removeOrder(id string) {
 	for i, oid := range p.order {

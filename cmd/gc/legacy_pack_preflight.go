@@ -88,7 +88,7 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) == nil {
 			continue
 		}
-		if _, err := packman.EnsureRepoInCache(imp.source, imp.commit); err != nil {
+		if _, err := packman.EnsureRepoInCache(cityPath, imp.source, imp.commit); err != nil {
 			return fmt.Errorf("caching bundled import %q from packs.lock: %w", imp.source, err)
 		}
 	}

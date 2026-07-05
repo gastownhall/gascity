@@ -11,11 +11,13 @@ import (
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	gitutil "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 var (
 	runGit                   = defaultRunGit
+	runNetworkGit            = defaultRunNetworkGit
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
 )
 
@@ -44,7 +46,9 @@ func RepoCachePath(source, commit string) (string, error) {
 
 // EnsureRepoInCache clones and checks out the requested commit when absent,
 // or repairs an existing cache whose checkout has drifted from the lock entry.
-func EnsureRepoInCache(source, commit string) (string, error) {
+// cityRoot scopes credential resolution for the network clone (it selects the
+// per-city credentials.toml layer); "" skips only that layer.
+func EnsureRepoInCache(cityRoot, source, commit string) (string, error) {
 	parsed := normalizeRemoteSource(source)
 	cachePath, err := RepoCachePath(source, commit)
 	if err != nil {
@@ -61,7 +65,7 @@ func EnsureRepoInCache(source, commit string) (string, error) {
 		if config.IsBundledSourceAtCanonicalPin(source, commit) {
 			return ensureBundledRepoInCacheLocked(source, commit, cachePath)
 		}
-		return ensureRepoInCacheLocked(source, commit, parsed, cachePath)
+		return ensureRepoInCacheLocked(cityRoot, source, commit, parsed, cachePath)
 	})
 }
 
@@ -104,7 +108,7 @@ func ensureBundledRepoInCacheLocked(source, commit, cachePath string) (string, e
 	return cachePath, nil
 }
 
-func ensureRepoInCacheLocked(source, commit string, parsed remoteSource, cachePath string) (string, error) {
+func ensureRepoInCacheLocked(cityRoot, source, commit string, parsed remoteSource, cachePath string) (string, error) {
 	if gitInfo, err := os.Stat(filepath.Join(cachePath, ".git")); err == nil && !gitutil.MissingCheckoutMarker(gitInfo, err) {
 		if err := checkoutExistingCache(cachePath, commit); err == nil {
 			if err := validateCachedPackRoot(source, cachePath); err != nil {
@@ -129,8 +133,8 @@ func ensureRepoInCacheLocked(source, commit string, parsed remoteSource, cachePa
 		return "", fmt.Errorf("checking repo cache %q: %w", cachePath, err)
 	}
 
-	if _, err := runGit("", "clone", "--quiet", parsed.CloneURL, cachePath); err != nil {
-		return "", fmt.Errorf("cloning %q: %w", source, err)
+	if _, err := runNetworkGit(cityRoot, parsed.CloneURL, "", "clone", "--quiet", parsed.CloneURL, cachePath); err != nil {
+		return "", fmt.Errorf("cloning %q: %w", gitcred.RedactUserinfo(source), err)
 	}
 	if _, err := runGit(cachePath, "checkout", "--quiet", commit); err != nil {
 		return "", fmt.Errorf("checking out %q: %w", commit, err)
@@ -258,12 +262,7 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	// inert for the local cache operations (rev-parse, checkout, reset, ...) that
 	// also flow through here. The remaining DNS-rebinding residual is documented
 	// at the pack SSRF fence (internal/api/pack_source_policy.go).
-	cmdArgs := append([]string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "core.untrackedCache=false",
-	}, gitutil.UntrustedRemoteGitConfigArgs()...)
-	cmdArgs = append(cmdArgs, args...)
+	cmdArgs := append(baseHardeningGitArgs(), args...)
 	cmd := exec.Command("git", cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -271,6 +270,57 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	cmd.Env = gitutil.HermeticEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// baseHardeningGitArgs returns the leading `-c` flags every network git
+// invocation carries: the core.* pins plus the untrusted-remote SSRF hardening.
+// It is the single source of truth shared by defaultRunGit and
+// buildNetworkGitArgs so the "no credential rule ⇒ byte-identical argv"
+// guarantee is a slice comparison in tests.
+func baseHardeningGitArgs() []string {
+	return append([]string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.untrackedCache=false",
+	}, gitutil.UntrustedRemoteGitConfigArgs()...)
+}
+
+// buildNetworkGitArgs assembles the full git argv for a network invocation:
+// the base hardening trio, then the credential injection's leading `-c` flags,
+// then the subcommand args. With a zero Injection the result is byte-identical
+// to defaultRunGit's argv — the byte-identical guarantee for public clones.
+func buildNetworkGitArgs(inj gitcred.Injection, args ...string) []string {
+	cmdArgs := baseHardeningGitArgs()
+	cmdArgs = append(cmdArgs, inj.CfgArgs...)
+	cmdArgs = append(cmdArgs, args...)
+	return cmdArgs
+}
+
+// defaultRunNetworkGit is defaultRunGit plus per-invocation credential
+// injection and typed auth classification. Every network fetch/clone/ls-remote
+// runs through it so a matched credential rule authenticates the call and an
+// auth failure surfaces as a typed *gitcred.AuthError. remoteURL is the clone
+// URL credential resolution matches on; cityRoot scopes the per-city rule
+// layer.
+func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (string, error) {
+	inj, err := gitcred.CredentialedNetworkArgs("", cityRoot, remoteURL)
+	if err != nil {
+		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(remoteURL), err)
+	}
+	cmdArgs := buildNetworkGitArgs(inj, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(gitutil.HermeticEnv(), inj.Env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if authErr := gitcred.ClassifyAuthError(remoteURL, inj, string(out), err); authErr != nil {
+			return "", authErr
+		}
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil

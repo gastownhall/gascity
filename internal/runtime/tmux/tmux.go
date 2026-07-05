@@ -1961,6 +1961,55 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 	)
 }
 
+// modelSwitchDismissConfirmDelay lets the model-switch modal register the
+// selection move before the confirm keypress, so Enter does not race the Down.
+const modelSwitchDismissConfirmDelay = 150 * time.Millisecond
+
+// dismissModelSwitchModal dismisses the Codex/GPT mid-session "approaching rate
+// limits — switch to a cheaper model?" modal by selecting "Keep current model"
+// (Down off the default "Switch" option, then Enter). It is a no-op unless the
+// high-confidence runtime.ContainsModelSwitchModal matcher fires, so it never
+// sends stray keystrokes into ordinary working panes. Side effects are injected
+// so the decision is unit-testable without a live tmux server. Returns whether
+// the modal was present (i.e. a dismiss was attempted).
+func dismissModelSwitchModal(content string, sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
+	if !runtime.ContainsModelSwitchModal(content) {
+		return false, nil
+	}
+	if err := sendKeys("Down"); err != nil {
+		return true, err
+	}
+	sleep(modelSwitchDismissConfirmDelay)
+	return true, sendKeys("Enter")
+}
+
+// DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
+// modal on the session's agent pane (keeping the current model — no downgrade,
+// no spend change) so a session that would otherwise hang on it can proceed.
+// No-op when the modal is absent. Best-effort: capture/send failures are
+// swallowed (the caller retries on the next wake).
+func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
+	target := session
+	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	content, err := t.CapturePane(target, promptObservationLines)
+	if err != nil {
+		return
+	}
+	_, _ = dismissModelSwitchModal(content,
+		func(keys ...string) error {
+			for _, k := range keys {
+				if _, err := t.run("send-keys", "-t", target, k); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		time.Sleep,
+	)
+}
+
 // GetPaneCommand returns the current command running in a pane.
 // Returns "bash", "zsh", "claude", "node", etc.
 func (t *Tmux) GetPaneCommand(session string) (string, error) {

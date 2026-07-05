@@ -10,11 +10,19 @@
 package runproj
 
 import (
-	"encoding/json"
-
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+// FoldStats reports observable signal from a fold pass. DecodeMisses counts
+// bead.* events whose payload did not decode to a bead with an id — the exact
+// silent-starve signature the run-view RCA identified. A non-zero value on a
+// live tail means the projection is dropping bead snapshots and the run view
+// will render blank/stale; the caller (the dashboard run tailer) surfaces it.
+type FoldStats struct {
+	DecodeMisses int
+}
 
 // beadEventTypes are the event types the fold consumes; everything else is
 // ignored. Kept as a set so callers can pre-filter a read if they want.
@@ -37,8 +45,9 @@ func Fold(evts []events.Event) map[string]beads.Bead {
 
 // Apply folds evts into an existing bead map in place (the live-tail path:
 // apply newly-watched events to the warm snapshot). Returns the highest seq
-// applied, so the caller can advance its cursor.
-func Apply(into map[string]beads.Bead, evts []events.Event) (lastSeq uint64) {
+// applied (so the caller can advance its cursor) and the pass's FoldStats (so a
+// silent decode-starve becomes observable rather than a bare continue).
+func Apply(into map[string]beads.Bead, evts []events.Event) (lastSeq uint64, stats FoldStats) {
 	for i := range evts {
 		e := &evts[i]
 		if e.Seq > lastSeq {
@@ -47,8 +56,9 @@ func Apply(into map[string]beads.Bead, evts []events.Event) (lastSeq uint64) {
 		if !beadEventTypes[e.Type] {
 			continue
 		}
-		b, ok := decodeBead(e.Payload)
+		b, ok := decodeBead(*e)
 		if !ok {
+			stats.DecodeMisses++
 			continue
 		}
 		if e.Type == events.BeadDeleted {
@@ -57,26 +67,46 @@ func Apply(into map[string]beads.Bead, evts []events.Event) (lastSeq uint64) {
 		}
 		into[b.ID] = b
 	}
-	return lastSeq
+	return lastSeq, stats
 }
 
-// decodeBead extracts a beads.Bead from a bead.* event payload. The current
-// payload shape is {"bead": <snapshot>}; older logs wrote the raw snapshot
-// directly, so both are accepted. A payload without an id is treated as a
-// decode miss.
-func decodeBead(payload json.RawMessage) (beads.Bead, bool) {
-	if len(payload) == 0 {
+// decodeBead extracts a beads.Bead from a bead.* event via the shared canonical
+// decoder (beads.DecodeBeadEventPayload) — the raw bead snapshot
+// CachingStore.notifyChange emits, with the wrapped {"bead": ...} form accepted
+// as a tolerant fallback. A payload without an id is a decode miss.
+//
+// After decoding, it backfills the run/step correlation ids from the event
+// envelope onto the bead's metadata when the envelope carries them and the
+// payload does not. The correlation spine promoted run_id/session_id/step_id to
+// typed envelope fields and is removing the metadata duplication the run view
+// still groups on; backfilling here keeps run/step grouping alive once the
+// duplicate metadata is gone. run_id is intentionally NOT synthesized —
+// ResolveRunID already falls back to the bead's own id.
+func decodeBead(e events.Event) (beads.Bead, bool) {
+	b, ok := beads.DecodeBeadEventPayload(e.Payload)
+	if !ok {
 		return beads.Bead{}, false
 	}
-	var env struct {
-		Bead beads.Bead `json:"bead"`
+	b.Metadata = backfillEnvelopeIDs(b.Metadata, e)
+	return b, true
+}
+
+// backfillEnvelopeIDs fills the step/session correlation ids from the event
+// envelope into a bead metadata map, but only when the envelope carries the id
+// and the payload metadata does not (the payload snapshot stays authoritative).
+func backfillEnvelopeIDs(md map[string]string, e events.Event) map[string]string {
+	md = fillIfAbsent(md, beadmeta.StepIDMetadataKey, e.StepID)
+	md = fillIfAbsent(md, beadmeta.SessionIDMetadataKey, e.SessionID)
+	return md
+}
+
+func fillIfAbsent(md map[string]string, key, value string) map[string]string {
+	if value == "" || md[key] != "" {
+		return md
 	}
-	if err := json.Unmarshal(payload, &env); err == nil && env.Bead.ID != "" {
-		return env.Bead, true
+	if md == nil {
+		md = make(map[string]string, 1)
 	}
-	var raw beads.Bead
-	if err := json.Unmarshal(payload, &raw); err == nil && raw.ID != "" {
-		return raw, true
-	}
-	return beads.Bead{}, false
+	md[key] = value
+	return md
 }

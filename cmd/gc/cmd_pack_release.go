@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/spf13/cobra"
@@ -300,7 +301,7 @@ func ensurePackReleaseRepoInCache(cloneURL, commit string) (string, error) {
 	sum := sha256.Sum256([]byte(cloneURL + "\x00" + strings.TrimSpace(commit)))
 	cachePath := filepath.Join(root, fmt.Sprintf("%x", sum[:]))
 	if _, err := os.Stat(filepath.Join(cachePath, ".git")); err == nil {
-		if err := runPackReleaseGitCommand(cachePath, "fetch", "--quiet", "origin"); err != nil {
+		if err := runPackReleaseNetworkGitCommand(cloneURL, cachePath, "fetch", "--quiet", "origin"); err != nil {
 			if removeErr := os.RemoveAll(cachePath); removeErr != nil {
 				return "", fmt.Errorf("removing stale pack release repo cache after fetch failure: %w", removeErr)
 			}
@@ -314,8 +315,8 @@ func ensurePackReleaseRepoInCache(cloneURL, commit string) (string, error) {
 	} else if err := os.RemoveAll(cachePath); err != nil {
 		return "", fmt.Errorf("removing invalid pack release repo cache: %w", err)
 	}
-	if err := runPackReleaseGitCommand("", "clone", "--quiet", cloneURL, cachePath); err != nil {
-		return "", fmt.Errorf("cloning %q: %w", cloneURL, err)
+	if err := runPackReleaseNetworkGitCommand(cloneURL, "", "clone", "--quiet", cloneURL, cachePath); err != nil {
+		return "", fmt.Errorf("cloning %q: %w", gitcred.RedactUserinfo(cloneURL), err)
 	}
 	if err := checkoutPackReleaseRepo(cachePath, commit); err != nil {
 		return "", err
@@ -361,6 +362,36 @@ func runPackReleaseGitCommand(dir string, args ...string) error {
 	cmd.Env = git.HermeticEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// runPackReleaseNetworkGitCommand is runPackReleaseGitCommand for the network
+// fetch/clone: it adds per-invocation credential injection matched on cloneURL
+// and classifies auth failures. Registry authoring is city-less, so the cityRoot
+// is "" — only the $GC_GIT_CREDENTIALS_FILE and $GC_HOME credential layers apply.
+func runPackReleaseNetworkGitCommand(cloneURL, dir string, args ...string) error {
+	inj, err := gitcred.CredentialedNetworkArgs("", "", cloneURL)
+	if err != nil {
+		return fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(cloneURL), err)
+	}
+	cmdArgs := append([]string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.untrackedCache=false",
+	}, inj.CfgArgs...)
+	cmdArgs = append(cmdArgs, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(git.HermeticEnv(), inj.Env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if authErr := gitcred.ClassifyAuthError(cloneURL, inj, string(out), err); authErr != nil {
+			return authErr
+		}
 		return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return nil

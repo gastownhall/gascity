@@ -1154,6 +1154,28 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: ensuring home dir %s: %v\n", supervisor.DefaultHome(), err) //nolint:errcheck
 		return 1
 	}
+	// Capture prior-instance evidence before acquireSupervisorLockAndRotateLog
+	// (re)creates the lock file: its existence means a supervisor ran
+	// on this machine before, which lets the restart-cause derivation
+	// distinguish a crashed prior instance from a first start.
+	_, lockStatErr := os.Stat(supervisorLockPath())
+	priorInstanceRan := lockStatErr == nil
+
+	// Bound supervisor.log before attaching to it. A supervisor that fails
+	// the same way on every start crash-loops under its service manager
+	// (systemd Restart=always, launchd KeepAlive) and appends identical
+	// failure lines through every restart — 645MB in one two-day
+	// bind-conflict incident (#3897) — so every start size-gates the log
+	// and archives it at the cap, under the single-instance lock so racing
+	// starts cannot interleave the compress/truncate sequence. Rotation
+	// failures are surfaced but never block startup: a supervisor with an
+	// oversized log beats no supervisor.
+	lock, err := acquireSupervisorLockAndRotateLog(supervisorLogPath(), time.Now(), stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	defer lock.Close() //nolint:errcheck
 	// Always tee to ~/.gc/supervisor.log so `gc supervisor logs` works
 	// regardless of how the supervisor was invoked. We skip the tee when
 	// stdout/stderr already point at the same file (manual `gc supervisor
@@ -1173,20 +1195,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			stderr = io.MultiWriter(stderr, logFile)
 		}
 	}
-
-	// Capture prior-instance evidence before acquireSupervisorLock
-	// (re)creates the lock file: its existence means a supervisor ran
-	// on this machine before, which lets the restart-cause derivation
-	// distinguish a crashed prior instance from a first start.
-	_, lockStatErr := os.Stat(supervisorLockPath())
-	priorInstanceRan := lockStatErr == nil
-
-	lock, err := acquireSupervisorLock()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	defer lock.Close() //nolint:errcheck
 
 	// Holding the instance lock, consume the clean-shutdown handoff
 	// token the previous instance's STOPPING path left behind (if any)

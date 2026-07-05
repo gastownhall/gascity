@@ -314,6 +314,56 @@ $ gc config show --validate
 $ gc config show | rg 'planner'
 ```
 
+### Private Packs And Credentials
+
+A pack whose source (or a transitive import) is a **private** repository needs a
+git credential. Credentials are never written into `pack.toml`, `packs.lock`, or
+`city.toml`; they live in a separate, never-committed `credentials.toml`,
+**secret-by-pointer** — the file records where to find the token, never the
+token itself. Register one with `gc import credential`:
+
+```text
+$ gc import credential add github.com/gascity --helper 'gh auth token'
+$ gc import credential add github.com/gascity --token-file /var/run/secrets/git/token
+$ gc import credential add github.com/gascity --token-env GC_GIT_TOKEN
+$ gc import credential add github.com/gascity --ssh-key-file ~/.ssh/packbot_ed25519
+```
+
+The `match` argument is a bare host or `host/path-prefix` (longest-prefix wins,
+so same-host different-org credentials coexist). Exactly one pointer flag is
+required. By default the rule is written to `<city>/.gc/credentials.toml`
+(0600); `--global` writes `$GC_HOME/credentials.toml` instead. List and remove
+registered rules with:
+
+```text
+$ gc import credential list
+$ gc import credential remove github.com/gascity
+```
+
+Credential resolution layers, highest precedence first:
+`$GC_GIT_CREDENTIALS_FILE` (replaces the file layers when set) →
+`<city>/.gc/credentials.toml` → `$GC_HOME/credentials.toml` →
+`$GC_GIT_CREDENTIAL_COMMAND`. A `credentials.toml` looks like:
+
+```toml
+[[credential]]
+match    = "github.com/gascity"       # host or host/path-prefix
+username = "x-access-token"           # optional; this is the default
+# exactly one pointer — never a literal token:
+helper       = "gh auth token"        # command whose stdout is the token
+# token_file = "/var/run/secrets/git/token"
+# token_env  = "GC_GIT_TOKEN"         # env var NAME, never a value
+# ssh_key_file = "~/.ssh/packbot_ed25519"
+```
+
+When a rule matches an import's host, `gc import add/install/upgrade` (and
+`gc rig add`, `gc doctor --fix`) authenticate the clone automatically; when no
+rule matches, public imports behave exactly as before. If a private import
+fails to authenticate, gc prints a `hint:` line pointing at
+`gc import credential add`. Never embed `user:token@` in a source URL — gc
+rejects it because the credential would leak into `city.toml`, `packs.lock`, the
+shared cache's `.git/config`, and error output.
+
 <Accordion title="Version constraints and the lockfile">
 
 The `[pack].version` field is pack metadata. Import version selection comes

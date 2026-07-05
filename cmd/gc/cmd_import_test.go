@@ -28,7 +28,7 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -113,7 +113,7 @@ session_live = ["echo hi"]
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -182,7 +182,7 @@ knob = "keep-me"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -228,7 +228,7 @@ source = "./packs/gastown"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -297,7 +297,7 @@ source = "./packs/foo"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -347,7 +347,7 @@ source = "./packs/a-pack"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -2577,7 +2577,7 @@ func TestDoImportAddBareGitHubSourceDefaultsVersion(t *testing.T) {
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(source, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, source, _ string) (packman.ResolvedVersion, error) {
 		if source != "github.com/example/tools" {
 			t.Fatalf("ResolveVersion source = %q", source)
 		}
@@ -2619,14 +2619,14 @@ func TestDefaultImportVersionForSourceFallsBackToSHAWhenTagsAbsent(t *testing.T)
 		resolveImportVersion = prevResolve
 		resolveImportHeadCommit = prevHead
 	})
-	resolveImportVersion = func(source, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, source, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{}, fmt.Errorf("%w for %q", packman.ErrNoSemverTags, source)
 	}
-	resolveImportHeadCommit = func(_ string) (string, error) {
+	resolveImportHeadCommit = func(_, _ string) (string, error) {
 		return "deadbeef", nil
 	}
 
-	got, err := defaultImportVersionForSource("github.com/example/tools")
+	got, err := defaultImportVersionForSource("", "github.com/example/tools")
 	if err != nil {
 		t.Fatalf("defaultImportVersionForSource: %v", err)
 	}
@@ -2869,7 +2869,7 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = ""
 	rigFlag = ""
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -2958,7 +2958,7 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = ""
 	rigFlag = ""
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -3023,7 +3023,7 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = dir
 	rigFlag = ""
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -3291,11 +3291,27 @@ func TestDefaultImportHeadCommitIgnoresPoisonedGitEnv(t *testing.T) {
 	t.Setenv("GIT_WORK_TREE", poison)
 	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
 
-	got, err := defaultImportHeadCommit(repo)
+	got, err := defaultImportHeadCommit("", repo)
 	if err != nil {
 		t.Fatalf("defaultImportHeadCommit with poisoned git env: %v", err)
 	}
 	if got != wantHead {
 		t.Fatalf("defaultImportHeadCommit = %q, want %q (must resolve the requested source)", got, wantHead)
+	}
+}
+
+// TestDefaultImportHeadCommitRedactsUserinfo proves the HEAD-resolve error never
+// echoes a userinfo token in the source. GIT_ALLOW_PROTOCOL=file fails the https
+// probe instantly (offline) so the resolve error path runs without a network hit.
+func TestDefaultImportHeadCommitRedactsUserinfo(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+	_, err := defaultImportHeadCommit("", "https://user:ghp_secret@github.com/example/repo")
+	if err == nil {
+		t.Fatalf("expected the offline https probe to fail")
+	}
+	if strings.Contains(err.Error(), "ghp_secret") {
+		t.Fatalf("resolve error leaked the userinfo token: %v", err)
 	}
 }
