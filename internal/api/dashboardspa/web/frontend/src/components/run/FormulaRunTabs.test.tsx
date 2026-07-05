@@ -150,6 +150,7 @@ function readyDiff(diff: RunDiffResponse): RunDiffLoadState {
     kind: 'ready',
     diff,
     refresh: async () => {},
+    cheapRefresh: async () => {},
     refreshState: { kind: 'idle' },
   };
 }

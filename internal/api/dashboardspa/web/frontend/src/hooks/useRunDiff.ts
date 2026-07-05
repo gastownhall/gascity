@@ -6,7 +6,14 @@ import { useCachedData } from './useCachedData';
 
 interface RunDiffState {
   kind: 'idle' | 'loading' | 'ready' | 'failed';
+  /** TTL-bypassing refresh — the manual Refresh lane; re-runs the git diff. */
   refresh: () => Promise<void>;
+  /**
+   * TTL-absorbed refresh for high-frequency event-driven nudges. Reads the diff
+   * with refresh=false so the server's diff TTL coalesces a burst instead of
+   * re-running the git-exec chain per event. Use for the bead/session nudge.
+   */
+  cheapRefresh: () => Promise<void>;
 }
 
 type RunDiffRefreshState =
@@ -38,13 +45,17 @@ export function useRunDiff(
   scopeRef?: string,
 ): RunDiffLoadState {
   const key = runDiffCacheKey(runId, executionPath, scopeKind, scopeRef);
-  const { data, loading, error, refresh } = useCachedData(
+  const { data, loading, error, refresh, cheapRefresh } = useCachedData(
     key,
     () => loadRunDiff(runId, executionPath, scopeKind, scopeRef),
     {
-      // Explicit refresh re-reads local git state for the same supervisor-
-      // resolved execution path, in lockstep with detail refreshes.
+      // The manual Refresh button bypasses the server diff TTL (refresh=true):
+      // the operator explicitly asked for fresh local git state.
       refreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, true),
+      // Event-driven nudges route here (cheapRefresh) with refresh=false so the
+      // server's diff TTL absorbs a burst rather than re-running the git-exec
+      // chain per event. Same read as first paint, kept off the bypass lane.
+      sseRefreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, false),
       onError: (err) => {
         if (runId !== undefined) reportRunDiffError('load diff', runId, err);
       },
@@ -52,18 +63,19 @@ export function useRunDiff(
   );
 
   if (runId === undefined || executionPath === undefined) {
-    return { kind: 'idle', refresh: noopRefresh };
+    return { kind: 'idle', refresh: noopRefresh, cheapRefresh: noopRefresh };
   }
   if (data?.kind === 'loaded') {
     return {
       kind: 'ready',
       diff: data.diff,
       refresh,
+      cheapRefresh,
       refreshState: refreshState(loading, error),
     };
   }
-  if (error !== null) return { kind: 'failed', error, refresh };
-  return { kind: 'loading', refresh };
+  if (error !== null) return { kind: 'failed', error, refresh, cheapRefresh };
+  return { kind: 'loading', refresh, cheapRefresh };
 }
 
 async function loadRunDiff(

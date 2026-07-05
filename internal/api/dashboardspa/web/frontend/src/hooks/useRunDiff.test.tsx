@@ -1,4 +1,4 @@
-import { cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import type { RunDiffResponse } from 'gas-city-dashboard-shared';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { invalidate } from '../api/cache';
@@ -81,6 +81,42 @@ describe('useRunDiff', () => {
       },
       {},
     );
+  });
+
+  it('bypasses the diff TTL on an explicit refresh (operator asked for fresh)', async () => {
+    mockRunDiff.mockResolvedValue(okDiff());
+
+    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    if (result.current.kind !== 'ready') throw new Error('diff did not load');
+    mockRunDiff.mockClear();
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(mockRunDiff).toHaveBeenCalledWith(
+      'wf-1',
+      { executionPath: knownPath() },
+      { refresh: true },
+    );
+  });
+
+  it('absorbs event-driven refreshes into the diff TTL via cheapRefresh (refresh=false)', async () => {
+    mockRunDiff.mockResolvedValue(okDiff());
+
+    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    if (result.current.kind !== 'ready') throw new Error('diff did not load');
+    mockRunDiff.mockClear();
+
+    await act(async () => {
+      await result.current.cheapRefresh();
+    });
+
+    // No `refresh: true` param — the server's diff TTL absorbs the burst so the
+    // git-exec chain does not re-run on every nudge.
+    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', { executionPath: knownPath() }, {});
   });
 });
 
