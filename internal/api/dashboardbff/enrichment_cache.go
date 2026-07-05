@@ -305,6 +305,24 @@ func (c *singleFlightCache[K, V]) lastGoodOrZero(key K) (V, uint64, bool) {
 	return zero, 0, false
 }
 
+// invalidate forces the next get for key to recompute — and bump the version —
+// even within its TTL, while preserving the last-good value (for serve-stale)
+// and the monotonic version. It expires the entry rather than deleting it so the
+// version counter keeps advancing (a delete would reset it to zero and could
+// collide with a memo key). Used to eagerly refresh an enrichment the moment an
+// out-of-band signal says it changed (e.g. a session.* event in the tail),
+// rather than waiting for the TTL to lapse. A no-op if the key is absent.
+func (c *singleFlightCache[K, V]) invalidate(key K) {
+	c.mu.Lock()
+	if e, ok := c.entries[key]; ok {
+		// ttl 0 makes the fresh-hit check (time.Since(computed) < ttl) always
+		// false, so the next get recomputes. An in-flight compute is unaffected —
+		// it publishes and bumps the version as usual.
+		e.ttl = 0
+	}
+	c.mu.Unlock()
+}
+
 // ── Cached payload shapes ─────────────────────────────────────────────────
 
 // cachedSessions is the value stored in the sessions cache: the projected
