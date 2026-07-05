@@ -1,13 +1,23 @@
+import { useCallback, useState } from 'react';
 import type { FormulaRunDetail, RunScopeKind } from 'gas-city-dashboard-shared';
 import { errorMessage } from 'gas-city-dashboard-shared';
 import { reportClientError } from '../lib/clientErrorReporting';
 import { loadSupervisorFormulaRunDetail } from '../supervisor/runDetail';
 import { ApiClientError } from '../api/client';
 import { useCachedData } from './useCachedData';
+import { useFormulaRunDetailStream } from './useFormulaRunDetailStream';
 
 interface FormulaRunDetailState {
   kind: 'idle' | 'loading' | 'ready' | 'failed' | 'unsupported' | 'not_found';
   refresh: () => Promise<void>;
+  /**
+   * Whether the per-run SSE stream can carry detail updates. False only when the
+   * runtime has no EventSource (SSR/tests, or a browser without it), where the
+   * caller must keep the nudge-driven detail refresh alive. Transient stream
+   * errors self-heal via the browser's native EventSource reconnect, so they do
+   * NOT flip this false. See the P4 stream-vs-nudge division in FormulaRunDetail.
+   */
+  streamActive: boolean;
 }
 
 type FormulaRunRefreshState =
@@ -56,29 +66,81 @@ export function useFormulaRunDetail(
   scopeRef?: string,
 ): FormulaRunDetailLoadState {
   const key = formulaRunDetailCacheKey(runId, scopeKind, scopeRef);
-  const { data, loading, error, refresh } = useCachedData(
-    key,
-    () => loadFormulaRunDetail(runId),
-    {
-      onError: (err) => {
-        if (runId !== undefined) reportRunDetailError('load detail', runId, err);
-      },
+  const {
+    data,
+    loading,
+    error,
+    refresh: cachedRefresh,
+  } = useCachedData(key, () => loadFormulaRunDetail(runId), {
+    onError: (err) => {
+      if (runId !== undefined) reportRunDetailError('load detail', runId, err);
     },
-  );
+  });
 
-  if (runId === undefined) return { kind: 'idle', refresh: noopRefresh };
-  if (data?.kind === 'loaded') {
+  // P4: the per-run SSE stream pushes the whole DTO, so a pushed frame becomes
+  // the rendered detail with ZERO refetch. The stream hook warms the SWR cache
+  // on every frame; we mirror the freshest frame into local state so the render
+  // updates immediately without waiting for a cache re-read. The initial GET
+  // (useCachedData) is still first paint and the fallback when the stream is
+  // unavailable or errors. The streamed frame is tagged with its cache key so a
+  // navigation to a different run never shows the previous run's pushed detail
+  // before its own first frame arrives.
+  const [streamed, setStreamed] = useState<{ key: string; detail: FormulaRunDetail } | null>(null);
+  const onStreamDetail = useCallback(
+    (detail: FormulaRunDetail) => setStreamed({ key, detail }),
+    [key],
+  );
+  // F4: don't open the stream for a run the GET has definitively resolved as
+  // non-streamable — an unsupported (v1/wisp, 422) or not_found (404) run has no
+  // graph.v2 detail to push, and connecting would just spend one wasted
+  // EventSource that the browser reaps on the fatal 4xx precheck. Any other state
+  // (loading, ready, transient failed) keeps the stream enabled.
+  const streamEnabled =
+    runId !== undefined && data?.kind !== 'unsupported' && data?.kind !== 'not_found';
+  const streamState = useFormulaRunDetailStream(
+    runId,
+    streamEnabled,
+    onStreamDetail,
+    scopeKind,
+    scopeRef,
+  );
+  const streamedDetail = streamed?.key === key ? streamed.detail : null;
+
+  // A live stream carries detail; only 'unavailable' (no EventSource) means the
+  // caller must keep detail on the nudge-driven refresh. Transient stream errors
+  // (state 'closed'/'connecting') self-heal via the browser's native reconnect,
+  // so they keep streamActive true — a permanent unavailability is the only case
+  // that needs the nudge fallback.
+  const streamActive = streamState !== 'unavailable';
+
+  // A manual refresh must clear the pinned streamed frame so the fresh GET
+  // renders (otherwise streamedDetail permanently shadows the refetch — the
+  // Refresh button would appear to no-op for the detail). The next stream frame
+  // re-populates it. Streaming keeps the render live between refreshes.
+  const refresh = useCallback(async () => {
+    setStreamed(null);
+    await cachedRefresh();
+  }, [cachedRefresh]);
+
+  if (runId === undefined) return { kind: 'idle', refresh: noopRefresh, streamActive };
+  // A pushed frame wins over the GET-backed cache value: it is the freshest
+  // snapshot of this run's detail. It stays subordinate to a definitive
+  // unsupported/not_found answer below (those come only from the GET precheck;
+  // the stream never delivers a frame for them).
+  const detail = streamedDetail ?? (data?.kind === 'loaded' ? data.detail : null);
+  if (detail !== null) {
     return {
       kind: 'ready',
-      detail: data.detail,
+      detail,
       refresh,
       refreshState: refreshState(loading, error),
+      streamActive,
     };
   }
-  if (data?.kind === 'unsupported') return { kind: 'unsupported', refresh };
-  if (data?.kind === 'not_found') return { kind: 'not_found', refresh };
-  if (error !== null) return { kind: 'failed', error, refresh };
-  return { kind: 'loading', refresh };
+  if (data?.kind === 'unsupported') return { kind: 'unsupported', refresh, streamActive };
+  if (data?.kind === 'not_found') return { kind: 'not_found', refresh, streamActive };
+  if (error !== null) return { kind: 'failed', error, refresh, streamActive };
+  return { kind: 'loading', refresh, streamActive };
 }
 
 async function loadFormulaRunDetail(runId: string | undefined): Promise<FormulaRunDetailPayload> {

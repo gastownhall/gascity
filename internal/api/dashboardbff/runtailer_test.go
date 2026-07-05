@@ -621,7 +621,7 @@ type runSummaryWire struct {
 	} `json:"census"`
 }
 
-func getRunSummary(t *testing.T, p *Plane, city string) runSummaryWire {
+func getRunSummary(t *testing.T, p *Plane, city string) runSummaryWire { //nolint:unparam // city is fixed today but kept for parity with the other run helpers
 	t.Helper()
 	rec := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/city/"+city+"/runs/summary", nil))

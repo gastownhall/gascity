@@ -201,6 +201,7 @@ func (p *Plane) registerRoutes() {
 	p.registerSamplers()
 	p.registerRunSummary()
 	p.registerRunDetail()
+	p.registerRunDetailStream()
 }
 
 // resolveCityPath validates a city name and resolves its host root path. It
