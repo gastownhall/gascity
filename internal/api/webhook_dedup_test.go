@@ -53,6 +53,44 @@ func TestWebhookDedupCache_FloodEvictsOwnHookNotNeighbor(t *testing.T) {
 	}
 }
 
+// A hook that already holds most of the shared cap must keep ALL of its replay
+// entries when an unrelated hook then floods the cache with unique deliveries.
+// The overflow is charged to the hook doing the flooding, never to whichever
+// hook happens to hold the most entries — otherwise the flooder silently erodes
+// a quiet-but-busy neighbor's replay window. This is the ordering the earlier
+// "flood evicts own hook" test misses: here the eventual victim becomes the
+// busiest hook FIRST, then the neighbor floods.
+func TestWebhookDedupCache_BusiestHookSurvivesNeighborFlood(t *testing.T) {
+	c := newWebhookDedupCache(time.Hour)
+	c.max = 8
+
+	// Hook A fills the cache to the cap, making it the busiest hook.
+	aKeys := make([]string, c.max)
+	for i := range aKeys {
+		aKeys[i] = webhookDedupKey("hook-a", fmt.Sprintf("a-%d", i))
+		if c.seen(aKeys[i]) {
+			t.Fatalf("hook-a delivery %d: first sight must be unseen", i)
+		}
+	}
+
+	// An unrelated hook now floods the shared cache with unique deliveries.
+	for i := 0; i < 100; i++ {
+		c.seen(webhookDedupKey("hook-b", fmt.Sprintf("b-%d", i)))
+	}
+
+	// Every one of hook A's original replay keys must still read as a duplicate:
+	// the neighbor's flood must not have evicted any of A's entries.
+	for i, k := range aKeys {
+		if !c.seen(k) {
+			t.Fatalf("hook-a replay key %d was evicted by hook-b's flood — a neighbor's traffic must not erode this hook's replay window", i)
+		}
+	}
+	// The global cap is still honored.
+	if len(c.entries) > c.max {
+		t.Fatalf("cache holds %d entries, over cap %d", len(c.entries), c.max)
+	}
+}
+
 func TestWebhookDedupCache_Clear(t *testing.T) {
 	c := newWebhookDedupCache(time.Hour)
 	k := webhookDedupKey("h", "1")
