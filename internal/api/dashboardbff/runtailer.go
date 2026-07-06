@@ -587,6 +587,14 @@ func (m *runTailerManager) fetchFormulaDetailVersioned(ctx context.Context, name
 	return got.detail, "", version, true
 }
 
+// fetchFormulaDetail preserves the pre-refactor 3-tuple call shape for tests
+// and older internal call sites while the versioned cache API remains the
+// implementation behind it.
+func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) { //nolint:unparam
+	detail, failure, _, ok := m.fetchFormulaDetailVersioned(ctx, name, formula, target, scopeKind, scopeRef)
+	return detail, failure, ok
+}
+
 // fetchFormulaDetailUpstream reads
 // GET {base}/v0/city/{name}/formulas/{formula}?target={target}&scope_kind={kind}&scope_ref={ref}
 // over loopback and projects the compiled formula's ordering-relevant preview
