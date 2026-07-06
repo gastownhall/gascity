@@ -1482,6 +1482,10 @@
           },
           "type": "array",
           "description": "Rules maps verified provider events to dispatch targets."
+        },
+        "max_per_minute": {
+          "type": "integer",
+          "description": "MaxPerMinute is an optional per-webhook self-imposed sustained request\nceiling for the E8 rate limiter. SECURITY: a [[webhook]] block may be\npack-contributed, and a pack must never be able to weaken the operator's\nflood defense, so this value may only LOWER a webhook's effective limit —\nit is min-clamped to the operator-owned ceiling and can never raise it (see\nWebhookPolicyConfig.EffectiveRateLimit). Leave unset to inherit the operator\ndefault/override."
         }
       },
       "additionalProperties": false,

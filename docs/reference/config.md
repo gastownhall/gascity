@@ -865,6 +865,7 @@ Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under /v0/c
 | `publication` | ServicePublicationConfig |  |  | Publication declares generic publication intent, reusing the service publication contract. Pack/fragment-contributed public webhooks are capped to tenant unless the city grants them via [webhooks].allow_public. |
 | `verify` | WebhookVerify |  |  | Verify declares the signature verification scheme and its inputs. |
 | `rule` | []WebhookRule |  |  | Rules maps verified provider events to dispatch targets. |
+| `max_per_minute` | integer |  |  | MaxPerMinute is an optional per-webhook self-imposed sustained request ceiling for the E8 rate limiter. SECURITY: a [[webhook]] block may be pack-contributed, and a pack must never be able to weaken the operator's flood defense, so this value may only LOWER a webhook's effective limit — it is min-clamped to the operator-owned ceiling and can never raise it (see WebhookPolicyConfig.EffectiveRateLimit). Leave unset to inherit the operator default/override. |
 
 ## WebhookAllowPublic
 
@@ -876,6 +877,17 @@ WebhookAllowPublic is one operator-authored public-exposure grant.
 | `source` | string | **yes** |  | Source is the pack/fragment provenance the grant is scoped to. Matched against the webhook's stamped SourceDir. |
 | `digest` | string |  |  | Digest optionally pins the content digest of the granted webhook's security-relevant fields.  TODO(R3): compute and enforce this digest over &#123;visibility, verify scheme/secret_env/secret_key/trust-root, each rule's event/match/order/rig/target&#125; so a content-swap upgrade auto-downgrades to tenant until the operator re-consents. E2 matches on &#123;name, source&#125; only; the digest field is reserved for that follow-up. |
 
+## WebhookJWTPolicy
+
+WebhookJWTPolicy is one operator-owned jwt-jwks trust anchor.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the webhook this policy applies to (matched against Webhook.Name). |
+| `issuer` | string | **yes** |  | Issuer is the required "iss" claim, pinned exactly. |
+| `audience` | string | **yes** |  | Audience is the required "aud" claim. |
+| `jwks_url` | string | **yes** |  | JWKSURL is the https endpoint publishing the signing keys. |
+
 ## WebhookPolicyConfig
 
 WebhookPolicyConfig holds city-level webhook governance authored in the root city.toml under [webhooks].
@@ -883,6 +895,28 @@ WebhookPolicyConfig holds city-level webhook governance authored in the root cit
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `allow_public` | []WebhookAllowPublic |  |  | AllowPublic lists &#123;name, source&#125; grants that permit a pack/fragment webhook to keep publication.visibility="public". Default-closed: a pack/fragment public webhook with no matching grant is capped to tenant. |
+| `jwt_policy` | []WebhookJWTPolicy |  |  | JWTPolicies pins the operator-owned trust anchor for each jwt-jwks webhook, keyed by webhook name. Per security review R1, a jwt-jwks webhook's issuer, audience, and JWKS URL are operator-owned and must come from here (the root city.toml [webhooks] block), never from a pack-authored [webhook.verify] table — otherwise a pack could point the trust root at an attacker-controlled issuer/JWKS. The receiver (E3) reads this, not WebhookVerify.Issuer/etc., when constructing the jwt-jwks verifier. |
+| `rate_limit` | WebhookRateLimitConfig |  |  | RateLimit holds the operator-owned E8 per-webhook rate-limit governance: the fleet default plus optional per-webhook overrides. Because the whole [webhooks] table is never merged from packs or fragments, a pack cannot touch these values — it can only LOWER its own limit via Webhook.MaxPerMinute (clamped in EffectiveRateLimit). This is the trust boundary for the flood defense: the operator sets the ceiling; packs may only self-restrict below it.  A pointer so an absent [webhooks].rate_limit round-trips cleanly (a zero-value nested table is not suppressed by BurntSushi's omitempty); nil means "use the built-in defaults". |
+
+## WebhookRateLimitConfig
+
+WebhookRateLimitConfig is the operator-owned rate-limit policy authored under the root city.toml [webhooks].rate_limit table.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `per_minute` | integer |  |  | PerMinute is the default sustained request ceiling applied to every webhook that declares no lower self-limit. 0 uses defaultWebhookRateLimitPerMinute. |
+| `burst` | integer |  |  | Burst is the token-bucket burst allowance. 0 uses defaultWebhookRateLimitBurst. |
+| `override` | []WebhookRateLimitOverride |  |  | Overrides pins an operator-chosen limit for a specific webhook by name. Operator authority: an override may raise OR lower that webhook's limit — it is the operator, not a pack, declaring it. A pack's own MaxPerMinute can then only clamp further downward, never above the override. |
+
+## WebhookRateLimitOverride
+
+WebhookRateLimitOverride is one operator-authored per-webhook rate-limit pin.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  |  |
+| `per_minute` | integer |  |  |  |
+| `burst` | integer |  |  |  |
 
 ## WebhookRule
 
