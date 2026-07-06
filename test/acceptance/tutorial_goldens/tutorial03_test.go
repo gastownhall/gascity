@@ -4,6 +4,7 @@ package tutorialgoldens
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -220,14 +221,34 @@ func TestTutorial03Sessions(t *testing.T) {
 	})
 
 	t.Run("gc session peek mc-8sfd", func(t *testing.T) {
+		reviewerIdentityPeekLines := 200
+		peekIdentifiesReviewer := func(out string) bool {
+			lower := strings.ToLower(out)
+			return strings.Contains(lower, "reviewer") || strings.Contains(lower, "codex")
+		}
 		out, err := ws.runShell("gc session peek "+reviewerSessionID, "")
 		if err != nil {
 			t.Fatalf("gc session peek %s: %v\n%s", reviewerSessionID, err, out)
 		}
-		lower := strings.ToLower(out)
-		if strings.TrimSpace(out) == "" || (!strings.Contains(lower, "reviewer") && !strings.Contains(lower, "codex")) {
-			t.Fatalf("peek reviewer output mismatch:\n%s", out)
+		if strings.TrimSpace(out) == "" {
+			t.Fatal("peek reviewer output is empty")
 		}
+		if peekIdentifiesReviewer(out) {
+			return
+		}
+		// The identifying "You are `reviewer`" prompt text sits above the
+		// session's skills appendix and review transcript, so provider chrome
+		// (e.g. a Claude CLI footer banner) can slide it out of the default
+		// 50-line window (#3877). The session is still the right one; only
+		// the window position moved.
+		deepOut, deepErr := ws.runShell("gc session peek "+reviewerSessionID+" --lines "+strconv.Itoa(reviewerIdentityPeekLines), "")
+		if deepErr != nil {
+			t.Fatalf("gc session peek %s --lines %d: %v\n%s", reviewerSessionID, reviewerIdentityPeekLines, deepErr, deepOut)
+		}
+		if !peekIdentifiesReviewer(deepOut) {
+			t.Fatalf("peek reviewer output mismatch; default window:\n%s\n\nhidden %d-line window:\n%s", out, reviewerIdentityPeekLines, deepOut)
+		}
+		ws.noteWarning("tutorial 03 runtime workaround: the default peek window slid past the reviewer-identifying prompt text (provider footer chrome can shift the visible window, issue #3877), so the page driver confirmed the same session identity in a wider hidden %d-line peek window", reviewerIdentityPeekLines)
 	})
 
 	t.Run("gc session list", func(t *testing.T) {

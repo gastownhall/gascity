@@ -3611,3 +3611,76 @@ func TestOrderScopedName(t *testing.T) {
 		}
 	}
 }
+
+// TestOrderCheckCooldownFastPathBypassesLastRunStore proves the cooldown
+// short-circuit: a recent order.fired event keeps a cooldown order not-due
+// without ever consulting the (slow, Dolt-backed) last-run store. The store
+// is rigged to error if queried, so a clean not-due result confirms the
+// fast path took over.
+func TestOrderCheckCooldownFastPathBypassesLastRunStore(t *testing.T) {
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	// Any query against this store errors — it must not be reached.
+	failStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: failStore}}, nil
+	}
+
+	// Recent order.fired event, well within the 24h cooldown.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest", Ts: now.Add(-1 * time.Hour)})
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1 (cooldown active, not due); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("last-run store was consulted despite in-window event; fast path did not bypass it:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cooldown") {
+		t.Fatalf("stdout missing not-due cooldown row:\n%s", stdout.String())
+	}
+}
+
+// TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore proves the other
+// half of the guarantee: an order.fired event older than the cooldown interval
+// does not short-circuit, so the last-run store is still consulted (and here,
+// its error surfaces).
+func TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore(t *testing.T) {
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	failStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: failStore}}, nil
+	}
+
+	// Stale order.fired event, older than the 24h cooldown.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest", Ts: now.Add(-25 * time.Hour)})
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1 when last-run store errors after stale event; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("stale event did not fall through to last-run store; expected last-run error in stderr:\n%s", stderr.String())
+	}
+}

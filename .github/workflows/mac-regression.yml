@@ -137,18 +137,24 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
-      - name: Get golangci-lint version for cache key
+      - name: Get golangci-lint + Go toolchain versions for cache key
         id: glint-version
         run: |
           version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # staticcheck (bundled in golangci-lint) caches type/CFG facts whose
+          # validity depends on the Go toolchain it was built with. Keying the
+          # cache on GOVERSION prevents a cache populated under one Go toolchain
+          # from being replayed under another, which produced a stale-fact
+          # SA5011 false-positive flood on main (ga-v7x9vk).
+          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
       - name: Restore golangci-lint cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/golangci-lint
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
           restore-keys: |
-            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-
+            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
