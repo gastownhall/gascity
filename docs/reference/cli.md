@@ -3479,6 +3479,7 @@ gc runtime
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
+| [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
@@ -3585,6 +3586,31 @@ gc runtime drain-check [name] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
+
+## gc runtime heartbeat
+
+Extend the idle-timeout and max-session-age windows during a long operation.
+
+Sets held_until on the current session's bead, suppressing the idle-timeout
+and max-session-age timers until the hold expires. Call this at the start of
+slow operations that produce no terminal output and would otherwise trigger
+a false-alarm watchdog kill.
+
+The hold is automatically cleared by the reconciler once held_until passes.
+This is the agent-facing API for the held_until bead-metadata mechanism; it
+does not put the session into a suspended state or change its sleep_intent.
+
+The default duration (45m0s) covers long-running operations.
+Pass --duration to override.
+
+```
+gc runtime heartbeat [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--duration` | string |  | hold duration (e.g. 30m, 1h); default 45m0s |
 | `--json` | bool |  | Output as JSON |
 
 ## gc runtime request-restart
