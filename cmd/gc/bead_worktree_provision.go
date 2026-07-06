@@ -11,10 +11,30 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
-// worktreeProvisionMu serializes worktree provisioning across the parallel
+// worktreeProvisionMuGuard protects worktreeProvisionMus, the per-rig-root
+// lock registry that serializes worktree provisioning across the parallel
 // start wave: concurrent `git worktree add` invocations against the same
-// repository can collide on repository-level lock files.
-var worktreeProvisionMu sync.Mutex
+// repository can collide on repository-level lock files. Locking is keyed by
+// rig root (rather than one global mutex) so concurrent starts against
+// unrelated rigs proceed in parallel.
+var (
+	worktreeProvisionMuGuard sync.Mutex
+	worktreeProvisionMus     = make(map[string]*sync.Mutex)
+)
+
+// worktreeProvisionLockFor returns the mutex serializing worktree
+// provisioning for rigRoot, creating it on first use.
+func worktreeProvisionLockFor(rigRoot string) *sync.Mutex {
+	key := filepath.Clean(rigRoot)
+	worktreeProvisionMuGuard.Lock()
+	defer worktreeProvisionMuGuard.Unlock()
+	mu, ok := worktreeProvisionMus[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		worktreeProvisionMus[key] = mu
+	}
+	return mu
+}
 
 // provisionSessionWorktree creates a git worktree of rigRoot at workDir,
 // detached at the rig's current HEAD, so a session launched there starts in a
@@ -39,8 +59,9 @@ func provisionSessionWorktree(cityPath, rigRoot, workDir string) error {
 		return nil
 	}
 
-	worktreeProvisionMu.Lock()
-	defer worktreeProvisionMu.Unlock()
+	mu := worktreeProvisionLockFor(rigRoot)
+	mu.Lock()
+	defer mu.Unlock()
 
 	if _, err := os.Lstat(filepath.Join(workDir, ".git")); err == nil {
 		// Already a worktree (or a repository); nothing to provision.

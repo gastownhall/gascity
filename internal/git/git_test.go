@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -450,6 +451,58 @@ func TestWorktreeList_NestedSiblings(t *testing.T) {
 	}
 	if strings.HasPrefix(wantHome+string(filepath.Separator), wantNested+string(filepath.Separator)) {
 		t.Errorf("home %q must not be classified as inside nested %q", wantHome, wantNested)
+	}
+}
+
+// TestEvacuateSeedRollsBackOnMidLoopRenameFailure pins the fix for a
+// mid-loop os.Rename failure inside evacuateSeed: entries already moved
+// into the temp seed dir must be restored to dir (best-effort) so a caller
+// retry sees dir back in its original state instead of partially emptied.
+func TestEvacuateSeedRollsBackOnMidLoopRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b"), []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// os.ReadDir returns entries sorted by name, so "a" is renamed first
+	// (succeeds) and "b" second (forced to fail), exercising the partial
+	// rollback path rather than a zero-entries-moved early exit.
+	orig := renameSeedEntry
+	calls := 0
+	renameSeedEntry = func(oldpath, newpath string) error {
+		calls++
+		if calls == 2 {
+			return fmt.Errorf("injected rename failure")
+		}
+		return orig(oldpath, newpath)
+	}
+	t.Cleanup(func() { renameSeedEntry = orig })
+
+	if _, err := evacuateSeed(dir); err == nil {
+		t.Fatal("evacuateSeed: expected error from injected rename failure, got nil")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "a")); err != nil {
+		t.Errorf("entry %q not rolled back into dir after mid-loop failure: %v", "a", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "b")); err != nil {
+		t.Errorf("entry %q missing from dir after failed evacuation: %v", "b", err)
+	}
+
+	// No leftover seed temp directory next to dir.
+	parent := filepath.Dir(dir)
+	siblings, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "." + filepath.Base(dir) + ".seed-"
+	for _, e := range siblings {
+		if strings.HasPrefix(e.Name(), prefix) {
+			t.Errorf("leftover seed temp dir not cleaned up: %s", e.Name())
+		}
 	}
 }
 

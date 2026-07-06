@@ -128,9 +128,10 @@ func (g *Git) WorktreeRemove(path string, force bool) error {
 }
 
 // WorktreeAdd creates a git worktree at path checked out to ref. When detach
-// is true the worktree is left at a detached HEAD on ref; otherwise git checks
-// out ref (creating a branch named after the leaf directory when ref is not an
-// existing branch).
+// is true, ref may be any commit-ish (branch, tag, or SHA) and the worktree is
+// left at a detached HEAD. When detach is false, this runs "git worktree add
+// <path> <ref>" without -b, so ref must name an existing branch — a
+// non-existent branch name causes git to error rather than create one.
 //
 // This is the create half of the worktree lifecycle whose reap half is
 // WorktreeRemove/WorktreeList/WorktreePrune. It is written to provision
@@ -153,6 +154,10 @@ func (g *Git) WorktreeAdd(path, ref string, detach bool) error {
 		if err := os.MkdirAll(parent, 0o755); err != nil {
 			return fmt.Errorf("creating worktree parent %q: %w", parent, err)
 		}
+	}
+
+	if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+		return fmt.Errorf("worktree add %q: refusing to provision: path already contains .git", path)
 	}
 
 	seed, err := evacuateSeed(path)
@@ -180,11 +185,18 @@ func (g *Git) WorktreeAdd(path, ref string, detach bool) error {
 	return nil
 }
 
+// renameSeedEntry renames a single evacuated entry. It is a package variable
+// so tests can inject a failure partway through evacuateSeed's loop.
+var renameSeedEntry = os.Rename
+
 // evacuateSeed moves the top-level contents of dir into a temporary sibling
 // directory when dir exists and is non-empty, returning that temp directory
 // (empty string when there was nothing to evacuate). git worktree add refuses
 // to populate a non-empty existing directory, so pre-seeded contents are
-// staged out of the way and restored by restoreSeed afterwards.
+// staged out of the way and restored by restoreSeed afterwards. If a rename
+// fails partway through, entries already moved are best-effort restored to
+// dir before the temp directory is removed, so a caller retry sees dir back
+// in its original state rather than partially emptied.
 func evacuateSeed(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -200,10 +212,16 @@ func evacuateSeed(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	moved := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if err := os.Rename(filepath.Join(dir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
+		if err := renameSeedEntry(filepath.Join(dir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
+			for _, name := range moved {
+				_ = renameSeedEntry(filepath.Join(tmp, name), filepath.Join(dir, name)) // best-effort rollback
+			}
+			_ = os.Remove(tmp)
 			return "", fmt.Errorf("moving %q aside: %w", e.Name(), err)
 		}
+		moved = append(moved, e.Name())
 	}
 	return tmp, nil
 }
