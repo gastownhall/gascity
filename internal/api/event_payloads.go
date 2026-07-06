@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -195,77 +196,19 @@ type BeadEventPayload struct {
 // IsEventPayload marks BeadEventPayload as an events.Payload variant.
 func (BeadEventPayload) IsEventPayload() {}
 
-// UnmarshalJSON accepts the current {"bead": ...} payload shape and the
-// legacy raw-bead shape emitted by older bd hook scripts.
+// UnmarshalJSON decodes a bead.* event payload via the shared canonical decoder
+// (beads.DecodeBeadEventPayload): the raw bead snapshot CachingStore.notifyChange
+// emits, with the wrapped {"bead": ...} form accepted as a tolerant fallback. A
+// non-empty payload that does not decode to a bead with an id is an error, so a
+// malformed payload surfaces at this typed boundary instead of decoding to a
+// zero bead.
 func (p *BeadEventPayload) UnmarshalJSON(data []byte) error {
-	var wrapped struct {
-		Bead *json.RawMessage `json:"bead"`
-	}
-	if err := json.Unmarshal(data, &wrapped); err != nil {
-		return err
-	}
-	if wrapped.Bead != nil {
-		bead, err := decodeBeadEventPayloadBead(*wrapped.Bead)
-		if err != nil {
-			return err
-		}
-		p.Bead = bead
-		return nil
-	}
-
-	bead, err := decodeBeadEventPayloadBead(data)
-	if err != nil {
-		return err
+	bead, ok := beads.DecodeBeadEventPayload(data)
+	if !ok {
+		return fmt.Errorf("decode bead event payload: not a bead snapshot with an id: %s", data)
 	}
 	p.Bead = bead
 	return nil
-}
-
-func decodeBeadEventPayloadBead(data []byte) (beads.Bead, error) {
-	var wire struct {
-		ID           string          `json:"id"`
-		Title        string          `json:"title"`
-		Status       string          `json:"status"`
-		Type         string          `json:"issue_type"`
-		TypeCompat   string          `json:"type,omitempty"`
-		Priority     *int            `json:"priority,omitempty"`
-		CreatedAt    time.Time       `json:"created_at"`
-		Assignee     string          `json:"assignee,omitempty"`
-		From         string          `json:"from,omitempty"`
-		ParentID     string          `json:"parent,omitempty"`
-		Ref          string          `json:"ref,omitempty"`
-		Needs        []string        `json:"needs,omitempty"`
-		Description  string          `json:"description,omitempty"`
-		Labels       []string        `json:"labels,omitempty"`
-		Metadata     beads.StringMap `json:"metadata,omitempty"`
-		Dependencies []beads.Dep     `json:"dependencies,omitempty"`
-	}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return beads.Bead{}, err
-	}
-	bead := beads.Bead{
-		ID:           wire.ID,
-		Title:        wire.Title,
-		Status:       wire.Status,
-		Type:         wire.Type,
-		Priority:     wire.Priority,
-		CreatedAt:    wire.CreatedAt,
-		Assignee:     wire.Assignee,
-		From:         wire.From,
-		ParentID:     wire.ParentID,
-		Ref:          wire.Ref,
-		Needs:        wire.Needs,
-		Description:  wire.Description,
-		Labels:       wire.Labels,
-		Dependencies: wire.Dependencies,
-	}
-	if bead.Type == "" {
-		bead.Type = wire.TypeCompat
-	}
-	if wire.Metadata != nil {
-		bead.Metadata = map[string]string(wire.Metadata)
-	}
-	return bead, nil
 }
 
 // SessionLifecyclePayload is the typed payload for terminal session

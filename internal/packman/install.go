@@ -100,7 +100,7 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 		if pack.Commit == "" {
 			return nil, fmt.Errorf("lock entry %q is missing commit", source)
 		}
-		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
+		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
 			return nil, err
 		}
 	}
@@ -136,7 +136,7 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 		if pack.Commit == "" {
 			continue
 		}
-		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
+		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
 			return err
 		}
 	}
@@ -169,6 +169,7 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 	}
 
 	state := syncState{
+		cityRoot:       cityRoot,
 		mode:           mode,
 		existing:       existing,
 		upgradeSources: upgradeSources,
@@ -208,6 +209,7 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 }
 
 type syncState struct {
+	cityRoot       string
 	mode           InstallMode
 	existing       *Lockfile
 	upgradeSources map[string]struct{}
@@ -292,7 +294,7 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolved, err := ResolveVersion(source, constraint)
+	resolved, err := ResolveVersion(s.cityRoot, source, constraint)
 	if err != nil {
 		return false, err
 	}
@@ -371,7 +373,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 }
 
 func (s *syncState) cachedPackPath(source, commit string) (string, error) {
-	cachePath, err := EnsureRepoInCache(source, commit)
+	cachePath, err := EnsureRepoInCache(s.cityRoot, source, commit)
 	if err != nil {
 		return "", err
 	}

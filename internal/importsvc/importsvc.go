@@ -88,9 +88,9 @@ type Deps struct {
 	// defaults.
 	SyncLock          func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error)
 	WriteLockfile     func(fs fsys.FS, cityRoot string, lock *packman.Lockfile) error
-	ResolveVersion    func(source, constraint string) (packman.ResolvedVersion, error)
+	ResolveVersion    func(cityRoot, source, constraint string) (packman.ResolvedVersion, error)
 	DefaultConstraint func(version string) (string, error)
-	ResolveHeadCommit func(source string) (string, error)
+	ResolveHeadCommit func(cityRoot, source string) (string, error)
 }
 
 func (d Deps) syncLock() func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
@@ -115,7 +115,7 @@ func (d Deps) writeLockfile() func(fsys.FS, string, *packman.Lockfile) error {
 	return writeLockfile
 }
 
-func (d Deps) resolveVersion() func(string, string) (packman.ResolvedVersion, error) {
+func (d Deps) resolveVersion() func(string, string, string) (packman.ResolvedVersion, error) {
 	if d.ResolveVersion != nil {
 		return d.ResolveVersion
 	}
@@ -129,22 +129,22 @@ func (d Deps) defaultConstraint() func(string) (string, error) {
 	return defaultConstraint
 }
 
-func (d Deps) resolveHeadCommit() func(string) (string, error) {
+func (d Deps) resolveHeadCommit() func(string, string) (string, error) {
 	if d.ResolveHeadCommit != nil {
 		return d.ResolveHeadCommit
 	}
 	return resolveHeadCommit
 }
 
-func (d Deps) defaultImportVersionForSource(source string) (string, error) {
-	resolved, err := d.resolveVersion()(source, "")
+func (d Deps) defaultImportVersionForSource(cityRoot, source string) (string, error) {
+	resolved, err := d.resolveVersion()(cityRoot, source, "")
 	if err == nil {
 		return d.defaultConstraint()(resolved.Version)
 	}
 	if !errors.Is(err, packman.ErrNoSemverTags) {
 		return "", err
 	}
-	commit, err := d.resolveHeadCommit()(source)
+	commit, err := d.resolveHeadCommit()(cityRoot, source)
 	if err != nil {
 		return "", err
 	}
@@ -167,7 +167,7 @@ func (d Deps) fenceSource(source string) error {
 // given, default to the resolved semver/HEAD; non-git path sources reject a
 // constraint outright. The returned error already carries the transport-mapped
 // sentinel (ErrInvalidSource or ErrVersionResolveFailed).
-func (d Deps) resolveImportVersion(source, versionConstraint string, gitBacked bool) (string, error) {
+func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked bool) (string, error) {
 	if !gitBacked {
 		if versionConstraint != "" {
 			return "", fmt.Errorf("%w: --version is only valid for git-backed imports", ErrInvalidSource)
@@ -180,7 +180,7 @@ func (d Deps) resolveImportVersion(source, versionConstraint string, gitBacked b
 	if versionConstraint != "" {
 		return versionConstraint, nil
 	}
-	version, err := d.defaultImportVersionForSource(source)
+	version, err := d.defaultImportVersionForSource(cityRoot, source)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
 	}
@@ -240,7 +240,7 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 		}
 	}
 
-	version, err := deps.resolveImportVersion(source, versionConstraint, gitBacked)
+	version, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked)
 	if err != nil {
 		return nil, err
 	}

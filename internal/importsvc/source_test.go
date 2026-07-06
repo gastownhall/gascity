@@ -37,3 +37,20 @@ func TestLsRemoteHeadArgsHardened(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultHeadCommitRedactsUserinfo proves the remote-HEAD resolve error
+// never echoes a userinfo token embedded in the source. GIT_ALLOW_PROTOCOL=file
+// makes git fail the https probe instantly (offline, exit 128) so the resolve
+// error path runs without a network round-trip.
+func TestDefaultHeadCommitRedactsUserinfo(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+	_, err := defaultHeadCommit("", "https://user:ghp_secret@github.com/example/repo")
+	if err == nil {
+		t.Fatalf("expected the offline https probe to fail")
+	}
+	if strings.Contains(err.Error(), "ghp_secret") {
+		t.Fatalf("resolve error leaked the userinfo token: %v", err)
+	}
+}

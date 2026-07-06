@@ -1,6 +1,7 @@
 package runproj
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -68,6 +69,27 @@ func TestProjectorNoOpTickReportsUnchanged(t *testing.T) {
 	}
 	if p.LastSeq() != 7 {
 		t.Errorf("lastSeq = %d, want 7 (cursor advances past ignored events)", p.LastSeq())
+	}
+}
+
+// TestProjectorCountsDecodeMisses proves the tailer-driven path (Projector.Apply,
+// not the free Apply) counts bead.* payload decode misses instead of swallowing
+// them — the observable signal the run tailer logs so a live projection starve
+// surfaces. Non-bead events are not misses, and the count is cumulative.
+func TestProjectorCountsDecodeMisses(t *testing.T) {
+	p := NewProjector()
+	p.Apply([]events.Event{
+		beadEvent(1, events.BeadCreated, "a", "open"),
+		{Seq: 2, Type: events.BeadUpdated, Payload: json.RawMessage(`{"status":"open"}`)}, // no id → miss
+		{Seq: 3, Type: events.SessionWoke, Subject: "w"},                                  // not a bead event
+	})
+	if p.DecodeMisses() != 1 {
+		t.Fatalf("DecodeMisses = %d, want 1 after first pass", p.DecodeMisses())
+	}
+	// A second pass with another undecodable bead.* event accumulates the count.
+	p.Apply([]events.Event{{Seq: 4, Type: events.BeadClosed, Payload: json.RawMessage(`garbage`)}})
+	if p.DecodeMisses() != 2 {
+		t.Errorf("DecodeMisses = %d, want 2 (cumulative across passes)", p.DecodeMisses())
 	}
 }
 

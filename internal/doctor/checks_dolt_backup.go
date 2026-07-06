@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // DoltBackupCheck verifies that a rig's Dolt database has a backup remote
@@ -60,6 +62,19 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
 	rigPath := c.normalizedRigPath()
+
+	// An external Dolt endpoint self-manages its backups on the remote server;
+	// the local .dolt-backup directory and managed-Dolt repo_state.json signals
+	// never apply to it, and the localhost fix hint below is actively wrong for
+	// it. Treat a resolved external endpoint as satisfied rather than warning.
+	// See gastownhall/gascity#3868. A resolution error falls through to the
+	// local-signal checks so a genuinely missing local backup still surfaces.
+	if target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath); err == nil && target.External {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("rig %q: external Dolt endpoint %s:%s — backups self-managed on the external server", c.rig.Name, target.Host, target.Port)
+		return r
+	}
+
 	dbName, details := c.resolveDBName(rigPath)
 	r.Details = append(r.Details, details...)
 	backupDir := filepath.Join(c.cityPath, ".dolt-backup", dbName)

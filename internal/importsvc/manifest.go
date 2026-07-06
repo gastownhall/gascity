@@ -46,6 +46,10 @@ var (
 	resolveHeadCommit = defaultHeadCommit
 )
 
+// The ResolveVersion / ResolveHeadCommit seams carry a leading cityRoot so the
+// network ls-remote can resolve per-city pack credentials; the CLI injects its
+// own stubbable copies through Deps.
+
 const cityPackSchema = 1
 
 type cityPackManifest struct {

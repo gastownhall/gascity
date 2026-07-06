@@ -617,6 +617,13 @@ func cacheEventLooksComplete(fields map[string]json.RawMessage) bool {
 		(hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type"))
 }
 
+// decodeCacheEvent decodes a bead.* event payload into a bead patch AND the raw
+// top-level field set the cache uses for change-detection (hasCacheEventField).
+// It unwraps the tolerant {"bead": ...} envelope for the fields map, then routes
+// the bead itself through the shared canonical decoder so the cache and the
+// run-view projection can never drift apart on the wire shape or the
+// issue_type/type compat. An empty id is a decode miss (error), matching the
+// prior contract.
 func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage, error) {
 	eventPayload := payload
 	var envelope map[string]json.RawMessage
@@ -631,24 +638,9 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	if err := json.Unmarshal(eventPayload, &fields); err != nil {
 		return Bead{}, nil, err
 	}
-	var wire struct {
-		Bead
-		Metadata   StringMap `json:"metadata,omitempty"`
-		TypeCompat string    `json:"type,omitempty"`
-	}
-	if err := json.Unmarshal(eventPayload, &wire); err != nil {
-		return Bead{}, nil, err
-	}
-	b := wire.Bead
-	if wire.Metadata != nil {
-		b.Metadata = map[string]string(wire.Metadata)
-	}
-	if b.ID == "" {
+	b, ok := DecodeBeadEventPayload(eventPayload)
+	if !ok {
 		return Bead{}, nil, fmt.Errorf("missing bead id")
-	}
-	// bd hook payloads use "issue_type" while exec-style payloads may use "type".
-	if b.Type == "" && wire.TypeCompat != "" {
-		b.Type = wire.TypeCompat
 	}
 	return b, fields, nil
 }

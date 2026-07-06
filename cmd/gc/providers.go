@@ -256,8 +256,13 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 	// auto provider that routes per-session.
 	// NOTE: agents comes from loadCityConfig which applies pack overrides, so the
 	// Session field from overrides is already resolved here.
-	requireACPWrapper := requiresACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg)
-	if ctx.providerName != "acp" && needsACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg) {
+	// acpRouteNames is computed once and reused for both the requires/needs
+	// checks and the route registration below, instead of recomputing the
+	// (agent + named-session) x provider-resolution walk up to 3x per call.
+	acpRouteNames := configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg)
+	requireACPWrapper := len(acpRouteNames) > 0
+	needsACPWrapper := requireACPWrapper || (ctx.cfg != nil && hasACPProviderTargets(ctx.cfg))
+	if ctx.providerName != "acp" && needsACPWrapper {
 		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
 		if acpErr != nil {
 			if requireACPWrapper {
@@ -266,7 +271,7 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 			return base, nil
 		}
 		autoSP := sessionauto.New(base, acpSP)
-		for _, sessName := range configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg) {
+		for _, sessName := range acpRouteNames {
 			autoSP.RouteACP(sessName)
 		}
 		return autoSP, nil
@@ -277,6 +282,20 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string {
 	if cfg == nil {
 		return strings.TrimSpace(agentCfg.Session)
+	}
+	// StartCommand is ResolveProvider's escape hatch (step 1): it bypasses
+	// provider-catalog resolution entirely, so a cache entry for
+	// agentCfg.Provider would not describe this agent's actual resolution.
+	if agentCfg.StartCommand == "" {
+		name := agentCfg.Provider
+		if name == "" {
+			name = cfg.Workspace.Provider
+		}
+		if name != "" {
+			if resolved, ok := config.ResolvedProviderCached(cfg, name); ok {
+				return config.ResolveSessionCreateTransport(agentCfg.Session, &resolved)
+			}
+		}
 	}
 	resolved, err := config.ResolveProvider(
 		&agentCfg,
@@ -310,14 +329,6 @@ func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionT
 	return names
 }
 
-func needsACPProviderWrapper(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) bool {
-	return requiresACPProviderWrapper(snapshot, cityName, cfg) || (cfg != nil && hasACPProviderTargets(cfg))
-}
-
-func requiresACPProviderWrapper(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) bool {
-	return len(configuredACPRouteNames(snapshot, cityName, cfg)) > 0
-}
-
 func hasACPProviderTargets(cfg *config.City) bool {
 	if cfg == nil {
 		return false
@@ -347,6 +358,9 @@ func hasACPProviderTargets(cfg *config.City) bool {
 func resolveProviderForACPTransport(cfg *config.City, providerName string) *config.ResolvedProvider {
 	if cfg == nil || strings.TrimSpace(providerName) == "" {
 		return nil
+	}
+	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+		return &resolved
 	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: providerName},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -117,6 +118,9 @@ type tailState struct {
 	offset     int64
 	activeInfo os.FileInfo
 	marks      map[string]runproj.LaneProgressMark
+	// loggedDecodeMisses is the projector's cumulative bead.* decode-miss count
+	// already surfaced to the log, so logDecodeMisses only warns on the delta.
+	loggedDecodeMisses int
 }
 
 // captureTailCursor snapshots the active log's byte size and identity from a
@@ -154,6 +158,7 @@ func (t *cityRunTailer) loop(ctx context.Context) {
 	st := captureTailCursor(t.eventsPath)
 	loadErr := proj.ColdLoad(t.eventsPath)
 	st.marks = t.build(proj, nil, loadErr)
+	t.logDecodeMisses(proj, st)
 	close(t.readyCh)
 
 	poll := time.NewTicker(runTailPollInterval)
@@ -164,8 +169,26 @@ func (t *cityRunTailer) loop(ctx context.Context) {
 			return
 		case <-poll.C:
 			t.foldNext(proj, st)
+			t.logDecodeMisses(proj, st)
 		}
 	}
+}
+
+// logDecodeMisses surfaces new bead.* payload decode misses since the last poll.
+// A silent projection starve — a payload-shape or correlation-spine drift that
+// stops bead.* events from decoding — is the exact failure the run-view RCA
+// flagged: the view goes blank while every request still returns 200. Logging
+// the miss delta makes that loud. Called only from the single loop goroutine, so
+// st.loggedDecodeMisses needs no lock.
+func (t *cityRunTailer) logDecodeMisses(proj *runproj.Projector, st *tailState) {
+	total := proj.DecodeMisses()
+	if total <= st.loggedDecodeMisses {
+		return
+	}
+	delta := total - st.loggedDecodeMisses
+	st.loggedDecodeMisses = total
+	log.Printf("run-tailer: city %q dropped %d bead.* event(s) on decode miss (%d total) — run view may be stale",
+		t.name, delta, total)
 }
 
 // readRotationCatchUp is the rotation catch-up read, indirected through a

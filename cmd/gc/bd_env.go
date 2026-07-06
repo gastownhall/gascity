@@ -1246,7 +1246,18 @@ func cityPostgresProjectionErrorCanBeBypassed(cityPath string, err error) bool {
 }
 
 func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
-	env, cityErr := bdRuntimeEnvWithError(cityPath)
+	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, true)
+}
+
+// bdRuntimeEnvForRigWithErrorNoRecovery is bdRuntimeEnvForRigWithError
+// without the managed-dolt recovery side effects; see
+// bdRuntimeEnvWithErrorNoRecovery for why (gascity ga-cdmx6x).
+func bdRuntimeEnvForRigWithErrorNoRecovery(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
+	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, false)
+}
+
+func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	env, cityErr := bdRuntimeEnvWithErrorRecovery(cityPath, allowRecovery)
 	rigPath = filepath.Clean(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
@@ -1270,7 +1281,7 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 		mirrorBeadsDoltEnv(env)
 		return env, nil
 	}
-	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, true); err != nil {
+	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
 		clearProjectedPostgresEnv(env)
 		mirrorBeadsDoltEnv(env)
@@ -1301,6 +1312,23 @@ func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot stri
 }
 
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecovery(cityPath, true)
+}
+
+// bdRuntimeEnvWithErrorNoRecovery is bdRuntimeEnvWithError without the
+// managed-dolt recovery/health-check/autostart side effects: it reads
+// existing published or configured connection state only, and fails fast
+// (env still gets the non-Dolt opt-out vars set) when no managed server is
+// currently reachable. Recovering a managed dolt server is legitimate
+// work, but doing it from every concurrent, short-budget scoped-store
+// construction would multiply exactly the load a read-storm mitigation
+// exists to bound (gascity ga-cdmx6x) — those callers use this instead of
+// bdRuntimeEnvWithError.
+func bdRuntimeEnvWithErrorNoRecovery(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecovery(cityPath, false)
+}
+
+func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
@@ -1353,7 +1381,7 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	} else if usedPostgres {
 		return env, nil
 	}
-	if err := applyResolvedCityDoltEnv(env, cityPath, true); err != nil {
+	if err := applyResolvedCityDoltEnv(env, cityPath, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {

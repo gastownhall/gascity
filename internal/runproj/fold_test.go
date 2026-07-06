@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// beadEvent builds a bead.* event with the REAL producer payload shape — the
+// raw bead snapshot json.Marshal(b) emits (never the wrapped {"bead":...} form,
+// which no producer writes). See CachingStore.notifyChange.
 func beadEvent(seq uint64, typ, id, status string) events.Event {
-	payload, _ := json.Marshal(struct {
-		Bead beads.Bead `json:"bead"`
-	}{beads.Bead{ID: id, Status: status, Type: "task"}})
+	payload, _ := json.Marshal(beads.Bead{ID: id, Status: status, Type: "task"})
 	return events.Event{Seq: seq, Type: typ, Payload: payload}
 }
 
@@ -45,7 +47,7 @@ func TestFoldKeepsLatestSnapshotPerID(t *testing.T) {
 func TestApplyAdvancesCursorAndMutatesInPlace(t *testing.T) {
 	state := Fold([]events.Event{beadEvent(10, events.BeadCreated, "a", "open")})
 
-	last := Apply(state, []events.Event{
+	last, _ := Apply(state, []events.Event{
 		beadEvent(11, events.BeadUpdated, "a", "closed"),
 		beadEvent(12, events.BeadCreated, "d", "open"),
 	})
@@ -65,7 +67,7 @@ func TestApplyCursorTracksMaxSeqEvenForIgnoredEvents(t *testing.T) {
 	// A non-bead event still advances the cursor so the tailer does not re-read
 	// it; only the fold map is unaffected.
 	state := map[string]beads.Bead{}
-	last := Apply(state, []events.Event{{Seq: 99, Type: events.SessionStopped, Subject: "w"}})
+	last, _ := Apply(state, []events.Event{{Seq: 99, Type: events.SessionStopped, Subject: "w"}})
 	if last != 99 {
 		t.Errorf("lastSeq = %d, want 99 (cursor advances past ignored events)", last)
 	}
@@ -74,11 +76,78 @@ func TestApplyCursorTracksMaxSeqEvenForIgnoredEvents(t *testing.T) {
 	}
 }
 
-func TestDecodeBeadAcceptsLegacyRawShape(t *testing.T) {
-	// Older logs wrote the raw bead snapshot with no {"bead": ...} envelope.
-	raw, _ := json.Marshal(beads.Bead{ID: "legacy", Status: "open", Type: "task"})
-	b, ok := decodeBead(raw)
-	if !ok || b.ID != "legacy" {
-		t.Fatalf("legacy raw-shape decode failed: ok=%v bead=%+v", ok, b)
+func TestDecodeBeadAcceptsCanonicalRawShape(t *testing.T) {
+	// The canonical producer shape is the raw bead snapshot (json.Marshal(b),
+	// exactly what CachingStore.notifyChange emits) — NOT the wrapped
+	// {"bead": ...} form. The fold must decode it, and an envelope carrying no
+	// correlation ids leaves the bead's own metadata untouched.
+	raw, _ := json.Marshal(beads.Bead{ID: "canon", Status: "open", Type: "task"})
+	b, ok := decodeBead(events.Event{Payload: raw})
+	if !ok || b.ID != "canon" {
+		t.Fatalf("canonical raw-shape decode failed: ok=%v bead=%+v", ok, b)
+	}
+}
+
+// TestApplyCountsDecodeMisses proves a bead.* event whose payload does not decode
+// to a bead with an id is counted as a decode miss (observable), not swallowed
+// silently. Non-bead events do not count.
+func TestApplyCountsDecodeMisses(t *testing.T) {
+	evts := []events.Event{
+		beadEvent(1, events.BeadCreated, "a", "open"),
+		{Seq: 2, Type: events.BeadUpdated, Payload: json.RawMessage(`{"status":"open"}`)}, // no id → miss
+		{Seq: 3, Type: events.BeadClosed, Payload: json.RawMessage(`garbage`)},            // undecodable → miss
+		{Seq: 4, Type: events.SessionWoke, Subject: "w"},                                  // not a bead event → not a miss
+	}
+	state := map[string]beads.Bead{}
+	last, stats := Apply(state, evts)
+	if last != 4 {
+		t.Errorf("lastSeq = %d, want 4", last)
+	}
+	if stats.DecodeMisses != 2 {
+		t.Errorf("DecodeMisses = %d, want 2 (id-less + garbage bead.* events)", stats.DecodeMisses)
+	}
+	if len(state) != 1 {
+		t.Errorf("fold size = %d, want 1 (only 'a' decoded)", len(state))
+	}
+}
+
+// TestApplyBackfillsEnvelopeCorrelationIDs proves the correlation-spine
+// guardrail: when a bead.* envelope carries step_id/session_id but the decoded
+// bead's metadata lacks them, Apply backfills them onto the bead metadata so
+// run/step grouping survives the spine work removing the metadata duplication.
+func TestApplyBackfillsEnvelopeCorrelationIDs(t *testing.T) {
+	// Bead payload deliberately omits gc.step_id / gc.session_id from metadata.
+	raw, _ := json.Marshal(beads.Bead{ID: "b1", Status: "open", Type: "task"})
+	state := map[string]beads.Bead{}
+	Apply(state, []events.Event{{
+		Seq:       1,
+		Type:      events.BeadCreated,
+		Payload:   raw,
+		StepID:    "gcg-step-9",
+		SessionID: "sess-9",
+	}})
+	got := state["b1"]
+	if got.Metadata[beadmeta.StepIDMetadataKey] != "gcg-step-9" {
+		t.Errorf("gc.step_id = %q, want gcg-step-9 (backfilled from envelope)", got.Metadata[beadmeta.StepIDMetadataKey])
+	}
+	if got.Metadata[beadmeta.SessionIDMetadataKey] != "sess-9" {
+		t.Errorf("gc.session_id = %q, want sess-9 (backfilled from envelope)", got.Metadata[beadmeta.SessionIDMetadataKey])
+	}
+}
+
+// TestApplyEnvelopeBackfillDoesNotClobberPayloadMetadata proves the backfill is
+// a fill-if-absent: a value already carried in the bead payload metadata wins
+// over the envelope copy (the payload is the authoritative snapshot).
+func TestApplyEnvelopeBackfillDoesNotClobberPayloadMetadata(t *testing.T) {
+	raw, _ := json.Marshal(beads.Bead{
+		ID: "b2", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.StepIDMetadataKey: "payload-step"},
+	})
+	state := map[string]beads.Bead{}
+	Apply(state, []events.Event{{
+		Seq: 1, Type: events.BeadCreated, Payload: raw, StepID: "envelope-step",
+	}})
+	if got := state["b2"].Metadata[beadmeta.StepIDMetadataKey]; got != "payload-step" {
+		t.Errorf("gc.step_id = %q, want payload-step (payload metadata wins over envelope)", got)
 	}
 }

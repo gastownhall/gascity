@@ -347,6 +347,17 @@ func (s *BdStore) IDPrefix() string {
 	return s.idPrefix
 }
 
+// Dir returns the root directory this store was constructed with (where
+// .beads/ lives). Callers that need to build an equivalent throwaway store
+// bound to a different context (e.g. a per-request scoped clone) use this
+// to target the same backend without a second, parallel way to track it.
+func (s *BdStore) Dir() string {
+	if s == nil {
+		return ""
+	}
+	return s.dir
+}
+
 // ListSkipLabelsEnabled reports whether this store may ask bd list to skip
 // label hydration.
 func (s *BdStore) ListSkipLabelsEnabled() bool {

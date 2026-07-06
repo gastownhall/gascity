@@ -24,7 +24,7 @@ func writeFile(t *testing.T, path, content string) {
 func stubDeps(t *testing.T, captured *map[string]config.Import) Deps {
 	t.Helper()
 	return Deps{
-		ResolveVersion: func(_, _ string) (packman.ResolvedVersion, error) {
+		ResolveVersion: func(_, _, _ string) (packman.ResolvedVersion, error) {
 			return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 		},
 		DefaultConstraint: func(_ string) (string, error) { return "^1.4", nil },
@@ -397,7 +397,7 @@ func TestAddImportDefaultExportsUsePackmanSeams(t *testing.T) {
 		syncLock = prevSync
 		writeLockfile = prevWrite
 	})
-	resolveVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -430,11 +430,11 @@ func TestAddImportWithSourcePolicyFencesDirectSource(t *testing.T) {
 	sentinel := errors.New("blocked by source policy")
 	deps := Deps{
 		SourcePolicy: func(string) error { return sentinel },
-		ResolveHeadCommit: func(string) (string, error) {
+		ResolveHeadCommit: func(string, string) (string, error) {
 			t.Fatal("HEAD probe must not run when the source policy blocks")
 			return "", nil
 		},
-		ResolveVersion: func(string, string) (packman.ResolvedVersion, error) {
+		ResolveVersion: func(string, string, string) (packman.ResolvedVersion, error) {
 			t.Fatal("version resolve must not run when the source policy blocks")
 			return packman.ResolvedVersion{}, nil
 		},

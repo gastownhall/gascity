@@ -504,7 +504,14 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
-		_ = p.tm.WaitForIdle(context.Background(), name, idleTimeout)
+		if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
+			// Not idle within the window. A mid-session Codex/GPT model-switch
+			// modal ("approaching rate limits — switch model?") blocks input and
+			// would otherwise hang the session; dismiss it (keep current model,
+			// no downgrade) so the nudge can land. No-op if the modal is absent,
+			// so this never disturbs a genuinely busy pane.
+			p.tm.DismissModelSwitchModalIfPresent(name)
+		}
 	}
 	return p.NudgeNow(name, content)
 }

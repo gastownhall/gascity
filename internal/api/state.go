@@ -107,6 +107,21 @@ type State interface {
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
 
+	// ScopedStoreLike returns a throwaway, ctx-bound clone of existing when
+	// existing is (or wraps) a bd-CLI-shell-backed store: cancellation kills
+	// the backend bd subprocess instead of abandoning it to run past ctx's
+	// deadline, unlike existing's own long-lived runner (fixed to
+	// context.Background() at construction). Returns (nil, nil) when
+	// existing is not bd-CLI backed (e.g. a native, file, or in-memory
+	// store) — those have no subprocess to leak, so callers should keep
+	// reading through existing directly in that case.
+	//
+	// Read paths with their own short request budget (e.g. GET /status) use
+	// this instead of reading through the shared store so a slow bd command
+	// cannot pin a Dolt connection past the caller's own deadline
+	// (gascity ga-cdmx6x).
+	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
+
 	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
 	// (gc:nudge). At the default backend this is the same store as
 	// CityBeadStore; when [beads.classes.nudges] is relocated it is the

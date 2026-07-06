@@ -18,13 +18,13 @@ func TestCachedStoreHealthServesMemoized(t *testing.T) {
 	var calls int
 	want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
 	s := &Server{}
-	s.storeHealthComputer = func() *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
 		calls++
 		return want
 	}
 
 	now := time.Unix(1_000_000, 0)
-	got := s.cachedStoreHealth(now)
+	got := s.cachedStoreHealth(context.Background(), now)
 	if got != want {
 		t.Fatalf("cachedStoreHealth = %+v, want %+v", got, want)
 	}
@@ -33,7 +33,7 @@ func TestCachedStoreHealthServesMemoized(t *testing.T) {
 	}
 
 	// Within TTL: no recomputation.
-	got2 := s.cachedStoreHealth(now.Add(storeHealthCacheTTL - time.Second))
+	got2 := s.cachedStoreHealth(context.Background(), now.Add(storeHealthCacheTTL-time.Second))
 	if got2 != want {
 		t.Fatalf("second cachedStoreHealth = %+v, want %+v", got2, want)
 	}
@@ -45,15 +45,15 @@ func TestCachedStoreHealthServesMemoized(t *testing.T) {
 func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
 	var calls int
 	s := &Server{}
-	s.storeHealthComputer = func() *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
 		calls++
 		return &StatusStoreHealth{SizeBytes: int64(calls)}
 	}
 
 	now := time.Unix(1_000_000, 0)
-	_ = s.cachedStoreHealth(now)
+	_ = s.cachedStoreHealth(context.Background(), now)
 	later := now.Add(storeHealthCacheTTL + time.Second)
-	got := s.cachedStoreHealth(later)
+	got := s.cachedStoreHealth(context.Background(), later)
 	if calls != 2 {
 		t.Fatalf("computer calls = %d, want 2", calls)
 	}
@@ -65,7 +65,7 @@ func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
 func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
 	s := &Server{}
 	canLockDuringCompute := make(chan bool, 1)
-	s.storeHealthComputer = func() *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
 		locked := make(chan struct{})
 		go func() {
 			s.storeHealthMu.Lock()
@@ -81,7 +81,7 @@ func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
 		return &StatusStoreHealth{SizeBytes: 1}
 	}
 
-	_ = s.cachedStoreHealth(time.Unix(1_000_000, 0))
+	_ = s.cachedStoreHealth(context.Background(), time.Unix(1_000_000, 0))
 	if !<-canLockDuringCompute {
 		t.Fatal("cachedStoreHealth held storeHealthMu while running the refresh computer")
 	}
@@ -137,7 +137,7 @@ func TestComputeStoreHealthServerIntegration(t *testing.T) {
 		cityBeadStore: store,
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth()
+	got := s.computeStoreHealth(context.Background())
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
@@ -168,7 +168,7 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 		cityBeadStore: beads.NewMemStore(),
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth()
+	got := s.computeStoreHealth(context.Background())
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
@@ -180,13 +180,13 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 	state := &fakeState{cityPath: ""}
 	s := &Server{state: state}
-	if got := s.computeStoreHealth(); got != nil {
+	if got := s.computeStoreHealth(context.Background()); got != nil {
 		t.Fatalf("computeStoreHealth = %+v, want nil for empty city path", got)
 	}
 }
 
 func TestCountBeadStoreRowsNil(t *testing.T) {
-	if got := countBeadStoreRows(nil); got != 0 {
+	if got := countBeadStoreRows(context.Background(), newFakeState(t), nil); got != 0 {
 		t.Fatalf("countBeadStoreRows(nil) = %d, want 0", got)
 	}
 }
@@ -204,7 +204,7 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := countBeadStoreRows(store); got != 2 {
+	if got := countBeadStoreRows(context.Background(), newFakeState(t), store); got != 2 {
 		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
 	}
 }

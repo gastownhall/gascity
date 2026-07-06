@@ -191,6 +191,8 @@ jobs:
         run: make check-native-dependency-surface
       - name: Event-export isolation guard
         run: make check-eventexport-isolation
+      - name: Open-core boundary guard
+        run: make check-core-boundary
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
       - name: Get golangci-lint version for cache key
