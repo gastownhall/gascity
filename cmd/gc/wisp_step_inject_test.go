@@ -109,6 +109,141 @@ func TestResolveActiveWispStep_MultipleAssignees(t *testing.T) {
 	}
 }
 
+// mustCreate creates a bead without changing status (leaves it "open").
+func mustCreate(t *testing.T, store *beads.MemStore, b beads.Bead) beads.Bead {
+	t.Helper()
+	created, err := store.Create(b)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return created
+}
+
+// TestResolveActiveWispStep_MoleculeInProgressStep verifies that when the agent
+// has an in-progress molecule bead with an in-progress step child, the step bead
+// is returned (not the molecule root or the work bead).
+func TestResolveActiveWispStep_MoleculeInProgressStep(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Work bead — should NOT be returned even though it has a description.
+	mustCreateInProgress(t, store, beads.Bead{
+		Title:       "Work bead",
+		Description: "Do the work",
+		Type:        "task",
+		Assignee:    "alice",
+	})
+
+	// Molecule root assigned to the agent.
+	mol := mustCreateInProgress(t, store, beads.Bead{
+		Title:    "Formula: mol-polecat-work",
+		Type:     "molecule",
+		Assignee: "alice",
+	})
+
+	// In-progress step child of the molecule.
+	step := mustCreateInProgress(t, store, beads.Bead{
+		Title:       "Step 1: implement",
+		Description: "Write the implementation",
+		Type:        "step",
+		Assignee:    "alice",
+		ParentID:    mol.ID,
+	})
+
+	b, err := resolveActiveWispStep(store, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b == nil {
+		t.Fatal("expected step bead, got nil")
+	}
+	if b.ID != step.ID {
+		t.Errorf("got bead ID %q (type %q), want step bead %q", b.ID, b.Type, step.ID)
+	}
+}
+
+// TestResolveActiveWispStep_MoleculeEntryStepFallback verifies that when the
+// molecule has no in-progress step, the first open step child is returned
+// (entry step / deterministic formula start position).
+func TestResolveActiveWispStep_MoleculeEntryStepFallback(t *testing.T) {
+	store := beads.NewMemStore()
+
+	mol := mustCreateInProgress(t, store, beads.Bead{
+		Title:    "Formula: mol-witness-patrol",
+		Type:     "molecule",
+		Assignee: "alice",
+	})
+
+	// Open step child (no one has claimed it yet).
+	entry := mustCreate(t, store, beads.Bead{
+		Title:       "Step 1: patrol",
+		Description: "Run the patrol check",
+		Type:        "step",
+		Assignee:    "alice",
+		ParentID:    mol.ID,
+	})
+
+	b, err := resolveActiveWispStep(store, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b == nil {
+		t.Fatal("expected entry step bead, got nil")
+	}
+	if b.ID != entry.ID {
+		t.Errorf("got bead ID %q (type %q), want entry step %q", b.ID, b.Type, entry.ID)
+	}
+}
+
+// TestResolveActiveWispStep_MoleculeNoSteps verifies that when the molecule has
+// no step children at all, nil is returned (not an error, not the molecule root).
+func TestResolveActiveWispStep_MoleculeNoSteps(t *testing.T) {
+	store := beads.NewMemStore()
+	mustCreateInProgress(t, store, beads.Bead{
+		Title:    "Empty molecule",
+		Type:     "molecule",
+		Assignee: "alice",
+	})
+
+	b, err := resolveActiveWispStep(store, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b != nil {
+		t.Fatalf("expected nil (no steps in molecule), got %+v", b)
+	}
+}
+
+// TestResolveActiveWispStep_WispTypeMolecule verifies that type=wisp beads are
+// also recognised as molecule roots during resolution.
+func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wisp := mustCreateInProgress(t, store, beads.Bead{
+		Title:    "Standalone wisp",
+		Type:     "wisp",
+		Assignee: "alice",
+	})
+
+	step := mustCreateInProgress(t, store, beads.Bead{
+		Title:       "Wisp step",
+		Description: "Do the wisp work",
+		Type:        "step",
+		Assignee:    "alice",
+		ParentID:    wisp.ID,
+	})
+
+	b, err := resolveActiveWispStep(store, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b == nil {
+		t.Fatal("expected step bead, got nil")
+	}
+	if b.ID != step.ID {
+		t.Errorf("got bead ID %q, want wisp step %q", b.ID, step.ID)
+	}
+}
+
 func TestFormatWispStepReminder_ContainsKeyContent(t *testing.T) {
 	b := &beads.Bead{
 		ID:          "gcy-abc",

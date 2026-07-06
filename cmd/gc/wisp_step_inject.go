@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -77,13 +78,142 @@ func wispStepAssignees() []string {
 	return out
 }
 
-// resolveActiveWispStep queries store for in-progress beads assigned to any
-// of the given identities and returns the first one that has a non-empty
-// Description. Returns nil, nil when no matching bead is found.
+// resolveActiveWispStep returns the agent's current formula step bead.
+//
+// Resolution order:
+//  1. Find the agent's in-progress molecule bead (type=molecule or type=wisp).
+//  2. Find that molecule's in-progress type=step child — the current step.
+//  3. If no in-progress step child exists, fall back to the entry step: the
+//     first open type=step child (deterministic formula start position).
+//  4. If no molecule bead is assigned to the agent, fall back to any
+//     in-progress bead with a non-empty Description (legacy behavior for agents
+//     not running a formula).
+//
+// Returns nil, nil when no bead can be resolved. Never returns an error for
+// not-found conditions — callers treat nil as "nothing to inject".
 func resolveActiveWispStep(store beads.Store, assignees []string) (*beads.Bead, error) {
 	if store == nil || len(assignees) == 0 {
 		return nil, nil
 	}
+
+	molecule, err := resolveActiveMolecule(store, assignees)
+	if err != nil {
+		return nil, err
+	}
+	if molecule == nil {
+		// No molecule bead found; fall back to legacy: any in-progress bead with a description.
+		return resolveBeadWithDescription(store, assignees)
+	}
+
+	// Prefer the in-progress step child (the agent is mid-step).
+	step, err := resolveInProgressStepChild(store, molecule.ID)
+	if err != nil {
+		log.Printf("wisp step inject: error resolving in-progress step children for molecule %s: %v", molecule.ID, err)
+		return nil, nil
+	}
+	if step != nil {
+		return step, nil
+	}
+
+	// Fall back to the entry step: first open step child.
+	log.Printf("wisp step inject: no in-progress step for molecule %s; resolving entry step", molecule.ID)
+	return resolveEntryStepChild(store, molecule.ID)
+}
+
+// resolveActiveMolecule returns the agent's in-progress molecule bead.
+// When multiple molecules are found, the most recently updated one is returned
+// and the ambiguity is logged. Returns nil, nil when none is found.
+func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, error) {
+	for _, molType := range []string{"molecule", "wisp"} {
+		results, err := store.List(beads.ListQuery{
+			Status:    "in_progress",
+			Type:      molType,
+			Assignees: assignees,
+			TierMode:  beads.TierBoth,
+			Limit:     5,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)
+		}
+		if len(results) == 0 {
+			continue
+		}
+		if len(results) > 1 {
+			ids := make([]string, len(results))
+			for i, r := range results {
+				ids[i] = r.ID
+			}
+			log.Printf("wisp step inject: %d in-progress %s beads found (%s); using most recent", len(results), molType, strings.Join(ids, ", "))
+		}
+		best := results[0]
+		for _, r := range results[1:] {
+			if r.UpdatedAt.After(best.UpdatedAt) {
+				best = r
+			}
+		}
+		return &best, nil
+	}
+	return nil, nil
+}
+
+// resolveInProgressStepChild returns the in-progress type=step child of moleculeID.
+// When multiple are found, the most recently updated one is returned.
+func resolveInProgressStepChild(store beads.Store, moleculeID string) (*beads.Bead, error) {
+	results, err := store.List(beads.ListQuery{
+		Status:   "in_progress",
+		Type:     "step",
+		ParentID: moleculeID,
+		TierMode: beads.TierBoth,
+		Limit:    5,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	if len(results) > 1 {
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+		log.Printf("wisp step inject: %d in-progress steps for molecule %s (%s); using most recent", len(results), moleculeID, strings.Join(ids, ", "))
+	}
+	best := results[0]
+	for _, r := range results[1:] {
+		if r.UpdatedAt.After(best.UpdatedAt) {
+			best = r
+		}
+	}
+	return &best, nil
+}
+
+// resolveEntryStepChild returns the first open type=step child of moleculeID.
+// This is the deterministic fallback when no step is in-progress: the formula's
+// entry position — where execution should (re)start.
+func resolveEntryStepChild(store beads.Store, moleculeID string) (*beads.Bead, error) {
+	results, err := store.List(beads.ListQuery{
+		Status:   "open",
+		Type:     "step",
+		ParentID: moleculeID,
+		TierMode: beads.TierBoth,
+		Limit:    1,
+		Sort:     beads.SortCreatedAsc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolving entry step for molecule %s: %w", moleculeID, err)
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	b := results[0]
+	return &b, nil
+}
+
+// resolveBeadWithDescription returns the first in-progress bead assigned to any
+// of the given identities that has a non-empty Description. This is the legacy
+// resolution path used when no molecule bead is assigned to the agent.
+func resolveBeadWithDescription(store beads.Store, assignees []string) (*beads.Bead, error) {
 	results, err := store.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
