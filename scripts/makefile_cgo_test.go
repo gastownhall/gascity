@@ -308,6 +308,13 @@ print-cgo-flags:
 		t.Fatalf("write test Makefile: %v", err)
 	}
 
+	// Write a fake gc stub so the Nix/Flox ICU detection block (which runs
+	// `ldd $(command -v gc)`) finds a shell script rather than the real binary.
+	// ldd on a shell script emits nothing useful, so _NIX_ICU_RT resolves to ""
+	// and the Nix block stays inert — letting the SYS_USR_CGO_FALLBACK logic
+	// under test run unobstructed.
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\n")
+
 	cmdArgs := append([]string{"--no-print-directory", "-f", testMakefile, "print-cgo-flags"}, args...)
 	cmd := makeCommand(cmdArgs...)
 	cmd.Dir = repoRoot
