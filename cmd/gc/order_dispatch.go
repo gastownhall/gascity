@@ -397,6 +397,17 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		return nil
 	}
 
+	return newMemoryOrderDispatcher(auto, cityPath, cfg, rec, stderr)
+}
+
+// newMemoryOrderDispatcher builds a memoryOrderDispatcher over a resolved order
+// set. aa is the tick loop's auto-dispatchable set; it may be nil for callers
+// that only fire pre-resolved orders through the orderdispatch.Dispatcher seam
+// (the webhook receiver), where the tick dispatch() path is never invoked.
+func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) *memoryOrderDispatcher {
+	if cfg == nil {
+		cfg = &config.City{}
+	}
 	// Extract events.Provider from recorder if available.
 	// FileRecorder implements Provider; Discard does not.
 	var ep events.Provider
@@ -406,7 +417,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
-		aa: auto,
+		aa: aa,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			return openStoreAtForCity(target.ScopeRoot, cityPath)
 		},

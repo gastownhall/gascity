@@ -4868,6 +4868,40 @@
         ],
         "type": "object"
       },
+      "OrderRunInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "vars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Declared [order.params] as key/value dispatch args (parity with 'gc order run --var'). Namespaced into the exec env under GC_WEBHOOK_ARG_ before overlay (R4).",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "OrderRunOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "scoped_name": {
+            "description": "Rig-qualified name of the fired order.",
+            "type": "string"
+          },
+          "status": {
+            "description": "\"dispatched\" when the order fired.",
+            "type": "string"
+          },
+          "tracking_id": {
+            "description": "Tracking bead id for the dispatch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "OrdersFeedBody": {
         "additionalProperties": false,
         "properties": {
@@ -24246,6 +24280,89 @@
           }
         },
         "summary": "Post v0 city by city name order by name enable"
+      }
+    },
+    "/v0/city/{cityName}/order/{name}/run": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-order-by-name-run",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Order name or scoped name of a trigger=\"webhook\" order.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Order name or scoped name of a trigger=\"webhook\" order.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderRunInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderRunOutputBody"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name order by name run"
       }
     },
     "/v0/city/{cityName}/orders": {

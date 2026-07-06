@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -238,6 +239,23 @@ type ProviderUpdate struct {
 // /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
 type RawConfigProvider interface {
 	RawConfig() *config.City
+}
+
+// WebhookDispatchProvider is optionally implemented by State to expose the live
+// order dispatcher the supervisor webhook receiver (E3) fires verified+matched
+// deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives
+// in cmd/gc (memoryOrderDispatcher.dispatchOne), which internal/api cannot import,
+// so the city runtime implements this accessor over the same dispatchOne core the
+// tick loop uses. A State that does not implement it disables webhook dispatch —
+// the receiver returns 503 rather than firing a stub, so the perimeter/verify/
+// match guards still run but no order is launched. Modeled on the optional
+// RawConfigProvider/AgentVisibilityWaiter capability pattern rather than a core
+// State method so the two production State implementers and the test fakes are not
+// all forced to grow a dispatcher they may not have.
+type WebhookDispatchProvider interface {
+	// WebhookDispatcher returns the order dispatcher, or nil when webhook dispatch
+	// is unavailable for this city.
+	WebhookDispatcher() orderdispatch.Dispatcher
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()

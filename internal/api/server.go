@@ -99,6 +99,15 @@ type Server struct {
 	// SlingRunnerFunc can be overridden in tests. When nil, uses a real
 	// shell runner. Set this to inject a fake runner for unit tests.
 	SlingRunnerFunc sling.SlingRunner
+
+	// webhookEvents is the E8 slot for webhook.received / webhook.rejected
+	// event emission. Nil (the default) makes the receiver's hook-point calls
+	// no-ops so /hook/ runs fully without E8 wired.
+	webhookEvents WebhookEventSink
+
+	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
+	// defaultMaxWebhookBodyBytes.
+	webhookMaxBody int64
 }
 
 type lookPathEntry struct {
@@ -179,6 +188,11 @@ func newServer(state State, readOnly bool) *Server {
 		idem:     newIdempotencyCache(30 * time.Minute),
 	}
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
+	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
+	// /svc/* it is a raw-body pass-through (HMAC/ed25519 sign the exact bytes),
+	// so it lives on the per-city mux outside the typed Huma control plane; its
+	// gates are the R2 perimeter + E4 signature verification, not Huma middleware.
+	mux.HandleFunc("/hook/", s.handleHookProxy)
 	return s
 }
 

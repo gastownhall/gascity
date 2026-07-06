@@ -124,6 +124,30 @@ type WebhookPolicyConfig struct {
 	// webhook to keep publication.visibility="public". Default-closed: a
 	// pack/fragment public webhook with no matching grant is capped to tenant.
 	AllowPublic []WebhookAllowPublic `toml:"allow_public,omitempty"`
+	// JWTPolicies pins the operator-owned trust anchor for each jwt-jwks webhook,
+	// keyed by webhook name. Per security review R1, a jwt-jwks webhook's issuer,
+	// audience, and JWKS URL are operator-owned and must come from here (the root
+	// city.toml [webhooks] block), never from a pack-authored [webhook.verify]
+	// table — otherwise a pack could point the trust root at an attacker-controlled
+	// issuer/JWKS. The receiver (E3) reads this, not WebhookVerify.Issuer/etc.,
+	// when constructing the jwt-jwks verifier.
+	JWTPolicies []WebhookJWTPolicy `toml:"jwt_policy,omitempty"`
+}
+
+// WebhookJWTPolicy is one operator-owned jwt-jwks trust anchor. It mirrors
+// webhookverify.JWTVerifierPolicy but lives in config so the operator declares
+// it in city.toml; the receiver copies it into the verifier options at request
+// time. Authoring it in the root [webhooks] block (never in a pack) is what makes
+// the R1 boundary enforceable: a pack cannot supply these fields.
+type WebhookJWTPolicy struct {
+	// Name is the webhook this policy applies to (matched against Webhook.Name).
+	Name string `toml:"name"`
+	// Issuer is the required "iss" claim, pinned exactly.
+	Issuer string `toml:"issuer"`
+	// Audience is the required "aud" claim.
+	Audience string `toml:"audience"`
+	// JWKSURL is the https endpoint publishing the signing keys.
+	JWKSURL string `toml:"jwks_url"`
 }
 
 // WebhookAllowPublic is one operator-authored public-exposure grant.
@@ -142,6 +166,20 @@ type WebhookAllowPublic struct {
 	// to tenant until the operator re-consents. E2 matches on {name, source}
 	// only; the digest field is reserved for that follow-up.
 	Digest string `toml:"digest,omitempty"`
+}
+
+// OperatorJWTPolicy returns the operator-owned jwt-jwks trust anchor declared for
+// the named webhook in the root city.toml [webhooks].jwt_policy list, or ok=false
+// when none is declared. It is the R1 seam: a jwt-jwks webhook's trust root comes
+// only from here, never from a pack-authored [webhook.verify].
+func (c WebhookPolicyConfig) OperatorJWTPolicy(webhookName string) (WebhookJWTPolicy, bool) {
+	name := strings.TrimSpace(webhookName)
+	for _, p := range c.JWTPolicies {
+		if strings.EqualFold(strings.TrimSpace(p.Name), name) {
+			return p, true
+		}
+	}
+	return WebhookJWTPolicy{}, false
 }
 
 // ScopeOrDefault returns the normalized webhook scope.
