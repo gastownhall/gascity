@@ -16,10 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 )
 
-// labelOrderTracking is applied to order bookkeeping beads by the dispatcher.
-// Event orders must not self-fire on lifecycle events emitted by these beads.
-const labelOrderTracking = "order-tracking"
-
 // TriggerResult holds the outcome of a trigger check.
 type TriggerResult struct {
 	// Due is true if the trigger condition is satisfied and the order should run.
@@ -260,6 +256,8 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	}
 	var count int
 	for _, e := range matched {
+		// Exclude the dispatcher's own order-tracking bookkeeping beads so an event
+		// order never self-fires on lifecycle events emitted by those beads (#3720).
 		if !payloadHasLabel(e.Payload, labelOrderTracking) {
 			count++
 		}
