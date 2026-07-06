@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,107 @@ type partialListStore struct {
 	beads.Store
 	rows []beads.Bead
 	err  error
+}
+
+type largeOrderHistoryStore struct {
+	beads.Store
+
+	mu         sync.Mutex
+	history    map[string][]time.Time
+	active     int
+	maxActive  int
+	exactReads int
+}
+
+func (s *largeOrderHistoryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !strings.HasPrefix(query.Label, "order-run:") || !query.IncludeClosed || query.Limit != 1 {
+		return s.Store.List(query)
+	}
+	s.mu.Lock()
+	s.active++
+	s.exactReads++
+	if s.active > s.maxActive {
+		s.maxActive = s.active
+	}
+	s.mu.Unlock()
+	// A serial 25-order check would take at least 6.25 seconds and violate the
+	// regression budget. The bounded loader keeps the same fixture below 5s.
+	time.Sleep(250 * time.Millisecond)
+	s.mu.Lock()
+	s.active--
+	history := s.history[query.Label]
+	s.mu.Unlock()
+	if len(history) == 0 {
+		return nil, nil
+	}
+	return []beads.Bead{{
+		ID:        query.Label,
+		CreatedAt: history[len(history)-1],
+		Labels:    []string{query.Label},
+	}}, nil
+}
+
+func TestLoadOrderCheckReadModelBoundsLargeCityAndRigHistory(t *testing.T) {
+	const (
+		orderCount      = 25
+		historyPerOrder = 5000
+	)
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	cityHistory := make(map[string][]time.Time, orderCount)
+	rigHistory := make(map[string][]time.Time, orderCount)
+	aa := make([]orders.Order, orderCount)
+	for i := range aa {
+		name := fmt.Sprintf("hot-%02d", i)
+		aa[i] = orders.Order{Name: name, Trigger: "cooldown", Interval: "30s"}
+		label := "order-run:" + name
+		cityHistory[label] = make([]time.Time, historyPerOrder)
+		for j := range cityHistory[label] {
+			cityHistory[label][j] = now.Add(-time.Duration(historyPerOrder-j) * time.Minute)
+		}
+		if i%2 == 1 {
+			aa[i].Rig = "repo"
+			rigHistory["order-run:"+aa[i].ScopedName()] = append([]time.Time(nil), cityHistory[label]...)
+			delete(cityHistory, label)
+			cityHistory["order-run:"+aa[i].ScopedName()] = []time.Time{now.Add(-time.Second)}
+		}
+	}
+	cityStore := &largeOrderHistoryStore{Store: beads.NewMemStore(), history: cityHistory}
+	rigStore := &largeOrderHistoryStore{Store: beads.NewMemStore(), history: rigHistory}
+	resolver := func(a orders.Order) ([]beads.OrdersStore, error) {
+		if a.Rig == "" {
+			return []beads.OrdersStore{{Store: cityStore}}, nil
+		}
+		return []beads.OrdersStore{{Store: rigStore}, {Store: cityStore}}, nil
+	}
+
+	started := time.Now()
+	model, err := loadOrderCheckReadModel(aa, resolver)
+	if err != nil {
+		t.Fatalf("loadOrderCheckReadModel: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("loadOrderCheckReadModel took %s, want < 5s", elapsed)
+	}
+	if len(model) != orderCount {
+		t.Fatalf("model length = %d, want %d", len(model), orderCount)
+	}
+	for i, row := range model {
+		if row.lastRun.IsZero() {
+			t.Fatalf("model[%d].lastRun is zero", i)
+		}
+		if i%2 == 1 {
+			want := now.Add(-time.Second)
+			if !row.lastRun.Equal(want) {
+				t.Fatalf("model[%d].lastRun = %s, want newer legacy city fallback %s", i, row.lastRun, want)
+			}
+		}
+	}
+	cityStore.mu.Lock()
+	cityMax := cityStore.maxActive
+	cityStore.mu.Unlock()
+	if cityMax <= 1 {
+		t.Fatalf("city store max concurrent reads = %d, want > 1", cityMax)
+	}
 }
 
 func (s *partialListStore) List(_ beads.ListQuery) ([]beads.Bead, error) {

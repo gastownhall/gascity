@@ -1472,6 +1472,78 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchColdAndWarmCacheBoundLargeTrackingHistory(t *testing.T) {
+	const (
+		orderCount      = 25
+		historyPerOrder = 5000
+	)
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	history := make(map[string][]time.Time, orderCount)
+	aa := make([]orders.Order, orderCount)
+	for i := range aa {
+		name := fmt.Sprintf("hot-%02d", i)
+		aa[i] = orders.Order{Name: name, Trigger: "cooldown", Interval: "1h", Exec: "true"}
+		label := "order-run:" + name
+		history[label] = make([]time.Time, historyPerOrder)
+		for j := range history[label] {
+			history[label][j] = now.Add(-time.Duration(historyPerOrder-j) * time.Second)
+		}
+	}
+	store := &largeOrderHistoryStore{Store: beads.NewMemStore(), history: history}
+	dispatcher := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if dispatcher == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	cityPath := t.TempDir()
+	started := time.Now()
+	dispatcher.dispatch(context.Background(), cityPath, now)
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("cold-cache dispatch took %s, want < 5s", elapsed)
+	}
+	store.mu.Lock()
+	coldMax := store.maxActive
+	coldReads := store.exactReads
+	store.maxActive = 0
+	store.exactReads = 0
+	store.mu.Unlock()
+	if coldMax <= 1 {
+		t.Fatalf("cold-cache max concurrent reads = %d, want > 1", coldMax)
+	}
+	if coldReads != orderCount {
+		t.Fatalf("cold-cache exact reads = %d, want %d", coldReads, orderCount)
+	}
+
+	dispatcher.dispatch(context.Background(), cityPath, now.Add(time.Second))
+	store.mu.Lock()
+	warmReads := store.exactReads
+	store.mu.Unlock()
+	if warmReads != 0 {
+		t.Fatalf("warm-cache exact reads = %d, want 0", warmReads)
+	}
+
+	store.mu.Lock()
+	store.maxActive = 0
+	store.exactReads = 0
+	store.mu.Unlock()
+	dispatcher.dispatch(context.Background(), cityPath, now.Add(2*time.Hour))
+	store.mu.Lock()
+	dueWarmMax := store.maxActive
+	dueWarmReads := store.exactReads
+	store.mu.Unlock()
+	if dueWarmMax <= 1 {
+		t.Fatalf("due warm-cache max concurrent reads = %d, want > 1", dueWarmMax)
+	}
+	if dueWarmReads != orderCount {
+		t.Fatalf("due warm-cache exact reads = %d, want %d", dueWarmReads, orderCount)
+	}
+	drainCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !dispatcher.drain(drainCtx) {
+		t.Fatal("dispatcher did not drain")
+	}
+}
+
 func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	baseStore := &createdAtOverrideStore{Store: beads.NewMemStore()}
 	store := &countingListStore{Store: baseStore}

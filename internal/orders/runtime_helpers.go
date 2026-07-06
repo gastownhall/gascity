@@ -2,12 +2,67 @@ package orders
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 var runtimeHelpersLogf = log.Printf
+
+// LastRunRequest describes one order whose latest persisted run must be read
+// across one or more stores.
+type LastRunRequest struct {
+	Name   string
+	Stores []beads.Store
+}
+
+// LastRunResult is the result corresponding to one LastRunRequest.
+type LastRunResult struct {
+	Name    string
+	LastRun time.Time
+	Err     error
+}
+
+// LoadLastRuns resolves latest-run requests concurrently while bounding the
+// number of requests in flight. Results preserve request order. A non-positive
+// maxConcurrent value uses one worker.
+func LoadLastRuns(requests []LastRunRequest, maxConcurrent int) []LastRunResult {
+	results := make([]LastRunResult, len(requests))
+	if len(requests) == 0 {
+		return results
+	}
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	if maxConcurrent > len(requests) {
+		maxConcurrent = len(requests)
+	}
+
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	workers.Add(maxConcurrent)
+	for range maxConcurrent {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				request := requests[index]
+				lastRun, err := LastRunAcrossStores(request.Stores...)(request.Name)
+				results[index] = LastRunResult{
+					Name:    request.Name,
+					LastRun: lastRun,
+					Err:     err,
+				}
+			}
+		}()
+	}
+	for index := range requests {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+	return results
+}
 
 // LastRunFuncForStore returns the latest order-run bead time for one store.
 func LastRunFuncForStore(store beads.Store) LastRunFunc {
