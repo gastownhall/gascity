@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 var (
@@ -254,6 +256,14 @@ func validateWebhookRule(webhookName string, idx int, rule WebhookRule) error {
 		}
 		if !validWebhookArgKey.MatchString(key) {
 			return fmt.Errorf("%s: args key %q must match [a-zA-Z_][a-zA-Z0-9_]*", ctx, key)
+		}
+		// R4 (security review): a webhook arg is untrusted payload data; it must
+		// never be able to set a controller-owned execution env key. The runtime
+		// namespaces extracted args under GC_WEBHOOK_ARG_ so a collision is
+		// structurally impossible, but rejecting a reserved name here fails the
+		// misconfiguration closed at load time rather than silently dropping it.
+		if orders.IsReservedExecEnvKey(key) {
+			return fmt.Errorf("%s: args key %q is a reserved controller-owned env key and cannot be set from a webhook payload", ctx, key)
 		}
 	}
 	return nil

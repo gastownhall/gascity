@@ -41,6 +41,8 @@ City is the top-level configuration for a Gas City instance.
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
+| `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
+| `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
@@ -851,6 +853,69 @@ UsageConfig holds usage-fact sink settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the usage sink backend:   - "discard" / "fake" → drop all facts   - "exec:&lt;script&gt;" → user-supplied script (JSON fact per line on stdin)   - "" / "local" → durable file-backed JSONL at .gc/usage.jsonl (default) |
+
+## Webhook
+
+Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under /v0/city/{city}/hook/{name}.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the unique webhook identifier and mount segment. |
+| `scope` | string |  |  | Scope selects city- or rig-scoped dispatch semantics, mirroring Order.Scope. Empty defaults to city. Enum: `city`, `rig` |
+| `publication` | ServicePublicationConfig |  |  | Publication declares generic publication intent, reusing the service publication contract. Pack/fragment-contributed public webhooks are capped to tenant unless the city grants them via [webhooks].allow_public. |
+| `verify` | WebhookVerify |  |  | Verify declares the signature verification scheme and its inputs. |
+| `rule` | []WebhookRule |  |  | Rules maps verified provider events to dispatch targets. |
+
+## WebhookAllowPublic
+
+WebhookAllowPublic is one operator-authored public-exposure grant.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the webhook name being granted public exposure. |
+| `source` | string | **yes** |  | Source is the pack/fragment provenance the grant is scoped to. Matched against the webhook's stamped SourceDir. |
+| `digest` | string |  |  | Digest optionally pins the content digest of the granted webhook's security-relevant fields.  TODO(R3): compute and enforce this digest over &#123;visibility, verify scheme/secret_env/secret_key/trust-root, each rule's event/match/order/rig/target&#125; so a content-swap upgrade auto-downgrades to tenant until the operator re-consents. E2 matches on &#123;name, source&#125; only; the digest field is reserved for that follow-up. |
+
+## WebhookPolicyConfig
+
+WebhookPolicyConfig holds city-level webhook governance authored in the root city.toml under [webhooks].
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `allow_public` | []WebhookAllowPublic |  |  | AllowPublic lists &#123;name, source&#125; grants that permit a pack/fragment webhook to keep publication.visibility="public". Default-closed: a pack/fragment public webhook with no matching grant is capped to tenant. |
+
+## WebhookRule
+
+WebhookRule maps one verified provider event to a dispatch target.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `event` | string | **yes** |  | Event is the provider event type this rule matches (e.g. pull_request). |
+| `match` | map[string]string |  |  | Match is an exact-equality dotted-path predicate over the payload. |
+| `order` | string |  |  | Order is the target order name for target="order" rules. |
+| `rig` | string |  |  | Rig optionally scopes the dispatched order to a rig. |
+| `target` | string |  |  | Target selects the dispatch sink: "order" (default) or "conversation". Enum: `order`, `conversation` |
+| `args` | map[string]string |  |  | Args maps declared order params to &#123;&#123;payload.path&#125;&#125; projections. |
+
+## WebhookVerify
+
+WebhookVerify declares how an inbound delivery is authenticated.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scheme` | string |  |  | Scheme selects the built-in verifier (see knownWebhookSchemes). |
+| `secret_env` | string |  |  | SecretEnv names the environment variable holding the HMAC/shared secret. |
+| `secret_key` | string |  |  | SecretKey is an optional stable rotation-slot identifier. Empty defaults to SecretEnv. |
+| `signature_header` | string |  |  | SignatureHeader overrides the request header carrying the signature for generic HMAC schemes (e.g. X-Plane-Signature). |
+| `event_header` | string |  |  | EventHeader names the request header carrying the provider event type. |
+| `dedup_header` | string |  |  | DedupHeader names the request header carrying the delivery id used for at-least-once dedup. |
+| `timestamp_header` | string |  |  | TimestampHeader optionally names a request header carrying a signed timestamp for replay defense. |
+| `replay_window` | string |  |  | ReplayWindow bounds the accepted signed-timestamp skew (Go duration). |
+| `issuer` | string |  |  | Issuer, JWKSURL, and Audience pin the jwt-jwks trust anchor. Per the security review (R1) these are operator-owned and must be declared in city.toml, never in pack TOML. |
+| `jwks_url` | string |  |  |  |
+| `audience` | string |  |  |  |
+| `bearer_env` | string |  |  | BearerEnv optionally names an env var holding an additional per-source bearer token checked alongside the signature. |
+| `allowed_cidrs` | []string |  |  | AllowedCIDRs optionally restricts accepted source addresses (e.g. the GitHub webhook CIDR allowlist). |
 
 ## Workspace
 
