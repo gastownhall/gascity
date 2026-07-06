@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -2198,6 +2199,10 @@ func discoverSessionBeadsWithRoots(
 				!sessionAlreadyDesired && !templateDesired && !poolPartialAlive {
 				continue
 			}
+			if controllerManagedPool && !manualSession && !isNamedSessionBead(b) &&
+				!sessionAlreadyDesired && creating && !pendingCreate && isStaleCreating(b) && !scaleCheckPartial {
+				continue
+			}
 			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial {
 				continue
 			}
@@ -2266,7 +2271,8 @@ func discoverSessionBeadsWithRoots(
 }
 
 func isPendingPoolCreate(b beads.Bead) bool {
-	return isPoolManagedSessionBead(b) && strings.TrimSpace(b.Metadata["pending_create_claim"]) == boolMetadata(true)
+	return isPoolManagedSessionBead(b) && strings.TrimSpace(b.Metadata["pending_create_claim"]) == boolMetadata(true) &&
+		pendingCreateLeaseActive(b, clock.Real{}, 0)
 }
 
 func realizeDependencyFloors(
@@ -3553,6 +3559,10 @@ func reusablePoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	if isFailedCreateSessionBead(bead) {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata["pending_create_claim"]) == boolMetadata(true) &&
+		!pendingCreateLeaseActive(bead, clock.Real{}, 0) {
 		return false
 	}
 	if bead.Metadata["state"] == "asleep" {

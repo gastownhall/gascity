@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func intPtr(n int) *int { return &n }
@@ -1256,6 +1257,25 @@ func TestComputePoolDesiredStates_StaleCreatingBeadStillConsumesNewDemand(t *tes
 	}
 	if got := result[0].Requests[0].SessionBeadID; got != stale.ID {
 		t.Fatalf("SessionBeadID = %q, want %q", got, stale.ID)
+	}
+}
+
+func TestComputePoolDesiredStates_ExpiredNeverStartedPendingCreateStopsConsumingDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	now := time.Now().UTC()
+	stale := poolSessionBeadWithState("sess-stale", string(sessionpkg.StateStartPending), boolMetadata(true))
+	stale.CreatedAt = now.Add(-24 * time.Hour)
+	stale.Metadata["pending_create_started_at"] = pendingCreateStartedAtNow(now.Add(-(pendingCreateNeverStartedTimeout + time.Second)))
+
+	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{stale}, map[string]int{"claude": 1})
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %#v, want one fresh demand request after stale lease expires", result)
+	}
+	if got := result[0].Requests[0].SessionBeadID; got != "" {
+		t.Fatalf("SessionBeadID = %q, want anonymous fresh demand request", got)
 	}
 }
 

@@ -8521,6 +8521,73 @@ func TestBuildDesiredState_PendingCreatePoolSessionCountsTowardScaleDemand(t *te
 	}
 }
 
+func TestBuildDesiredState_ExpiredNeverStartedPendingCreateDoesNotConsumeScaleDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const template = "worker"
+	now := time.Now().UTC()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create queued work: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  template,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker-1"},
+		Metadata: map[string]string{
+			"template":                  template,
+			"session_name":              "worker-mc-stale",
+			"agent_name":                "worker-1",
+			"session_origin":            "ephemeral",
+			"pool_managed":              boolMetadata(true),
+			"pool_slot":                 "1",
+			"pending_create_claim":      boolMetadata(true),
+			"pending_create_started_at": pendingCreateStartedAtNow(now.Add(-(pendingCreateNeverStartedTimeout + time.Second))),
+			"state":                     string(sessionpkg.StateStartPending),
+		},
+		CreatedAt: now.Add(-24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("create stale session bead: %v", err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              template,
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+	sessionSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, now, cfg, runtime.NewFake(),
+		store, nil, sessionSnapshot, nil, io.Discard,
+	)
+
+	if _, ok := dsResult.State["worker-mc-stale"]; ok {
+		t.Fatalf("expired pending-create session stayed desired: keys=%v", mapKeys(dsResult.State))
+	}
+	for _, tp := range dsResult.State {
+		if tp.TemplateName != template {
+			continue
+		}
+		if tp.SessionName == "worker-mc-stale" {
+			t.Fatalf("expired pending-create session reused stale identity: %+v", tp)
+		}
+		return
+	}
+	t.Fatalf("expected fresh desired session for %s; keys=%v", template, mapKeys(dsResult.State))
+}
+
 func TestBuildDesiredState_LegacyAliaslessEphemeralPoolSessionFallsBackToSessionNameIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
