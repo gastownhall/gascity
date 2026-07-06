@@ -213,6 +213,10 @@ func (t nudgeTarget) sessionTransport() string {
 	return t.agent.Session
 }
 
+func (t nudgeTarget) providerFamily() string {
+	return session.ProviderFamilyFromMetadata(nil, t.providerName())
+}
+
 func (t nudgeTarget) providerName() string {
 	if t.resolved != nil && strings.TrimSpace(t.resolved.Name) != "" {
 		return strings.TrimSpace(t.resolved.Name)
@@ -1051,7 +1055,10 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	if err != nil {
 		return err
 	}
-	if obs.Running {
+	// Codex sessions use a poller to deliver queued nudges when ready; skip
+	// the synchronous WaitIdle delivery so the poller is always started for
+	// running codex sessions. Other providers still try direct delivery first.
+	if obs.Running && target.providerFamily() != "codex" {
 		handle, err := workerHandleForNudgeTarget(target, store, sp)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{

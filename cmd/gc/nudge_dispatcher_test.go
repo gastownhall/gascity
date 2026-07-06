@@ -211,12 +211,15 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 
 	var nudgeMessages []string
 	for _, call := range fake.Calls {
-		if call.Method == "Nudge" {
+		if call.Method == "NudgeNow" {
 			nudgeMessages = append(nudgeMessages, call.Message)
+		}
+		if call.Method == "Nudge" {
+			t.Fatalf("unexpected provider-default nudge call: %+v", call)
 		}
 	}
 	if len(nudgeMessages) != 1 {
-		t.Fatalf("nudge calls = %d, want 1", len(nudgeMessages))
+		t.Fatalf("NudgeNow calls = %d, want 1", len(nudgeMessages))
 	}
 	if !strings.Contains(nudgeMessages[0], "review the deploy logs") {
 		t.Fatalf("nudge message = %q, want original reminder", nudgeMessages[0])

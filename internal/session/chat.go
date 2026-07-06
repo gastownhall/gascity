@@ -626,7 +626,8 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 		return false, err
 	}
-	if providerKind(b) != "claude" {
+	kind := providerKind(b)
+	if kind != "claude" && kind != "codex" {
 		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
@@ -634,7 +635,12 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
-		return false, nil
+		if errors.Is(err, context.Canceled) {
+			return false, err
+		}
+		if kind != "codex" {
+			return false, nil
+		}
 	}
 	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
@@ -652,7 +658,8 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 		}
 		return true, nil
 	}
-	if providerKind(b) != "claude" {
+	kind := providerKind(b)
+	if kind != "claude" && kind != "codex" {
 		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
@@ -660,7 +667,12 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
-		return false, nil
+		if errors.Is(err, context.Canceled) {
+			return false, err
+		}
+		if kind != "codex" {
+			return false, nil
+		}
 	}
 	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
@@ -725,6 +737,9 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		if !immediate {
+			immediate = usesImmediateDefaultSubmit(b, false)
 		}
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
 	})

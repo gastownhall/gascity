@@ -263,8 +263,15 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+		if runtimeHandleUsesImmediateDefaultNudge(h.providerName, h.transport) &&
+			!runtimeHandleIsActivitylessTimedOnly(h.provider, h.sessionName) {
+			if err := h.nudgeNow(req.Text); err != nil {
+				return NudgeResult{}, err
+			}
+		} else {
+			if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+				return NudgeResult{}, err
+			}
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
@@ -384,6 +391,29 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
 
+func runtimeHandleUsesImmediateDefaultNudge(providerName, transport string) bool {
+	if strings.TrimSpace(transport) == "acp" {
+		return false
+	}
+	return runtimeHandleProviderFamily(providerName) == "codex"
+}
+
+// runtimeHandleIsActivitylessTimedOnly reports whether the provider+sessionName
+// combination is an activityless timed-only session (no activity signal, timer
+// wakes only). For such sessions, regular Nudge is preferable to NudgeNow so
+// the message waits for the next natural wake instead of interrupting.
+func runtimeHandleIsActivitylessTimedOnly(provider runtime.Provider, sessionName string) bool {
+	if provider == nil || provider.Capabilities().CanReportActivity {
+		return false
+	}
+	sleeper, ok := provider.(runtime.SleepCapabilityProvider)
+	return ok && sleeper.SleepCapability(sessionName) == runtime.SessionSleepCapabilityTimedOnly
+}
+
+func runtimeHandleProviderFamily(providerName string) string {
+	return sessionpkg.ProviderFamilyFromMetadata(nil, providerName)
+}
+
 func (h *RuntimeHandle) nudgeNow(message string) error {
 	content := runtime.TextContent(message)
 	if immediate, ok := h.provider.(runtime.ImmediateNudgeProvider); ok {
@@ -402,7 +432,8 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
-	if h.providerName != "claude" {
+	providerFamily := runtimeHandleProviderFamily(h.providerName)
+	if providerFamily != "claude" && providerFamily != "codex" {
 		return NudgeResult{Delivered: false}, nil
 	}
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)
@@ -417,9 +448,12 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return NudgeResult{Delivered: false}, ctxErr
 			}
+			if providerFamily != "codex" {
+				return NudgeResult{Delivered: false}, nil
+			}
+		} else if providerFamily != "codex" {
 			return NudgeResult{Delivered: false}, nil
 		}
-		return NudgeResult{Delivered: false}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
 		return NudgeResult{}, err

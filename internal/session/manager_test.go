@@ -3139,6 +3139,73 @@ func TestSendImmediateFallsBackToDefaultNudge(t *testing.T) {
 	}
 }
 
+func TestSendDefaultCodexUsesImmediateNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", "/tmp", "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	found := false
+	for _, call := range sp.Calls {
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
+			found = true
+			break
+		}
+		if call.Method == "Nudge" && call.Name == info.SessionName {
+			t.Fatalf("calls = %#v, want default codex send to avoid provider wait-idle Nudge", sp.Calls)
+		}
+	}
+	if !found {
+		t.Fatalf("calls = %#v, want NudgeNow hello", sp.Calls)
+	}
+}
+
+func TestTryWaitIdleNudgeCodexFallsBackToImmediateAfterIdleTimeout(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", "/tmp", "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = context.DeadlineExceeded
+
+	delivered, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "session", "hello", "", runtime.Config{})
+	if err != nil {
+		t.Fatalf("TryWaitIdleNudge: %v", err)
+	}
+	if !delivered {
+		t.Fatal("TryWaitIdleNudge delivered = false, want true after codex idle-timeout fallback")
+	}
+
+	var waitForIdle, nudgeNow int
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitForIdle++
+		case "NudgeNow":
+			nudgeNow++
+		case "Nudge":
+			t.Fatalf("calls = %#v, want immediate fallback without provider-default Nudge", sp.Calls)
+		}
+	}
+	if waitForIdle != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", waitForIdle)
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
+	}
+}
+
 func TestSendResumesSuspendedSession_SyncsGCDirFromBeadWorkDir(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

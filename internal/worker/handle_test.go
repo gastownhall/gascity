@@ -739,12 +739,12 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 
 func TestSessionHandleNudgeWaitIdleReturnsUndeliveredForUnsupportedProvider(t *testing.T) {
 	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
-		Profile:  ProfileCodexTmuxCLI,
+		Profile:  ProfileGeminiTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
-		Command:  "codex",
+		Command:  "gemini",
 		WorkDir:  t.TempDir(),
-		Provider: "codex",
+		Provider: "gemini",
 	})
 
 	if err := handle.Start(context.Background()); err != nil {
@@ -1532,6 +1532,48 @@ func TestRuntimeHandleNudgeImmediateUsesImmediateProvider(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleNudgeDefaultCodexUsesImmediateProvider(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "codex/tmux-cli",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text: "check deploy status",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(default): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(default) Delivered = false, want true")
+	}
+
+	var nudgeNow, nudge int
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "NudgeNow":
+			nudgeNow++
+		case "Nudge":
+			nudge++
+		}
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
+	}
+	if nudge != 0 {
+		t.Fatalf("Nudge calls = %d, want 0", nudge)
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
@@ -1673,7 +1715,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     sp,
 		SessionName:  "legacy-worker",
-		ProviderName: "codex",
+		ProviderName: "unsupported",
 	})
 	if err != nil {
 		t.Fatalf("NewRuntimeHandle: %v", err)

@@ -460,13 +460,14 @@ func TestExpiredNudgeCleanupSurvivesNilFrontDoor(t *testing.T) {
 	}
 }
 
-func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
+func TestDeliverSessionNudgeWithProviderWaitIdleDeliversCodexImmediately(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fake := runtime.NewFake()
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	fake.WaitForIdleErrors["sess-worker"] = context.DeadlineExceeded
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -480,30 +481,39 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Queued nudge for worker") {
-		t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
+	if !strings.Contains(stdout.String(), "Nudged worker") {
+		t.Fatalf("stdout = %q, want delivered confirmation", stdout.String())
 	}
+	var waitForIdle, nudgeNow int
 	for _, call := range fake.Calls {
-		if call.Method == "Nudge" {
+		switch call.Method {
+		case "WaitForIdle":
+			waitForIdle++
+		case "NudgeNow":
+			nudgeNow++
+		case "Nudge":
 			t.Fatalf("unexpected direct nudge call: %+v", call)
 		}
+	}
+	if waitForIdle != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", waitForIdle)
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
 	}
 
 	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
 	if err != nil {
 		t.Fatalf("listQueuedNudges: %v", err)
 	}
-	if len(pending) != 1 {
-		t.Fatalf("pending = %d, want 1", len(pending))
+	if len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(pending))
 	}
 	if len(inFlight) != 0 {
 		t.Fatalf("inFlight = %d, want 0", len(inFlight))
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0", len(dead))
-	}
-	if pending[0].Source != "session" {
-		t.Fatalf("source = %q, want session", pending[0].Source)
 	}
 }
 
@@ -1050,7 +1060,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "pi", dir, "pi", nil, session.ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1103,7 +1113,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	}
 }
 
-func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *testing.T) {
+func TestDeliverSessionNudgeWithProviderWaitIdleStartsUnsupportedProviderPollerWhenQueued(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fake := runtime.NewFake()
@@ -1114,7 +1124,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *t
 	target := nudgeTarget{
 		cityPath:    dir,
 		agent:       config.Agent{Name: "worker"},
-		resolved:    &config.ResolvedProvider{Name: "codex"},
+		resolved:    &config.ResolvedProvider{Name: "pi"},
 		sessionName: "sess-worker",
 	}
 
@@ -2463,12 +2473,15 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 
 	var nudgeCalls []runtime.Call
 	for _, call := range fake.Calls {
-		if call.Method == "Nudge" {
+		if call.Method == "NudgeNow" {
 			nudgeCalls = append(nudgeCalls, call)
+		}
+		if call.Method == "Nudge" {
+			t.Fatalf("unexpected provider-default nudge call: %+v", call)
 		}
 	}
 	if len(nudgeCalls) != 1 {
-		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+		t.Fatalf("NudgeNow calls = %d, want 1", len(nudgeCalls))
 	}
 	if !strings.Contains(nudgeCalls[0].Message, "<system-reminder>") {
 		t.Fatalf("nudge message = %q, want system-reminder wrapper", nudgeCalls[0].Message)
@@ -2888,12 +2901,15 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 
 	var nudgeCalls []runtime.Call
 	for _, call := range fake.Calls {
-		if call.Method == "Nudge" {
+		if call.Method == "NudgeNow" {
 			nudgeCalls = append(nudgeCalls, call)
+		}
+		if call.Method == "Nudge" {
+			t.Fatalf("unexpected provider-default nudge call: %+v", call)
 		}
 	}
 	if len(nudgeCalls) != 1 {
-		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+		t.Fatalf("NudgeNow calls = %d, want 1", len(nudgeCalls))
 	}
 	if !strings.Contains(nudgeCalls[0].Message, "wake up and resume your wisp") {
 		t.Fatalf("nudge message = %q, want fence-matching reminder", nudgeCalls[0].Message)
