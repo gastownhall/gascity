@@ -640,7 +640,10 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// controller exit or config reload.
 		m.addInflight()
 		inFlight.Add(1)
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
+		// The controller tick loop only dispatches auto-triggered (non-manual)
+		// orders, which carry no args channel — vars are nil here. Webhook and
+		// `gc order run --var` dispatch supply real vars through their own paths.
+		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, nil, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -655,14 +658,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, onDone func()) {
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string, onDone func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+			m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars)
 		}()
 		return
 	}
@@ -675,7 +678,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID)
+		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID, vars)
 	}()
 }
 
@@ -1087,7 +1090,7 @@ func eventCursorLabels(scoped string, headSeq uint64) []string {
 // dispatchOne runs a single order dispatch in its own goroutine.
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
@@ -1097,11 +1100,25 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		}
 	}()
 
+	scoped := a.ScopedName()
+
+	// Refuse to fire when a declared-required param is absent from the dispatch
+	// vars. The tracking bead was already created by the caller and is closed by
+	// the deferred close above.
+	if err := orders.ValidateRequiredParams(a, vars); err != nil {
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: err.Error(),
+		})
+		return
+	}
+
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	scoped := a.ScopedName()
 	m.rec.Record(events.Event{
 		Type:    events.OrderFired,
 		Actor:   "controller",
@@ -1115,9 +1132,9 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		// closeOrderTrackingBead defer) from the same store, so the bead writes
 		// stay byte-identical.
 		front := orders.NewStore(beads.OrdersStore{Store: store})
-		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID)
+		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, vars)
 	} else {
-		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
+		m.dispatchWisp(childCtx, store, a, cityPath, trackingID, vars)
 	}
 }
 
@@ -1226,7 +1243,7 @@ func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
 }
 
 // dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	scoped := a.ScopedName()
 	outcome := orders.RunOutcomeExec
 	var headSeq uint64
@@ -1268,7 +1285,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		}
 	}
 
-	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
 	if err != nil {
@@ -1325,8 +1342,8 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string) (*formula.Recipe, error) {
-	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", nil)
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
 		return nil, err
 	}
@@ -1348,7 +1365,7 @@ func redactOrderEnvError(err error, env []string) string {
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
-func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	scoped := a.ScopedName()
 
 	if err := ctx.Err(); err != nil {
@@ -1386,7 +1403,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths)
+	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
