@@ -248,6 +248,13 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backin
 }
 
 func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName string) bool {
+	return preserveConfiguredNamedSessionBeadAtPath(b, cfg, cityName, "")
+}
+
+// preserveConfiguredNamedSessionBeadAtPath is like preserveConfiguredNamedSessionBead
+// but also suppresses preservation when the backing agent is in a suspended rig.
+// Pass cityPath="" to skip the rig-suspension check.
+func preserveConfiguredNamedSessionBeadAtPath(b beads.Bead, cfg *config.City, cityName, cityPath string) bool {
 	if cfg == nil || !isNamedSessionBead(b) {
 		return false
 	}
@@ -258,6 +265,14 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok {
 		return false
+	}
+	// Don't preserve sessions whose backing agent is in a suspended rig.
+	// A suspended rig's sessions should wind down, not be held open.
+	if cityPath != "" && spec.Agent != nil {
+		suspState := loadSuspensionStateBestEffort(cityPath)
+		if isAgentEffectivelySuspendedWith(cfg, spec.Agent, suspState) {
+			return false
+		}
 	}
 	if strings.TrimSpace(b.Metadata["session_name"]) != spec.SessionName {
 		return false
@@ -1598,7 +1613,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					continue
 				}
 			}
-			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {
+			if preserveConfiguredNamedSessionBeadAtPath(b, cfg, cityName, cityPath) {
 				continue
 			}
 			if spec, conflict, err := findConflictingNamedSessionSpecForBead(cfg, cityName, b); err != nil {

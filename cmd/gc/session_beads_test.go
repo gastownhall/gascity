@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type countingMetadataStore struct {
@@ -8138,6 +8139,62 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPreserveConfiguredNamedSessionBead_SuspendedRig: a named
+// session bead for an agent in a suspended rig must NOT be preserved — the rig
+// suspension should wind it down rather than holding it open.
+func TestPreserveConfiguredNamedSessionBead_SuspendedRig(t *testing.T) {
+	cityName := "test-city"
+	workspace := config.Workspace{Name: cityName}
+	rigName := "my-rig"
+	cfg := &config.City{
+		Workspace: workspace,
+		Agents: []config.Agent{
+			{Name: "witness", Dir: rigName, StartCommand: "true"},
+		},
+		Rigs: []config.Rig{
+			{Name: rigName, Path: "/some/path"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: rigName, Mode: "always"},
+		},
+	}
+	identity := rigName + "/witness"
+	sessionName := config.NamedSessionRuntimeName(cityName, workspace, identity)
+	bead := beads.Bead{
+		ID:     "gm-test-rig-suspended",
+		Title:  "witness",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:witness"},
+		Metadata: map[string]string{
+			"session_name":                sessionName,
+			"state":                       "active",
+			namedSessionIdentityMetadata:  identity,
+			namedSessionModeMetadata:      "always",
+			"configured_named_session":    "true",
+		},
+	}
+
+	// Without suspension state: should preserve (normal operation).
+	got := preserveConfiguredNamedSessionBeadAtPath(bead, cfg, cityName, "")
+	if !got {
+		t.Fatal("preserveConfiguredNamedSessionBeadAtPath with empty cityPath should preserve active named session")
+	}
+
+	// With a city dir where the rig is suspended: should NOT preserve.
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		Rigs: map[string]suspensionstate.Override{rigName: {Suspended: boolPtrTest(true)}},
+	}
+	if err := saveSuspensionState(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatalf("saving suspension state: %v", err)
+	}
+	got = preserveConfiguredNamedSessionBeadAtPath(bead, cfg, cityName, cityDir)
+	if got {
+		t.Fatal("preserveConfiguredNamedSessionBeadAtPath should NOT preserve a named session whose rig is suspended")
 	}
 }
 
