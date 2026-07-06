@@ -131,3 +131,54 @@ func TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt(t *testing.T) {
 		t.Fatalf("claimedBead = %q, want ready-behind (blocked-head must be skipped)", claimedBead)
 	}
 }
+
+func TestDoHookClaimToleratesNonStringMetadata(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-bool","status":"open","metadata":{"gc.routed_to":"worker","auto_push":false,"attempt":2}}]`, nil
+	}
+
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(non-string metadata) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	output, err := runner("", "")
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	candidates, err := decodeHookClaimBeads(output)
+	if err != nil {
+		t.Fatalf("decodeHookClaimBeads: %v", err)
+	}
+	claimedMetadata := candidates[0].Metadata
+	if claimedMetadata["gc.routed_to"] != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", claimedMetadata["gc.routed_to"])
+	}
+	if claimedMetadata["auto_push"] != "false" {
+		t.Fatalf("auto_push = %q, want false", claimedMetadata["auto_push"])
+	}
+	if claimedMetadata["attempt"] != "2" {
+		t.Fatalf("attempt = %q, want 2", claimedMetadata["attempt"])
+	}
+
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "hw-bool" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+}
