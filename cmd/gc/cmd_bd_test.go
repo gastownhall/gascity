@@ -140,6 +140,27 @@ func TestExtractBdScopeFlags(t *testing.T) {
 	}
 }
 
+func TestExtractBdDirectoryFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"short flag", []string{"create", "-C", "/tmp/packs", "--json"}, "/tmp/packs"},
+		{"long flag space", []string{"create", "--directory", "/tmp/packs"}, "/tmp/packs"},
+		{"long flag equals", []string{"create", "--directory=/tmp/packs"}, "/tmp/packs"},
+		{"absent", []string{"create", "--json"}, ""},
+		{"short flag at end no value", []string{"create", "-C"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractBdDirectoryFlag(tt.args); got != tt.want {
+				t.Fatalf("extractBdDirectoryFlag(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveBdScopeTarget(t *testing.T) {
 	// Isolate cwd from any ambient `.beads/redirect` in the working tree
 	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's
@@ -267,6 +288,38 @@ func TestResolveBdScopeTarget(t *testing.T) {
 				ScopeKind: "rig",
 				Prefix:    "projectwrenunity",
 				RigName:   "wren",
+			},
+		},
+		{
+			name:    "-C routes to matching rig",
+			rigName: "",
+			args:    []string{"create", "-C", filepath.Join(cityDir, "rigs", "wren"), "--json"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name:    "--directory routes to matching rig",
+			rigName: "",
+			args:    []string{"create", "--directory", filepath.Join(cityDir, "rigs", "wren"), "--json"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name:    "-C outside known rigs falls back to city",
+			rigName: "",
+			args:    []string{"create", "-C", "/tmp/unknown-dir", "--json"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
 			},
 		},
 	}
