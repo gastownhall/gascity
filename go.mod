@@ -8,7 +8,9 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.37.3
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gastownhall/gascity-packs v0.3.1-0.20260617013242-33d3a430a67d
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-sql-driver/mysql v1.9.3
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/invopop/jsonschema v0.13.0
@@ -120,7 +122,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/flynn-archive/go-shlex v0.0.0-20150515145356-3f9db97f8568 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.22.5 // indirect
@@ -131,7 +132,6 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/gocraft/dbr/v2 v2.7.6 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
