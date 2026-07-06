@@ -1224,10 +1224,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
-			preserveNamed := preserveConfiguredNamedSessionBead(*session, cfg, cityName)
-			// #3630: the configured spec is present this tick — reset any
-			// suspend-drain confirmation window so a later genuine removal still
-			// gets the full confirmation buffer.
+			preserveNamed := preserveConfiguredNamedSessionBeadAtPath(*session, cfg, cityName, cityPath)
+			// #3630: the configured spec is present (and not suspended) this
+			// tick — reset any suspend-drain confirmation window so a later
+			// genuine removal still gets the full confirmation buffer.
 			if preserveNamed {
 				dt.clearSuspendDeferral(session.ID)
 			}
