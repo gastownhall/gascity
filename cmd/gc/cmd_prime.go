@@ -201,7 +201,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
+		prompt := defaultPrimePrompt
+		if hookMode {
+			prompt += wispStepInjectionContent("")
+		}
+		writePrimePromptWithFormat(stdout, "", "", prompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
@@ -210,7 +214,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
+		prompt := defaultPrimePrompt
+		if hookMode {
+			prompt += wispStepInjectionContent(cityPath)
+		}
+		writePrimePromptWithFormat(stdout, "", "", prompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -317,6 +325,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
+				if hookMode {
+					prompt += wispStepInjectionContent(cityPath)
+				}
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
 				return 0
 			}
@@ -340,7 +351,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(promptFile); fErr == nil {
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt)
+					builtinPrompt := string(content)
+					if hookMode {
+						builtinPrompt += wispStepInjectionContent(cityPath)
+					}
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, builtinPrompt, hookMode, hookFormat, suppressHookPrompt)
 					return 0
 				}
 			}
@@ -351,7 +366,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
+	fallbackPrompt := defaultPrimePrompt
+	if hookMode {
+		fallbackPrompt += wispStepInjectionContent(cityPath)
+	}
+	writePrimePromptWithFormat(stdout, cityName, agentName, fallbackPrompt, hookMode, hookFormat, suppressHookPrompt)
 	return 0
 }
 
