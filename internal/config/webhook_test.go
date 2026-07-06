@@ -337,3 +337,48 @@ func sameDir(a, b string) bool {
 	bb, _ := filepath.Abs(b)
 	return aa == bb
 }
+
+// TestEffectiveRateLimit_PackCannotRaiseCeiling is the E8 trust assertion: a
+// pack authors the whole [[webhook]] block, so its MaxPerMinute is untrusted and
+// may only LOWER the operator ceiling — never raise it.
+func TestEffectiveRateLimit_PackCannotRaiseCeiling(t *testing.T) {
+	pol := WebhookPolicyConfig{RateLimit: &WebhookRateLimitConfig{PerMinute: 100, Burst: 10}}
+
+	// A pack-contributed webhook tries to grant itself a huge limit.
+	raise := Webhook{Name: "evil", SourceDir: "packs/evil", MaxPerMinute: 1_000_000}
+	if pm, burst := pol.EffectiveRateLimit(raise); pm != 100 || burst != 10 {
+		t.Fatalf("pack raise attempt: got (%d,%d), want operator ceiling (100,10)", pm, burst)
+	}
+
+	// A pack lowering its own limit is honored (self-restriction is safe).
+	lower := Webhook{Name: "polite", MaxPerMinute: 5}
+	if pm, _ := pol.EffectiveRateLimit(lower); pm != 5 {
+		t.Fatalf("pack self-lower: got %d, want 5", pm)
+	}
+}
+
+func TestEffectiveRateLimit_DefaultsAndOverride(t *testing.T) {
+	// No operator policy → built-in defaults.
+	var empty WebhookPolicyConfig
+	if pm, burst := empty.EffectiveRateLimit(Webhook{Name: "x"}); pm != defaultWebhookRateLimitPerMinute || burst != defaultWebhookRateLimitBurst {
+		t.Fatalf("defaults: got (%d,%d), want (%d,%d)", pm, burst, defaultWebhookRateLimitPerMinute, defaultWebhookRateLimitBurst)
+	}
+
+	// An operator per-webhook override has operator authority: it may raise above
+	// the fleet default. A pack's MaxPerMinute still clamps below it.
+	pol := WebhookPolicyConfig{RateLimit: &WebhookRateLimitConfig{
+		PerMinute: 50,
+		Burst:     5,
+		Overrides: []WebhookRateLimitOverride{{Name: "github", PerMinute: 600, Burst: 120}},
+	}}
+	if pm, burst := pol.EffectiveRateLimit(Webhook{Name: "github"}); pm != 600 || burst != 120 {
+		t.Fatalf("operator override: got (%d,%d), want (600,120)", pm, burst)
+	}
+	if pm, _ := pol.EffectiveRateLimit(Webhook{Name: "github", MaxPerMinute: 30}); pm != 30 {
+		t.Fatalf("override + pack self-lower: got %d, want 30", pm)
+	}
+	// A different webhook falls back to the fleet default.
+	if pm, _ := pol.EffectiveRateLimit(Webhook{Name: "plane"}); pm != 50 {
+		t.Fatalf("no override: got %d, want fleet default 50", pm)
+	}
+}

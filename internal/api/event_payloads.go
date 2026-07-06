@@ -105,6 +105,46 @@ type SessionSubmitSucceededPayload struct {
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
 func (SessionSubmitSucceededPayload) IsEventPayload() {}
 
+// WebhookReceivedPayload is the webhook.received event body — emitted on every
+// accepted, authentic delivery (dispatched, deduped, or no-match). It doubles as
+// the value the receiver hands the WebhookEventSink. It deliberately carries no
+// secret, signature, or body: the provider delivery id (DedupID) and a raw-body
+// byte count (BodySize) are the only delivery-derived fields.
+type WebhookReceivedPayload struct {
+	Webhook    string `json:"webhook" doc:"Configured webhook name that received the delivery."`
+	Scheme     string `json:"scheme,omitempty" doc:"Verifier scheme (github-hmac-sha256, slack-v0, …)."`
+	EventType  string `json:"event_type,omitempty" doc:"Provider event type surfaced by the scheme (e.g. pull_request)."`
+	DedupID    string `json:"dedup_id,omitempty" doc:"Provider delivery id used for dedup (or a body hash when the scheme carries none)."`
+	Deduped    bool   `json:"deduped" doc:"True when this delivery was a duplicate and was NOT dispatched."`
+	Matched    bool   `json:"matched" doc:"True when a [[webhook.rule]] matched the delivery."`
+	Dispatched bool   `json:"dispatched" doc:"True when an order was launched for this delivery."`
+	RuleIndex  int    `json:"rule_index" doc:"Matched rule index, or -1 when no rule matched."`
+	Order      string `json:"order,omitempty" doc:"Target order name when a rule matched."`
+	Rig        string `json:"rig,omitempty" doc:"Target rig when the matched rule scoped one."`
+	ScopedName string `json:"scoped_name,omitempty" doc:"Rig-qualified name of the fired order."`
+	TrackingID string `json:"tracking_id,omitempty" doc:"Tracking bead id for the dispatch, when fired."`
+	BodySize   int    `json:"body_size" doc:"Raw request body size in bytes (never the body itself)."`
+}
+
+// IsEventPayload marks WebhookReceivedPayload as an events.Payload variant.
+func (WebhookReceivedPayload) IsEventPayload() {}
+
+// WebhookRejectedPayload is the webhook.rejected event body — emitted on every
+// refused delivery. Reason is a stable enum (see the reason* constants); the
+// payload carries enough to debug WITHOUT leaking the secret, signature, or body.
+type WebhookRejectedPayload struct {
+	Webhook   string `json:"webhook" doc:"Configured webhook name (empty only for unresolved routes, which are not evented)."`
+	Scheme    string `json:"scheme,omitempty" doc:"Verifier scheme, when the webhook resolved."`
+	Reason    string `json:"reason" doc:"Rejection reason enum (perimeter_denied, read_only, rate_limited, operator_fault, verify_failed, bad_payload, dispatch_refused, …)."`
+	Status    int    `json:"status,omitempty" doc:"HTTP status returned to the sender."`
+	EventType string `json:"event_type,omitempty" doc:"Provider event type, when known at the rejection point."`
+	DedupID   string `json:"dedup_id,omitempty" doc:"Provider delivery id, when known."`
+	BodySize  int    `json:"body_size,omitempty" doc:"Raw request body size in bytes, when the body was read."`
+}
+
+// IsEventPayload marks WebhookRejectedPayload as an events.Payload variant.
+func (WebhookRejectedPayload) IsEventPayload() {}
+
 // ProjectIdentityStampedPayload carries one layer-write event for a scope
 // identity reconcile. Source is one of generated, migrated_from_metadata,
 // migrated_from_database, or cache_repair. Layer is one of L1, L2, or L3.
@@ -526,6 +566,10 @@ func init() {
 	events.RegisterPayload(events.OrderFired, events.NoPayload{})
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
+
+	// webhook.* — E8 supervisor webhook receiver observability.
+	events.RegisterPayload(events.WebhookReceived, WebhookReceivedPayload{})
+	events.RegisterPayload(events.WebhookRejected, WebhookRejectedPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
 	events.RegisterPayload(events.ProjectIdentityStamped, ProjectIdentityStampedPayload{})

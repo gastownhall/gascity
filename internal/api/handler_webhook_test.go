@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -418,4 +420,321 @@ func TestOrderRunTypedGuards(t *testing.T) {
 			t.Errorf("typed run Vars[repo] = %q, want acme/widgets", got)
 		}
 	})
+}
+
+// --- E8: dedup, rate-limit, and webhook.received/rejected events ---
+
+// newWebhookHandler builds the receiver against a caller-controlled *Server so a
+// test can inject the limiter/dedup clock. It mirrors newTestCityHandler but
+// hands back the Server whose per-city dedup cache + rate limiter persist across
+// requests (the supervisor caches one Server per city in production).
+func newWebhookHandler(t *testing.T, state *fakeState) (http.Handler, *Server) {
+	t.Helper()
+	srv := newServer(state, false)
+	return newTestCityHandlerWith(t, state, srv), srv
+}
+
+func githubHeaders(sig, delivery string) map[string]string {
+	return map[string]string{
+		"X-Hub-Signature-256": sig,
+		"X-GitHub-Event":      "pull_request",
+		"X-GitHub-Delivery":   delivery,
+	}
+}
+
+func webhookReceivedEvents(t *testing.T, state State) []WebhookReceivedPayload {
+	t.Helper()
+	fake, ok := state.EventProvider().(*events.Fake)
+	if !ok {
+		t.Fatalf("event provider is %T, want *events.Fake", state.EventProvider())
+	}
+	var out []WebhookReceivedPayload
+	for _, e := range fake.Events {
+		if e.Type != events.WebhookReceived {
+			continue
+		}
+		var p WebhookReceivedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode webhook.received payload: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func lastWebhookRejected(t *testing.T, state State) WebhookRejectedPayload {
+	t.Helper()
+	fake, ok := state.EventProvider().(*events.Fake)
+	if !ok {
+		t.Fatalf("event provider is %T, want *events.Fake", state.EventProvider())
+	}
+	for i := len(fake.Events) - 1; i >= 0; i-- {
+		if fake.Events[i].Type != events.WebhookRejected {
+			continue
+		}
+		var p WebhookRejectedPayload
+		if err := json.Unmarshal(fake.Events[i].Payload, &p); err != nil {
+			t.Fatalf("decode webhook.rejected payload: %v", err)
+		}
+		return p
+	}
+	t.Fatalf("no webhook.rejected event recorded")
+	return WebhookRejectedPayload{}
+}
+
+// (E8-a) A duplicate delivery (same DedupID) is 2xx but dispatches the order
+// exactly once across both; the second delivery emits a deduped received event.
+func TestWebhookDedupSuppressesDuplicateDispatch(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-dedup")
+	secret := []byte("top-secret-webhook-key-dedup")
+
+	disp := firedDispatcher()
+	state := newWebhookState(t, githubWebhook("public"), prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+	hdrs := githubHeaders(sig, "dup-1")
+
+	first := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", hdrs)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first delivery status = %d, want 202 (body %s)", first.Code, first.Body.String())
+	}
+	second := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", hdrs)
+	if second.Code < 200 || second.Code >= 300 {
+		t.Fatalf("duplicate delivery status = %d, want 2xx", second.Code)
+	}
+	if !strings.Contains(second.Body.String(), `"deduped":true`) {
+		t.Errorf("duplicate body = %s, want deduped:true", second.Body.String())
+	}
+	if disp.count() != 1 {
+		t.Fatalf("dispatch count across duplicate deliveries = %d, want exactly 1", disp.count())
+	}
+
+	recvs := webhookReceivedEvents(t, state)
+	if len(recvs) != 2 {
+		t.Fatalf("webhook.received events = %d, want 2 (dispatch + deduped)", len(recvs))
+	}
+	if recvs[0].Deduped || !recvs[0].Dispatched {
+		t.Errorf("first received = %+v, want dispatched=true deduped=false", recvs[0])
+	}
+	if !recvs[1].Deduped || recvs[1].Dispatched {
+		t.Errorf("second received = %+v, want deduped=true dispatched=false", recvs[1])
+	}
+}
+
+// (E8-b) Over the per-webhook rate limit → 429 with Retry-After, no dispatch, and
+// a webhook.rejected event with reason=rate_limited.
+func TestWebhookRateLimitReturns429(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-rl")
+	secret := []byte("top-secret-webhook-key-rl")
+
+	disp := firedDispatcher()
+	state := newWebhookState(t, githubWebhook("public"), prReviewOrder(), disp)
+	// Operator ceiling: one delivery per minute, burst 1 → 2nd back-to-back is 429.
+	state.cfg.WebhookPolicy.RateLimit = &config.WebhookRateLimitConfig{PerMinute: 1, Burst: 1}
+	h, srv := newWebhookHandler(t, state)
+	now := time.Now()
+	srv.webhookLimiter.now = func() time.Time { return now } // freeze: no refill mid-test
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+
+	first := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "rl-1"))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first delivery status = %d, want 202", first.Code)
+	}
+	second := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "rl-2"))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit status = %d, want 429", second.Code)
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Errorf("429 response missing Retry-After header")
+	}
+	if disp.count() != 1 {
+		t.Fatalf("dispatch count = %d, want 1 (the 429 must not dispatch)", disp.count())
+	}
+	rej := lastWebhookRejected(t, state)
+	if rej.Reason != reasonRateLimited {
+		t.Errorf("rejected reason = %q, want %q", rej.Reason, reasonRateLimited)
+	}
+	if rej.Status != http.StatusTooManyRequests {
+		t.Errorf("rejected status = %d, want 429", rej.Status)
+	}
+}
+
+// (E8-c) A pack cannot raise its own rate limit above the operator ceiling: a
+// pack-contributed webhook with a huge MaxPerMinute is still limited at the tiny
+// operator ceiling and 429s on the second back-to-back delivery.
+func TestWebhookPackCannotRaiseRateLimitCeiling(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-clamp")
+	secret := []byte("top-secret-webhook-key-clamp")
+
+	hook := githubWebhook("public")
+	hook.SourceDir = "packs/evil" // pack-contributed provenance
+	hook.MaxPerMinute = 1_000_000 // pack tries to grant itself a huge limit
+	disp := firedDispatcher()
+	state := newWebhookState(t, hook, prReviewOrder(), disp)
+	// Operator ceiling is tiny; the pack value must be clamped to it.
+	state.cfg.WebhookPolicy.RateLimit = &config.WebhookRateLimitConfig{PerMinute: 1, Burst: 1}
+	h, srv := newWebhookHandler(t, state)
+	now := time.Now()
+	srv.webhookLimiter.now = func() time.Time { return now }
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "c-1")); rec.Code != http.StatusAccepted {
+		t.Fatalf("first delivery status = %d, want 202", rec.Code)
+	}
+	rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "c-2"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second delivery status = %d, want 429 — a pack MaxPerMinute must not raise the operator ceiling", rec.Code)
+	}
+	if disp.count() != 1 {
+		t.Fatalf("dispatch count = %d, want 1", disp.count())
+	}
+}
+
+// (E8-d) A successful delivery emits webhook.received with dispatched=true and
+// the right fields, carrying no arg values.
+func TestWebhookReceivedEventOnDispatch(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-recv")
+	secret := []byte("top-secret-webhook-key-recv")
+
+	disp := firedDispatcher() // TrackingID "track-1"
+	state := newWebhookState(t, githubWebhook("public"), prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+	rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "recv-1"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	recvs := webhookReceivedEvents(t, state)
+	if len(recvs) != 1 {
+		t.Fatalf("webhook.received events = %d, want 1", len(recvs))
+	}
+	ev := recvs[0]
+	if ev.Webhook != "github" {
+		t.Errorf("Webhook = %q, want github", ev.Webhook)
+	}
+	if ev.Scheme != "github-hmac-sha256" {
+		t.Errorf("Scheme = %q, want github-hmac-sha256", ev.Scheme)
+	}
+	if ev.EventType != "pull_request" {
+		t.Errorf("EventType = %q, want pull_request", ev.EventType)
+	}
+	if ev.DedupID != "recv-1" {
+		t.Errorf("DedupID = %q, want recv-1", ev.DedupID)
+	}
+	if !ev.Dispatched || !ev.Matched || ev.Deduped {
+		t.Errorf("flags = {dispatched:%v matched:%v deduped:%v}, want {true,true,false}", ev.Dispatched, ev.Matched, ev.Deduped)
+	}
+	if ev.RuleIndex != 0 {
+		t.Errorf("RuleIndex = %d, want 0", ev.RuleIndex)
+	}
+	if ev.Order != prReviewOrderName {
+		t.Errorf("Order = %q, want %q", ev.Order, prReviewOrderName)
+	}
+	if ev.TrackingID != "track-1" {
+		t.Errorf("TrackingID = %q, want track-1", ev.TrackingID)
+	}
+	if ev.BodySize != len(prLabeledPayload) {
+		t.Errorf("BodySize = %d, want %d", ev.BodySize, len(prLabeledPayload))
+	}
+}
+
+// (E8-e) webhook.rejected fires with the correct reason on a verify failure and
+// on a perimeter denial.
+func TestWebhookRejectedEventReasons(t *testing.T) {
+	t.Run("verify failure", func(t *testing.T) {
+		t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-vf")
+		disp := firedDispatcher()
+		state := newWebhookState(t, githubWebhook("public"), prReviewOrder(), disp)
+		h := newTestCityHandler(t, state)
+
+		rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders("sha256=deadbeef", "vf-1"))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("verify-failure status = %d, want 401", rec.Code)
+		}
+		if disp.count() != 0 {
+			t.Fatalf("verify failure must not dispatch, count = %d", disp.count())
+		}
+		rej := lastWebhookRejected(t, state)
+		if rej.Reason != reasonVerifyFailed {
+			t.Errorf("reason = %q, want %q", rej.Reason, reasonVerifyFailed)
+		}
+		if rej.Status != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", rej.Status)
+		}
+	})
+
+	t.Run("perimeter denial", func(t *testing.T) {
+		t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-pd")
+		disp := firedDispatcher()
+		// A private webhook denies an external (non-loopback) delivery at the perimeter.
+		state := newWebhookState(t, githubWebhook("private"), prReviewOrder(), disp)
+		h := newTestCityHandler(t, state)
+
+		rec := postHook(t, h, state, "github", prLabeledPayload, "198.51.100.10:9000", map[string]string{"X-GitHub-Event": "pull_request"})
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("perimeter-denied status = %d, want 404", rec.Code)
+		}
+		if disp.count() != 0 {
+			t.Fatalf("perimeter denial must not dispatch, count = %d", disp.count())
+		}
+		rej := lastWebhookRejected(t, state)
+		if rej.Reason != reasonPerimeterDenied {
+			t.Errorf("reason = %q, want %q", rej.Reason, reasonPerimeterDenied)
+		}
+	})
+}
+
+// (E8-f) No secret, signature, or raw body ever appears in an emitted event.
+func TestWebhookEventsNeverLeakSecrets(t *testing.T) {
+	const secretStr = "top-secret-webhook-key-leak"
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", secretStr)
+	secret := []byte(secretStr)
+
+	disp := firedDispatcher()
+	state := newWebhookState(t, githubWebhook("public"), prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+	// A successful dispatch (rich received event) …
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "leak-1")); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch status = %d, want 202", rec.Code)
+	}
+	// … and a verify failure (rejected event).
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders("sha256=deadbeef", "leak-2")); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("verify-failure status = %d, want 401", rec.Code)
+	}
+
+	fake, ok := state.EventProvider().(*events.Fake)
+	if !ok {
+		t.Fatalf("event provider is %T, want *events.Fake", state.EventProvider())
+	}
+	var asserted int
+	for _, e := range fake.Events {
+		if e.Type != events.WebhookReceived && e.Type != events.WebhookRejected {
+			continue
+		}
+		asserted++
+		blob := string(e.Payload)
+		if strings.Contains(blob, secretStr) {
+			t.Errorf("%s event leaks the secret: %s", e.Type, blob)
+		}
+		if strings.Contains(blob, sig) {
+			t.Errorf("%s event leaks the signature: %s", e.Type, blob)
+		}
+		if strings.Contains(blob, prLabeledPayload) {
+			t.Errorf("%s event leaks the raw body: %s", e.Type, blob)
+		}
+		// The extracted arg value (payload body content) must not appear either.
+		if strings.Contains(blob, "acme/widgets") {
+			t.Errorf("%s event leaks payload content: %s", e.Type, blob)
+		}
+	}
+	if asserted == 0 {
+		t.Fatal("expected webhook events to assert against")
+	}
 }

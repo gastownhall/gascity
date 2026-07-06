@@ -55,6 +55,14 @@ type Webhook struct {
 	Verify WebhookVerify `toml:"verify,omitempty"`
 	// Rules maps verified provider events to dispatch targets.
 	Rules []WebhookRule `toml:"rule,omitempty"`
+	// MaxPerMinute is an optional per-webhook self-imposed sustained request
+	// ceiling for the E8 rate limiter. SECURITY: a [[webhook]] block may be
+	// pack-contributed, and a pack must never be able to weaken the operator's
+	// flood defense, so this value may only LOWER a webhook's effective limit —
+	// it is min-clamped to the operator-owned ceiling and can never raise it (see
+	// WebhookPolicyConfig.EffectiveRateLimit). Leave unset to inherit the operator
+	// default/override.
+	MaxPerMinute int `toml:"max_per_minute,omitempty"`
 	// SourceDir records pack/fragment provenance for pack-stamped webhooks.
 	// Empty means the webhook was authored directly in the root city.toml and
 	// is therefore operator-trusted. Runtime-only; never authored in TOML.
@@ -132,6 +140,99 @@ type WebhookPolicyConfig struct {
 	// issuer/JWKS. The receiver (E3) reads this, not WebhookVerify.Issuer/etc.,
 	// when constructing the jwt-jwks verifier.
 	JWTPolicies []WebhookJWTPolicy `toml:"jwt_policy,omitempty"`
+	// RateLimit holds the operator-owned E8 per-webhook rate-limit governance:
+	// the fleet default plus optional per-webhook overrides. Because the whole
+	// [webhooks] table is never merged from packs or fragments, a pack cannot
+	// touch these values — it can only LOWER its own limit via Webhook.MaxPerMinute
+	// (clamped in EffectiveRateLimit). This is the trust boundary for the flood
+	// defense: the operator sets the ceiling; packs may only self-restrict below it.
+	//
+	// A pointer so an absent [webhooks].rate_limit round-trips cleanly (a zero-value
+	// nested table is not suppressed by BurntSushi's omitempty); nil means "use the
+	// built-in defaults".
+	RateLimit *WebhookRateLimitConfig `toml:"rate_limit,omitempty"`
+}
+
+// Built-in webhook rate-limit defaults, applied when the operator declares no
+// [webhooks].rate_limit. A sustained few-per-second sustained rate with a burst
+// covers legitimate provider delivery (GitHub can batch a handful at once) while
+// capping a compromised-secret flood or a runaway sender.
+const (
+	defaultWebhookRateLimitPerMinute = 300
+	defaultWebhookRateLimitBurst     = 60
+)
+
+// WebhookRateLimitConfig is the operator-owned rate-limit policy authored under
+// the root city.toml [webhooks].rate_limit table. It is never composed from packs.
+type WebhookRateLimitConfig struct {
+	// PerMinute is the default sustained request ceiling applied to every webhook
+	// that declares no lower self-limit. 0 uses defaultWebhookRateLimitPerMinute.
+	PerMinute int `toml:"per_minute,omitempty"`
+	// Burst is the token-bucket burst allowance. 0 uses defaultWebhookRateLimitBurst.
+	Burst int `toml:"burst,omitempty"`
+	// Overrides pins an operator-chosen limit for a specific webhook by name.
+	// Operator authority: an override may raise OR lower that webhook's limit — it
+	// is the operator, not a pack, declaring it. A pack's own MaxPerMinute can then
+	// only clamp further downward, never above the override.
+	Overrides []WebhookRateLimitOverride `toml:"override,omitempty"`
+}
+
+// WebhookRateLimitOverride is one operator-authored per-webhook rate-limit pin.
+type WebhookRateLimitOverride struct {
+	Name      string `toml:"name"`
+	PerMinute int    `toml:"per_minute,omitempty"`
+	Burst     int    `toml:"burst,omitempty"`
+}
+
+// override returns the operator-declared limit for the named webhook, if any.
+func (c WebhookRateLimitConfig) override(name string) (WebhookRateLimitOverride, bool) {
+	name = strings.TrimSpace(name)
+	for _, o := range c.Overrides {
+		if strings.EqualFold(strings.TrimSpace(o.Name), name) {
+			return o, true
+		}
+	}
+	return WebhookRateLimitOverride{}, false
+}
+
+// EffectiveRateLimit resolves the sustained per-minute rate and burst the E8
+// limiter should enforce for w, applying the operator-owned policy and then the
+// pack/city self-limit clamp:
+//
+//  1. start from the built-in default;
+//  2. apply the operator fleet default ([webhooks].rate_limit);
+//  3. apply the operator per-webhook override (operator authority: may raise or lower);
+//  4. apply the webhook's own MaxPerMinute, which may ONLY lower the result — a
+//     pack-contributed webhook cannot raise the limit it is subject to.
+//
+// Step 4 is the security-relevant clamp: a pack authors the whole [[webhook]]
+// block, so MaxPerMinute is untrusted and is honored only when it is stricter
+// than the operator ceiling.
+func (c WebhookPolicyConfig) EffectiveRateLimit(w Webhook) (perMinute, burst int) {
+	perMinute = defaultWebhookRateLimitPerMinute
+	burst = defaultWebhookRateLimitBurst
+	if rl := c.RateLimit; rl != nil {
+		if rl.PerMinute > 0 {
+			perMinute = rl.PerMinute
+		}
+		if rl.Burst > 0 {
+			burst = rl.Burst
+		}
+		if ov, ok := rl.override(w.Name); ok {
+			if ov.PerMinute > 0 {
+				perMinute = ov.PerMinute
+			}
+			if ov.Burst > 0 {
+				burst = ov.Burst
+			}
+		}
+	}
+	// Pack/city self-limit: clamp downward only. A value at or above the operator
+	// ceiling is ignored, so a pack can never widen its own limit.
+	if w.MaxPerMinute > 0 && w.MaxPerMinute < perMinute {
+		perMinute = w.MaxPerMinute
+	}
+	return perMinute, burst
 }
 
 // WebhookJWTPolicy is one operator-owned jwt-jwks trust anchor. It mirrors
@@ -235,6 +336,9 @@ func ValidateWebhooks(webhooks []Webhook) error {
 		}
 		if hostname := strings.TrimSpace(strings.ToLower(w.Publication.Hostname)); hostname != "" && !validPublicationLabel.MatchString(hostname) {
 			return fmt.Errorf("webhook %q: publication.hostname must be a single DNS label, got %q", w.Name, w.Publication.Hostname)
+		}
+		if w.MaxPerMinute < 0 {
+			return fmt.Errorf("webhook %q: max_per_minute must be >= 0, got %d", w.Name, w.MaxPerMinute)
 		}
 
 		if err := validateWebhookVerify(w); err != nil {

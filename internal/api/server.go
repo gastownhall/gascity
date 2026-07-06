@@ -100,10 +100,18 @@ type Server struct {
 	// shell runner. Set this to inject a fake runner for unit tests.
 	SlingRunnerFunc sling.SlingRunner
 
-	// webhookEvents is the E8 slot for webhook.received / webhook.rejected
-	// event emission. Nil (the default) makes the receiver's hook-point calls
-	// no-ops so /hook/ runs fully without E8 wired.
+	// webhookEvents overrides the E8 webhook.received / webhook.rejected sink.
+	// Nil (the default) forwards to the city event bus via cityEventWebhookSink;
+	// tests inject a fake to assert emitted events. See webhookEventSink.
 	webhookEvents WebhookEventSink
+
+	// webhookDedup is the E8 delivery-idempotency store, keyed (webhook,
+	// delivery-id). Shared across deliveries for the process lifetime of this
+	// per-city Server (the supervisor caches one Server per city).
+	webhookDedup *webhookDedupCache
+
+	// webhookLimiter is the E8 per-webhook token-bucket rate limiter.
+	webhookLimiter *webhookRateLimiter
 
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
@@ -182,10 +190,12 @@ func NewReadOnly(state State) *Server {
 func newServer(state State, readOnly bool) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		state:    state,
-		mux:      mux,
-		readOnly: readOnly,
-		idem:     newIdempotencyCache(30 * time.Minute),
+		state:          state,
+		mux:            mux,
+		readOnly:       readOnly,
+		idem:           newIdempotencyCache(30 * time.Minute),
+		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
+		webhookLimiter: newWebhookRateLimiter(),
 	}
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
 	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like

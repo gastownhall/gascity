@@ -154,6 +154,16 @@ const (
 	// observable signal (RCA gc-5aie6: per-PL Slack channel cross-wiring).
 	ExtMsgOutboundChannelMismatch = "extmsg.outbound_channel_mismatch"
 
+	// Supervisor webhook receiver events (E8). WebhookReceived fires on every
+	// accepted, cryptographically authentic delivery — whether it dispatched an
+	// order, was suppressed as a duplicate, or matched no rule. WebhookRejected
+	// fires on every refused delivery, carrying a reason enum. Their payloads
+	// (internal/api WebhookReceivedPayload / WebhookRejectedPayload) MUST NOT carry
+	// the secret, signature, or raw body — a body byte-count and the provider's
+	// own delivery id are the most that appear.
+	WebhookReceived = "webhook.received"
+	WebhookRejected = "webhook.rejected"
+
 	// EventsRotated is the forensic anchor written as the first event in
 	// a freshly-rotated active log. Its payload carries the prior
 	// archive's filename and seq range so log readers can stitch back
@@ -228,6 +238,7 @@ var KnownEventTypes = []string{
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
 	ExtMsgOutboundChannelMismatch,
+	WebhookReceived, WebhookRejected,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,

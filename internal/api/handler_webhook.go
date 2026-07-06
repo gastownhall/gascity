@@ -27,31 +27,6 @@ import (
 // payloads while staying well under GitHub's own 25 MiB delivery ceiling.
 const defaultMaxWebhookBodyBytes int64 = 5 << 20
 
-// WebhookEventSink is the E8 slot for emitting webhook.received /
-// webhook.rejected events. E3 calls it at the accept/reject decision points; E8
-// supplies the implementation that records the sealed-registry event body. A nil
-// sink (the default) makes the calls no-ops, so the receiver runs fully without
-// E8 wired.
-type WebhookEventSink interface {
-	// WebhookReceived reports an authentic delivery that dispatched an order.
-	WebhookReceived(hook, delivery string, result webhooksink.Result)
-	// WebhookRejected reports a delivery refused before or after verification,
-	// with the HTTP status returned to the sender (0 when already written).
-	WebhookRejected(hook, reason string, status int)
-}
-
-func (s *Server) emitWebhookReceived(hook, delivery string, result webhooksink.Result) {
-	if s.webhookEvents != nil {
-		s.webhookEvents.WebhookReceived(hook, delivery, result)
-	}
-}
-
-func (s *Server) emitWebhookRejected(hook, reason string, status int) {
-	if s.webhookEvents != nil {
-		s.webhookEvents.WebhookRejected(hook, reason, status)
-	}
-}
-
 // handleHookProxy is the raw /hook/{name} receiver — the fourth sanctioned
 // non-Huma surface (alongside /svc/*), mounted on the per-city Server.mux so the
 // HMAC/ed25519 verifiers see the exact raw body. It deliberately sits OUTSIDE the
@@ -63,9 +38,10 @@ func (s *Server) emitWebhookRejected(hook, reason string, status int) {
 // ADDITIONAL gate for public webhooks, never a replacement for the operator's grant
 // when write-auth is configured.
 //
-// Flow: resolve webhook (404 if unknown) → R2 perimeter → read raw body (capped) →
-// R1 verifier build → verify (E4) → Discord PING→PONG special-case → parse + match
-// (E5) → dispatch (E6) via the live E0.5 seam.
+// Flow: resolve webhook (404 if unknown) → R2 perimeter → E8 rate-limit (429) →
+// read raw body (capped) → R1 verifier build → verify (E4) → Discord PING→PONG →
+// parse + match (E5) → E8 dedup claim → dispatch (E6) via the live E0.5 seam. Every
+// accept/reject decision emits a webhook.received / webhook.rejected event (E8).
 func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	name := webhookNameFromPath(r.URL.Path)
 	if name == "" {
@@ -76,13 +52,21 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	hook, ok := findWebhook(cfg, name)
 	if !ok {
 		// Unknown name → 404. Never leak which webhook names exist, and never
-		// answer with a 403-plus-detail that would confirm the route.
+		// answer with a 403-plus-detail that would confirm the route. Deliberately
+		// NOT evented: the route segment is attacker-chosen and unauthenticated, so
+		// emitting here would be an event-log-flood amplifier and a name oracle.
 		problemWebhookRouteNotFound.writeTo(w)
 		return
 	}
+	scheme := strings.TrimSpace(hook.Verify.Scheme)
+
 	// Webhooks are POST deliveries only.
 	if r.Method != http.MethodPost {
 		problemWebhookMethodNotAllowed.writeTo(w)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonMethodNotAllowed, Status: http.StatusMethodNotAllowed,
+		})
 		return
 	}
 
@@ -91,9 +75,24 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	// allow_public grant; otherwise tenant). Read the post-guard value — do NOT
 	// re-derive trust here.
 	visibility := strings.ToLower(strings.TrimSpace(hook.Publication.Visibility))
-	if !webhookRequestAllowed(w, visibility, r, s.readOnly) {
-		// webhookRequestAllowed already wrote the response.
-		s.emitWebhookRejected(hook.Name, "perimeter", 0)
+	if allowed, reason := webhookRequestAllowed(w, visibility, r, s.readOnly); !allowed {
+		// webhookRequestAllowed already wrote the response; reason distinguishes a
+		// perimeter denial from a read-only refusal.
+		s.emitWebhookRejected(WebhookRejectedPayload{Webhook: hook.Name, Scheme: scheme, Reason: reason})
+		return
+	}
+
+	// E8 rate-limit: per-webhook token bucket on the RESOLVED name, upstream of the
+	// expensive body-read + verify. The limit is operator-owned; a pack can only
+	// LOWER its own ceiling (clamped in EffectiveRateLimit), never raise it.
+	perMinute, burst := cfg.WebhookPolicy.EffectiveRateLimit(hook)
+	if ok, retryAfter := s.webhookLimiter.allow(hook.Name, perMinute, burst); !ok {
+		setRetryAfter(w, retryAfter)
+		problemWebhookRateLimited.writeTo(w)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonRateLimited, Status: http.StatusTooManyRequests,
+		})
 		return
 	}
 
@@ -103,11 +102,17 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			problemWebhookBodyTooLarge.writeTo(w)
-			s.emitWebhookRejected(hook.Name, "body_too_large", http.StatusRequestEntityTooLarge)
+			s.emitWebhookRejected(WebhookRejectedPayload{
+				Webhook: hook.Name, Scheme: scheme,
+				Reason: reasonBodyTooLarge, Status: http.StatusRequestEntityTooLarge,
+			})
 			return
 		}
 		problemWebhookBadBody.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "bad_body", http.StatusBadRequest)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonBadBody, Status: http.StatusBadRequest,
+		})
 		return
 	}
 
@@ -120,7 +125,10 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		// authentic, we simply cannot check it. This is the R1 fail-closed contract.
 		log.Printf("api: webhook %q verifier unavailable: %v", hook.Name, verr)
 		problemWebhookVerifierUnavailable.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "verifier_unavailable", http.StatusServiceUnavailable)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonOperatorFault, Status: http.StatusServiceUnavailable, BodySize: len(body),
+		})
 		return
 	}
 
@@ -133,18 +141,26 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		// The check could not be performed (operator fault, e.g. malformed key).
 		log.Printf("api: webhook %q verify error: %v", hook.Name, verifyErr)
 		problemWebhookVerifierUnavailable.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "verify_error", http.StatusServiceUnavailable)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonOperatorFault, Status: http.StatusServiceUnavailable, BodySize: len(body),
+		})
 		return
 	}
 	if !vres.OK {
 		problemWebhookUnauthorized.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "signature", http.StatusUnauthorized)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonVerifyFailed, Status: http.StatusUnauthorized,
+			EventType: vres.EventType, BodySize: len(body),
+		})
 		return
 	}
 
 	// Discord PING (interaction type 1) on a VERIFIED payload → PONG, no dispatch.
-	// Ordered after verification so a forged type=1 body cannot elicit a PONG.
-	if strings.EqualFold(strings.TrimSpace(hook.Verify.Scheme), "discord-ed25519") && isDiscordPing(body) {
+	// Ordered after verification so a forged type=1 body cannot elicit a PONG. A
+	// protocol handshake, not a delivery, so it is neither deduped nor evented.
+	if strings.EqualFold(scheme, "discord-ed25519") && isDiscordPing(body) {
 		writeJSONBytes(w, http.StatusOK, discordPongBody)
 		return
 	}
@@ -153,7 +169,11 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	if perr != nil {
 		// Authentic sender, malformed payload → 400.
 		problemWebhookBadPayload.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "bad_payload", http.StatusBadRequest)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonBadPayload, Status: http.StatusBadRequest,
+			EventType: vres.EventType, BodySize: len(body),
+		})
 		return
 	}
 
@@ -167,21 +187,55 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		// Structural arg-extraction failure on a matched rule (misconfiguration).
 		log.Printf("api: webhook %q match error: %v", hook.Name, merr)
 		problemInternalServerError.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "match_error", http.StatusInternalServerError)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonMatchError, Status: http.StatusInternalServerError,
+			EventType: vres.EventType, BodySize: len(body),
+		})
 		return
 	}
 	if !matched {
 		// A valid, authentic delivery that no rule wanted. Webhook senders retry on
-		// non-2xx, so a valid-but-unmatched delivery is a 2xx no-op — never a 4xx.
+		// non-2xx, so a valid-but-unmatched delivery is a 2xx no-op — never a 4xx —
+		// but it IS an accepted delivery, so it is evented as webhook.received.
+		s.emitWebhookReceived(WebhookReceivedPayload{
+			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
+			DedupID: vres.DedupID, Matched: false, Dispatched: false,
+			RuleIndex: -1, BodySize: len(body),
+		})
 		writeJSONBytes(w, http.StatusOK, webhookNoMatchBody)
+		return
+	}
+
+	// E8 dedup: claim (webhook, delivery-id) so a provider retry (GitHub/Slack/
+	// Discord all re-deliver) cannot fire the order twice. dedupID is the verifier's
+	// stable delivery id, or a body hash when the scheme surfaces none.
+	dedupID := strings.TrimSpace(vres.DedupID)
+	if dedupID == "" {
+		dedupID = webhookBodyHash(body)
+	}
+	dedupKey := webhookDedupKey(hook.Name, dedupID)
+	if s.webhookDedup.seen(dedupKey) {
+		// Duplicate: ack 2xx so the sender stops retrying, but do NOT dispatch.
+		s.emitWebhookReceived(WebhookReceivedPayload{
+			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
+			DedupID: dedupID, Deduped: true, Matched: true, Dispatched: false,
+			RuleIndex: match.RuleIndex, Order: match.Order, Rig: match.Rig, BodySize: len(body),
+		})
+		writeJSONBytes(w, http.StatusOK, webhookDuplicateBody)
 		return
 	}
 
 	// Dispatch through the E6 sink + the live E0.5 dispatcher seam.
 	dispatcher := webhookDispatcherFor(s.state)
 	if dispatcher == nil {
+		s.webhookDedup.forget(dedupKey) // never acted on: let the sender retry
 		problemWebhookDispatchUnavailable.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "dispatch_unavailable", http.StatusServiceUnavailable)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonDispatchUnavailable, Status: http.StatusServiceUnavailable,
+			EventType: vres.EventType, DedupID: dedupID, BodySize: len(body),
+		})
 		return
 	}
 	// Detach cancellation from the request: the design's fast-ACK contract runs
@@ -193,23 +247,41 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		ResolveOrder: orderResolverFor(s.state),
 	}, webhookScopeFor(hook), match)
 	if rerr != nil {
+		s.webhookDedup.forget(dedupKey) // genuine failure: allow the sender's retry
 		log.Printf("api: webhook %q dispatch failed: %v", hook.Name, rerr)
 		problemWebhookDispatchUnavailable.writeTo(w)
-		s.emitWebhookRejected(hook.Name, "dispatch_error", http.StatusServiceUnavailable)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: hook.Name, Scheme: scheme,
+			Reason: reasonDispatchError, Status: http.StatusServiceUnavailable,
+			EventType: vres.EventType, DedupID: dedupID, BodySize: len(body),
+		})
 		return
 	}
 
 	if result.Dispatched {
-		s.emitWebhookReceived(hook.Name, vres.DedupID, result)
+		s.emitWebhookReceived(WebhookReceivedPayload{
+			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
+			DedupID: dedupID, Deduped: false, Matched: true, Dispatched: true,
+			RuleIndex: match.RuleIndex, Order: match.Order, Rig: match.Rig,
+			ScopedName: result.Dispatch.ScopedName, TrackingID: result.Dispatch.TrackingID,
+			BodySize: len(body),
+		})
 		writeJSONBytes(w, http.StatusAccepted, webhookAcceptedBody)
 		return
 	}
 	// Refused by a sink guard (rig scope, trigger!=webhook, missing required param,
-	// conversation sink not yet wired). The reason names an order/rig/param — safe
-	// enough to log, but the wire body stays generic so the public edge learns
+	// conversation sink not yet wired). Deterministic, so release the dedup claim:
+	// the sender's non-2xx retry should get an honest 422, not a masked 2xx dedup.
+	// The detailed reason names an order/rig/param — safe to log, but the wire body
+	// AND the event stay generic (reason=dispatch_refused) so the public edge learns
 	// nothing about the city's order catalog.
+	s.webhookDedup.forget(dedupKey)
 	log.Printf("api: webhook %q refused: %s", hook.Name, result.Reason)
-	s.emitWebhookRejected(hook.Name, result.Reason, http.StatusUnprocessableEntity)
+	s.emitWebhookRejected(WebhookRejectedPayload{
+		Webhook: hook.Name, Scheme: scheme,
+		Reason: reasonDispatchRefused, Status: http.StatusUnprocessableEntity,
+		EventType: vres.EventType, DedupID: dedupID, BodySize: len(body),
+	})
 	writeJSONBytes(w, http.StatusUnprocessableEntity, webhookRejectedBody)
 }
 
@@ -248,7 +320,7 @@ func findWebhook(cfg *config.City, name string) (config.Webhook, bool) {
 }
 
 // webhookRequestAllowed is the R2 mux-enforced, visibility-aware perimeter — the
-// webhook analogue of serviceRequestAllowed. It runs on every /hook/ delivery
+// webhook analog of serviceRequestAllowed. It runs on every /hook/ delivery
 // before the body is read or the signature is checked.
 //
 //   - private / tenant webhook: require the /svc-style loopback-or-X-GC-Request
@@ -265,21 +337,22 @@ func findWebhook(cfg *config.City, name string) (config.Webhook, bool) {
 // gets a 404 (not a read-only 403 that would confirm the route exists); a public
 // route's existence is already known, so a read-only 403 there leaks nothing.
 //
-// Returns true to proceed; on false it has already written the rejection.
-func webhookRequestAllowed(w http.ResponseWriter, visibility string, r *http.Request, apiReadOnly bool) bool {
+// Returns (true, "") to proceed; on false it has already written the rejection and
+// returns the reason enum (reasonPerimeterDenied or reasonReadOnly) for the event.
+func webhookRequestAllowed(w http.ResponseWriter, visibility string, r *http.Request, apiReadOnly bool) (bool, string) {
 	public := visibility == "public"
 	if !public {
 		internalProxyRequest := r.Header.Get("X-GC-Request") != ""
 		if !isLoopbackRemoteAddr(r.RemoteAddr) && !internalProxyRequest {
 			problemWebhookRouteNotFound.writeTo(w)
-			return false
+			return false, reasonPerimeterDenied
 		}
 	}
 	if apiReadOnly {
 		problemWebhookReadOnly.writeTo(w)
-		return false
+		return false, reasonReadOnly
 	}
-	return true
+	return true, ""
 }
 
 // buildWebhookVerifier constructs the E4 verifier for a hook with an
@@ -461,6 +534,9 @@ var (
 	discordPongBody = []byte(`{"type":1}`)
 	// webhookNoMatchBody acks a verified-but-unmatched delivery (a 2xx no-op).
 	webhookNoMatchBody = []byte(`{"status":"ok","matched":false}`)
+	// webhookDuplicateBody acks a deduplicated delivery — 2xx so the sender stops
+	// retrying, deduped:true so it can observe the suppression.
+	webhookDuplicateBody = []byte(`{"status":"ok","deduped":true}`)
 	// webhookAcceptedBody acks a dispatched delivery.
 	webhookAcceptedBody = []byte(`{"status":"accepted"}`)
 	// webhookRejectedBody is the generic refusal body — deliberately reason-free so
@@ -482,6 +558,10 @@ var (
 	problemWebhookReadOnly = problemBody{
 		status: http.StatusForbidden,
 		body:   []byte(`{"status":403,"title":"Forbidden","detail":"read_only: webhook dispatch is disabled in read-only mode"}`),
+	}
+	problemWebhookRateLimited = problemBody{
+		status: http.StatusTooManyRequests,
+		body:   []byte(`{"status":429,"title":"Too Many Requests","detail":"rate_limited: webhook delivery rate exceeded"}`),
 	}
 	problemWebhookBodyTooLarge = problemBody{
 		status: http.StatusRequestEntityTooLarge,
