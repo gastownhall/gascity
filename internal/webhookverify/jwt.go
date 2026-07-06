@@ -134,7 +134,10 @@ func (v *jwtJWKS) Verify(ctx context.Context, req VerifyRequest) (VerifyResult, 
 	if jti, ok := claims["jti"].(string); ok {
 		dedup = strings.TrimSpace(jti)
 	}
-	return VerifyResult{OK: true, Identity: identity, DedupID: dedup}, nil
+	// The jti is inside the signed JWT and is unique per delivery, so it is the
+	// one dedup id safe to use as the dedup KEY (DedupIDSigned). Every other
+	// scheme's id is unsigned or coarse, so the receiver keys on the body hash.
+	return VerifyResult{OK: true, Identity: identity, DedupID: dedup, DedupIDSigned: dedup != ""}, nil
 }
 
 // cutBearerPrefix strips a case-insensitive "Bearer " prefix if present.

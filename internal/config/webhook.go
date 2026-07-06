@@ -420,7 +420,7 @@ func validateWebhookRule(webhookName string, idx int, rule WebhookRule) error {
 // once over the fully-composed webhook set — after every merge site has stamped
 // SourceDir — so provenance is centralized and cannot leak through an
 // unstamped path. It returns the downgrade warnings for the caller to surface.
-func applyWebhookPackGuard(cfg *City) []string {
+func applyWebhookPackGuard(cfg *City, cityRoot string) []string {
 	if cfg == nil {
 		return nil
 	}
@@ -436,7 +436,7 @@ func applyWebhookPackGuard(cfg *City) []string {
 		if w.SourceDir == "" {
 			continue
 		}
-		if webhookPublicGranted(w.Name, w.SourceDir, cfg.WebhookPolicy.AllowPublic) {
+		if webhookPublicGranted(w.Name, w.SourceDir, cityRoot, cfg.WebhookPolicy.AllowPublic) {
 			continue
 		}
 		w.Publication.Visibility = "tenant"
@@ -448,13 +448,15 @@ func applyWebhookPackGuard(cfg *City) []string {
 }
 
 // webhookPublicGranted reports whether an operator-authored allow_public entry
-// grants public exposure to the named webhook from the given provenance.
-func webhookPublicGranted(name, sourceDir string, grants []WebhookAllowPublic) bool {
+// grants public exposure to the named webhook from the given provenance. A
+// relative grant Source is resolved against cityRoot (the directory of the root
+// city.toml).
+func webhookPublicGranted(name, sourceDir, cityRoot string, grants []WebhookAllowPublic) bool {
 	for _, g := range grants {
 		if !strings.EqualFold(strings.TrimSpace(g.Name), strings.TrimSpace(name)) {
 			continue
 		}
-		if webhookSourceMatches(sourceDir, g.Source) {
+		if webhookSourceMatches(sourceDir, g.Source, cityRoot) {
 			return true
 		}
 	}
@@ -463,26 +465,31 @@ func webhookPublicGranted(name, sourceDir string, grants []WebhookAllowPublic) b
 
 // webhookSourceMatches reports whether a stamped provenance directory satisfies
 // an operator-declared allow_public source. The grant is default-closed: an
-// empty source never matches. A source matches when it equals the stamped
-// SourceDir, is a path suffix of it (so "packs/github" matches an absolute
-// resolved dir), or shares the same final path segment.
-func webhookSourceMatches(sourceDir, allowSource string) bool {
+// empty source never matches. Matching is by CANONICAL filesystem path — exact
+// equality or true subtree containment — so a foreign pack whose SourceDir
+// merely shares the same final path segment (basename), or ends in the grant
+// string as an unanchored suffix, can NOT satisfy a grant scoped to a different
+// pack (that spoof defeated R3's provenance-scoped default-closed guard). A
+// relative grant source is resolved against cityRoot; the stamped SourceDir is
+// already absolute (each merge site stamps it with an absolute pack dir).
+func webhookSourceMatches(sourceDir, allowSource, cityRoot string) bool {
 	src := strings.TrimSpace(allowSource)
-	if src == "" {
+	sd := strings.TrimSpace(sourceDir)
+	if src == "" || sd == "" {
 		return false
 	}
-	sd := filepath.ToSlash(filepath.Clean(strings.TrimSpace(sourceDir)))
-	src = filepath.ToSlash(filepath.Clean(src))
-	if sd == "." || src == "." {
+	if !filepath.IsAbs(src) {
+		src = filepath.Join(strings.TrimSpace(cityRoot), src)
+	}
+	absSD, err := filepath.Abs(sd)
+	if err != nil {
 		return false
 	}
-	if sd == src {
-		return true
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
+		return false
 	}
-	if strings.HasSuffix(sd, "/"+src) {
-		return true
-	}
-	return filepath.Base(sd) == filepath.Base(src)
+	return absSD == absSrc || strings.HasPrefix(absSD, absSrc+string(filepath.Separator))
 }
 
 // stampWebhookSource returns a copy of webhooks with SourceDir set to source.

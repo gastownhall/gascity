@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -33,16 +32,12 @@ type slackV0 struct {
 }
 
 func newSlackV0(cfg config.WebhookVerify, opts Options) (Verifier, error) {
-	window := slackDefaultWindow
-	if raw := strings.TrimSpace(cfg.ReplayWindow); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return nil, fmt.Errorf("webhookverify: slack-v0 replay_window is invalid: %w", err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("webhookverify: slack-v0 replay_window must be positive, got %q", raw)
-		}
-		window = d
+	// A pack authors [webhook.verify], so replay_window is untrusted: clamp it
+	// down to the operator ceiling (maxReplayWindow) so a pack cannot widen the
+	// freshness window it benefits from weakening.
+	window, err := resolveReplayWindow(cfg.ReplayWindow, slackDefaultWindow)
+	if err != nil {
+		return nil, err
 	}
 	return &slackV0{
 		signatureHeader: headerOrDefault(cfg.SignatureHeader, slackSignatureHeader),

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -57,8 +58,19 @@ type VerifyResult struct {
 	EventType string
 	// DedupID is a stable per-delivery identifier for at-least-once dedup when
 	// the scheme exposes one (e.g. X-GitHub-Delivery, the Slack timestamp, or
-	// the JWT id). Empty when the scheme carries none.
+	// the JWT id). Empty when the scheme carries none. It is safe for
+	// observability (event logs) but NOT necessarily safe as a dedup KEY — see
+	// DedupIDSigned.
 	DedupID string
+	// DedupIDSigned is true only when DedupID is BOTH covered by the delivery's
+	// signature AND unique per delivery, so the receiver may key dedup on it.
+	// It is set only for jwt-jwks (the signed "jti"). It is false for schemes
+	// whose DedupID is an unsigned/attacker-mutable header (github's
+	// X-GitHub-Delivery, generic-hmac's dedup header, discord) or a coarse signed
+	// value that can collide across distinct deliveries (slack's second-granular
+	// timestamp). The receiver keys dedup on the body hash for those, since the
+	// body is signed under every scheme (tamper-proof and per-delivery-unique).
+	DedupIDSigned bool
 	// Identity is the verified principal for identity-bearing schemes — the JWT
 	// subject (falling back to the issuer) for jwt-jwks. Empty for signature-
 	// only schemes.
@@ -143,4 +155,34 @@ func effectiveNow(req VerifyRequest, configured func() time.Time) time.Time {
 // failf builds a failed (OK==false) result with a formatted reason.
 func failf(format string, args ...any) VerifyResult {
 	return VerifyResult{OK: false, Reason: fmt.Sprintf(format, args...)}
+}
+
+// maxReplayWindow is the operator-enforced ceiling on any pack-authorable
+// replay_window. WebhookVerify (including replay_window) is pack/fragment-
+// authored, so a pack could set an enormous window to neuter the very
+// freshness control it benefits from weakening. Clamping to this ceiling
+// mirrors the downward-only rate-limit clamp (config.EffectiveRateLimit): the
+// operator owns the maximum; a pack may only make the window stricter.
+const maxReplayWindow = 15 * time.Minute
+
+// resolveReplayWindow resolves a pack-authored replay_window to the effective
+// duration a timestamp-freshness check should enforce: the default when unset
+// or non-positive, clamped down to maxReplayWindow. A malformed duration string
+// is an operator/pack configuration fault surfaced as a construction error.
+func resolveReplayWindow(raw string, def time.Duration) (time.Duration, error) {
+	w := def
+	if raw = strings.TrimSpace(raw); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("webhookverify: replay_window is invalid: %w", err)
+		}
+		w = d
+	}
+	if w <= 0 {
+		w = def
+	}
+	if w > maxReplayWindow {
+		w = maxReplayWindow
+	}
+	return w, nil
 }

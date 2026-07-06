@@ -714,7 +714,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Enforce the default-closed webhook public pack-guard over the fully
 	// composed webhook set (every merge site has stamped SourceDir by now).
-	prov.Warnings = append(prov.Warnings, applyWebhookPackGuard(root)...)
+	prov.Warnings = append(prov.Warnings, applyWebhookPackGuard(root, cityRoot)...)
 
 	// Build the resolved provider cache now that compose + patch have
 	// populated the full provider table. Chain resolution errors

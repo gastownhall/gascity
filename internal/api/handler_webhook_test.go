@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -274,7 +275,9 @@ func TestWebhookDiscordPingPongNoDispatch(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	ping := []byte(`{"type":1}`)
-	ts := "1700000000"
+	// A fresh timestamp: the discord verifier now enforces a replay window (FIX 1),
+	// and this delivery flows through the real handler on the wall clock.
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	msg := append([]byte(ts), ping...)
 	sig := hex.EncodeToString(ed25519.Sign(priv, msg))
 
@@ -462,6 +465,27 @@ func webhookReceivedEvents(t *testing.T, state State) []WebhookReceivedPayload {
 	return out
 }
 
+// webhookRejectedEvents returns every emitted webhook.rejected payload.
+func webhookRejectedEvents(t *testing.T, state State) []WebhookRejectedPayload {
+	t.Helper()
+	fake, ok := state.EventProvider().(*events.Fake)
+	if !ok {
+		t.Fatalf("event provider is %T, want *events.Fake", state.EventProvider())
+	}
+	var out []WebhookRejectedPayload
+	for _, e := range fake.Events {
+		if e.Type != events.WebhookRejected {
+			continue
+		}
+		var p WebhookRejectedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decode webhook.rejected payload: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 func lastWebhookRejected(t *testing.T, state State) WebhookRejectedPayload {
 	t.Helper()
 	fake, ok := state.EventProvider().(*events.Fake)
@@ -522,8 +546,130 @@ func TestWebhookDedupSuppressesDuplicateDispatch(t *testing.T) {
 	}
 }
 
-// (E8-b) Over the per-webhook rate limit → 429 with Retry-After, no dispatch, and
-// a webhook.rejected event with reason=rate_limited.
+// slackWebhook is a public slack-v0 webhook that fires pr-review on any event
+// (Event "*"), used to exercise the dedup-key derivation for a coarse signed id.
+func slackWebhook() config.Webhook {
+	return config.Webhook{
+		Name:        "slack",
+		Publication: config.ServicePublicationConfig{Visibility: "public"},
+		Verify:      config.WebhookVerify{Scheme: "slack-v0", SecretEnv: "GC_WEBHOOK_SLACK_SECRET"},
+		Rules:       []config.WebhookRule{{Event: "*", Order: prReviewOrderName}},
+	}
+}
+
+func slackHeaders(secret []byte, ts, body string) map[string]string {
+	base := []byte("v0:" + ts + ":" + body)
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(base)
+	return map[string]string{
+		"X-Slack-Signature":         "v0=" + hex.EncodeToString(mac.Sum(nil)),
+		"X-Slack-Request-Timestamp": ts,
+	}
+}
+
+// (FIX 3) An attacker-mutable delivery id must not be part of the dedup key: two
+// deliveries of the SAME signed body with DIFFERENT X-GitHub-Delivery values
+// dedup to ONE dispatch. The key is the body hash (signature-covered), so minting
+// a fresh delivery id cannot replay the order from the public endpoint.
+func TestWebhookDedupIgnoresDeliveryHeader(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-fix3")
+	secret := []byte("top-secret-webhook-key-fix3")
+
+	disp := firedDispatcher()
+	state := newWebhookState(t, githubWebhook("public"), prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+	first := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "fresh-A"))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first delivery status = %d, want 202 (body %s)", first.Code, first.Body.String())
+	}
+	// Same signed body, a FRESH delivery id (the attacker's replay handle).
+	second := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "fresh-B"))
+	if second.Code < 200 || second.Code >= 300 {
+		t.Fatalf("replayed body status = %d, want 2xx", second.Code)
+	}
+	if disp.count() != 1 {
+		t.Fatalf("same body + fresh delivery id must dedup to ONE dispatch (key ignores the header), got %d", disp.count())
+	}
+}
+
+// (FIX 4) Two DISTINCT slack deliveries in the same wall-clock second (same signed
+// ts) must BOTH dispatch: the key is the per-delivery body hash, so distinct
+// bodies never collide. The old ts-granular key silently dropped one with a 2xx.
+func TestWebhookSlackDistinctBodiesSameTsBothDispatch(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_SLACK_SECRET", "slack-webhook-secret-abcdefgh")
+	secret := []byte("slack-webhook-secret-abcdefgh")
+
+	disp := firedDispatcher()
+	state := newWebhookState(t, slackWebhook(), prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	ts := strconv.FormatInt(time.Now().Unix(), 10) // fresh: inside the replay window
+	bodyA := `{"event":{"type":"message"},"n":1}`
+	bodyB := `{"event":{"type":"message"},"n":2}`
+
+	recA := postHook(t, h, state, "slack", bodyA, "203.0.113.7:443", slackHeaders(secret, ts, bodyA))
+	if recA.Code != http.StatusAccepted {
+		t.Fatalf("delivery A status = %d, want 202 (body %s)", recA.Code, recA.Body.String())
+	}
+	recB := postHook(t, h, state, "slack", bodyB, "203.0.113.7:443", slackHeaders(secret, ts, bodyB))
+	if recB.Code != http.StatusAccepted {
+		t.Fatalf("delivery B status = %d, want 202 (body %s)", recB.Code, recB.Body.String())
+	}
+	if disp.count() != 2 {
+		t.Fatalf("two distinct bodies sharing a slack ts must both dispatch, got %d", disp.count())
+	}
+}
+
+// (FIX 6) The built verifier is memoized per webhook so the jwt-jwks JWKS cache
+// persists across deliveries (fetched once, not rebuilt+refetched per request).
+// Two builds with an unchanged config fingerprint return the SAME verifier
+// instance; a changed fingerprint rebuilds. (The complementary "JWKS fetched once
+// across two Verify calls on one verifier" is asserted in
+// webhookverify.TestJWTJWKS_ValidToken.)
+func TestWebhookVerifierMemoizedPerHook(t *testing.T) {
+	state := newFakeState(t)
+	hook := config.Webhook{
+		Name:   "idp",
+		Verify: config.WebhookVerify{Scheme: "jwt-jwks"},
+		Rules:  []config.WebhookRule{{Event: "*", Order: "o"}},
+	}
+	state.cfg.Webhooks = []config.Webhook{hook}
+	state.cfg.WebhookPolicy.JWTPolicies = []config.WebhookJWTPolicy{{
+		Name: "idp", Issuer: "https://idp.example", Audience: "supervisor",
+		JWKSURL: "https://idp.example/.well-known/jwks.json",
+	}}
+	srv := newServer(state, false)
+	cfg := state.Config()
+
+	v1, _, err := srv.buildWebhookVerifier(cfg, hook)
+	if err != nil {
+		t.Fatalf("build 1: %v", err)
+	}
+	v2, _, err := srv.buildWebhookVerifier(cfg, hook)
+	if err != nil {
+		t.Fatalf("build 2: %v", err)
+	}
+	if v1 != v2 {
+		t.Fatal("same-config deliveries must reuse ONE verifier instance so the JWKS cache persists")
+	}
+
+	// A config hot-reload that changes a fingerprinted field rebuilds the verifier.
+	hook2 := hook
+	hook2.Verify.SignatureHeader = "X-Other-Token"
+	v3, _, err := srv.buildWebhookVerifier(cfg, hook2)
+	if err != nil {
+		t.Fatalf("build 3: %v", err)
+	}
+	if v1 == v3 {
+		t.Fatal("a changed config fingerprint must rebuild the verifier")
+	}
+}
+
+// (E8-b) Over the per-webhook rate limit → 429 with Retry-After and no dispatch.
+// FIX 7: the over-limit path is deliberately NOT evented (it would be an
+// un-throttled per-request write on a flood); the 429 + Retry-After is the signal.
 func TestWebhookRateLimitReturns429(t *testing.T) {
 	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-rl")
 	secret := []byte("top-secret-webhook-key-rl")
@@ -552,12 +698,9 @@ func TestWebhookRateLimitReturns429(t *testing.T) {
 	if disp.count() != 1 {
 		t.Fatalf("dispatch count = %d, want 1 (the 429 must not dispatch)", disp.count())
 	}
-	rej := lastWebhookRejected(t, state)
-	if rej.Reason != reasonRateLimited {
-		t.Errorf("rejected reason = %q, want %q", rej.Reason, reasonRateLimited)
-	}
-	if rej.Status != http.StatusTooManyRequests {
-		t.Errorf("rejected status = %d, want 429", rej.Status)
+	// FIX 7: the over-limit request emits NO webhook.rejected event.
+	if rejs := webhookRejectedEvents(t, state); len(rejs) != 0 {
+		t.Errorf("over-limit request must emit no webhook.rejected event, got %d: %+v", len(rejs), rejs)
 	}
 }
 

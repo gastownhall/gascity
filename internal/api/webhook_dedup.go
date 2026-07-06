@@ -3,8 +3,11 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/webhookverify"
 )
 
 // defaultWebhookDedupTTL bounds how long a delivery id is remembered. Providers
@@ -117,6 +120,31 @@ func (c *webhookDedupCache) enforceCapLocked(now time.Time) {
 // share a delivery-id value (e.g. both counting from 1) never collide.
 func webhookDedupKey(hook, dedupID string) string {
 	return hook + "\x00" + dedupID
+}
+
+// webhookDedupKeyFor derives the (webhook, delivery) dedup key from content the
+// delivery's signature COVERS. A per-delivery-unique, signature-covered id (the
+// jwt-jwks jti, flagged DedupIDSigned) is used directly; every other scheme keys
+// on the body hash — the body is signed under every scheme, so it is tamper-proof
+// and unique per delivery.
+//
+// The provider's surfaced DedupID (github's X-GitHub-Delivery, slack's timestamp)
+// is deliberately NOT part of the key when it is unsigned or coarse:
+//   - github/generic-hmac: the delivery header is UNSIGNED, so an attacker could
+//     replay a captured valid (body, signature) under a fresh delivery id to mint
+//     a fresh key and re-fire the order. Keying on the body hash defeats that —
+//     a legit retry re-sends the byte-identical body, so it still dedups.
+//   - slack: the timestamp is signed but only second-granular, so two DISTINCT
+//     deliveries in the same wall-clock second would collide and one would be
+//     silently dropped. The body hash keeps distinct deliveries distinct.
+func webhookDedupKeyFor(hook string, vres webhookverify.VerifyResult, body []byte) string {
+	id := webhookBodyHash(body)
+	if vres.DedupIDSigned {
+		if signed := strings.TrimSpace(vres.DedupID); signed != "" {
+			id = signed
+		}
+	}
+	return webhookDedupKey(hook, id)
 }
 
 // webhookBodyHash is the dedup-id fallback for schemes that surface no delivery

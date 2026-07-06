@@ -119,3 +119,28 @@ func TestSlackV0_ConfigurableWindow(t *testing.T) {
 		t.Fatal("delivery outside the configured 1m window must be rejected")
 	}
 }
+
+// FIX 2: a pack-authored replay_window above the operator ceiling is clamped down
+// to maxReplayWindow — a pack cannot widen the freshness window it benefits from
+// weakening. A delivery just outside the clamped max is still rejected.
+func TestSlackV0_ReplayWindowClampedToMax(t *testing.T) {
+	secret := slackTestSecret
+	body := []byte(`{}`)
+	now := time.Unix(1_700_000_000, 0)
+	ts := fmt.Sprintf("%d", now.Unix())
+	sig := slackSign(ts, body)
+
+	// A pack asks for a 1000h window; the effective window is clamped to 15m.
+	v, err := New("slack-v0", config.WebhookVerify{ReplayWindow: "1000h"}, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, _ := v.Verify(context.Background(), VerifyRequest{
+		Body: body, Secret: []byte(secret),
+		Header: hdr(slackSignatureHeader, sig, slackTimestampHeader, ts),
+		Now:    func() time.Time { return now.Add(maxReplayWindow + time.Minute) },
+	})
+	if res.OK {
+		t.Fatalf("a pack replay_window=1000h must be clamped to %s; a stale delivery past the max must be rejected", maxReplayWindow)
+	}
+}

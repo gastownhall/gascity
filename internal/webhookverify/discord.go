@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -14,6 +16,10 @@ import (
 const (
 	discordSignatureHeader = "X-Signature-Ed25519"
 	discordTimestampHeader = "X-Signature-Timestamp"
+	// discordDefaultWindow mirrors slack's default replay window (5 min): Discord
+	// signs "{timestamp}{body}", so the timestamp is signature-covered and can
+	// gate replays exactly as slack's does.
+	discordDefaultWindow = 5 * time.Minute
 )
 
 // discordEd25519 verifies Discord's interactions signature: an Ed25519
@@ -29,13 +35,23 @@ type discordEd25519 struct {
 	signatureHeader string
 	timestampHeader string
 	dedupHeader     string
+	window          time.Duration
+	now             func() time.Time
 }
 
-func newDiscordEd25519(cfg config.WebhookVerify, _ Options) (Verifier, error) {
+func newDiscordEd25519(cfg config.WebhookVerify, opts Options) (Verifier, error) {
+	// replay_window is pack-authored, so clamp it down to the operator ceiling
+	// (maxReplayWindow) — a pack must not be able to widen the freshness window.
+	window, err := resolveReplayWindow(cfg.ReplayWindow, discordDefaultWindow)
+	if err != nil {
+		return nil, err
+	}
 	return &discordEd25519{
 		signatureHeader: headerOrDefault(cfg.SignatureHeader, discordSignatureHeader),
 		timestampHeader: headerOrDefault(cfg.TimestampHeader, discordTimestampHeader),
 		dedupHeader:     strings.TrimSpace(cfg.DedupHeader),
+		window:          window,
+		now:             opts.Now,
 	}, nil
 }
 
@@ -60,6 +76,21 @@ func (v *discordEd25519) Verify(_ context.Context, req VerifyRequest) (VerifyRes
 	ts := strings.TrimSpace(req.Header.Get(v.timestampHeader))
 	if ts == "" {
 		return failf("missing %s header", v.timestampHeader), nil
+	}
+	// Freshness: the signed timestamp is part of the signed message, so a captured
+	// valid delivery replayed outside the window is rejected even though ed25519
+	// still verifies. Mirrors slack-v0's replay defense (parse the unix seconds,
+	// reject when the skew exceeds the window) using the injectable clock.
+	tsSecs, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return failf("%s is not a unix timestamp", v.timestampHeader), nil
+	}
+	skew := effectiveNow(req, v.now).Sub(time.Unix(tsSecs, 0))
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > v.window {
+		return failf("%s skew %s exceeds replay window %s", v.timestampHeader, skew.Truncate(time.Second), v.window), nil
 	}
 	msg := make([]byte, 0, len(ts)+len(req.Body))
 	msg = append(msg, ts...)

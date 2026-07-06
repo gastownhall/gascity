@@ -89,10 +89,12 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	if ok, retryAfter := s.webhookLimiter.allow(hook.Name, perMinute, burst); !ok {
 		setRetryAfter(w, retryAfter)
 		problemWebhookRateLimited.writeTo(w)
-		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
-			Reason: reasonRateLimited, Status: http.StatusTooManyRequests,
-		})
+		// Deliberately NOT evented: this fires on every over-limit request, so on a
+		// flood it would be an un-throttled per-request event/log write on a public
+		// endpoint — the very amplification the limiter exists to stop. The 429 +
+		// Retry-After IS the signal; a persistent flood shows up in ingress metrics.
+		// (The other reject paths — perimeter_denied, verify_failed, operator_fault,
+		// dispatch_* — stay evented: they are lower-volume and diagnostically useful.)
 		return
 	}
 
@@ -207,19 +209,26 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// E8 dedup: claim (webhook, delivery-id) so a provider retry (GitHub/Slack/
-	// Discord all re-deliver) cannot fire the order twice. dedupID is the verifier's
-	// stable delivery id, or a body hash when the scheme surfaces none.
-	dedupID := strings.TrimSpace(vres.DedupID)
-	if dedupID == "" {
-		dedupID = webhookBodyHash(body)
+	// E8 dedup: claim (webhook, delivery) so a provider retry (GitHub/Slack/
+	// Discord all re-deliver) cannot fire the order twice. The KEY is derived from
+	// content the signature COVERS (a signed jti, else the body hash) — never from
+	// the unsigned/coarse provider delivery id, which an attacker could mutate to
+	// mint a fresh key (github) or which could silently collide two distinct
+	// deliveries in one second (slack). See webhookDedupKeyFor.
+	//
+	// eventDedupID keeps the provider's surfaced id on the emitted event for
+	// observability (the github delivery id / slack ts is still useful to log),
+	// falling back to the body hash only when the scheme surfaces none.
+	eventDedupID := strings.TrimSpace(vres.DedupID)
+	if eventDedupID == "" {
+		eventDedupID = webhookBodyHash(body)
 	}
-	dedupKey := webhookDedupKey(hook.Name, dedupID)
+	dedupKey := webhookDedupKeyFor(hook.Name, vres, body)
 	if s.webhookDedup.seen(dedupKey) {
 		// Duplicate: ack 2xx so the sender stops retrying, but do NOT dispatch.
 		s.emitWebhookReceived(WebhookReceivedPayload{
 			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
-			DedupID: dedupID, Deduped: true, Matched: true, Dispatched: false,
+			DedupID: eventDedupID, Deduped: true, Matched: true, Dispatched: false,
 			RuleIndex: match.RuleIndex, Order: match.Order, Rig: match.Rig, BodySize: len(body),
 		})
 		writeJSONBytes(w, http.StatusOK, webhookDuplicateBody)
@@ -234,7 +243,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		s.emitWebhookRejected(WebhookRejectedPayload{
 			Webhook: hook.Name, Scheme: scheme,
 			Reason: reasonDispatchUnavailable, Status: http.StatusServiceUnavailable,
-			EventType: vres.EventType, DedupID: dedupID, BodySize: len(body),
+			EventType: vres.EventType, DedupID: eventDedupID, BodySize: len(body),
 		})
 		return
 	}
@@ -253,7 +262,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		s.emitWebhookRejected(WebhookRejectedPayload{
 			Webhook: hook.Name, Scheme: scheme,
 			Reason: reasonDispatchError, Status: http.StatusServiceUnavailable,
-			EventType: vres.EventType, DedupID: dedupID, BodySize: len(body),
+			EventType: vres.EventType, DedupID: eventDedupID, BodySize: len(body),
 		})
 		return
 	}
@@ -261,7 +270,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	if result.Dispatched {
 		s.emitWebhookReceived(WebhookReceivedPayload{
 			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
-			DedupID: dedupID, Deduped: false, Matched: true, Dispatched: true,
+			DedupID: eventDedupID, Deduped: false, Matched: true, Dispatched: true,
 			RuleIndex: match.RuleIndex, Order: match.Order, Rig: match.Rig,
 			ScopedName: result.Dispatch.ScopedName, TrackingID: result.Dispatch.TrackingID,
 			BodySize: len(body),
@@ -280,7 +289,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	s.emitWebhookRejected(WebhookRejectedPayload{
 		Webhook: hook.Name, Scheme: scheme,
 		Reason: reasonDispatchRefused, Status: http.StatusUnprocessableEntity,
-		EventType: vres.EventType, DedupID: dedupID, BodySize: len(body),
+		EventType: vres.EventType, DedupID: eventDedupID, BodySize: len(body),
 	})
 	writeJSONBytes(w, http.StatusUnprocessableEntity, webhookRejectedBody)
 }
@@ -387,11 +396,57 @@ func (s *Server) buildWebhookVerifier(cfg *config.City, hook config.Webhook) (we
 		}
 		secret = sec
 	}
-	v, err := webhookverify.New(scheme, hook.Verify, opts)
+	// Reuse a memoized verifier when the config fingerprint is unchanged, so the
+	// jwt-jwks JWKS cache (the only stateful part) persists across deliveries
+	// instead of being rebuilt — and its JWKS refetched, blocking, pre-signature —
+	// on every request. Secret resolution above stays per-request (cheap env read);
+	// only the verifier is cached. Non-jwt verifiers are stateless, so memoizing
+	// them is harmless.
+	v, err := s.cachedWebhookVerifier(scheme, hook, opts)
 	if err != nil {
 		return nil, nil, err
 	}
 	return v, secret, nil
+}
+
+// cachedWebhookVerifier returns the memoized verifier for hook, rebuilding it
+// when no entry exists or the config fingerprint changed (a hot-reload). The
+// build runs under the mutex; for jwt-jwks that is a cheap allocation (the JWKS
+// fetch is lazy, on first Verify), so no network call happens while locked.
+func (s *Server) cachedWebhookVerifier(scheme string, hook config.Webhook, opts webhookverify.Options) (webhookverify.Verifier, error) {
+	fp := webhookVerifierFingerprint(hook, opts)
+	s.webhookVerifiersMu.Lock()
+	defer s.webhookVerifiersMu.Unlock()
+	if s.webhookVerifiers == nil {
+		s.webhookVerifiers = make(map[string]cachedWebhookVerifier)
+	}
+	if c, ok := s.webhookVerifiers[hook.Name]; ok && c.fingerprint == fp {
+		return c.verifier, nil
+	}
+	v, err := webhookverify.New(scheme, hook.Verify, opts)
+	if err != nil {
+		return nil, err
+	}
+	s.webhookVerifiers[hook.Name] = cachedWebhookVerifier{verifier: v, fingerprint: fp}
+	return v, nil
+}
+
+// webhookVerifierFingerprint is a cheap identity for the security-relevant
+// verifier inputs, so a config hot-reload that changes any of them rebuilds the
+// verifier (and drops the stale JWKS cache). It covers the verify scheme, secret
+// env/slot, the scheme header overrides, the replay window, and the operator jwt
+// trust anchor (issuer/audience/jwks_url) carried in opts.
+func webhookVerifierFingerprint(hook config.Webhook, opts webhookverify.Options) string {
+	v := hook.Verify
+	var iss, aud, jwks string
+	if opts.JWTPolicy != nil {
+		iss, aud, jwks = opts.JWTPolicy.Issuer, opts.JWTPolicy.Audience, opts.JWTPolicy.JWKSURL
+	}
+	return strings.Join([]string{
+		v.Scheme, v.SecretEnv, v.SecretKey,
+		v.SignatureHeader, v.EventHeader, v.DedupHeader, v.TimestampHeader,
+		v.ReplayWindow, iss, aud, jwks,
+	}, "\x00")
 }
 
 // webhookScopeFor builds the E6 dispatch scope from a matched webhook. config.Webhook

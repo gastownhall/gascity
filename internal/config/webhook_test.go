@@ -243,6 +243,85 @@ order = "pr-review-request"
 	}
 }
 
+// FIX 5: allow_public provenance matching is by canonical path (exact or true
+// subtree) only — never by shared basename or unanchored suffix. A foreign pack
+// whose SourceDir merely ends in the same leaf segment as an operator grant must
+// NOT be authorized, or R3's provenance-scoped default-closed guard is defeated.
+func TestWebhookSourceMatches_CanonicalPathOnly(t *testing.T) {
+	const cityRoot = "/city"
+	cases := []struct {
+		name       string
+		sourceDir  string
+		allow      string
+		wantMatch  bool
+		wantReason string
+	}{
+		{"exact absolute", "/city/packs/trusted/github", "/city/packs/trusted/github", true, "identical path"},
+		{"true subtree", "/city/packs/trusted/github", "/city/packs/trusted", true, "SourceDir under the granted dir"},
+		{"basename collision rejected", "/city/packs/evil/github", "/city/packs/trusted/github", false, "same leaf, different pack"},
+		{"suffix collision rejected", "/city/other/github", "/city/packs/trusted/github", false, "unanchored suffix must not match"},
+		{"sibling-prefix not subtree", "/city/packs/trusted-evil/github", "/city/packs/trusted", false, "prefix string but not a path subtree"},
+		{"relative grant resolves against city root", "/city/packs/trusted/github", "packs/trusted/github", true, "relative source joined to cityRoot"},
+		{"relative grant basename spoof rejected", "/city/packs/evil/github", "packs/trusted/github", false, "relative source must still be canonical"},
+		{"empty grant never matches", "/city/packs/trusted/github", "", false, "default-closed"},
+		{"empty source never matches", "", "/city/packs/trusted/github", false, "unstamped provenance is not trusted here"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := webhookSourceMatches(tc.sourceDir, tc.allow, cityRoot); got != tc.wantMatch {
+				t.Fatalf("webhookSourceMatches(%q, %q, %q) = %v, want %v (%s)",
+					tc.sourceDir, tc.allow, cityRoot, got, tc.wantMatch, tc.wantReason)
+			}
+		})
+	}
+}
+
+// FIX 5 (integration): a grant scoped to one pack must not re-home a DIFFERENT
+// pack that shares the webhook name + leaf segment. The basename-collision pack
+// stays capped to tenant; only the exact granted pack keeps public.
+func TestWebhook_AllowPublicRejectsBasenameSpoof(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/evil/github"]
+
+[[webhooks.allow_public]]
+name = "github"
+source = "packs/trusted/github"
+`)
+	writeFile(t, dir, "packs/evil/github/pack.toml", `
+[pack]
+name = "evil"
+schema = 1
+
+[[webhook]]
+name = "github"
+
+[webhook.publication]
+visibility = "public"
+
+[webhook.verify]
+scheme = "github-hmac-sha256"
+secret_env = "GC_WEBHOOK_GITHUB_SECRET"
+
+[[webhook.rule]]
+event = "pull_request"
+order = "pr-review-request"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Webhooks) != 1 {
+		t.Fatalf("want 1 webhook, got %d", len(cfg.Webhooks))
+	}
+	if got := cfg.Webhooks[0].Publication.Visibility; got != "tenant" {
+		t.Errorf("visibility = %q, want tenant: a grant for packs/trusted/github must NOT authorize packs/evil/github (basename spoof)", got)
+	}
+}
+
 func TestValidateWebhooks_Rejects(t *testing.T) {
 	base := func(w Webhook) Webhook {
 		if w.Verify.Scheme == "" {

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/webhookverify"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -113,9 +114,25 @@ type Server struct {
 	// webhookLimiter is the E8 per-webhook token-bucket rate limiter.
 	webhookLimiter *webhookRateLimiter
 
+	// webhookVerifiers memoizes the built E4 verifier per webhook so a stateful
+	// verifier (the jwt-jwks JWKS cache) persists across deliveries instead of
+	// being rebuilt — and its JWKS refetched — on every request. Keyed by webhook
+	// name; a cheap config fingerprint guards each entry so a config hot-reload
+	// that changes the verify config rebuilds the verifier. Secret resolution
+	// stays per-request; only the verifier (the stateful part) is reused.
+	webhookVerifiersMu sync.Mutex
+	webhookVerifiers   map[string]cachedWebhookVerifier
+
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
 	webhookMaxBody int64
+}
+
+// cachedWebhookVerifier is a memoized verifier plus the config fingerprint it
+// was built from; a fingerprint mismatch on the next delivery triggers a rebuild.
+type cachedWebhookVerifier struct {
+	verifier    webhookverify.Verifier
+	fingerprint string
 }
 
 type lookPathEntry struct {

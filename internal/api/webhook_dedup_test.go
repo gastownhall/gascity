@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/webhookverify"
 )
 
 func TestWebhookDedupCache_SeenAndForget(t *testing.T) {
@@ -70,6 +72,50 @@ func TestWebhookDedupCache_EvictsOverCap(t *testing.T) {
 	}
 	if len(c.entries) > c.max {
 		t.Fatalf("entries = %d, want <= cap %d", len(c.entries), c.max)
+	}
+}
+
+// FIX 3/4: the dedup KEY comes from signature-covered content, never from the
+// unsigned/coarse provider delivery id.
+func TestWebhookDedupKeyFor_KeysOnSignedContent(t *testing.T) {
+	bodyA := []byte(`{"n":1}`)
+	bodyB := []byte(`{"n":2}`)
+
+	// FIX 3 (github/generic-hmac): the delivery id is UNSIGNED. A replayed body
+	// with a FRESH delivery id must map to the SAME key (so the replay dedups) —
+	// keying is on the body hash, not the attacker-mutable header.
+	ghA := webhookverify.VerifyResult{OK: true, DedupID: "delivery-A", DedupIDSigned: false}
+	ghB := webhookverify.VerifyResult{OK: true, DedupID: "delivery-B", DedupIDSigned: false}
+	if webhookDedupKeyFor("gh", ghA, bodyA) != webhookDedupKeyFor("gh", ghB, bodyA) {
+		t.Error("github: same body with different (unsigned) delivery ids must share a key — else a fresh id replays the delivery")
+	}
+	// Distinct bodies must stay distinct even with the same delivery id.
+	if webhookDedupKeyFor("gh", ghA, bodyA) == webhookDedupKeyFor("gh", ghA, bodyB) {
+		t.Error("github: distinct bodies must have distinct keys")
+	}
+
+	// FIX 4 (slack): the id is signed but coarse (second-granular). Two DISTINCT
+	// bodies sharing the same ts must NOT collide — key on the body hash.
+	slA := webhookverify.VerifyResult{OK: true, DedupID: "1700000000", DedupIDSigned: false}
+	slB := webhookverify.VerifyResult{OK: true, DedupID: "1700000000", DedupIDSigned: false}
+	if webhookDedupKeyFor("slack", slA, bodyA) == webhookDedupKeyFor("slack", slB, bodyB) {
+		t.Error("slack: distinct bodies in the same second must not collide on the dedup key")
+	}
+
+	// jwt-jwks: the jti is signed AND unique per delivery, so it IS the key.
+	// Same jti dedups regardless of body; different jti does not.
+	jtiX := webhookverify.VerifyResult{OK: true, DedupID: "jti-x", DedupIDSigned: true}
+	jtiY := webhookverify.VerifyResult{OK: true, DedupID: "jti-y", DedupIDSigned: true}
+	if webhookDedupKeyFor("jwt", jtiX, bodyA) != webhookDedupKeyFor("jwt", jtiX, bodyB) {
+		t.Error("jwt: same signed jti must dedup even when the body differs")
+	}
+	if webhookDedupKeyFor("jwt", jtiX, bodyA) == webhookDedupKeyFor("jwt", jtiY, bodyA) {
+		t.Error("jwt: different jti must produce different keys (both dispatch)")
+	}
+	// A jwt with no jti falls back to the body hash (not an empty-id collision).
+	noJTI := webhookverify.VerifyResult{OK: true, DedupID: "", DedupIDSigned: true}
+	if webhookDedupKeyFor("jwt", noJTI, bodyA) != webhookDedupKey("jwt", webhookBodyHash(bodyA)) {
+		t.Error("jwt without a jti must fall back to the body hash")
 	}
 }
 
