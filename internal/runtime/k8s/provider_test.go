@@ -2199,3 +2199,66 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
 	}
 }
+
+// TestBuildPodEnvExcludesInfraSecretsButKeepsProviderAuth verifies the secret
+// blast-radius hardening (R3 #4): infra/cloud credentials must NOT be projected
+// into agent pods, while provider auth + proxy + GC_* config that agents
+// legitimately require MUST still pass through.
+func TestBuildPodEnvExcludesInfraSecretsButKeepsProviderAuth(t *testing.T) {
+	cfgEnv := map[string]string{
+		// Infra secrets — must be stripped.
+		"HCLOUD_TOKEN":          "hetzner-secret",
+		"KUBECONFIG":            "/root/.kube/config",
+		"JSM_API_KEY":           "jsm-secret",
+		"AWS_SECRET_ACCESS_KEY": "aws-secret",
+		"AWS_ACCESS_KEY_ID":     "aws-id",
+
+		// Provider/agent auth + proxy + GC config — must be preserved.
+		"CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth",
+		"ANTHROPIC_API_KEY":       "anthropic-key",
+		"ANTHROPIC_BASE_URL":      "https://api.anthropic.com",
+		"DEEPSEEK_API_KEY":        "deepseek-key",
+		"HTTPS_PROXY":             "http://egress-relay:8888",
+		"NO_PROXY":                "dolt.gc.svc.cluster.local",
+		"GC_AGENT":                "worker",
+		"GC_MAIL":                 "exec:mail",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	// Infra secrets must NOT reach agent pods.
+	for _, key := range []string{
+		"HCLOUD_TOKEN", "KUBECONFIG", "JSM_API_KEY",
+		"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID",
+	} {
+		if _, exists := envMap[key]; exists {
+			t.Errorf("infra secret %s leaked into agent pod env", key)
+		}
+	}
+
+	// Provider auth + proxy + GC config must be preserved verbatim.
+	wantKept := map[string]string{
+		"CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth",
+		"ANTHROPIC_API_KEY":       "anthropic-key",
+		"ANTHROPIC_BASE_URL":      "https://api.anthropic.com",
+		"DEEPSEEK_API_KEY":        "deepseek-key",
+		"HTTPS_PROXY":             "http://egress-relay:8888",
+		"NO_PROXY":                "dolt.gc.svc.cluster.local",
+		"GC_AGENT":                "worker",
+		"GC_MAIL":                 "exec:mail",
+	}
+	for key, want := range wantKept {
+		got, exists := envMap[key]
+		if !exists {
+			t.Errorf("required agent var %s was stripped from agent pod env", key)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
