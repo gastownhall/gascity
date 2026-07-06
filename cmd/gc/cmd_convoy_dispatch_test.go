@@ -2976,6 +2976,53 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 }
 
+// TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort guards
+// against gc-74rxa: the ready-query subprocess env is otherwise rebuilt via
+// mergeRuntimeEnv/controllerWorkQueryEnv, which can transiently resolve
+// without a Dolt port and silently drop GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT,
+// causing `bd --sandbox` to fall back to port 0. The dispatcher process's own
+// environment already carries the correct connection coordinates it was
+// spawned with, so the query string must carry them through explicitly.
+func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, want := range []string{
+		"GC_DOLT_HOST='127.0.0.1'",
+		"BEADS_DOLT_SERVER_HOST='127.0.0.1'",
+		"GC_DOLT_PORT='29620'",
+		"BEADS_DOLT_SERVER_PORT='29620'",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset ensures the
+// query stays clean (no bare "KEY=" assignments) when the current process has
+// no Dolt connection env at all (e.g. a doltlite-backed scope).
+func TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset(t *testing.T) {
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT="} {
+		if strings.Contains(query, unwanted) {
+			t.Fatalf("workflowServeControlReadyQuery should omit %q when ambient env is unset: %q", unwanted, query)
+		}
+	}
+}
+
 func TestWorkflowServeWorkQueryRecognizesCoreControlDispatcher(t *testing.T) {
 	query := workflowServeWorkQuery(config.Agent{Name: "core.control-dispatcher", Dir: "fixture"})
 

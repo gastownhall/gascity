@@ -785,7 +785,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
 	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
 	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
-	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
+	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target) + ambientDoltConnectionQueryPrefix()
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -823,6 +823,43 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`routed_ready "${GC_CONTROL_BARE_TARGET:-}"; ` +
 		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
 	return query
+}
+
+// ambientDoltConnectionQueryPrefix returns a shell-prefix env fragment
+// (leading space + "KEY=value" pairs, or "") carrying the CURRENT process's
+// Dolt connection coordinates under both the GC_DOLT_* and BEADS_DOLT_SERVER_*
+// names bd recognizes.
+//
+// Without this, the ready-query subprocess env is built by stripping the
+// parent's inherited Dolt vars and re-projecting them from a freshly resolved
+// scope lookup (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution
+// runs its own managed-runtime-availability probe and can transiently come
+// back without a port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT
+// from the subprocess env and causing `bd --sandbox` to resolve port 0
+// ("Dolt server unreachable at 127.0.0.1:0") — the recurring fleet-wide
+// graph.v2 wedge (gascity gc-74rxa). The running control-dispatcher process's
+// own environment already carries the connection coordinates it was spawned
+// with, so pass them through explicitly as a shell-prefix assignment (which
+// takes effect for the inner `sh -c` and its `bd` children regardless of what
+// the outer subprocess's cmd.Env resolved to) rather than depending on that
+// re-resolution succeeding on every poll.
+func ambientDoltConnectionQueryPrefix() string {
+	host := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+	if host == "" {
+		host = strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_HOST"))
+	}
+	port := strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
+	if port == "" {
+		port = strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT"))
+	}
+	var prefix string
+	if host != "" {
+		prefix += ` GC_DOLT_HOST=` + shellquote.Quote(host) + ` BEADS_DOLT_SERVER_HOST=` + shellquote.Quote(host)
+	}
+	if port != "" {
+		prefix += ` GC_DOLT_PORT=` + shellquote.Quote(port) + ` BEADS_DOLT_SERVER_PORT=` + shellquote.Quote(port)
+	}
+	return prefix
 }
 
 func workflowServeLegacyControlRoute(target string) string {
