@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -103,5 +105,31 @@ func TestEmitWorkQueryFailureIgnoresOrdinaryErrors(t *testing.T) {
 func TestEmitWorkQueryFailureNilRecorderSafe(t *testing.T) {
 	if !emitWorkQueryFailure(nil, "gm-1", "t", "cmd", errors.New("signal: killed")) {
 		t.Fatal("a nil recorder must still classify the kill and report it as emitted")
+	}
+}
+
+func TestEmitCityServeTargetDegraded(t *testing.T) {
+	cityDir := t.TempDir()
+	if emitCityServeTargetDegraded(cityDir, io.Discard, "", "demo/agent", "/rig/store", 3, errors.New("boom")) {
+		t.Fatal("degradation without a managed session ID must stay on the trace path")
+	}
+	if got := readCityWorkQueryFailureEvents(t, cityDir); len(got) != 0 {
+		t.Fatalf("events without a session ID = %+v, want none", got)
+	}
+	if !emitCityServeTargetDegraded(cityDir, io.Discard, "sess-1", "demo/agent", "/rig/store", 3, errors.New("boom")) {
+		t.Fatal("expected the degraded serve target to be recorded")
+	}
+	failures := readCityWorkQueryFailureEvents(t, cityDir)
+	if len(failures) != 1 {
+		t.Fatalf("recorded events = %+v, want exactly one", failures)
+	}
+	msg := failures[0].Message
+	for _, want := range []string{"/rig/store", "3 consecutive", "boom"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("degradation message %q missing %q", msg, want)
+		}
+	}
+	if failures[0].Subject != "demo/agent" {
+		t.Fatalf("event subject = %q, want the template", failures[0].Subject)
 	}
 }

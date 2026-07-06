@@ -73,10 +73,15 @@ const (
 	SessionResetStalled = "session.reset_stalled"
 	// SessionWorkQueryFailed fires when the current managed session's
 	// work-discovery query subprocess is killed by an external signal or
-	// aborted by the runner-imposed timeout before producing output.
-	// Emission requires the current session ID so the lifecycle payload
-	// remains correlated; the companion reconciler handler is tracked in
-	// #1497.
+	// aborted by the runner-imposed timeout before producing output. The
+	// fanned control-dispatcher serve loop also records it for a killed
+	// control-processing subprocess on an isolated serve target and, with
+	// a reason naming the store, when one target's consecutive-failure
+	// streak crosses the escalation threshold — isolated targets never
+	// surface their errors to the caller, so this event is the only
+	// reconciler-visible channel for them. Emission requires the current
+	// session ID so the lifecycle payload remains correlated; the
+	// companion reconciler handler is tracked in #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is

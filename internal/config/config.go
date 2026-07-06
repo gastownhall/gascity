@@ -127,6 +127,50 @@ func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agen
 	return Agent{}, false
 }
 
+// ResidentRigControlDispatcher returns the rig-scoped deterministic control
+// dispatcher for rigName when configuration actually keeps a session alive
+// for it: min_active_sessions >= 1 on the rig-scoped dispatcher agent, or a
+// [[named_session]] with mode="always" whose backing template resolves (the
+// same FindAgent correlation validateNamedSessions uses) to that rig's
+// dispatcher. This is the residency predicate that partitions rig-store
+// control-bead serving: a resident rig dispatcher exclusively serves its
+// rig store, and the city singleton's serve loop skips that store, so the
+// same control bead can never be visible to two serve loops. A
+// configured-but-idle rig-scoped copy (no pin) is NOT resident — routing
+// to it or reserving its store for it would strand control beads with no
+// live session to claim them (the #3764 failure mode).
+func ResidentRigControlDispatcher(cfg *City, rigName string) (Agent, bool) {
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigName = strings.TrimSpace(rigName)
+	if rigName == "" {
+		return Agent{}, false
+	}
+	for _, a := range cfg.Agents {
+		if !IsDeterministicControlDispatcher(&a) || strings.TrimSpace(a.Dir) != rigName {
+			continue
+		}
+		if a.EffectiveMinActiveSessions() >= 1 {
+			return a, true
+		}
+	}
+	for i := range cfg.NamedSessions {
+		s := &cfg.NamedSessions[i]
+		if s.ModeOrDefault() != "always" || strings.TrimSpace(s.Dir) != rigName {
+			continue
+		}
+		backing := FindAgent(cfg, s.TemplateQualifiedName())
+		if backing == nil || !IsDeterministicControlDispatcher(backing) {
+			continue
+		}
+		if strings.TrimSpace(backing.Dir) == rigName {
+			return *backing, true
+		}
+	}
+	return Agent{}, false
+}
+
 // BindingQualifiedName returns the binding-qualified agent identity without a
 // rig prefix. Examples: "polecat", "gastown.polecat", or "gastown.mayor".
 func (a *Agent) BindingQualifiedName() string {

@@ -89,6 +89,13 @@ func emitWorkQueryFailure(rec events.Recorder, sessionID, template, _ string, er
 	if sessionID == "" {
 		return false
 	}
+	recordWorkQueryFailureEvent(rec, sessionID, template, reason)
+	return true
+}
+
+// recordWorkQueryFailureEvent appends one SessionWorkQueryFailed event with
+// the shared subject/payload shape used by every emitter in this file.
+func recordWorkQueryFailureEvent(rec events.Recorder, sessionID, template, reason string) {
 	if rec == nil {
 		rec = events.Discard
 	}
@@ -104,5 +111,36 @@ func emitWorkQueryFailure(rec events.Recorder, sessionID, template, _ string, er
 		Message: reason,
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, template, reason),
 	})
+}
+
+// workflowServeTargetEscalationStreak is the number of consecutive failed
+// sweeps of a single serve target after which the fanned control-dispatcher
+// serve loop escalates the target on the event bus. Target isolation keeps
+// the loop alive past per-sweep failures, so without this threshold a
+// chronically failing rig store degrades silently forever behind the
+// healthy targets.
+const workflowServeTargetEscalationStreak = 3
+
+// emitCityServeTargetDegraded records a SessionWorkQueryFailed event naming
+// a serve target that has failed workflowServeTargetEscalationStreak
+// consecutive sweeps. Unlike emitWorkQueryFailure it does not require a
+// kill/timeout classification: an isolated target's errors never reach the
+// serve loop's caller, so the event bus is the only channel where the
+// reconciler can see the degradation. It fires once per failure episode —
+// at the sweep where the streak crosses the threshold — and re-arms when
+// the target recovers. Emission still requires the managed session ID so
+// the lifecycle payload stays correlated; without one the failure remains
+// visible in the workflow trace only.
+func emitCityServeTargetDegraded(cityPath string, stderr io.Writer, sessionID, template, storePath string, streak int, err error) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	rec := openCityRecorderAt(cityPath, stderr)
+	if closer, ok := rec.(interface{ Close() error }); ok {
+		defer closer.Close() //nolint:errcheck // best-effort event recorder cleanup
+	}
+	reason := fmt.Sprintf("control serve target %s degraded: %d consecutive failed sweeps: %v", storePath, streak, err)
+	recordWorkQueryFailureEvent(rec, sessionID, template, reason)
 	return true
 }

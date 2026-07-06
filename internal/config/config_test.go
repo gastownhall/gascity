@@ -7937,6 +7937,169 @@ func TestPreferredDeterministicControlDispatcher(t *testing.T) {
 	}
 }
 
+// TestResidentRigControlDispatcher locks the residency predicate that
+// partitions rig-store control-bead serving between the city singleton's
+// fan-out (the default backstop) and a rig's own dispatcher (the opt-in
+// fast path): a rig-scoped deterministic control dispatcher counts as
+// resident only when configuration actually keeps a session alive for it —
+// min_active_sessions >= 1 on the rig-scoped agent, or a [[named_session]]
+// mode="always" whose backing template resolves to it.
+func TestResidentRigControlDispatcher(t *testing.T) {
+	deterministic := func(dir string) Agent {
+		return Agent{
+			Name:         ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          dir,
+			StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}
+	}
+	one := 1
+	zero := 0
+
+	pinned := deterministic("fixture")
+	pinned.MinActiveSessions = &one
+	unpinned := deterministic("fixture")
+	zeroPinned := deterministic("fixture")
+	zeroPinned.MinActiveSessions = &zero
+	pinnedSingleton := deterministic("")
+	pinnedSingleton.MinActiveSessions = &one
+	plain := Agent{Name: ControlDispatcherAgentName, Dir: "fixture", MinActiveSessions: &one} // no StartCommand
+	genericRigScoped := Agent{
+		Name:         ControlDispatcherAgentName,
+		Scope:        "rig",
+		StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+	}
+
+	fixtureRig := []Rig{{Name: "fixture"}}
+
+	tests := []struct {
+		name         string
+		cfg          *City
+		rigName      string
+		wantQN       string
+		wantResident bool
+	}{
+		{
+			name:         "min_active_sessions pins the rig dispatcher resident",
+			cfg:          &City{Agents: []Agent{pinned}, Rigs: fixtureRig},
+			rigName:      "fixture",
+			wantQN:       "fixture/core.control-dispatcher",
+			wantResident: true,
+		},
+		{
+			name:         "unpinned rig dispatcher is not resident",
+			cfg:          &City{Agents: []Agent{unpinned}, Rigs: fixtureRig},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+		{
+			name:         "min_active_sessions zero is not resident",
+			cfg:          &City{Agents: []Agent{zeroPinned}, Rigs: fixtureRig},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+		{
+			name:         "pinned city singleton does not make a rig resident",
+			cfg:          &City{Agents: []Agent{pinnedSingleton}, Rigs: fixtureRig},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+		{
+			name:         "non-deterministic dispatcher is ignored even when pinned",
+			cfg:          &City{Agents: []Agent{plain}, Rigs: fixtureRig},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+		{
+			name:         "pin on one rig does not leak to another",
+			cfg:          &City{Agents: []Agent{pinned}, Rigs: []Rig{{Name: "fixture"}, {Name: "other"}}},
+			rigName:      "other",
+			wantResident: false,
+		},
+		{
+			name: "named_session always backing the explicit rig dispatcher",
+			cfg: &City{
+				Agents: []Agent{unpinned},
+				Rigs:   fixtureRig,
+				NamedSessions: []NamedSession{
+					{Template: "core.control-dispatcher", Dir: "fixture", Mode: "always"},
+				},
+			},
+			rigName:      "fixture",
+			wantQN:       "fixture/core.control-dispatcher",
+			wantResident: true,
+		},
+		{
+			name: "named_session always backing a generic scope-rig dispatcher template",
+			cfg: &City{
+				Agents: []Agent{genericRigScoped},
+				Rigs:   fixtureRig,
+				NamedSessions: []NamedSession{
+					{Template: ControlDispatcherAgentName, Dir: "fixture", Mode: "always"},
+				},
+			},
+			rigName:      "fixture",
+			wantQN:       "fixture/control-dispatcher",
+			wantResident: true,
+		},
+		{
+			name: "named_session on_demand does not pin residency",
+			cfg: &City{
+				Agents: []Agent{unpinned},
+				Rigs:   fixtureRig,
+				NamedSessions: []NamedSession{
+					{Template: "core.control-dispatcher", Dir: "fixture"},
+				},
+			},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+		{
+			name: "named_session always for a different rig does not pin this one",
+			cfg: &City{
+				Agents: []Agent{unpinned, deterministic("other")},
+				Rigs:   []Rig{{Name: "fixture"}, {Name: "other"}},
+				NamedSessions: []NamedSession{
+					{Template: "core.control-dispatcher", Dir: "other", Mode: "always"},
+				},
+			},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+		{
+			name: "named_session always backing an unresolved template is not resident",
+			cfg: &City{
+				Rigs: fixtureRig,
+				NamedSessions: []NamedSession{
+					{Template: "core.control-dispatcher", Dir: "fixture", Mode: "always"},
+				},
+			},
+			rigName:      "fixture",
+			wantResident: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, resident := ResidentRigControlDispatcher(tt.cfg, tt.rigName)
+			if resident != tt.wantResident {
+				t.Fatalf("resident = %v, want %v", resident, tt.wantResident)
+			}
+			if resident && got.QualifiedName() != tt.wantQN {
+				t.Fatalf("QualifiedName = %q, want %q", got.QualifiedName(), tt.wantQN)
+			}
+		})
+	}
+
+	if _, resident := ResidentRigControlDispatcher(nil, "fixture"); resident {
+		t.Fatal("nil cfg should not report a resident dispatcher")
+	}
+	cfg := &City{Agents: []Agent{pinned}, Rigs: fixtureRig}
+	if _, resident := ResidentRigControlDispatcher(cfg, ""); resident {
+		t.Fatal("empty rig name should not report a resident dispatcher")
+	}
+}
+
 // TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
 // RigPackDirs that the prompt renderer relies on. Regression: rig-imported
 // pack template fragments were silently dropped before gascity#2676.
