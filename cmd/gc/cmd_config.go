@@ -126,6 +126,9 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		validationErrors = append(validationErrors, err.Error())
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	} else if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {

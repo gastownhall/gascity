@@ -282,6 +282,14 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// Webhooks declares inbound HTTP receivers mounted on the supervisor edge
+	// under /hook/{name}. Composed like Services (pack concatenation + SourceDir
+	// provenance + the default-closed public pack-guard).
+	Webhooks []Webhook `toml:"webhook,omitempty"`
+	// WebhookPolicy holds city-level webhook governance (the [webhooks] table,
+	// notably allow_public grants). Authored only in the root city.toml; never
+	// merged from packs or fragments so a pack cannot grant itself exposure.
+	WebhookPolicy WebhookPolicyConfig `toml:"webhooks,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
 	// ExtMsg configures the external-messaging fabric (default routes

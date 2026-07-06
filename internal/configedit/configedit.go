@@ -166,6 +166,9 @@ func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("%w: webhooks: %w", ErrValidation, err)
+	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}

@@ -385,10 +385,11 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	}
 	allAA = orders.FilterEnabled(allAA)
 
-	// Filter out manual-trigger orders — they are never auto-dispatched.
+	// Filter out manual- and webhook-trigger orders — they are never
+	// auto-dispatched (webhook orders fire only via the supervisor receiver).
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Trigger != "manual" {
+		if a.Trigger != "manual" && a.Trigger != "webhook" {
 			auto = append(auto, a)
 		}
 	}

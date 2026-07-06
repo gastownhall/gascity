@@ -50,6 +50,7 @@ type PackConfig struct {
 	Agents        []Agent                     `toml:"agent,omitempty"`
 	NamedSessions []NamedSession              `toml:"named_session,omitempty"`
 	Services      []Service                   `toml:"service,omitempty"`
+	Webhooks      []Webhook                   `toml:"webhook,omitempty"`
 	Providers     map[string]ProviderSpec     `toml:"providers,omitempty"`
 	Upstreams     map[string]UpstreamSpec     `toml:"upstreams,omitempty"`
 	Runtimes      map[string]PackRuntimeEntry `toml:"runtimes,omitempty"`
@@ -624,6 +625,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		allRequires = append(allRequires, reqs...)
 		allGlobals = append(allGlobals, globals...)
 		cfg.Services = append(cfg.Services, services...)
+		cfg.Webhooks = append(cfg.Webhooks, cachedPackWebhooks(cache, topoDir)...)
 		packName := tcPackName(fs, topoPath)
 		if packName == "" && len(cachedPackCommands(cache, topoDir)) > 0 {
 			return nil, nil, nil, fmt.Errorf("city pack %q: discovered commands require [pack].name for CLI binding", ref)
@@ -734,6 +736,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			doctors := cachedPackDoctors(cache, impDir)
 			runtimes := cachedPackRuntimes(cache, impDir)
 			skills := cachedPackSkills(cache, impDir)
+			webhooks := cachedPackWebhooks(cache, impDir)
 			mcpTopoDirs := topoDirs
 
 			// by this import. Nested pack dependencies reached through
@@ -760,6 +763,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				reqs = cachedPackLocalRequires(cache, impDir)
 				globals = cachedPackLocalGlobals(cache, impDir)
 				skills = filterSkillsByPackDir(skills, impDir)
+				webhooks = filterWebhooksBySourceDir(webhooks, impDir)
 				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
 
@@ -839,6 +843,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			allRequires = append(allRequires, reqs...)
 			allGlobals = append(allGlobals, globals...)
 			cfg.Services = append(cfg.Services, services...)
+			cfg.Webhooks = append(cfg.Webhooks, webhooks...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 			// Register pack-declared runtimes city-wide (collisions error).
@@ -1100,6 +1105,7 @@ type packLoadResult struct {
 	upstreams      map[string]UpstreamSpec
 	localUpstreams map[string]UpstreamSpec
 	services       []Service
+	webhooks       []Webhook
 	topoDirs       []string
 	localTopoDirs  []string
 	requires       []PackRequirement
@@ -1272,6 +1278,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var includedAgents []Agent
 	var includedNamedSessions []NamedSession
 	var includedServices []Service
+	var includedWebhooks []Webhook
 	var includedTopoDirs []string
 	var allRequires []PackRequirement
 	var includedGlobals []ResolvedPackGlobal
@@ -1300,6 +1307,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedAgents = append(includedAgents, incAgents...)
 		includedNamedSessions = append(includedNamedSessions, incNamedSessions...)
 		includedServices = append(includedServices, incServices...)
+		includedWebhooks = append(includedWebhooks, cachedPackWebhooks(cache, incTopoDir)...)
 		includedTopoDirs = append(includedTopoDirs, incTopoDirs...)
 		allRequires = append(allRequires, incReqs...)
 		includedGlobals = append(includedGlobals, incGlobals...)
@@ -1361,6 +1369,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		impDoctors := cachedPackDoctors(cache, impDir)
 		impRuntimes := cachedPackRuntimes(cache, impDir)
 		impSkills := cachedPackSkills(cache, impDir)
+		impWebhooks := cachedPackWebhooks(cache, impDir)
 
 		// When transitive = false, strip agents that came from the
 		// imported pack's nested dependencies. We keep only agents
@@ -1387,6 +1396,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			impReqs = cachedPackLocalRequires(cache, impDir)
 			impGlobals = cachedPackLocalGlobals(cache, impDir)
 			impSkills = filterSkillsByPackDir(impSkills, impDir)
+			impWebhooks = filterWebhooksBySourceDir(impWebhooks, impDir)
 		}
 
 		// Stamp binding name on all agents and named sessions from this import.
@@ -1453,6 +1463,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedAgents = append(includedAgents, impAgents...)
 		includedNamedSessions = append(includedNamedSessions, impNamedSessions...)
 		includedServices = append(includedServices, impServices...)
+		includedWebhooks = append(includedWebhooks, impWebhooks...)
 		includedTopoDirs = append(includedTopoDirs, impTopoDirs...)
 		allRequires = append(allRequires, impReqs...)
 		includedGlobals = append(includedGlobals, impGlobals...)
@@ -1574,10 +1585,16 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		}
 	}
 
+	// Stamp this pack's own webhooks with pack provenance. The default-closed
+	// public pack-guard runs once post-composition in LoadWithIncludes; here we
+	// only record where each webhook came from.
+	webhooks := stampWebhookSource(tc.Webhooks, topoDir)
+
 	// Merge: included agents first (base), then parent agents (override).
 	includedAgents = append(includedAgents, agents...)
 	includedNamedSessions = append(includedNamedSessions, namedSessions...)
 	includedServices = append(includedServices, services...)
+	includedWebhooks = append(includedWebhooks, webhooks...)
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedRuntimes = append(includedRuntimes, localRuntimes...)
@@ -1661,6 +1678,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		upstreams:      mergedUpstreams,
 		localUpstreams: tc.Upstreams,
 		services:       includedServices,
+		webhooks:       includedWebhooks,
 		topoDirs:       topoDirs,
 		localTopoDirs:  []string{topoDir},
 		requires:       allRequires,
@@ -1690,6 +1708,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		upstreams:      deepCopyUpstreamSpecs(in.upstreams),
 		localUpstreams: deepCopyUpstreamSpecs(in.localUpstreams),
 		services:       deepCopyServices(in.services),
+		webhooks:       deepCopyWebhooks(in.webhooks),
 		topoDirs:       append([]string(nil), in.topoDirs...),
 		localTopoDirs:  append([]string(nil), in.localTopoDirs...),
 		requires:       append([]PackRequirement(nil), in.requires...),

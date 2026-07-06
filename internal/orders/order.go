@@ -256,6 +256,13 @@ func Validate(a Order) error {
 		}
 	case "manual":
 		// No additional fields required.
+	case "webhook":
+		// Webhook-dispatched orders declare the named args they accept so the
+		// receiver can validate required params before dispatch. An order with
+		// no [order.params] could never receive webhook args meaningfully.
+		if len(a.Params) == 0 {
+			return fmt.Errorf("order %q: webhook trigger requires a non-empty [order.params]", a.Name)
+		}
 	case "":
 		return fmt.Errorf("order %q: trigger is required", a.Name)
 	default:
