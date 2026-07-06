@@ -32,6 +32,15 @@ var (
 	// promptly instead of being pinned missing for the full success TTL. A var so
 	// tests can shorten it.
 	formulaNotFoundTTL = 5 * time.Second
+	// singleFlightComputeTimeout bounds the elected single-flight compute, which
+	// runs under a context DETACHED from the electing caller's request (see get).
+	// Detaching stops the caller disconnecting from canceling the shared upstream
+	// fetch, but a detached context also loses the request deadline, so this
+	// timeout backstops a wedged upstream and keeps a stuck flight from pinning the
+	// elector goroutine (and every joiner) forever. It sits above the per-fetch
+	// http.Client timeout (runSessionsFetchTimeout), which stays the primary bound
+	// in practice. A var so tests can shorten it.
+	singleFlightComputeTimeout = 30 * time.Second
 )
 
 // ── Generic single-flight TTL cache ───────────────────────────────────────
@@ -62,9 +71,26 @@ type cacheEntry[V any] struct {
 	// cold-miss degrade so a stale not-found never masks a later upstream error.
 	staleServeable bool
 	// inflight is non-nil while exactly one caller computes this key; joiners wait
-	// on it and then re-read the entry. It is set under the cache lock, closed by
-	// the computing caller after publishing, and cleared under the lock.
-	inflight chan struct{}
+	// on its done channel and then return its published result (never re-electing),
+	// so a burst of concurrent callers collapses onto ONE upstream fetch even when
+	// that fetch fails. It is set under the cache lock, resolved and closed by the
+	// computing caller after publishing, and cleared under the lock.
+	inflight *flight[V]
+}
+
+// flight is one in-flight compute for a key. It carries the channel joiners wait
+// on plus the single result the elected computer publishes for every caller
+// joined to this flight to return: a fresh success, a served-stale positive
+// last-good, or a transient cold/expired-negative failure. Sharing one flight's
+// result is what collapses a concurrent burst onto ONE upstream fetch even when
+// the fetch fails — the failure is NOT written to the cache entry, so a LATER
+// request still re-elects and refetches. value/ok are written once (under the
+// cache lock, before done is closed) and read by joiners only after done closes,
+// so the channel close supplies the happens-before with no extra locking.
+type flight[V any] struct {
+	done  chan struct{}
+	value V
+	ok    bool
 }
 
 // singleFlightCache is a small per-key TTL cache with single-flight: concurrent
@@ -94,99 +120,142 @@ func newSingleFlightCache[K comparable, V any]() *singleFlightCache[K, V] {
 // staleServeable last-good the stale value is served (available); on a cold miss
 // with no serveable last-good the zero value is returned so the caller can apply
 // its own honest degrade. Exactly one caller runs compute per key per miss; the
-// rest block until it publishes, then re-read.
+// rest block until it publishes, then return that same shared result — so a
+// concurrent burst, INCLUDING a failed one, collapses onto that single fetch.
+// The elected compute runs under a context detached from the electing caller's
+// request (its values kept, its cancellation and deadline dropped) plus a bounded
+// timeout, so an elector that disconnects mid-fetch cannot cancel the shared
+// upstream request its joiners are still waiting on; each joiner still abandons
+// its own wait via ctx. A caller whose ctx is already canceled at a miss does not
+// elect at all — it degrades to the serveable last-good — so only a caller that
+// was live at election ever detaches a compute for nobody.
 //
 // The returned bool reports whether a usable value is being served: true for a
 // fresh success, a within-TTL hit, or a served-stale positive last-good; false
 // for a cold miss whose fetch failed and left no last-good, or an expired
 // negative whose refetch failed.
 func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(context.Context) (V, time.Duration, bool, bool)) (V, bool) {
-	for {
-		c.mu.Lock()
-		e, ok := c.entries[key]
-		if !ok {
-			e = &cacheEntry[V]{}
-			c.entries[key] = e
-		}
-		// Fresh hit: serve without touching the upstream.
-		if e.hasValue && e.inflight == nil && time.Since(e.computed) < e.ttl {
-			v := e.value
-			c.mu.Unlock()
-			return v, true
-		}
-		// Someone is already computing this key: join and re-read once they publish.
-		if e.inflight != nil {
-			wait := e.inflight
-			c.mu.Unlock()
-			select {
-			case <-wait:
-				// Loop: re-read the now-published entry (or re-elect a computer if the
-				// prior compute failed and left the entry stale/empty and expired).
-				continue
-			case <-ctx.Done():
-				// The caller gave up. Serve the last-good if we have one (never block a
-				// canceled caller on an in-flight fetch); otherwise degrade.
-				return c.lastGoodOrZero(key)
-			}
-		}
-		// We are the elected computer for this key.
-		done := make(chan struct{})
-		e.inflight = done
-		c.mu.Unlock()
-
-		// The in-flight handshake MUST be released on every exit — including a
-		// panic in compute. The dashboardbff plane runs under the supervisor's
-		// withRecovery middleware, so a compute panic is caught and turned into a
-		// 500 while the process keeps serving; without a deferred release the
-		// entry's inflight channel would be orphaned (never closed) and every
-		// future caller for this key would block on it forever (or degrade to a
-		// frozen last-good that never refetches). The deferred cleanup runs
-		// before the panic propagates, so the next caller re-elects and recovers
-		// while withRecovery still logs and 500s the panicking request.
-		var (
-			value          V
-			ttl            time.Duration
-			computeOK      bool
-			staleServeable bool
-			served         V
-			servedStaleOK  bool
-		)
-		func() {
-			defer func() {
-				c.mu.Lock()
-				if computeOK {
-					e.value = value
-					e.computed = time.Now()
-					e.ttl = ttl
-					e.hasValue = true
-					e.staleServeable = staleServeable
-				}
-				// else: keep the prior last-good (if any) untouched — degrade,
-				// don't blank.
-				served, servedStaleOK = e.value, e.hasValue && e.staleServeable
-				e.inflight = nil
-				c.mu.Unlock()
-				close(done)
-			}()
-			// Compute with NO cache lock held (the samplers.go contract). A panic
-			// here still runs the deferred release above, then propagates.
-			value, ttl, computeOK, staleServeable = compute(ctx)
-		}()
-
-		if computeOK {
-			return value, true
-		}
-		if servedStaleOK {
-			// A failed refetch with a serveable positive last-good: serve it stale.
-			// A negative last-good is NOT serveable stale, so it falls through to the
-			// cold-miss degrade below rather than masking this upstream error.
-			return served, true
-		}
-		// Cold miss (or expired negative), fetch failed, no serveable last-good:
-		// honest degrade to the zero value.
-		var zero V
-		return zero, false
+	c.mu.Lock()
+	e, ok := c.entries[key]
+	if !ok {
+		e = &cacheEntry[V]{}
+		c.entries[key] = e
 	}
+	// Fresh hit: serve without touching the upstream.
+	if e.hasValue && e.inflight == nil && time.Since(e.computed) < e.ttl {
+		v := e.value
+		c.mu.Unlock()
+		return v, true
+	}
+	// Someone is already computing this key: join that flight and return its
+	// shared result instead of re-electing. A failed cold or expired-negative
+	// flight is shared here too, so N concurrent callers collapse onto the ONE
+	// upstream fetch rather than each waking, re-electing, and refetching
+	// serially. A later request (after the flight clears inflight) still elects a
+	// fresh compute, since the failure was never cached on the entry.
+	if e.inflight != nil {
+		fl := e.inflight
+		c.mu.Unlock()
+		select {
+		case <-fl.done:
+			return fl.value, fl.ok
+		case <-ctx.Done():
+			// The caller gave up. Serve the last-good if we have one (never block a
+			// canceled caller on an in-flight fetch); otherwise degrade.
+			return c.lastGoodOrZero(key)
+		}
+	}
+	// A caller whose request context is already canceled must NOT elect a new
+	// flight. Electing sets the inflight slot and runs compute under a context
+	// DETACHED from this caller (context.WithoutCancel below), so a request that
+	// was already gone before the miss would still drive a full upstream fetch —
+	// bounded only by the fetch/backstop timeout — on nobody's behalf. The
+	// fresh-hit and join paths above are already safe for a canceled caller (a
+	// hit does no upstream work; a joiner abandons via its own ctx.Done()); only
+	// election has to guard. Degrade to the serveable last-good exactly as the
+	// canceled-joiner branch does. WithoutCancel below therefore only ever
+	// detaches a compute elected by a caller that was live at election, so a
+	// mid-flight disconnect still cannot cancel the shared fetch for joiners.
+	if ctx.Err() != nil {
+		c.mu.Unlock()
+		return c.lastGoodOrZero(key)
+	}
+	// We are the elected computer for this key.
+	fl := &flight[V]{done: make(chan struct{})}
+	e.inflight = fl
+	c.mu.Unlock()
+
+	// The in-flight handshake MUST be released on every exit — including a panic
+	// in compute. The dashboardbff plane runs under the supervisor's withRecovery
+	// middleware, so a compute panic is caught and turned into a 500 while the
+	// process keeps serving; without a deferred release the entry's inflight
+	// channel would be orphaned (never closed) and every future caller for this
+	// key would block on it forever (or degrade to a frozen last-good that never
+	// refetches). The deferred cleanup runs before the panic propagates, so the
+	// next caller re-elects and recovers while withRecovery still logs and 500s
+	// the panicking request.
+	var (
+		value          V
+		ttl            time.Duration
+		computeOK      bool
+		staleServeable bool
+		resultValue    V
+		resultOK       bool
+	)
+	func() {
+		defer func() {
+			c.mu.Lock()
+			if computeOK {
+				e.value = value
+				e.computed = time.Now()
+				e.ttl = ttl
+				e.hasValue = true
+				e.staleServeable = staleServeable
+			}
+			// else: keep the prior last-good (if any) untouched — degrade,
+			// don't blank.
+			//
+			// Resolve the single result this flight publishes to every joined caller
+			// (the elector and all current waiters): a fresh success, a served-stale
+			// positive last-good, or an honest degrade. Because a failure is never
+			// written to the entry above, a LATER request re-elects and refetches —
+			// only the concurrent burst is collapsed.
+			switch {
+			case computeOK:
+				resultValue, resultOK = value, true
+			case e.hasValue && e.staleServeable:
+				// A failed refetch with a serveable positive last-good: serve it stale.
+				// A negative last-good is NOT serveable stale, so it falls through to
+				// the degrade below rather than masking this upstream error.
+				resultValue, resultOK = e.value, true
+			default:
+				// Cold miss (or expired negative), fetch failed, no serveable
+				// last-good: honest degrade to the zero value.
+				var zero V
+				resultValue, resultOK = zero, false
+			}
+			fl.value, fl.ok = resultValue, resultOK
+			e.inflight = nil
+			c.mu.Unlock()
+			close(fl.done)
+		}()
+		// Compute with NO cache lock held (the samplers.go contract), under a
+		// context DETACHED from the electing caller's request. This elected compute
+		// is the single upstream fetch every joined caller shares; if it ran on the
+		// elector's ctx, that caller disconnecting or hitting its deadline mid-fetch
+		// would cancel the shared request and hand every still-waiting joiner a
+		// canceled/failed result instead of their own enrichment. context.WithoutCancel
+		// keeps the request's values (auth, tracing) while dropping its cancellation
+		// and deadline; a bounded timeout backstops a wedged upstream so the detached
+		// compute can never pin the flight forever. Joiners still abandon their own
+		// wait via ctx.Done() above — only the shared compute is decoupled. A panic
+		// here still runs the deferred release above, then propagates.
+		computeCtx, cancelCompute := context.WithTimeout(context.WithoutCancel(ctx), singleFlightComputeTimeout)
+		defer cancelCompute()
+		value, ttl, computeOK, staleServeable = compute(computeCtx)
+	}()
+
+	return resultValue, resultOK
 }
 
 // lastGoodOrZero returns the entry's serveable last-good value (available) if one

@@ -98,6 +98,153 @@ func TestSingleFlightCacheRecoversAfterComputePanic(t *testing.T) {
 	}
 }
 
+// TestSingleFlightCacheElectorCancelDoesNotCancelSharedCompute proves the elected
+// single-flight compute is decoupled from the electing caller's request context:
+// if the elector's ctx is canceled while a joiner is still waiting on the shared
+// flight, the shared compute must NOT be canceled, and the still-live joiner must
+// receive the compute's real (successful) result instead of a canceled/degraded
+// one. Before the fix the elector ran compute on its own request ctx, so an
+// elector whose client disconnected mid-fetch canceled the shared upstream request
+// and handed every joined caller a failed result rather than their own enrichment.
+func TestSingleFlightCacheElectorCancelDoesNotCancelSharedCompute(t *testing.T) {
+	c := newSingleFlightCache[string, int]()
+
+	var (
+		startOnce     sync.Once
+		started       = make(chan struct{}) // closed when the elected compute begins
+		release       = make(chan struct{}) // closed by the test to let compute finish
+		computeCalls  atomic.Int64          // must stay 1: the joiner joins, never re-elects
+		computeCtxErr error                 // compute's own ctx error, sampled after release
+	)
+	compute := func(cctx context.Context) (int, time.Duration, bool, bool) {
+		computeCalls.Add(1)
+		startOnce.Do(func() { close(started) })
+		<-release
+		// Sample the compute context AFTER the elector's ctx was canceled. With the
+		// fix this stays nil (detached); the pre-fix code would see context.Canceled
+		// here, and a real upstream fetch on that ctx would abort.
+		computeCtxErr = cctx.Err()
+		if cctx.Err() != nil {
+			// Mirror a real upstream fetch aborting on a canceled ctx: report failure.
+			return 0, 0, false, false
+		}
+		return 42, time.Minute, true, true
+	}
+
+	electorCtx, cancelElector := context.WithCancel(context.Background())
+	joinerCtx := context.Background() // the joiner stays live throughout
+
+	var (
+		electorVal, joinerVal int
+		electorOK, joinerOK   bool
+	)
+	electorDone := make(chan struct{})
+	go func() {
+		defer close(electorDone)
+		electorVal, electorOK = c.get(electorCtx, "k", compute)
+	}()
+
+	<-started // the elector was elected and is inside compute
+
+	joinerDone := make(chan struct{})
+	go func() {
+		defer close(joinerDone)
+		joinerVal, joinerOK = c.get(joinerCtx, "k", compute)
+	}()
+
+	// Let the joiner reach the in-flight join before we cancel the elector.
+	time.Sleep(50 * time.Millisecond)
+
+	// The electing caller's client disconnects: cancel its request ctx while the
+	// joiner is still waiting on the shared flight.
+	cancelElector()
+	time.Sleep(20 * time.Millisecond) // give cancellation a chance to (wrongly) propagate
+
+	close(release) // let the shared compute finish
+
+	select {
+	case <-joinerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("joiner never returned; the shared flight wedged")
+	}
+	<-electorDone
+
+	if got := computeCalls.Load(); got != 1 {
+		t.Fatalf("compute ran %d times, want 1 (the joiner must join the flight, not re-elect)", got)
+	}
+	if computeCtxErr != nil {
+		t.Fatalf("shared compute ctx was canceled (%v); the elected compute must be decoupled from the electing caller's request", computeCtxErr)
+	}
+	if !joinerOK || joinerVal != 42 {
+		t.Fatalf("joiner result = (%d,%v), want (42,true): a still-live joiner must get the shared compute's real result, not the canceled elector's degrade", joinerVal, joinerOK)
+	}
+	if !electorOK || electorVal != 42 {
+		t.Fatalf("elector result = (%d,%v), want (42,true): the elected compute completes under its detached ctx", electorVal, electorOK)
+	}
+}
+
+// TestSingleFlightCachePreCanceledColdCallerDoesNotElect proves a caller whose
+// request context is already canceled before a cold-miss get does NOT elect the
+// single-flight compute: it degrades to unavailable instead. Before the fix an
+// already-canceled request could still become the elector, and because the
+// elected compute runs under context.WithoutCancel(ctx) the detached fetch would
+// then run a full upstream loopback (bounded only by the fetch/backstop timeout)
+// on behalf of a caller that was already gone.
+func TestSingleFlightCachePreCanceledColdCallerDoesNotElect(t *testing.T) {
+	c := newSingleFlightCache[string, int]()
+
+	var computeCalls atomic.Int64
+	compute := func(context.Context) (int, time.Duration, bool, bool) {
+		computeCalls.Add(1)
+		return 42, time.Minute, true, true
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled before get is even called
+
+	v, ok := c.get(ctx, "k", compute)
+	if got := computeCalls.Load(); got != 0 {
+		t.Fatalf("compute ran %d times, want 0 (a pre-canceled caller must not elect a detached flight)", got)
+	}
+	if ok || v != 0 {
+		t.Fatalf("pre-canceled cold get = (%d,%v), want (0,false): degrade to unavailable, not a detached compute", v, ok)
+	}
+}
+
+// TestSingleFlightCachePreCanceledCallerServesLastGoodOnExpiredKey proves a caller
+// whose context is already canceled at an EXPIRED key (past its TTL, so the
+// fresh-hit path no longer applies) still does not elect a refetch: it degrades to
+// the serveable last-good instead of driving a detached upstream compute for a
+// caller that is already gone. Before the fix the pre-canceled caller re-elected
+// and refetched, so compute ran a second time.
+func TestSingleFlightCachePreCanceledCallerServesLastGoodOnExpiredKey(t *testing.T) {
+	c := newSingleFlightCache[string, int]()
+
+	var computeCalls atomic.Int64
+	compute := func(context.Context) (int, time.Duration, bool, bool) {
+		computeCalls.Add(1)
+		return 7, 20 * time.Millisecond, true, true // staleServeable positive last-good, short TTL
+	}
+
+	// Seed a staleServeable positive last-good on a live ctx, then let it expire so
+	// the next get can no longer take the fresh-hit path.
+	if v, ok := c.get(context.Background(), "k", compute); !ok || v != 7 {
+		t.Fatalf("seed get = (%d,%v), want (7,true)", v, ok)
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	v, ok := c.get(ctx, "k", compute)
+	if got := computeCalls.Load(); got != 1 {
+		t.Fatalf("compute ran %d times, want 1 (a pre-canceled caller must not elect a refetch on the expired key)", got)
+	}
+	if !ok || v != 7 {
+		t.Fatalf("pre-canceled expired get = (%d,%v), want (7,true): serve the staleServeable last-good instead of a detached refetch", v, ok)
+	}
+}
+
 // TestSessionsCacheServesWithinTTL proves two reads inside the TTL hit the
 // supervisor exactly once (the second is served from cache).
 func TestSessionsCacheServesWithinTTL(t *testing.T) {
@@ -237,6 +384,49 @@ func TestSessionsCacheColdFailureDegrades(t *testing.T) {
 	}
 }
 
+// TestSessionsCacheColdFailureSingleFlight proves a burst of concurrent cold-miss
+// callers whose shared fetch FAILS collapses onto ONE upstream hit — every waiter
+// returns that one failed flight's (nil,false) degrade instead of waking and
+// re-electing itself to refetch serially. Regression for the single-flight
+// burst-collapse contract on the negative path (the pre-fix code re-elected each
+// waiter, producing one supervisor request per dashboard request).
+func TestSessionsCacheColdFailureSingleFlight(t *testing.T) {
+	var hits atomic.Int64
+	gate := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-gate // hold every caller in-flight until released, proving overlap
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	m := newEnrichmentManager(t, ts.URL)
+	ctx := context.Background()
+
+	const n = 8
+	var wg sync.WaitGroup
+	var degraded atomic.Int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if s, ok := m.fetchSessions(ctx, "alpha"); !ok && s == nil {
+				degraded.Add(1)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond) // let every caller reach the in-flight join
+	close(gate)
+	wg.Wait()
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("sessions upstream hits = %d, want 1 (a failed cold flight is shared, not re-elected per waiter)", got)
+	}
+	if got := degraded.Load(); got != n {
+		t.Fatalf("degraded callers = %d, want %d (every waiter shares the one failed flight's (nil,false))", got, n)
+	}
+}
+
 // TestFormulaCacheServesWithinTTL proves two formula reads inside the TTL hit the
 // supervisor once and both resolve to the same available detail.
 func TestFormulaCacheServesWithinTTL(t *testing.T) {
@@ -363,6 +553,47 @@ func TestFormulaCacheColdFailureDegrades(t *testing.T) {
 	}
 }
 
+// TestFormulaCacheColdFailureSingleFlight proves the same negative-path
+// burst-collapse for the formula cache: concurrent cold-miss callers whose shared
+// fetch returns a non-404 upstream error all resolve to (nil, upstream_error,
+// false) from ONE upstream hit, not one re-elected refetch per waiter.
+func TestFormulaCacheColdFailureSingleFlight(t *testing.T) {
+	var hits atomic.Int64
+	gate := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-gate
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	m := newEnrichmentManager(t, ts.URL)
+	ctx := context.Background()
+
+	const n = 8
+	var wg sync.WaitGroup
+	var upstreamErr atomic.Int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if d, f, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); !ok && d == nil && f == runproj.FormulaDetailUpstreamError {
+				upstreamErr.Add(1)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("formula upstream hits = %d, want 1 (a failed cold flight is shared, not re-elected per waiter)", got)
+	}
+	if got := upstreamErr.Load(); got != n {
+		t.Fatalf("upstream_error degrades = %d, want %d (every waiter shares the one failed flight)", got, n)
+	}
+}
+
 // TestFormulaCacheExpiredNotFoundDoesNotMaskUpstreamError proves a cached 404 is
 // NOT served stale once its short TTL lapses: after the not-found window a fresh
 // upstream 500 must surface as FormulaDetailUpstreamError, not the stale
@@ -400,6 +631,67 @@ func TestFormulaCacheExpiredNotFoundDoesNotMaskUpstreamError(t *testing.T) {
 	}
 	if got := srv.formulaHits.Load(); got != 2 {
 		t.Fatalf("formula hits = %d, want 2 (the expired not_found refetched and hit the 500)", got)
+	}
+}
+
+// TestFormulaCacheExpiredNotFoundConcurrent500SingleFlight proves the hardest
+// negative-path case: after a cached not_found expires, a concurrent burst that
+// now hits a 500 collapses onto ONE refetch, and every waiter sees the honest
+// upstream_error degrade. It combines two contracts under concurrency — the
+// expired not_found must not be served stale to mask the 500, and it must not be
+// re-probed once per waiter.
+func TestFormulaCacheExpiredNotFoundConcurrent500SingleFlight(t *testing.T) {
+	defer func(prev time.Duration) { formulaNotFoundTTL = prev }(formulaNotFoundTTL)
+	formulaNotFoundTTL = 20 * time.Millisecond
+
+	var hits atomic.Int64
+	var status atomic.Int64
+	status.Store(http.StatusNotFound)
+	var gateActive atomic.Bool
+	gate := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if gateActive.Load() {
+			<-gate // hold only the concurrent burst in-flight together
+		}
+		hits.Add(1)
+		w.WriteHeader(int(status.Load()))
+	}))
+	defer ts.Close()
+
+	m := newEnrichmentManager(t, ts.URL)
+	ctx := context.Background()
+
+	// Seed a cached not_found (ungated), then let its short TTL lapse.
+	if _, f, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); ok || f != runproj.FormulaDetailNotFound {
+		t.Fatalf("seed read: ok=%v failure=%q, want not_found", ok, f)
+	}
+	time.Sleep(40 * time.Millisecond) // expire the not-found entry
+	status.Store(http.StatusInternalServerError)
+	gateActive.Store(true)
+
+	const n = 8
+	var wg sync.WaitGroup
+	var upstreamErr atomic.Int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if d, f, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); !ok && d == nil && f == runproj.FormulaDetailUpstreamError {
+				upstreamErr.Add(1)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	// One seed hit + exactly one shared burst hit: the expired not_found refetch
+	// collapses to a single 500 flight, not one probe per waiter.
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("formula upstream hits = %d, want 2 (1 seed + 1 shared burst flight)", got)
+	}
+	if got := upstreamErr.Load(); got != n {
+		t.Fatalf("upstream_error degrades = %d, want %d (expired not_found must not mask the shared 500)", got, n)
 	}
 }
 
