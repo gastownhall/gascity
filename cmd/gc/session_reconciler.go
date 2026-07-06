@@ -2436,7 +2436,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		eval.Policy = policy
 		name := target.session.Metadata["session_name"]
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
+		if decision.ShouldWake && decision.Reason != "pending-create" && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
+			// Pending creates represent an in-flight start and must not be
+			// suppressed by stale sleep metadata while waiting for op=start.
 			// Direct assigned work overrides sleep suppression for every
 			// sleep class — the assignment is session-specific, so a pool
 			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)

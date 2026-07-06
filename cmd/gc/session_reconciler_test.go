@@ -6311,6 +6311,55 @@ func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *t
 	}
 }
 
+func TestReconcileSessionBeads_PendingCreateBypassesSessionSleepSuppression(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		SessionSleep: config.SessionSleepConfig{
+			InteractiveResume: "0s",
+		},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionCreating(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"pending_create_claim":       "true",
+	})
+
+	if woken := env.reconcile([]beads.Bead{session}); woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active", got.Metadata["state"])
+	}
+}
+
 func TestReconcileSessionBeads_PreservesNeverStartedPendingCreateBeforeLeaseExpires(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
