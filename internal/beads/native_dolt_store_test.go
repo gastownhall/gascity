@@ -299,6 +299,37 @@ func TestNativeDoltStoreListStatusOpenMatchesOpenNormalizedUpstreamStatuses(t *t
 	}
 }
 
+// TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift guards
+// against Dolt status-index drift (gcy-1on) where SearchIssues returns a bead
+// with status="closed" even though the ExcludeStatus filter asked to exclude it.
+// ApplyListQuery must catch leaked closed beads so List(Status: "open") never
+// returns them regardless of upstream inconsistency.
+func TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift(t *testing.T) {
+	// Spy that ignores the ExcludeStatus filter and returns a closed bead,
+	// simulating Dolt status-index drift.
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, _ string, _ beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			return []*beadslib.Issue{
+				{ID: "gc-closed-drift", Title: "closed but leaking from index", Status: beadslib.StatusClosed, IssueType: beadslib.TypeTask, Priority: 2},
+				{ID: "gc-open", Title: "genuinely open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+			}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{AllowScan: true, Status: "open", TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("List(Status: open) len = %d, want 1 (closed drift bead must be excluded); got %+v", len(got), got)
+	}
+	if got[0].ID != "gc-open" {
+		t.Fatalf("List(Status: open) returned unexpected bead %q, want gc-open", got[0].ID)
+	}
+}
+
 func TestNativeDoltStoreReadyIncludesOpenNormalizedUpstreamStatuses(t *testing.T) {
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
