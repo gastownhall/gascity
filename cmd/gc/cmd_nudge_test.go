@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -3188,6 +3189,83 @@ func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 				t.Fatalf("%s timestamp drift %s is outside the 1-minute test window (raw=%q)", session.MetadataLastNudgeDeliveredAt, drift, raw)
 			}
 		})
+	}
+}
+
+func TestCmdNudgeDrainInjectDegradesWhenQueueLockExceedsHookBudget(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_INJECT_CLOCK", "1")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	lockPath := nudgequeue.LockPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll lock dir: %v", err)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile lock: %v", err)
+	}
+	defer lockFile.Close() //nolint:errcheck
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("Flock lock: %v", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+
+	origTimeout := nudgeDrainInjectTimeout
+	nudgeDrainInjectTimeout = 25 * time.Millisecond
+	defer func() { nudgeDrainInjectTimeout = origTimeout }()
+
+	start := time.Now()
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrainWithFormat([]string{created.ID}, true, "codex", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want degraded success; stderr=%s", code, stderr.String())
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("Flock unlock: %v", err)
+	}
+	if err := nudgequeue.WithState(cityDir, func(*nudgequeue.State) error { return nil }); err != nil {
+		t.Fatalf("waiting for background drain to release queue lock: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("cmdNudgeDrainWithFormat took %s, want bounded hook return", elapsed)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty degraded hook stderr", stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "UserPromptSubmit") {
+		t.Fatalf("stdout = %q, want provider-formatted UserPromptSubmit context", out)
+	}
+	if !strings.Contains(out, "gc nudge drain degraded") {
+		t.Fatalf("stdout = %q, want degraded hook notice", out)
+	}
+	if !strings.Contains(out, "Current time:") {
+		t.Fatalf("stdout = %q, want clock context preserved", out)
 	}
 }
 
