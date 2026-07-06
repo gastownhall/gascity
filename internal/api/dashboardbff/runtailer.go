@@ -414,12 +414,14 @@ func (t *cityRunTailer) enrichedSummary(ctx context.Context) runproj.RunSummary 
 // the caller's honest partial/warming states are preserved. detail() and
 // enrichedSummary() consume this.
 func (m *runTailerManager) fetchSessions(ctx context.Context, name string) ([]runproj.DashboardSession, bool) {
-	got, ok := m.sessionsCache.get(ctx, name, func(ctx context.Context) (cachedSessions, time.Duration, bool) {
+	got, ok := m.sessionsCache.get(ctx, name, func(ctx context.Context) (cachedSessions, time.Duration, bool, bool) {
 		items, upstreamOK := m.fetchSessionsUpstream(ctx, name)
 		if !upstreamOK {
-			return cachedSessions{}, 0, false
+			return cachedSessions{}, 0, false, false
 		}
-		return cachedSessions{items: items}, sessionsCacheTTL, true
+		// A successful sessions read is a positive last-good: serve it stale on a
+		// later failed refetch rather than blanking the health card.
+		return cachedSessions{items: items}, sessionsCacheTTL, true, true
 	})
 	if !ok {
 		return nil, false
@@ -482,18 +484,23 @@ type formulaNodeRef struct {
 // runproj renders as the operator diagnostic. detail() consumes this.
 func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
 	key := formulaCacheKey{name: name, formula: formula, target: target, scopeKind: scopeKind, scopeRef: scopeRef}
-	got, ok := m.formulaCache.get(ctx, key, func(ctx context.Context) (cachedFormulaDetail, time.Duration, bool) {
+	got, ok := m.formulaCache.get(ctx, key, func(ctx context.Context) (cachedFormulaDetail, time.Duration, bool, bool) {
 		detail, failure, upstreamOK := m.fetchFormulaDetailUpstream(ctx, name, formula, target, scopeKind, scopeRef)
 		switch {
 		case upstreamOK:
-			return cachedFormulaDetail{detail: detail}, formulaCacheTTL, true
+			// A compiled formula is a positive last-good: serve it stale on a later
+			// failed refetch.
+			return cachedFormulaDetail{detail: detail}, formulaCacheTTL, true, true
 		case failure == runproj.FormulaDetailNotFound:
 			// A definitive 404 is a real negative result: cache it briefly so a burst
 			// of GETs does not re-probe a known-missing formula, but re-check soon.
-			return cachedFormulaDetail{failure: runproj.FormulaDetailNotFound}, formulaNotFoundTTL, true
+			// It is NOT stale-serveable, so once formulaNotFoundTTL lapses an errored
+			// refetch degrades to upstream_error instead of pinning this stale
+			// not-found over a live upstream failure.
+			return cachedFormulaDetail{failure: runproj.FormulaDetailNotFound}, formulaNotFoundTTL, true, false
 		default:
 			// A transient upstream error is not cached; degrade like a cold miss.
-			return cachedFormulaDetail{}, 0, false
+			return cachedFormulaDetail{}, 0, false, false
 		}
 	})
 	if !ok {

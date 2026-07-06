@@ -53,6 +53,14 @@ type cacheEntry[V any] struct {
 	// definitively-negative) compute, so a cold miss whose fetch fails does not
 	// publish a zero value as if it were last-good.
 	hasValue bool
+	// staleServeable reports whether this entry may be served AFTER a failed
+	// refetch (the last-good/serve-stale contract). A positive result (a real
+	// success) is safe to serve stale — a slow-changing formula or a session list
+	// is still a useful answer. A negative result (a cached not-found) is
+	// fresh-serveable within its TTL via the fast-hit path, but must NOT be served
+	// stale: once it expires, an errored refetch falls through to the caller's
+	// cold-miss degrade so a stale not-found never masks a later upstream error.
+	staleServeable bool
 	// inflight is non-nil while exactly one caller computes this key; joiners wait
 	// on it and then re-read the entry. It is set under the cache lock, closed by
 	// the computing caller after publishing, and cleared under the lock.
@@ -76,17 +84,23 @@ func newSingleFlightCache[K comparable, V any]() *singleFlightCache[K, V] {
 
 // get returns the value for key, computing it via compute on a miss or expiry.
 // compute returns the fetched value, the TTL that value should live for (so the
-// formula cache can pick a shorter window for a not-found outcome), and ok
-// reporting whether the fetch succeeded well enough to cache as last-good. On a
-// compute failure with an existing last-good value the stale value is served
-// (available); on a cold miss with no last-good the zero value is returned so the
-// caller can apply its own honest degrade. Exactly one caller runs compute per
-// key per miss; the rest block until it publishes, then re-read.
+// formula cache can pick a shorter window for a not-found outcome), ok reporting
+// whether the fetch succeeded well enough to cache, and staleServeable reporting
+// whether that cached value may be served AFTER a later failed refetch. A
+// positive result is staleServeable (serve last-good on error); a definitive
+// negative (a cached not-found) is cached but NOT staleServeable, so once it
+// expires an errored refetch falls through to the caller's cold-miss degrade
+// rather than surfacing the stale negative. On a compute failure with an existing
+// staleServeable last-good the stale value is served (available); on a cold miss
+// with no serveable last-good the zero value is returned so the caller can apply
+// its own honest degrade. Exactly one caller runs compute per key per miss; the
+// rest block until it publishes, then re-read.
 //
 // The returned bool reports whether a usable value is being served: true for a
-// fresh success, a within-TTL hit, or a served-stale last-good; false only for a
-// cold miss whose fetch failed and left no last-good.
-func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(context.Context) (V, time.Duration, bool)) (V, bool) {
+// fresh success, a within-TTL hit, or a served-stale positive last-good; false
+// for a cold miss whose fetch failed and left no last-good, or an expired
+// negative whose refetch failed.
+func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(context.Context) (V, time.Duration, bool, bool)) (V, bool) {
 	for {
 		c.mu.Lock()
 		e, ok := c.entries[key]
@@ -130,11 +144,12 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 		// before the panic propagates, so the next caller re-elects and recovers
 		// while withRecovery still logs and 500s the panicking request.
 		var (
-			value     V
-			ttl       time.Duration
-			computeOK bool
-			served    V
-			hadValue  bool
+			value          V
+			ttl            time.Duration
+			computeOK      bool
+			staleServeable bool
+			served         V
+			servedStaleOK  bool
 		)
 		func() {
 			defer func() {
@@ -144,40 +159,46 @@ func (c *singleFlightCache[K, V]) get(ctx context.Context, key K, compute func(c
 					e.computed = time.Now()
 					e.ttl = ttl
 					e.hasValue = true
+					e.staleServeable = staleServeable
 				}
 				// else: keep the prior last-good (if any) untouched — degrade,
 				// don't blank.
-				served, hadValue = e.value, e.hasValue
+				served, servedStaleOK = e.value, e.hasValue && e.staleServeable
 				e.inflight = nil
 				c.mu.Unlock()
 				close(done)
 			}()
 			// Compute with NO cache lock held (the samplers.go contract). A panic
 			// here still runs the deferred release above, then propagates.
-			value, ttl, computeOK = compute(ctx)
+			value, ttl, computeOK, staleServeable = compute(ctx)
 		}()
 
 		if computeOK {
 			return value, true
 		}
-		if hadValue {
-			// A failed refetch with a prior success: serve the stale last-good.
+		if servedStaleOK {
+			// A failed refetch with a serveable positive last-good: serve it stale.
+			// A negative last-good is NOT serveable stale, so it falls through to the
+			// cold-miss degrade below rather than masking this upstream error.
 			return served, true
 		}
-		// Cold miss, fetch failed, no last-good: honest degrade to the zero value.
+		// Cold miss (or expired negative), fetch failed, no serveable last-good:
+		// honest degrade to the zero value.
 		var zero V
 		return zero, false
 	}
 }
 
-// lastGoodOrZero returns the entry's last-good value (available) if one exists,
-// else the zero value (unavailable). Used when a caller's ctx is canceled while
-// joining an in-flight fetch: a canceled caller must never block, but should
-// still serve the last-good if the cache holds one.
+// lastGoodOrZero returns the entry's serveable last-good value (available) if one
+// exists, else the zero value (unavailable). Used when a caller's ctx is canceled
+// while joining an in-flight fetch: a canceled caller must never block, but should
+// still serve a serveable last-good if the cache holds one. A cached negative is
+// not serveable stale (see cacheEntry.staleServeable), so it degrades here too
+// rather than surfacing a stale not-found on cancellation.
 func (c *singleFlightCache[K, V]) lastGoodOrZero(key K) (V, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if e, ok := c.entries[key]; ok && e.hasValue {
+	if e, ok := c.entries[key]; ok && e.hasValue && e.staleServeable {
 		return e.value, true
 	}
 	var zero V

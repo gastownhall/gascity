@@ -72,7 +72,7 @@ func TestSingleFlightCacheRecoversAfterComputePanic(t *testing.T) {
 	// release still clears the key.
 	func() {
 		defer func() { _ = recover() }()
-		c.get(context.Background(), "alpha", func(context.Context) (cachedSessions, time.Duration, bool) {
+		c.get(context.Background(), "alpha", func(context.Context) (cachedSessions, time.Duration, bool, bool) {
 			panic("boom")
 		})
 		t.Fatal("expected the panicking compute to propagate out of get")
@@ -84,8 +84,8 @@ func TestSingleFlightCacheRecoversAfterComputePanic(t *testing.T) {
 	var ok bool
 	go func() {
 		defer close(done)
-		_, ok = c.get(context.Background(), "alpha", func(context.Context) (cachedSessions, time.Duration, bool) {
-			return cachedSessions{items: []runproj.DashboardSession{}}, sessionsCacheTTL, true
+		_, ok = c.get(context.Background(), "alpha", func(context.Context) (cachedSessions, time.Duration, bool, bool) {
+			return cachedSessions{items: []runproj.DashboardSession{}}, sessionsCacheTTL, true, true
 		})
 	}()
 	select {
@@ -360,6 +360,46 @@ func TestFormulaCacheColdFailureDegrades(t *testing.T) {
 	}
 	if failure != runproj.FormulaDetailUpstreamError {
 		t.Fatalf("failure = %q, want upstream_error", failure)
+	}
+}
+
+// TestFormulaCacheExpiredNotFoundDoesNotMaskUpstreamError proves a cached 404 is
+// NOT served stale once its short TTL lapses: after the not-found window a fresh
+// upstream 500 must surface as FormulaDetailUpstreamError, not the stale
+// not_found. A negative last-good would otherwise pin a genuinely-missing verdict
+// over a live upstream failure, hiding the real operator diagnostic.
+func TestFormulaCacheExpiredNotFoundDoesNotMaskUpstreamError(t *testing.T) {
+	defer func(prev time.Duration) { formulaNotFoundTTL = prev }(formulaNotFoundTTL)
+	formulaNotFoundTTL = 20 * time.Millisecond
+
+	srv := &enrichmentCacheTestServer{}
+	srv.formulaStatus.Store(http.StatusNotFound)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	m := newEnrichmentManager(t, ts.URL)
+	ctx := context.Background()
+
+	// First read: 404 -> cached not_found.
+	if _, failure, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo"); ok || failure != runproj.FormulaDetailNotFound {
+		t.Fatalf("first read: ok=%v failure=%q, want not_found", ok, failure)
+	}
+
+	// Let the short not-found TTL lapse, then the upstream starts erroring (500).
+	time.Sleep(40 * time.Millisecond)
+	srv.formulaStatus.Store(http.StatusInternalServerError)
+
+	// The expired not_found MUST NOT be served stale to mask the live 500: the
+	// honest reason is upstream_error.
+	d, failure, ok := m.fetchFormulaDetail(ctx, "alpha", "mol-adopt-pr-v2", "rig:demo", "rig", "demo")
+	if ok || d != nil {
+		t.Fatalf("expired not_found + upstream 500 must degrade to (nil,...,false); got d=%+v ok=%v", d, ok)
+	}
+	if failure != runproj.FormulaDetailUpstreamError {
+		t.Fatalf("failure = %q, want upstream_error (stale not_found must not mask the 500)", failure)
+	}
+	if got := srv.formulaHits.Load(); got != 2 {
+		t.Fatalf("formula hits = %d, want 2 (the expired not_found refetched and hit the 500)", got)
 	}
 }
 
