@@ -591,41 +591,42 @@ func applyWebhookPackGuard(cfg *City, cityRoot string) []string {
 
 // webhookPublicDenyReason returns "" when a pack/fragment public webhook is
 // authorized to keep public exposure, or a human-readable reason to cap it to
-// tenant. Authorization requires BOTH a name+provenance-matching
-// [webhooks].allow_public grant AND a grant digest that equals the webhook's
-// current content digest (R3 content-scoped consent). A grant with no digest, or
-// a stale digest, is not authorization — the reason names the current digest so
-// the operator can re-consent by pinning it.
+// tenant. Authorization requires an operator-authored [webhooks].allow_public
+// grant that matches the webhook by name+provenance AND pins a digest equal to
+// the webhook's current content digest (R3 content-scoped consent). EVERY matching
+// grant is considered, so a stale duplicate grant ordered ahead of a valid
+// re-consent for the same name+source can never shadow it. A match with no digest,
+// or only a stale digest, is not authorization — the reason names the current
+// digest so the operator can re-consent by pinning it.
 func webhookPublicDenyReason(w *Webhook, cityRoot string, grants []WebhookAllowPublic) string {
-	grant, ok := matchingPublicGrant(w.Name, w.SourceDir, cityRoot, grants)
-	if !ok {
-		return fmt.Sprintf("no matching [webhooks].allow_public grant for source %q", w.SourceDir)
-	}
 	digest := WebhookContentDigest(*w)
-	pinned := strings.TrimSpace(grant.Digest)
-	if pinned == "" {
-		return fmt.Sprintf("[webhooks].allow_public grant has no digest; pin digest=%q to consent to the current content", digest)
-	}
-	if !strings.EqualFold(pinned, digest) {
-		return fmt.Sprintf("webhook content changed since consent; re-consent by setting [webhooks].allow_public digest=%q", digest)
-	}
-	return ""
-}
-
-// matchingPublicGrant returns the operator-authored allow_public entry whose name
-// and provenance match the webhook, if any. A relative grant Source is resolved
-// against cityRoot (the directory of the root city.toml). It does not consult the
-// digest — webhookPublicDenyReason applies that on top.
-func matchingPublicGrant(name, sourceDir, cityRoot string, grants []WebhookAllowPublic) (WebhookAllowPublic, bool) {
+	matched := false         // some grant matched name+provenance
+	sawPinnedDigest := false // a matching grant carried a (non-empty) digest
 	for _, g := range grants {
-		if !strings.EqualFold(strings.TrimSpace(g.Name), strings.TrimSpace(name)) {
+		if !strings.EqualFold(strings.TrimSpace(g.Name), strings.TrimSpace(w.Name)) {
 			continue
 		}
-		if webhookSourceMatches(sourceDir, g.Source, cityRoot) {
-			return g, true
+		if !webhookSourceMatches(w.SourceDir, g.Source, cityRoot) {
+			continue
+		}
+		matched = true
+		pinned := strings.TrimSpace(g.Digest)
+		if pinned == "" {
+			continue
+		}
+		sawPinnedDigest = true
+		if strings.EqualFold(pinned, digest) {
+			return "" // a matching grant consents to the current content
 		}
 	}
-	return WebhookAllowPublic{}, false
+	switch {
+	case !matched:
+		return fmt.Sprintf("no matching [webhooks].allow_public grant for source %q", w.SourceDir)
+	case !sawPinnedDigest:
+		return fmt.Sprintf("[webhooks].allow_public grant has no digest; pin digest=%q to consent to the current content", digest)
+	default:
+		return fmt.Sprintf("webhook content changed since consent; re-consent by setting [webhooks].allow_public digest=%q", digest)
+	}
 }
 
 // WebhookContentDigest computes a stable digest over a webhook's

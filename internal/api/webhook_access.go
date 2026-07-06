@@ -42,11 +42,11 @@ func (s *Server) webhookSourceAllowed(w http.ResponseWriter, r *http.Request, re
 			}
 		}
 	}
+	// Off-allowlist source → 403, deliberately NON-evented. Like the perimeter and
+	// rate-limit rejects, the caller fully controls their source address, so this
+	// gate runs before the limiter (it must not consume a delivery token) and
+	// eventing it per request would be the flood amplifier the receiver avoids.
 	problemWebhookForbiddenSource.writeTo(w)
-	s.emitWebhookRejected(WebhookRejectedPayload{
-		Webhook: req.hook.Name, Scheme: req.scheme,
-		Reason: reasonSourceDenied, Status: http.StatusForbidden,
-	})
 	return false
 }
 
@@ -91,11 +91,12 @@ func (s *Server) webhookBearerAllowed(w http.ResponseWriter, r *http.Request, re
 	}
 	provided := bearerToken(r.Header.Get("Authorization"))
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		// Missing/wrong bearer → 401, deliberately NON-evented. The caller fully
+		// controls the Authorization header, so this gate runs before the limiter (it
+		// must not consume a delivery token) and eventing it per request would amplify
+		// a flood. An unset/empty bearer_env above IS an operator fault (503) and is
+		// evented, because that is a misconfiguration signal, not attacker-shaped input.
 		problemWebhookUnauthorized.writeTo(w)
-		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: req.hook.Name, Scheme: req.scheme,
-			Reason: reasonBearerFailed, Status: http.StatusUnauthorized,
-		})
 		return false
 	}
 	return true

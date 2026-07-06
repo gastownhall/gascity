@@ -875,6 +875,96 @@ func TestWebhookRateLimitReturns429(t *testing.T) {
 	}
 }
 
+// The operator-owned access gates (allowed_cidrs, bearer_env) run BEFORE the E8
+// rate limiter, so an off-network or unauthenticated flood is rejected without
+// consuming the shared per-hook delivery bucket — and those denials are
+// non-evented (a flood must not amplify into per-request events). A burst of
+// denied requests therefore leaves the single delivery token intact for a
+// subsequent legitimate delivery.
+func TestWebhookAccessDenialsAreNonEventedAndSpareDeliveryBucket(t *testing.T) {
+	t.Run("off-CIDR flood spares the bucket", func(t *testing.T) {
+		t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "access-order-cidr-secret-01")
+		secret := []byte("access-order-cidr-secret-01")
+
+		hook := githubWebhook("public")
+		hook.Verify.AllowedCIDRs = []string{"203.0.113.0/24"}
+		disp := firedDispatcher()
+		state := newWebhookState(t, hook, prReviewOrder(), disp)
+		// One delivery per minute, burst 1: a single token guards the bucket.
+		state.cfg.WebhookPolicy.RateLimit = &config.WebhookRateLimitConfig{PerMinute: 1, Burst: 1}
+		h, srv := newWebhookHandler(t, state)
+		now := time.Now()
+		srv.webhookLimiter.now = func() time.Time { return now } // freeze: no refill
+
+		sig := githubSignature(secret, []byte(prLabeledPayload))
+		// A burst of off-allowlist deliveries: each is a 403 and must NOT consume a token.
+		for i := 0; i < 3; i++ {
+			rec := postHook(t, h, state, "github", prLabeledPayload, "198.51.100.10:9000", githubHeaders(sig, "cidr-"+strconv.Itoa(i)))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("off-CIDR delivery %d = %d, want 403", i, rec.Code)
+			}
+		}
+		if disp.count() != 0 {
+			t.Fatalf("off-CIDR deliveries must not dispatch, got %d", disp.count())
+		}
+		// The denied burst emits no events (non-evented, no amplification).
+		if rejs := webhookRejectedEvents(t, state); len(rejs) != 0 {
+			t.Errorf("off-CIDR denials emitted %d rejected events, want 0 (non-evented)", len(rejs))
+		}
+		// A legitimate in-CIDR delivery still has its token → dispatches, proving the
+		// off-CIDR flood never drained the shared bucket.
+		rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "cidr-ok"))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("in-CIDR delivery after off-CIDR flood = %d, want 202 (bucket must be intact)", rec.Code)
+		}
+		if disp.count() != 1 {
+			t.Fatalf("in-CIDR dispatch count = %d, want 1", disp.count())
+		}
+	})
+
+	t.Run("bad-bearer flood spares the bucket", func(t *testing.T) {
+		t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "access-order-bearer-secret-01")
+		t.Setenv("GC_WEBHOOK_GH_BEARER", "the-real-bearer-token")
+		secret := []byte("access-order-bearer-secret-01")
+
+		hook := githubWebhook("public")
+		hook.Verify.BearerEnv = "GC_WEBHOOK_GH_BEARER"
+		disp := firedDispatcher()
+		state := newWebhookState(t, hook, prReviewOrder(), disp)
+		state.cfg.WebhookPolicy.RateLimit = &config.WebhookRateLimitConfig{PerMinute: 1, Burst: 1}
+		h, srv := newWebhookHandler(t, state)
+		now := time.Now()
+		srv.webhookLimiter.now = func() time.Time { return now }
+
+		sig := githubSignature(secret, []byte(prLabeledPayload))
+		// A burst of wrong-bearer deliveries: each is a 401 and must NOT consume a token.
+		for i := 0; i < 3; i++ {
+			hdrs := githubHeaders(sig, "bearer-"+strconv.Itoa(i))
+			hdrs["Authorization"] = "Bearer not-the-token"
+			rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", hdrs)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("bad-bearer delivery %d = %d, want 401", i, rec.Code)
+			}
+		}
+		if disp.count() != 0 {
+			t.Fatalf("bad-bearer deliveries must not dispatch, got %d", disp.count())
+		}
+		if rejs := webhookRejectedEvents(t, state); len(rejs) != 0 {
+			t.Errorf("bad-bearer denials emitted %d rejected events, want 0 (non-evented)", len(rejs))
+		}
+		// The correct bearer still has its token → dispatches.
+		ok := githubHeaders(sig, "bearer-ok")
+		ok["Authorization"] = "Bearer the-real-bearer-token"
+		rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", ok)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("correct-bearer delivery after bad-bearer flood = %d, want 202 (bucket must be intact)", rec.Code)
+		}
+		if disp.count() != 1 {
+			t.Fatalf("correct-bearer dispatch count = %d, want 1", disp.count())
+		}
+	})
+}
+
 // (E8-c) A pack cannot raise its own rate limit above the operator ceiling: a
 // pack-contributed webhook with a huge MaxPerMinute is still limited at the tiny
 // operator ceiling and 429s on the second back-to-back delivery.

@@ -48,12 +48,14 @@ type webhookRequest struct {
 // when write-auth is configured.
 //
 // Flow (split into stages): resolve webhook (404 if unknown) → admit (R2
-// perimeter → E8 rate-limit → POST-only → allowed_cidrs → bearer_env) → read raw
+// perimeter → POST-only → allowed_cidrs → bearer_env → E8 rate-limit) → read raw
 // body (capped) → verify (R1 build → E4 verify → Discord PING→PONG) → dispatch
 // (parse + match → dedup → E6 sink). The pre-verification reject paths that an
-// unauthenticated caller fully controls (unknown name, perimeter, rate-limit,
-// method) are NON-evented so a flood cannot amplify into per-request event/log
-// writes; the auth/dispatch decisions past the limiter stay evented.
+// unauthenticated caller fully controls (unknown name, perimeter, method,
+// source/bearer denial, rate-limit) are NON-evented so a flood cannot amplify
+// into per-request event/log writes; the verify/dispatch decisions past the
+// limiter — and operator-fault 503s — stay evented. The access gates sit BEFORE
+// the limiter so a disallowed caller cannot drain the shared delivery bucket.
 func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	req, ok := s.resolveWebhookRequest(w, r)
 	if !ok {
@@ -93,11 +95,19 @@ func (s *Server) resolveWebhookRequest(w http.ResponseWriter, r *http.Request) (
 }
 
 // admitWebhookRequest runs the cheap pre-verification gates in the order that
-// closes the amplification/existence-leak findings: the R2 perimeter FIRST (so a
+// closes the amplification/existence-leak findings AND keeps a disallowed caller
+// off the shared per-hook delivery bucket: the R2 perimeter FIRST (so a
 // private/tenant probe gets the same 404 as an unknown route, never a 405 that
-// confirms existence), then the rate limiter (so no downstream evented/expensive
-// work runs un-throttled), then POST-only, then the operator-owned source and
-// bearer gates. It returns false when it has already written the response.
+// confirms existence), then POST-only, then the operator-owned source and bearer
+// gates, and ONLY THEN the E8 rate limiter. Running the access gates before the
+// limiter is load-bearing: an off-network or unauthenticated flood is rejected
+// without consuming a delivery token, so it cannot drain the bucket that
+// legitimate provider deliveries draw from and force them into 429s. Every gate
+// here is non-evented — each is a cheap, unauthenticated, attacker-fully-controlled
+// reject, so eventing it would be the per-request amplification the limiter exists
+// to stop (an operator misconfiguration surfaced by the access gates is the lone
+// evented exception, a 503). It returns false when it has already written the
+// response.
 func (s *Server) admitWebhookRequest(w http.ResponseWriter, r *http.Request, req webhookRequest) bool {
 	// R2 perimeter on the EFFECTIVE (post pack-guard) visibility. Non-evented: the
 	// private/tenant 404 must be as quiet as an unknown-route 404.
@@ -105,29 +115,34 @@ func (s *Server) admitWebhookRequest(w http.ResponseWriter, r *http.Request, req
 	if !webhookRequestAllowed(w, visibility, r, s.readOnly) {
 		return false
 	}
-	// E8 rate-limit on the RESOLVED name, upstream of every evented/expensive
-	// stage. Non-evented: eventing here would be the per-request amplification the
-	// limiter exists to stop. The limit is operator-owned; a pack can only LOWER
-	// its own ceiling (EffectiveRateLimit), never raise it.
+	// POST-only, right after the perimeter so a non-POST probe of a private/tenant
+	// hook already got the existence-hiding 404. Cheap, non-evented.
+	if r.Method != http.MethodPost {
+		problemWebhookMethodNotAllowed.writeTo(w)
+		return false
+	}
+	// Operator-owned access controls, enforced fail-closed BEFORE the limiter so a
+	// disallowed source/bearer neither consumes a delivery token nor reaches the
+	// body read and signature verify. Their attacker-controlled denials are
+	// non-evented; only an operator misconfiguration (503) events.
+	if !s.webhookSourceAllowed(w, r, req) {
+		return false
+	}
+	if !s.webhookBearerAllowed(w, r, req) {
+		return false
+	}
+	// E8 rate-limit on the RESOLVED name, LAST in admit so only access-passing
+	// requests consume the operator-owned per-hook delivery bucket, and still
+	// upstream of the expensive body read + signature verify it exists to throttle.
+	// Non-evented: eventing here would be the per-request amplification the limiter
+	// stops. A pack can only LOWER its own ceiling (EffectiveRateLimit), never raise it.
 	perMinute, burst := req.cfg.WebhookPolicy.EffectiveRateLimit(req.hook)
 	if ok, retryAfter := s.webhookLimiter.allow(req.hook.Name, perMinute, burst); !ok {
 		setRetryAfter(w, retryAfter)
 		problemWebhookRateLimited.writeTo(w)
 		return false
 	}
-	// POST-only. Non-evented and rate-limited above: a non-POST flood is a cheap,
-	// bounded reject, and this now runs AFTER the perimeter so a non-POST probe of
-	// a private/tenant hook already got the existence-hiding 404.
-	if r.Method != http.MethodPost {
-		problemWebhookMethodNotAllowed.writeTo(w)
-		return false
-	}
-	// Operator-owned access controls, enforced fail-closed BEFORE the body read
-	// and signature verify so a disallowed source/bearer costs nothing downstream.
-	if !s.webhookSourceAllowed(w, r, req) {
-		return false
-	}
-	return s.webhookBearerAllowed(w, r, req)
+	return true
 }
 
 // readWebhookBody reads the raw body under a hard cap (the signature is computed

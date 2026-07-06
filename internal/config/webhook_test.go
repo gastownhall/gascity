@@ -290,6 +290,45 @@ digest = %q
 	}
 }
 
+// (d”) Duplicate allow_public grants for the same name+source must not let a
+// stale-digest entry shadow a later valid re-consent: authorization holds when
+// ANY matching grant pins the current digest, regardless of grant order.
+func TestWebhookPublicDenyReason_StaleGrantDoesNotShadowValid(t *testing.T) {
+	const cityRoot = "/city"
+	w := &Webhook{
+		Name:      "github",
+		SourceDir: "/city/packs/gh",
+		Verify:    WebhookVerify{Scheme: "github-hmac-sha256", SecretEnv: "GC_WEBHOOK_GITHUB_SECRET"},
+		Rules:     []WebhookRule{{Event: "pull_request", Order: "pr-review-request"}},
+	}
+	digest := WebhookContentDigest(*w)
+	stale := WebhookAllowPublic{Name: "github", Source: "/city/packs/gh", Digest: "sha256:stale"}
+	valid := WebhookAllowPublic{Name: "github", Source: "/city/packs/gh", Digest: digest}
+
+	// Stale grant FIRST, valid re-consent SECOND → authorized (the shadowing bug:
+	// the stale first match used to cap the hook despite the later valid grant).
+	if reason := webhookPublicDenyReason(w, cityRoot, []WebhookAllowPublic{stale, valid}); reason != "" {
+		t.Errorf("stale-then-valid: got deny reason %q, want authorized (empty)", reason)
+	}
+	// Order-independent: valid FIRST, stale SECOND → still authorized.
+	if reason := webhookPublicDenyReason(w, cityRoot, []WebhookAllowPublic{valid, stale}); reason != "" {
+		t.Errorf("valid-then-stale: got deny reason %q, want authorized (empty)", reason)
+	}
+	// Only stale duplicates (none pin the current digest) → capped, and the reason
+	// is the content-changed re-consent prompt (not the no-digest or no-match one).
+	onlyStale := []WebhookAllowPublic{
+		{Name: "github", Source: "/city/packs/gh", Digest: "sha256:stale-a"},
+		{Name: "github", Source: "/city/packs/gh", Digest: "sha256:stale-b"},
+	}
+	reason := webhookPublicDenyReason(w, cityRoot, onlyStale)
+	if reason == "" {
+		t.Fatal("only-stale duplicates: got authorized, want a content-changed deny reason")
+	}
+	if !strings.Contains(reason, "content changed") {
+		t.Errorf("only-stale duplicates: reason = %q, want it to mention content change", reason)
+	}
+}
+
 // FIX 5: allow_public provenance matching is by canonical path (exact or true
 // subtree) only — never by shared basename or unanchored suffix. A foreign pack
 // whose SourceDir merely ends in the same leaf segment as an operator grant must
