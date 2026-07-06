@@ -4,26 +4,26 @@ import "github.com/gastownhall/gascity/internal/events"
 
 // Webhook rejection reason enum. These are the stable strings carried on
 // WebhookRejectedPayload.Reason so operators can alert/aggregate on a rejection
-// class without parsing free text. The security-relevant classes the design and
-// red-team call out (perimeter_denied, read_only, verify_failed, operator_fault,
-// rate_limited, dispatch_refused) are here alongside the operational ones
-// (method_not_allowed, body_too_large, bad_body, bad_payload, match_error,
-// dispatch_unavailable/dispatch_error) that keep the receiver debuggable.
+// class without parsing free text. The evented classes are the ones PAST the
+// rate limiter — the auth decisions (source_denied, bearer_failed, verify_failed,
+// operator_fault) and the dispatch/payload outcomes (bad_body, body_too_large,
+// bad_payload, match_error, dispatch_refused, dispatch_unavailable,
+// dispatch_error) — which are bounded and diagnostically useful.
 //
-// Notes on two design decisions:
-//   - An unresolved route (unknown webhook name) is intentionally NOT evented:
-//     the route segment is chosen by an unauthenticated caller, so emitting there
-//     would be an event-log-flood amplification vector and a name-existence oracle
-//     (it would also violate R2's "never confirm which hooks exist"). The receiver
-//     404s such probes silently, so there is no unknown_webhook reason.
+// Notes on the deliberately NON-evented paths:
+//   - An unresolved route (unknown webhook name), a visibility-perimeter/read-only
+//     denial (webhookRequestAllowed), a rate-limit 429, and a non-POST method are
+//     all cheap, unauthenticated, attacker-fully-controlled rejects that run at or
+//     before the limiter. Eventing them would be an event-log-flood amplification
+//     vector and a name-existence oracle (and would violate R2's "never confirm
+//     which hooks exist"), so the receiver rejects them silently — there is no
+//     reason string for them.
 //   - no-match is classified as webhook.received (an accepted, authentic 2xx
 //     delivery that no rule wanted), NOT as a rejection — so there is no
 //     no_match reason.
 const (
-	reasonMethodNotAllowed    = "method_not_allowed"
-	reasonPerimeterDenied     = "perimeter_denied"
-	reasonReadOnly            = "read_only"
-	reasonRateLimited         = "rate_limited"
+	reasonSourceDenied        = "source_denied"
+	reasonBearerFailed        = "bearer_failed"
 	reasonBodyTooLarge        = "body_too_large"
 	reasonBadBody             = "bad_body"
 	reasonOperatorFault       = "operator_fault"

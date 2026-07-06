@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -85,12 +86,8 @@ func (v *discordEd25519) Verify(_ context.Context, req VerifyRequest) (VerifyRes
 	if err != nil {
 		return failf("%s is not a unix timestamp", v.timestampHeader), nil
 	}
-	skew := effectiveNow(req, v.now).Sub(time.Unix(tsSecs, 0))
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > v.window {
-		return failf("%s skew %s exceeds replay window %s", v.timestampHeader, skew.Truncate(time.Second), v.window), nil
+	if !withinReplayWindow(effectiveNow(req, v.now), tsSecs, v.window) {
+		return failf("%s %d is outside the %s replay window", v.timestampHeader, tsSecs, v.window), nil
 	}
 	msg := make([]byte, 0, len(ts)+len(req.Body))
 	msg = append(msg, ts...)
@@ -98,11 +95,44 @@ func (v *discordEd25519) Verify(_ context.Context, req VerifyRequest) (VerifyRes
 	if !ed25519.Verify(pub, msg, sig) {
 		return failf("%s does not match", v.signatureHeader), nil
 	}
-	res := VerifyResult{OK: true}
+	res := VerifyResult{OK: true, EventType: discordEventType(req.Body)}
 	if v.dedupHeader != "" {
 		res.DedupID = strings.TrimSpace(req.Header.Get(v.dedupHeader))
 	}
 	return res, nil
+}
+
+// discordEventType derives the rule-facing event type from a verified Discord
+// interaction body: its interaction "type", mapped to a stable lowercase name
+// so a rule can select a non-PING interaction (e.g. `event =
+// "application_command"`) and narrow further with a match on `data.name`.
+// Unknown/future types fall back to "interaction_<n>" so the value is always
+// non-empty and legible; a body that is not the expected JSON object yields "".
+// (Type 1 PING is short-circuited to PONG by the receiver before matching, so
+// "ping" here is only ever surfaced for observability.)
+func discordEventType(body []byte) string {
+	var p struct {
+		Type json.Number `json:"type"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return ""
+	}
+	switch n := p.Type.String(); n {
+	case "":
+		return ""
+	case "1":
+		return "ping"
+	case "2":
+		return "application_command"
+	case "3":
+		return "message_component"
+	case "4":
+		return "application_command_autocomplete"
+	case "5":
+		return "modal_submit"
+	default:
+		return "interaction_" + n
+	}
 }
 
 // decodeEd25519PublicKey interprets operator-provided public-key material as

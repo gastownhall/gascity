@@ -676,7 +676,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
 		}()
 		return
 	}
@@ -689,8 +689,24 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
+		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
 	}()
+}
+
+// runDispatchGuarded runs dispatchOne with a panic boundary. A dispatch goroutine
+// is detached from the request/tick that launched it — the webhook fast-ACK path
+// in particular returns its HTTP response (past any recovery middleware) before
+// this goroutine runs — so a panic here (e.g. while processing untrusted
+// webhook-derived args) would otherwise crash the whole supervisor. dispatchOne's
+// own defers close the tracking bead as the stack unwinds before recovery here;
+// this boundary logs the panic and contains it to the single dispatch.
+func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+	defer func() {
+		if p := recover(); p != nil {
+			logDispatchError(m.stderr, "gc: order %s: dispatch goroutine panic (tracking %s): %v", a.ScopedName(), trackingID, p)
+		}
+	}()
+	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
 }
 
 // launchResolvedDispatch is the single fire path shared by the controller tick

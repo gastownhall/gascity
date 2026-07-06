@@ -862,6 +862,7 @@ Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under /v0/c
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the unique webhook identifier and mount segment. |
 | `scope` | string |  |  | Scope selects city- or rig-scoped dispatch semantics, mirroring Order.Scope. Empty defaults to city. Enum: `city`, `rig` |
+| `rig` | string |  |  | Rig is the authoritative rig binding for a rig-scoped webhook (Scope=="rig"). It is REQUIRED when scope="rig" and forbidden otherwise: the receiver copies it into the dispatch scope so the sink constrains delivery to this rig (R4), and a rule that names any other rig is refused. Without it a rig-scoped webhook fails closed (it can target no rig). Leave unset for city scope. |
 | `publication` | ServicePublicationConfig |  |  | Publication declares generic publication intent, reusing the service publication contract. Pack/fragment-contributed public webhooks are capped to tenant unless the city grants them via [webhooks].allow_public. |
 | `verify` | WebhookVerify |  |  | Verify declares the signature verification scheme and its inputs. |
 | `rule` | []WebhookRule |  |  | Rules maps verified provider events to dispatch targets. |
@@ -875,7 +876,7 @@ WebhookAllowPublic is one operator-authored public-exposure grant.
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the webhook name being granted public exposure. |
 | `source` | string | **yes** |  | Source is the pack/fragment provenance the grant is scoped to. Matched against the webhook's stamped SourceDir. |
-| `digest` | string |  |  | Digest optionally pins the content digest of the granted webhook's security-relevant fields.  TODO(R3): compute and enforce this digest over &#123;visibility, verify scheme/secret_env/secret_key/trust-root, each rule's event/match/order/rig/target&#125; so a content-swap upgrade auto-downgrades to tenant until the operator re-consents. E2 matches on &#123;name, source&#125; only; the digest field is reserved for that follow-up. |
+| `digest` | string |  |  | Digest pins the content digest of the granted webhook's security-relevant fields (see WebhookContentDigest). It is REQUIRED for the grant to honor public exposure: applyWebhookPackGuard recomputes the digest at load and caps the webhook to tenant when the grant has no digest or the digest no longer matches (R3 content-scoped consent), so a content-swap upgrade of a public hook auto-downgrades until the operator re-consents to the new digest. The downgrade warning names the digest to pin. |
 
 ## WebhookJWTPolicy
 

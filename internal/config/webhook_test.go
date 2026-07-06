@@ -1,12 +1,36 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// ghPublicPackTOML is a pack that contributes a public github webhook, used by
+// the allow_public content-digest tests.
+const ghPublicPackTOML = `
+[pack]
+name = "gh"
+schema = 1
+
+[[webhook]]
+name = "github"
+
+[webhook.publication]
+visibility = "public"
+hostname = "hooks"
+
+[webhook.verify]
+scheme = "github-hmac-sha256"
+secret_env = "GC_WEBHOOK_GITHUB_SECRET"
+
+[[webhook.rule]]
+event = "pull_request"
+order = "pr-review-request"
+`
 
 // (a) A full [[webhook]] with every sub-table parses and validates.
 func TestWebhook_ParsesAllSubTables(t *testing.T) {
@@ -193,9 +217,10 @@ order = "backlog-patrol"
 	}
 }
 
-// (d) A city-level allow_public grant honors public exposure for the matching
-// pack webhook.
-func TestWebhook_AllowPublicGrantHonorsPublic(t *testing.T) {
+// (d) A city-level allow_public grant with NO digest is default-closed: the pack
+// webhook is capped to tenant even though name+source match, because a name-only
+// grant would silently re-honor a content swap (R3 content-scoped consent).
+func TestWebhook_AllowPublicWithoutDigestCapped(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `
 [workspace]
@@ -206,26 +231,7 @@ includes = ["packs/gh"]
 name = "github"
 source = "packs/gh"
 `)
-	writeFile(t, dir, "packs/gh/pack.toml", `
-[pack]
-name = "gh"
-schema = 1
-
-[[webhook]]
-name = "github"
-
-[webhook.publication]
-visibility = "public"
-hostname = "hooks"
-
-[webhook.verify]
-scheme = "github-hmac-sha256"
-secret_env = "GC_WEBHOOK_GITHUB_SECRET"
-
-[[webhook.rule]]
-event = "pull_request"
-order = "pr-review-request"
-`)
+	writeFile(t, dir, "packs/gh/pack.toml", ghPublicPackTOML)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
 	if err != nil {
@@ -234,12 +240,53 @@ order = "pr-review-request"
 	if len(cfg.Webhooks) != 1 {
 		t.Fatalf("want 1 webhook, got %d", len(cfg.Webhooks))
 	}
-	w := cfg.Webhooks[0]
-	if w.SourceDir == "" {
+	if w := cfg.Webhooks[0]; w.SourceDir == "" {
 		t.Fatal("imported-pack webhook must carry SourceDir provenance")
 	}
-	if w.Publication.Visibility != "public" {
-		t.Errorf("visibility = %q, want public (granted by [webhooks].allow_public)", w.Publication.Visibility)
+	if got := cfg.Webhooks[0].Publication.Visibility; got != "tenant" {
+		t.Errorf("visibility = %q, want tenant (a name+source grant with no digest must not honor public)", got)
+	}
+}
+
+// (d') A grant whose digest matches the webhook's current content honors public
+// exposure; a stale/placeholder digest does not (content-scoped consent, R3).
+func TestWebhook_AllowPublicWithMatchingDigestHonored(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/gh/pack.toml", ghPublicPackTOML)
+	grantWith := func(digest string) string {
+		return fmt.Sprintf(`
+[workspace]
+name = "test"
+includes = ["packs/gh"]
+
+[[webhooks.allow_public]]
+name = "github"
+source = "packs/gh"
+digest = %q
+`, digest)
+	}
+
+	// A placeholder (stale) digest is still capped to tenant; the composed webhook
+	// then yields the real digest (visibility is excluded from the digest, so the
+	// capped value is fine to compute from).
+	writeFile(t, dir, "city.toml", grantWith("sha256:stale"))
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes (stale): %v", err)
+	}
+	if got := cfg.Webhooks[0].Publication.Visibility; got != "tenant" {
+		t.Fatalf("stale-digest grant: visibility = %q, want tenant", got)
+	}
+	digest := WebhookContentDigest(cfg.Webhooks[0])
+
+	// Re-consent with the correct digest → public honored.
+	writeFile(t, dir, "city.toml", grantWith(digest))
+	cfg2, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes (matching): %v", err)
+	}
+	if got := cfg2.Webhooks[0].Publication.Visibility; got != "public" {
+		t.Errorf("matching-digest grant: visibility = %q, want public", got)
 	}
 }
 
@@ -385,6 +432,30 @@ func TestValidateWebhooks_Rejects(t *testing.T) {
 			w.Rules = []WebhookRule{{Event: "e", Order: "o", Args: map[string]string{"GC_CITY": "{{action}}"}}}
 			return w
 		}(), "reserved controller-owned env key"},
+		{"secret_env outside operator namespace", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Verify.SecretEnv = "MY_SECRET"
+			return w
+		}(), "operator namespace"},
+		{"discord requires secret_env", func() Webhook {
+			return Webhook{Name: "h", Verify: WebhookVerify{Scheme: "discord-ed25519"}, Rules: []WebhookRule{{Event: "e", Order: "o"}}}
+		}(), "secret_env is required"},
+		{"bearer_env outside operator namespace", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Verify.BearerEnv = "SOME_TOKEN"
+			return w
+		}(), "operator namespace"},
+		{"malformed allowed_cidr", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Verify.AllowedCIDRs = []string{"not-a-cidr"}
+			return w
+		}(), "allowed_cidrs"},
+		{"rig scope without rig", func() Webhook {
+			return base(Webhook{Name: "h", Scope: "rig"})
+		}(), "requires a rig binding"},
+		{"city scope with rig", func() Webhook {
+			return base(Webhook{Name: "h", Rig: "maintainer"})
+		}(), "rig is only valid for scope"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,6 +467,68 @@ func TestValidateWebhooks_Rejects(t *testing.T) {
 				t.Errorf("error = %q, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A rig-scoped webhook with its authoritative rig binding validates; the sink
+// uses that rig to constrain dispatch (R4).
+func TestValidateWebhooks_RigScopedValid(t *testing.T) {
+	w := Webhook{
+		Name:   "maintainer-hook",
+		Scope:  "rig",
+		Rig:    "maintainer",
+		Verify: WebhookVerify{Scheme: "hmac-sha256", SecretEnv: "GC_WEBHOOK_MAINT"},
+		Rules:  []WebhookRule{{Event: "issue", Order: "triage", Rig: "maintainer"}},
+	}
+	if err := ValidateWebhooks([]Webhook{w}); err != nil {
+		t.Fatalf("valid rig-scoped webhook rejected: %v", err)
+	}
+}
+
+// Valid operator-namespaced bearer_env and well-formed allowed_cidrs (CIDR and
+// bare-IP forms) are accepted.
+func TestValidateWebhooks_BearerAndCIDRAccepted(t *testing.T) {
+	w := Webhook{
+		Name: "gh",
+		Verify: WebhookVerify{
+			Scheme: "github-hmac-sha256", SecretEnv: "GC_WEBHOOK_GH",
+			BearerEnv:    "GC_WEBHOOK_GH_BEARER",
+			AllowedCIDRs: []string{"192.30.252.0/22", "203.0.113.7"},
+		},
+		Rules: []WebhookRule{{Event: "push", Order: "build", Args: map[string]string{"ref": "{{ref}}"}}},
+	}
+	if err := ValidateWebhooks([]Webhook{w}); err != nil {
+		t.Fatalf("valid bearer_env/allowed_cidrs rejected: %v", err)
+	}
+}
+
+// WebhookContentDigest is stable across equivalent content and changes when a
+// security-relevant field (here the target order) changes, but ignores the
+// excluded fields (name, SourceDir, visibility, max_per_minute).
+func TestWebhookContentDigest_StableAndSensitive(t *testing.T) {
+	w := Webhook{
+		Name:        "github",
+		Publication: ServicePublicationConfig{Visibility: "public"},
+		Verify:      WebhookVerify{Scheme: "github-hmac-sha256", SecretEnv: "GC_WEBHOOK_GH"},
+		Rules:       []WebhookRule{{Event: "pull_request", Order: "pr-review", Args: map[string]string{"repo": "{{repo}}"}}},
+	}
+	base := WebhookContentDigest(w)
+
+	// Excluded fields do not change the digest.
+	ignored := w
+	ignored.Name = "renamed"
+	ignored.SourceDir = "/packs/elsewhere"
+	ignored.Publication.Visibility = "tenant"
+	ignored.MaxPerMinute = 99
+	if got := WebhookContentDigest(ignored); got != base {
+		t.Errorf("digest changed on an excluded-field edit: %q != %q", got, base)
+	}
+
+	// A security-relevant change (target order) changes the digest.
+	swapped := w
+	swapped.Rules = []WebhookRule{{Event: "pull_request", Order: "attacker-order", Args: map[string]string{"repo": "{{repo}}"}}}
+	if got := WebhookContentDigest(swapped); got == base {
+		t.Error("digest must change when a rule's target order changes (content-swap detection)")
 	}
 }
 

@@ -89,8 +89,13 @@ func (c *webhookDedupCache) clear() {
 	c.entries = make(map[string]time.Time)
 }
 
-// enforceCapLocked keeps the map under c.max: expired entries first, then the
-// soonest-expiring, until at or below the cap. Must hold c.mu.
+// enforceCapLocked keeps the map under c.max: it drops expired entries first,
+// then — while still over cap — evicts the soonest-expiring entry belonging to
+// the hook that currently holds the MOST entries. Targeting the busiest hook's
+// own entry means a high-volume webhook can only shrink ITS OWN replay window
+// under pressure, never a quieter co-resident hook's: the shared per-city cap
+// must not let one hook erode another's replay protection (the schemes without a
+// signed timestamp rely on this window). Must hold c.mu.
 func (c *webhookDedupCache) enforceCapLocked(now time.Time) {
 	if len(c.entries) <= c.max {
 		return
@@ -101,19 +106,52 @@ func (c *webhookDedupCache) enforceCapLocked(now time.Time) {
 		}
 	}
 	for len(c.entries) > c.max {
-		var oldestKey string
-		var oldest time.Time
-		for k, exp := range c.entries {
-			if oldestKey == "" || exp.Before(oldest) {
-				oldestKey = k
-				oldest = exp
-			}
-		}
-		if oldestKey == "" {
+		if !c.evictFromBusiestHookLocked() {
 			return
 		}
-		delete(c.entries, oldestKey)
 	}
+}
+
+// evictFromBusiestHookLocked deletes the soonest-expiring entry of the hook with
+// the most live entries, returning false only when the map is empty. Must hold
+// c.mu. Eviction runs only on a cap overflow, so the O(n) scan is bounded and
+// rare.
+func (c *webhookDedupCache) evictFromBusiestHookLocked() bool {
+	counts := make(map[string]int, len(c.entries))
+	for k := range c.entries {
+		counts[webhookDedupHookOf(k)]++
+	}
+	var busiest string
+	var most int
+	for hook, n := range counts {
+		if n > most {
+			most, busiest = n, hook
+		}
+	}
+	var victimKey string
+	var victimExp time.Time
+	for k, exp := range c.entries {
+		if webhookDedupHookOf(k) != busiest {
+			continue
+		}
+		if victimKey == "" || exp.Before(victimExp) {
+			victimKey, victimExp = k, exp
+		}
+	}
+	if victimKey == "" {
+		return false
+	}
+	delete(c.entries, victimKey)
+	return true
+}
+
+// webhookDedupHookOf returns the hook-name prefix of a dedup key (the segment
+// before the NUL separator written by webhookDedupKey).
+func webhookDedupHookOf(key string) string {
+	if i := strings.IndexByte(key, 0); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 // webhookDedupKey namespaces a delivery id under its webhook so two webhooks that

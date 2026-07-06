@@ -622,6 +622,177 @@ func TestWebhookSlackDistinctBodiesSameTsBothDispatch(t *testing.T) {
 	}
 }
 
+// (#1) A rig-scoped webhook dispatches to its own rig and refuses a rule that
+// targets a foreign rig — end-to-end through the receiver + sink.
+func TestWebhookRigScopedOwnRigDispatchesForeignRejected(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "rig-scoped-webhook-secret-01")
+	secret := []byte("rig-scoped-webhook-secret-01")
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+	hdrs := githubHeaders(sig, "rig-1")
+
+	rigHook := func(ruleRig string) config.Webhook {
+		w := githubWebhook("public")
+		w.Scope = "rig"
+		w.Rig = "maintainer"
+		w.Rules[0].Rig = ruleRig
+		return w
+	}
+	order := prReviewOrder()
+	order.Rig = "maintainer"
+
+	t.Run("own rig dispatches", func(t *testing.T) {
+		disp := firedDispatcher()
+		state := newWebhookState(t, rigHook(""), order, disp) // empty rule rig inherits the webhook's
+		h := newTestCityHandler(t, state)
+		rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", hdrs)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("own-rig delivery = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+		}
+		if disp.count() != 1 {
+			t.Fatalf("own-rig dispatch count = %d, want 1", disp.count())
+		}
+	})
+
+	t.Run("foreign rig refused", func(t *testing.T) {
+		disp := firedDispatcher()
+		state := newWebhookState(t, rigHook("intruder"), order, disp)
+		h := newTestCityHandler(t, state)
+		rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", hdrs)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("foreign-rig delivery = %d, want 422", rec.Code)
+		}
+		if disp.count() != 0 {
+			t.Fatalf("foreign-rig target must never dispatch, got %d", disp.count())
+		}
+	})
+}
+
+// (#3) A public webhook that targets an exec (sh -c) order is refused end-to-end:
+// public deliveries are limited to formula orders (the removed RCE sink).
+func TestWebhookPublicExecOrderRefused(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "public-exec-webhook-secret-1")
+	secret := []byte("public-exec-webhook-secret-1")
+
+	execOrder := orders.Order{Name: prReviewOrderName, Trigger: "webhook", Exec: "deploy.sh"}
+	disp := firedDispatcher()
+	state := newWebhookState(t, githubWebhook("public"), execOrder, disp)
+	h := newTestCityHandler(t, state)
+
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+	rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "exec-1"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("public→exec delivery = %d, want 422 (body %s)", rec.Code, rec.Body.String())
+	}
+	if disp.count() != 0 {
+		t.Fatalf("a public webhook must never fire an exec order, got %d", disp.count())
+	}
+}
+
+// (#2) An operator-declared bearer_env token is enforced alongside the signature:
+// a valid signature with a missing/wrong bearer is 401; the correct bearer passes.
+func TestWebhookBearerEnvEnforced(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "bearer-webhook-signing-secret")
+	t.Setenv("GC_WEBHOOK_GH_BEARER", "s3cr3t-bearer-token-value")
+	secret := []byte("bearer-webhook-signing-secret")
+
+	hook := githubWebhook("public")
+	hook.Verify.BearerEnv = "GC_WEBHOOK_GH_BEARER"
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+
+	// Valid signature, NO bearer → 401.
+	disp := firedDispatcher()
+	state := newWebhookState(t, hook, prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "b-1")); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("valid sig, no bearer = %d, want 401", rec.Code)
+	}
+	if disp.count() != 0 {
+		t.Fatalf("missing bearer must not dispatch, got %d", disp.count())
+	}
+
+	// Wrong bearer → 401.
+	wrong := githubHeaders(sig, "b-2")
+	wrong["Authorization"] = "Bearer not-the-token"
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", wrong); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong bearer = %d, want 401", rec.Code)
+	}
+
+	// Correct bearer → dispatch.
+	ok := githubHeaders(sig, "b-3")
+	ok["Authorization"] = "Bearer s3cr3t-bearer-token-value"
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", ok); rec.Code != http.StatusAccepted {
+		t.Fatalf("correct bearer = %d, want 202", rec.Code)
+	}
+	if disp.count() != 1 {
+		t.Fatalf("correct bearer dispatch count = %d, want 1", disp.count())
+	}
+}
+
+// (#2) An operator-declared allowed_cidrs allowlist is enforced against the direct
+// connection address: an in-range source dispatches, an out-of-range source is 403.
+func TestWebhookAllowedCIDRsEnforced(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "cidr-webhook-signing-secret-1")
+	secret := []byte("cidr-webhook-signing-secret-1")
+
+	hook := githubWebhook("public")
+	hook.Verify.AllowedCIDRs = []string{"203.0.113.0/24"}
+	sig := githubSignature(secret, []byte(prLabeledPayload))
+
+	disp := firedDispatcher()
+	state := newWebhookState(t, hook, prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	// Out-of-range source → 403, no dispatch.
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "198.51.100.10:9000", githubHeaders(sig, "c-1")); rec.Code != http.StatusForbidden {
+		t.Fatalf("out-of-range source = %d, want 403", rec.Code)
+	}
+	if disp.count() != 0 {
+		t.Fatalf("out-of-range source must not dispatch, got %d", disp.count())
+	}
+
+	// In-range source → dispatch.
+	if rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "c-2")); rec.Code != http.StatusAccepted {
+		t.Fatalf("in-range source = %d, want 202", rec.Code)
+	}
+	if disp.count() != 1 {
+		t.Fatalf("in-range source dispatch count = %d, want 1", disp.count())
+	}
+}
+
+// (#4) A Slack rule that selects a payload event type (event = "message") matches
+// only when the verified body carries that nested event.type — proving the event
+// type is derived from the body, not left empty.
+func TestWebhookSlackEventTypeRuleMatches(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_SLACK_SECRET", "slack-eventtype-secret-abcdef")
+	secret := []byte("slack-eventtype-secret-abcdef")
+
+	hook := slackWebhook()
+	hook.Rules = []config.WebhookRule{{Event: "message", Order: prReviewOrderName}}
+	disp := firedDispatcher()
+	state := newWebhookState(t, hook, prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// event.type=message → matches the event="message" rule → dispatch.
+	msg := `{"type":"event_callback","event":{"type":"message"}}`
+	if rec := postHook(t, h, state, "slack", msg, "203.0.113.7:443", slackHeaders(secret, ts, msg)); rec.Code != http.StatusAccepted {
+		t.Fatalf("slack event.type=message = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	if disp.count() != 1 {
+		t.Fatalf("event.type=message must dispatch, got %d", disp.count())
+	}
+
+	// A different event type → no rule matches → 2xx no-op, no new dispatch.
+	other := `{"type":"event_callback","event":{"type":"reaction_added"}}`
+	rec := postHook(t, h, state, "slack", other, "203.0.113.7:443", slackHeaders(secret, ts, other))
+	if rec.Code < 200 || rec.Code >= 300 {
+		t.Fatalf("unmatched slack event = %d, want 2xx no-op", rec.Code)
+	}
+	if disp.count() != 1 {
+		t.Fatalf("a non-matching event type must not dispatch, count = %d (want still 1)", disp.count())
+	}
+}
+
 // (FIX 6) The built verifier is memoized per webhook so the jwt-jwks JWKS cache
 // persists across deliveries (fetched once, not rebuilt+refetched per request).
 // Two builds with an unchanged config fingerprint return the SAME verifier
@@ -811,7 +982,7 @@ func TestWebhookRejectedEventReasons(t *testing.T) {
 		}
 	})
 
-	t.Run("perimeter denial", func(t *testing.T) {
+	t.Run("perimeter denial is non-evented (no amplification)", func(t *testing.T) {
 		t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-pd")
 		disp := firedDispatcher()
 		// A private webhook denies an external (non-loopback) delivery at the perimeter.
@@ -825,11 +996,44 @@ func TestWebhookRejectedEventReasons(t *testing.T) {
 		if disp.count() != 0 {
 			t.Fatalf("perimeter denial must not dispatch, count = %d", disp.count())
 		}
-		rej := lastWebhookRejected(t, state)
-		if rej.Reason != reasonPerimeterDenied {
-			t.Errorf("reason = %q, want %q", rej.Reason, reasonPerimeterDenied)
+		// The perimeter reject is a cheap, unauthenticated, attacker-controlled path,
+		// so it must NOT emit an event (the amplification the finding flagged).
+		if rejs := webhookRejectedEvents(t, state); len(rejs) != 0 {
+			t.Errorf("perimeter denial emitted %d rejected events, want 0 (non-evented)", len(rejs))
 		}
 	})
+}
+
+// A non-POST request to a private/tenant hook is rejected by the visibility
+// perimeter with a 404 (hiding existence) BEFORE the method check — never a 405
+// that would confirm the route — and the reject is non-evented.
+func TestWebhookMethodOrderingHidesPrivateExistence(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "top-secret-webhook-key-mo")
+	disp := firedDispatcher()
+	state := newWebhookState(t, githubWebhook("private"), prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	// External GET to a private hook → 404 (perimeter), not 405.
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/hook/github"), nil)
+	req.RemoteAddr = "198.51.100.10:9000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("external non-POST to private hook = %d, want 404 (perimeter before method)", rec.Code)
+	}
+
+	// A loopback GET passes the perimeter and then hits the POST-only check (405),
+	// which is non-evented.
+	loReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/hook/github"), nil)
+	loReq.RemoteAddr = "127.0.0.1:9000"
+	loRec := httptest.NewRecorder()
+	h.ServeHTTP(loRec, loReq)
+	if loRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("loopback non-POST = %d, want 405", loRec.Code)
+	}
+	if rejs := webhookRejectedEvents(t, state); len(rejs) != 0 {
+		t.Errorf("method/perimeter rejects emitted %d events, want 0 (non-evented)", len(rejs))
+	}
 }
 
 // (E8-f) No secret, signature, or raw body ever appears in an emitted event.

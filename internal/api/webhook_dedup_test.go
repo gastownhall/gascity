@@ -25,6 +25,34 @@ func TestWebhookDedupCache_SeenAndForget(t *testing.T) {
 	}
 }
 
+// A high-volume webhook that overflows the shared per-city cap must evict its
+// OWN soonest-expiring entries, never a quieter co-resident hook's — otherwise a
+// flood erodes another hook's replay window (schemes without a signed timestamp
+// depend on that window).
+func TestWebhookDedupCache_FloodEvictsOwnHookNotNeighbor(t *testing.T) {
+	c := newWebhookDedupCache(time.Hour)
+	c.max = 4 // small cap so the flood overflows quickly
+
+	quiet := webhookDedupKey("quiet", "only-one")
+	if c.seen(quiet) {
+		t.Fatal("first sight of the quiet hook must be unseen")
+	}
+
+	// Flood a noisy hook well past the cap.
+	for i := 0; i < 50; i++ {
+		c.seen(webhookDedupKey("noisy", fmt.Sprintf("d-%d", i)))
+	}
+
+	// The quiet hook's single entry must survive: seeing it again is a duplicate.
+	if !c.seen(quiet) {
+		t.Fatal("the quiet hook's replay entry was evicted by the noisy hook's flood")
+	}
+	// The cap is still honored.
+	if len(c.entries) > c.max {
+		t.Fatalf("cache holds %d entries, over cap %d", len(c.entries), c.max)
+	}
+}
+
 func TestWebhookDedupCache_Clear(t *testing.T) {
 	c := newWebhookDedupCache(time.Hour)
 	k := webhookDedupKey("h", "1")

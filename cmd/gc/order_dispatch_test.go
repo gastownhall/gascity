@@ -9551,3 +9551,29 @@ func TestCarryLastRunCacheFrom(t *testing.T) {
 		t.Errorf("cache size = %d after no-op carries, want 2", len(next.lastRunCache))
 	}
 }
+
+// A panic inside a detached dispatch goroutine must be contained by
+// runDispatchGuarded, not crash the supervisor (the webhook fast-ACK path has
+// already returned its HTTP response past any recovery middleware). A nil
+// recorder makes dispatchOne panic at its OrderFired emit; the guard must
+// recover and log it rather than let the panic escape the goroutine.
+func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
+	var logs bytes.Buffer
+	m := &memoryOrderDispatcher{stderr: &logs} // rec is nil → dispatchOne panics on Record
+
+	order := orders.Order{Name: "boom", Trigger: "webhook", Formula: "f"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.runDispatchGuarded(context.Background(), beads.NewMemStore(), execStoreTarget{}, order, "/city", "track-x", nil, nil)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDispatchGuarded did not return — a dispatch-goroutine panic was not recovered")
+	}
+	if !strings.Contains(logs.String(), "panic") {
+		t.Errorf("expected the recovered panic to be logged, got %q", logs.String())
+	}
+}
