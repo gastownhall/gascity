@@ -50,6 +50,11 @@ func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
 
 type preserveExistingFunc func(relPath string) bool
 
+func skipRuntimeMirror(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
+}
+
 func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
@@ -80,6 +85,10 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		entryRel := entry.Name()
 		if rel != "" {
 			entryRel = filepath.Join(rel, entry.Name())
+		}
+
+		if skipRuntimeMirror(entryRel) {
+			continue
 		}
 
 		if entry.IsDir() {
@@ -216,6 +225,9 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 
 	// Step 1: copy universal files (skip per-provider/).
 	skip := func(relPath string, _ bool) bool {
+		if skipRuntimeMirror(relPath) {
+			return true
+		}
 		// Skip the per-provider directory itself and all its contents.
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
@@ -260,6 +272,9 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 
 	// Step 1: copy universal files (skip per-provider/).
 	skip := func(relPath string, _ bool) bool {
+		if skipRuntimeMirror(relPath) {
+			return true
+		}
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
 	}
