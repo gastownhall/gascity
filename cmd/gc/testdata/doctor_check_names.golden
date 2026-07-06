@@ -62,6 +62,7 @@ order-tracking-retention
 session-model
 dolt-server
 fork-rate
+gc-shell-alias-shadow
 dolt-noms-size
 dolt-journal-size
 dolt-config

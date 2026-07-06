@@ -305,6 +305,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
+	// Host-level shell-config watch: a `gc` alias/function (oh-my-zsh's git
+	// plugin) shadows the gc binary in agent-inherited shell snapshots, so
+	// agents silently run `git commit` instead of gc and idle as if no work
+	// is hooked. Advisory + read-only; no config needed.
+	register(newGCShadowCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
 	}
