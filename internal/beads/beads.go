@@ -21,6 +21,10 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrMetadataParse is returned when a bead exists but its stored metadata
+// cannot be decoded into the Store object model.
+var ErrMetadataParse = errors.New("bead metadata parse")
+
 // ErrCacheUnavailable is returned by cache-only read handles when the cache
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
