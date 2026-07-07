@@ -1340,6 +1340,122 @@ max_active_sessions = 1
 	}
 }
 
+// TestSpawnNextAttemptScopeCheckGateInheritsSubjectRigDispatcher pins the third
+// call-site of the rig-scoped-dispatcher fix (#4006 extension): the mid-run
+// finalize-scope gate minted by applyAttemptRecipeScopeChecks during an attempt
+// re-spawn. The gate carries no run_target of its own, so before the fix its
+// rig context resolved empty and it routed to the CITY-level dispatcher
+// (bare "control-dispatcher") even though its subject execution lane lives in a
+// rig. With both a city singleton (Dir="") and a rig-scoped copy (Dir="frontend")
+// configured, and a subject whose only rig signal is its own rig-prefixed
+// gc.run_target (the control bead carries no gc.execution_routed_to), the minted
+// "Finalize scope for ..." gate must route to the rig dispatcher the rig owns.
+func TestSpawnNextAttemptScopeCheckGateInheritsSubjectRigDispatcher(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "maintainer-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "frontend"
+path = "/tmp/frontend"
+
+[[agent]]
+name = "reviewer"
+dir = "frontend"
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+start_command = "sh -c 'exec gc convoy control --serve --follow control-dispatcher'"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "frontend"
+max_active_sessions = 1
+start_command = "sh -c 'exec gc convoy control --serve --follow frontend/control-dispatcher'"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "review",
+				Title: "Review",
+				Type:  "task",
+				// The subject's ONLY rig signal: an explicit rig-prefixed target.
+				// The control bead below deliberately carries no
+				// gc.execution_routed_to, so the gate cannot inherit the rig from
+				// the parent — it must derive it from this subject.
+				Metadata: map[string]string{
+					"gc.run_target": "frontend/reviewer",
+				},
+			},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":             "ralph",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-review-v2.review-loop",
+			"gc.step_id":          "review-loop",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+			// NOTE: no gc.execution_routed_to on purpose.
+		},
+	})
+
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	// Sibling execution lane routes to the rig via its own run_target.
+	review := findAttemptByRef(t, store, root.ID, "mol-review-v2.review-loop.iteration.2.review")
+	if review.ID == "" {
+		t.Fatal("review child not created")
+	}
+	if got := review.Metadata["gc.routed_to"]; got != "frontend/reviewer" {
+		t.Fatalf("review child gc.routed_to = %q, want frontend/reviewer", got)
+	}
+
+	// The finalize-scope gate minted alongside must route to the rig dispatcher,
+	// not the bare city singleton.
+	gate := findAttemptByRef(t, store, root.ID, "mol-review-v2.review-loop.iteration.2.review-scope-check")
+	if gate.ID == "" {
+		t.Fatal("finalize-scope gate not created")
+	}
+	if got := gate.Metadata["gc.kind"]; got != "scope-check" {
+		t.Fatalf("gate gc.kind = %q, want scope-check", got)
+	}
+	if got := gate.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("finalize-scope gate gc.routed_to = %q, want rig-scoped frontend/control-dispatcher", got)
+	}
+	if gate.Assignee != "" {
+		t.Fatalf("gate assignee = %q, want empty routed control-dispatcher queue", gate.Assignee)
+	}
+}
+
 func TestApplyAttemptControlStepRoute_MinimalRigScopedDispatcherUsesMetadataRoute(t *testing.T) {
 	t.Parallel()
 

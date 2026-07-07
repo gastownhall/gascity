@@ -924,6 +924,18 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 				meta[key] = value
 			}
 		}
+		// The scope-check gate carries no run_target of its own, so downstream
+		// control routing (applyAttemptControlStepRoute) would derive an empty rig
+		// context and stamp the CITY-level dispatcher — even when the subject
+		// execution lane lives in a rig that runs and owns its own dispatcher.
+		// Inherit the subject step's rig context so the gate lands on
+		// <rig>/control-dispatcher, in lockstep with #4006's rig-scoped ownership
+		// model (the sibling execution lane already carries the rig via its own
+		// run_target). Prefer any explicit rig context on the subject, else derive
+		// it from the rig prefix of the subject's own routing target.
+		if rigContext := attemptScopeCheckSubjectRigContext(step); rigContext != "" {
+			meta[beadmeta.ExecutionRigContextMetadataKey] = rigContext
+		}
 		controls = append(controls, formula.RecipeStep{
 			ID:       controlID,
 			Title:    "Finalize scope for " + step.Title,
@@ -958,6 +970,31 @@ func attemptRecipeStepNeedsScopeCheck(step formula.RecipeStep) bool {
 		return false
 	}
 	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
+}
+
+// attemptScopeCheckSubjectRigContext derives the rig context of a scoped subject
+// step so its minted scope-check gate can route to the rig-scoped control
+// dispatcher (matching #4006). It prefers an explicit gc.execution_rig_context on
+// the subject, then falls back to the rig prefix of the subject's own routing
+// target (gc.run_target, gc.routed_to, or a rig-qualified assignee) — the same
+// target-precedence spawnNextAttempt uses to route the sibling execution lane.
+// Returns "" when the subject carries no rig signal, leaving the gate to inherit
+// the parent execution lane exactly as before.
+func attemptScopeCheckSubjectRigContext(step formula.RecipeStep) string {
+	if rigContext := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey]); rigContext != "" {
+		return rigContext
+	}
+	candidates := []string{
+		step.Metadata[beadmeta.RunTargetMetadataKey],
+		step.Metadata[beadmeta.RoutedToMetadataKey],
+		step.Assignee,
+	}
+	for _, candidate := range candidates {
+		if dir, _ := config.ParseQualifiedName(strings.TrimSpace(candidate)); dir != "" {
+			return dir
+		}
+	}
+	return ""
 }
 
 func loadAttemptRouteConfig(cityPath string) *config.City {
