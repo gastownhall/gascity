@@ -2620,12 +2620,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 							if launchOnlyDrift {
-								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr)
+								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name,
+									tp, cityPath, cfg, store, storedHash, currentHash, storedProvision, storedLaunch,
+									driftedFields, rec, trace, stdout, stderr)
+								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
+								// On success it is the rebaseline patch; on the prepare/skew/relaunch
+								// failure paths it is the buildPreparedStart prepare residue
+								// (instance_token mint, stale-resume-key clear) so the snapshot never
+								// diverges from the raw bead. ApplyPatch(nil) is a no-op.
+								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 								if relaunched {
-									// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
-									// launchBatch is nil only when rebaselineLaunchDriftHashesWithBatch failed;
-									// ApplyPatch(nil) is a no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 9).
-									infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 									continue
 								}
 							}
@@ -2691,12 +2695,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 							if launchOnlyDrift {
-								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr)
+								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name,
+									tp, cityPath, cfg, store, storedHash, currentHash, storedProvision, storedLaunch,
+									driftedFields, rec, trace, stdout, stderr)
+								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
+								// On success it is the rebaseline patch; on the prepare/skew/relaunch
+								// failure paths it is the buildPreparedStart prepare residue
+								// (instance_token mint, stale-resume-key clear) so the snapshot never
+								// diverges from the raw bead. ApplyPatch(nil) is a no-op.
+								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 								if relaunched {
-									// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
-									// launchBatch is nil only when rebaselineLaunchDriftHashesWithBatch failed;
-									// ApplyPatch(nil) is a no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 9).
-									infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 									continue
 								}
 							}
@@ -4813,12 +4821,23 @@ func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.St
 // restart. It mirrors the live-drift→RunLive clause: act, and on success
 // rebaseline the Core/provision/launch baselines so the next tick sees no drift.
 //
+// The config handed to Relaunch is derived by buildPreparedStart — the SAME
+// derivation the fresh-start and pending-create-recovery paths use — so the
+// relaunched agent resumes its tracked conversation (resolveSessionCommand adds
+// --resume/--session-id), carries the runtime env (GC_SESSION_ID, instance
+// token, GC_PROVIDER, trigger-bead env), and does NOT re-send the full startup
+// prompt (the !firstStart prompt-strip + restart-nudge block). The drift
+// COMPARISON still uses the hash-form sessionCoreConfigForHash; only the
+// EXECUTED config and the rebaselined baselines come from buildPreparedStart.
+//
 // Returns (true, launchBatch) iff the agent was relaunched and hashes were
 // rebaselined (the caller folds launchBatch onto the typed snapshot and
-// `continue`s). Returns (false, nil) when the provider cannot relaunch or the
-// relaunch failed — the caller falls through to the existing full restart.
-// The batch is nil on the true return only when rebaselineLaunchDriftHashesWithBatch
-// failed (agent was relaunched; stale baseline self-corrects on a later tick).
+// `continue`s). Returns (false, fold) when the provider cannot relaunch, the
+// prepare/precondition/relaunch step failed, or the rebaseline failed — the
+// caller folds the prepare residue (buildPreparedStart mutates the raw bead:
+// instance_token mint, stale-resume-key clear) and falls through to the full
+// restart. The fold is nil only when no buildPreparedStart side effect ran (the
+// RelaunchProvider gate rejected the runtime before any preparation).
 //
 // The deferral guards (attached / named-active / pending-interaction / open
 // assigned work) are honored by the CALLER: this is invoked only after those
@@ -4831,9 +4850,12 @@ func relaunchAgentForLaunchDrift(
 	sessFront *sessionpkg.Store,
 	session *beads.Bead,
 	name string,
-	agentCfg runtime.Config,
 	tp TemplateParams,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
 	storedHash, currentHash string,
+	storedProvisionHash, storedLaunchHash string,
 	driftedFields []string,
 	rec events.Recorder,
 	trace *sessionReconcilerTraceCycle,
@@ -4842,32 +4864,65 @@ func relaunchAgentForLaunchDrift(
 	r, ok := sp.(runtime.RelaunchProvider)
 	if !ok {
 		// Conjoined runtimes (subprocess/acp/t3bridge) do not implement
-		// RelaunchProvider; fall through to the full restart.
+		// RelaunchProvider; fall through to the full restart. No side effects yet —
+		// no buildPreparedStart residue to fold.
 		return false, nil
 	}
-	if err := r.Relaunch(ctx, name, agentCfg); err != nil {
+	// Derive the executable config exactly as the fresh-start / pending-create
+	// recovery paths do. cityPath resolves session.Metadata["work_dir"] against
+	// the city; the nil work-dir resolver is correct because both call sites sit
+	// behind the no-open-assigned-work / not-active deferral guards. Deliberately
+	// buildPreparedStart*, NOT prepareStartCandidateForCity — the session is
+	// alive, not waking, so no preWakeCommit / named-template refresh.
+	prepared, err := buildPreparedStartWithWorkDirResolver(startCandidate{session: session, tp: tp}, cityPath, cfg, store, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: preparing relaunch config for %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
+		return false, pendingCreateResidueFold(session)
+	}
+	// Anti-skew gate: the launch-only-drift verdict was computed from the
+	// hash-form config; relaunch only if it still holds for the prepared config.
+	// A mismatch means a concurrent bead mutation or a derivation divergence
+	// between the hash-form and prepared configs — take the full restart rather
+	// than relaunch-then-rebaseline against an unverified baseline.
+	if prepared.coreHash != currentHash || prepared.provisionHash != storedProvisionHash || prepared.launchHash == storedLaunchHash {
+		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n",
+			name, prepared.coreHash != currentHash, prepared.provisionHash != storedProvisionHash, prepared.launchHash == storedLaunchHash) //nolint:errcheck
+		return false, pendingCreateResidueFold(session)
+	}
+	if err := r.Relaunch(ctx, name, prepared.cfg); err != nil {
 		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
 		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
 		// back to the full restart so the launch change is still applied.
 		if !errors.Is(err, runtime.ErrRelaunchUnsupported) {
 			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
 		}
-		return false, nil
+		return false, pendingCreateResidueFold(session)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
 	// Rebaseline the Core baseline (started_config_hash) and the partition
-	// sub-hashes so the next tick sees no Core drift. started_live_hash is
+	// sub-hashes so the next tick sees no Core drift. The hashes come from
+	// buildPreparedStart's PRE-rewrite fingerprints (prepared.coreHash etc.), NOT
+	// the executed prepared.cfg (which carries the --resume rewrite + runtime env,
+	// neither a fingerprint input), so the baseline matches what the next tick's
+	// sessionCoreConfigForHash comparison reproduces. started_live_hash is
 	// DELIBERATELY left untouched: a relaunch MAY re-run SessionLive via the
 	// shared orchestration tail (tmux and ssh do; k8s does not), so the live
 	// half is not reliably re-applied here. Leaving the live hash alone keeps
 	// this provider-independent — any concurrent live drift is re-applied
 	// idempotently by the live-drift clause on the next tick (a redundant
 	// SessionLive re-apply is harmless; a missed one self-heals).
-	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(session, sessFront, agentCfg)
+	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(session, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown)
 	if rebaseErr != nil {
 		// The agent is already relaunched; do not trigger a second restart. The
-		// stale Core baseline self-corrects on a later rebaseline tick.
+		// stale Core baseline self-corrects on a later rebaseline tick. Fold the
+		// prepare residue so the snapshot still matches the raw bead.
 		fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, rebaseErr) //nolint:errcheck
+		launchBatch = pendingCreateResidueFold(session)
+	} else if tok := session.Metadata["instance_token"]; tok != "" {
+		// buildPreparedStart may mint instance_token onto the raw bead + store
+		// (SetMarker) — a residue outside the rebaseline patch. Carry it in the
+		// fold so the snapshot reflects it (mirrors pendingCreateResidueFold).
+		launchBatch["instance_token"] = tok
 	}
 	if trace != nil {
 		trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRelaunch, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
@@ -4882,31 +4937,38 @@ func relaunchAgentForLaunchDrift(
 }
 
 // rebaselineLaunchDriftHashesWithBatch moves a session's Core drift baseline to
-// agentCfg after a successful warm-box relaunch — started_config_hash + the
-// provision/launch sub-hashes + core_hash_breakdown — WITHOUT touching
-// started_live_hash/live_hash. The relaunch re-applied the launch half (the
-// agent now runs agentCfg); the provision half was unchanged by definition. The
-// live hash is left untouched because relaunch does not reliably re-apply the
-// live half (tmux/ssh re-run SessionLive via the shared orchestration tail; k8s
-// does not), so a concurrent SessionLive change is re-applied idempotently by
-// the live-drift clause on the next tick. Contrast sessionHashRebaselineMetadata,
-// which rebaselines every field (used when the config did not actually change).
+// the relaunched config after a successful warm-box relaunch —
+// started_config_hash + the provision/launch sub-hashes + core_hash_breakdown —
+// WITHOUT touching started_live_hash/live_hash. The relaunch re-applied the
+// launch half (the agent now runs the prepared config); the provision half was
+// unchanged by definition. The live hash is left untouched because relaunch does
+// not reliably re-apply the live half (tmux/ssh re-run SessionLive via the
+// shared orchestration tail; k8s does not), so a concurrent SessionLive change
+// is re-applied idempotently by the live-drift clause on the next tick. Contrast
+// sessionHashRebaselineMetadata, which rebaselines every field (used when the
+// config did not actually change).
+//
+// The hashes are passed in explicitly (from buildPreparedStart's pre-rewrite
+// fingerprints) rather than recomputed here: the executed config carries the
+// resolveSessionCommand --resume/--session-id rewrite and runtime env, which are
+// NOT fingerprint inputs, so the baseline must be the durable-config hashes the
+// next tick's sessionCoreConfigForHash comparison will reproduce.
 //
 // Returns the mirrored patch on success so the caller can fold it onto the typed
 // snapshot via ApplyPatch. Returns (nil, nil) when there is nothing to do (nil
 // session/front-door), (nil, err) on any failure.
-func rebaselineLaunchDriftHashesWithBatch(session *beads.Bead, sessFront *sessionpkg.Store, agentCfg runtime.Config) (map[string]string, error) {
+func rebaselineLaunchDriftHashesWithBatch(session *beads.Bead, sessFront *sessionpkg.Store, coreHash, provisionHash, launchHash string, breakdown runtime.BreakdownV1) (map[string]string, error) {
 	if session == nil || sessFront == nil {
 		return nil, nil
 	}
-	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	breakdownJSON, err := json.Marshal(breakdown)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling core_hash_breakdown: %w", err)
 	}
 	patch := map[string]string{
-		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
-		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
-		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"started_config_hash":    coreHash,
+		"started_provision_hash": provisionHash,
+		"started_launch_hash":    launchHash,
 		"core_hash_breakdown":    string(breakdownJSON),
 	}
 	if err := sessFront.ApplyPatch(session.ID, patch); err != nil {
