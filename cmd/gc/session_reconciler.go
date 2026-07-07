@@ -2447,6 +2447,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
 				}
+			} else if lastActivityErr == nil && dialogDismissAttemptCount(session) > 0 {
+				// The session is progressing again (or restarted fresh after a
+				// bounded fallthrough recycle): reset the persisted dialog-dismiss
+				// budget so a stale count from an earlier dialog episode cannot
+				// shorten - or zero out - the bounded suppression window on a
+				// later, unrelated dialog stall. The count guard keeps this from
+				// writing metadata on every healthy tick; it costs one write per
+				// recovered session (#3426 review, non-blocking note 2).
+				recordDialogDismissAttempts(store, session, 0, stderr)
 			}
 		}
 

@@ -504,3 +504,36 @@ func TestReconcileSessionBeads_ProgressStallDoesNotDismissBarePhraseAboveLivePro
 		t.Fatalf("session %q still running; a non-dialog stall should recycle normally", sessionName)
 	}
 }
+
+// TestReconcileSessionBeads_ProgressStallClearsStaleDismissAttemptsOnProgress
+// proves the dialog-dismiss budget self-heals: a session that recovered from an
+// earlier dialog episode (persisted dialog_dismiss_attempts > 0) and is
+// progressing again has the stale count reset, so a later, unrelated dialog
+// stall gets the full bounded suppression window instead of a shortened - or
+// zeroed - one.
+func TestReconcileSessionBeads_ProgressStallClearsStaleDismissAttemptsOnProgress(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	// Residue from an earlier dialog episode at the fallthrough cap, which
+	// uncleaned would zero the suppression budget of the next episode.
+	env.setSessionMetadata(&session, map[string]string{
+		dialogDismissAttemptsMetadataKey: "3",
+	})
+	// The session is progressing again: activity well inside the 30m threshold.
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-time.Minute))
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q recycled; a progressing session must be left running", sessionName)
+	}
+	if got := countDialogDismissCalls(env.sp.Calls); got != 0 {
+		t.Fatalf("DismissKnownDialogs calls = %d, want 0 (session is not stalled)", got)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata[dialogDismissAttemptsMetadataKey] != "0" {
+		t.Fatalf("dialog_dismiss_attempts = %q, want 0 (stale budget must reset on progress)", got.Metadata[dialogDismissAttemptsMetadataKey])
+	}
+}
