@@ -42,6 +42,11 @@ COPY contrib/events-scripts/gc-events-k8s /usr/local/bin/gc-events-k8s
 WORKDIR /city
 USER gcagent
 
+# tini as PID 1 reaps orphaned children. `gc` runs as PID 1 in this container
+# and does not harvest SIGCHLD, so bd/dolt/git processes spawned across the
+# container that reparent to it would otherwise pile up as <defunct> zombies.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
 # Wait for city directory to be copied in (via gc-controller-k8s deploy),
 # then init from it and wait for the deploy script to finish setup (bd init
 # for scale_check) before starting the controller.  Skip init if already

@@ -426,6 +426,12 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
 	}
+	// Reap the child when it exits so it does not linger as a zombie under a
+	// non-reaping PID-1 controller. This server is managed out-of-band by PID
+	// (health checks, terminateManagedDoltPID); the returned struct carries no
+	// *exec.Cmd, so this goroutine is the sole Wait — matching the scope/test
+	// watchdog paths, which already reap via a background cmd.Wait().
+	go func() { _ = cmd.Wait() }()
 	return managedDoltStartedProcess{CityPath: cityPath, PID: cmd.Process.Pid}, nil
 }
 
