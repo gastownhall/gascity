@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/api/dashboardbff"
 )
 
 type fakeDashResolver struct{ cities []api.CityInfo }
@@ -78,6 +79,48 @@ func TestRunCwdAllowedRootsFromEnv(t *testing.T) {
 	t.Setenv("RUN_CWD_ALLOWED_ROOTS", "")
 	if got := runCwdAllowedRootsFromEnv(); got != nil {
 		t.Errorf("empty env should yield nil, got %v", got)
+	}
+}
+
+// TestDashboardCityResolverCitiesMapsListCities proves the production resolver's
+// Cities() enumerator — the source the dashboard plane eager-warms from at
+// startup — maps every ListCities entry onto a CityRef (name + host root path),
+// so no served city is missed by the eager warm-up.
+func TestDashboardCityResolverCitiesMapsListCities(t *testing.T) {
+	res := dashboardCityResolver{resolver: fakeDashResolver{cities: []api.CityInfo{
+		{Name: "alpha", Path: "/srv/alpha", Running: true},
+		{Name: "beta", Path: "/srv/beta"},
+	}}}
+
+	got := res.Cities()
+	want := []dashboardbff.CityRef{
+		{Name: "alpha", Path: "/srv/alpha"},
+		{Name: "beta", Path: "/srv/beta"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Cities() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Cities()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// CityPath still resolves a known city and rejects an unknown one.
+	if p, ok := res.CityPath("beta"); !ok || p != "/srv/beta" {
+		t.Errorf("CityPath(beta) = %q,%v, want /srv/beta,true", p, ok)
+	}
+	if _, ok := res.CityPath("ghost"); ok {
+		t.Error("CityPath(ghost) = true, want false for an unknown city")
+	}
+}
+
+// TestDashboardCityResolverCitiesEmpty proves an empty registry yields an empty
+// (non-nil) slice, so Plane.Start's eager warm-up is a clean no-op.
+func TestDashboardCityResolverCitiesEmpty(t *testing.T) {
+	res := dashboardCityResolver{resolver: fakeDashResolver{}}
+	if got := res.Cities(); len(got) != 0 {
+		t.Errorf("Cities() = %+v, want empty", got)
 	}
 }
 

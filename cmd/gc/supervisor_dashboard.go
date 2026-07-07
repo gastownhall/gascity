@@ -30,6 +30,18 @@ func (d dashboardCityResolver) CityPath(name string) (string, bool) {
 	return "", false
 }
 
+// Cities returns every managed city (name + host root path) so the dashboard
+// plane can eager-warm each city's run-view fold at startup. It maps the
+// supervisor registry's ListCities entries onto the plane's CityRef shape.
+func (d dashboardCityResolver) Cities() []dashboardbff.CityRef {
+	cities := d.resolver.ListCities()
+	refs := make([]dashboardbff.CityRef, 0, len(cities))
+	for _, c := range cities {
+		refs = append(refs, dashboardbff.CityRef{Name: c.Name, Path: c.Path})
+	}
+	return refs
+}
+
 // dashboardEnabled reports whether the supervisor hosts the embedded dashboard.
 // On by default; set GC_SUPERVISOR_DASHBOARD=0 to disable (revert to a
 // typed-API-only supervisor with no static or /api surface).
