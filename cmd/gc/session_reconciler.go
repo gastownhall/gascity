@@ -2626,8 +2626,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
 								// On success it is the rebaseline patch; on the prepare/skew/relaunch
 								// failure paths it is the buildPreparedStart prepare residue
-								// (instance_token mint, stale-resume-key clear) so the snapshot never
-								// diverges from the raw bead. ApplyPatch(nil) is a no-op.
+								// — only started_config_hash and instance_token are folded, while
+								// session_key and continuation_reset_pending stay intentionally
+								// unthreaded (no same-tick Info reader) and self-heal on the next
+								// store reload. ApplyPatch(nil) is a no-op.
 								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 								if relaunched {
 									continue
@@ -2701,8 +2703,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
 								// On success it is the rebaseline patch; on the prepare/skew/relaunch
 								// failure paths it is the buildPreparedStart prepare residue
-								// (instance_token mint, stale-resume-key clear) so the snapshot never
-								// diverges from the raw bead. ApplyPatch(nil) is a no-op.
+								// — only started_config_hash and instance_token are folded, while
+								// session_key and continuation_reset_pending stay intentionally
+								// unthreaded (no same-tick Info reader) and self-heal on the next
+								// store reload. ApplyPatch(nil) is a no-op.
 								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 								if relaunched {
 									continue
@@ -4832,7 +4836,9 @@ func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.St
 //
 // Returns (true, launchBatch) iff the agent was relaunched and hashes were
 // rebaselined (the caller folds launchBatch onto the typed snapshot and
-// `continue`s). Returns (false, fold) when the provider cannot relaunch, the
+// `continue`s). Returns (false, fold) when the provider cannot relaunch,
+// buildPreparedStart minted a speculative resume key (a warm relaunch would
+// --resume a key naming a conversation that was never created), the
 // prepare/precondition/relaunch step failed, or the rebaseline failed — the
 // caller folds the prepare residue (buildPreparedStart mutates the raw bead:
 // instance_token mint, stale-resume-key clear) and falls through to the full
@@ -4868,6 +4874,16 @@ func relaunchAgentForLaunchDrift(
 		// no buildPreparedStart residue to fold.
 		return false, nil
 	}
+	// Capture whether the bead already tracked a resumable conversation BEFORE
+	// buildPreparedStart runs. An empty session_key means any key the preparation
+	// mints below (line ~911, for a SessionIDFlag provider) is speculative: it
+	// names a conversation the relaunch has not created yet. Such a speculative key
+	// must never be executed as `--resume` and must never survive into the
+	// full-restart fallback, or a future start would --resume a phantom
+	// conversation. Both halves are enforced below: the minted-speculative-key guard
+	// before Relaunch prevents execution, and relaunchAbortResidueFold clears the key
+	// on every abort path.
+	hadResumeKeyBeforePrepare := strings.TrimSpace(session.Metadata["session_key"]) != ""
 	// Derive the executable config exactly as the fresh-start / pending-create
 	// recovery paths do. cityPath resolves session.Metadata["work_dir"] against
 	// the city; the nil work-dir resolver is correct because both call sites sit
@@ -4877,7 +4893,7 @@ func relaunchAgentForLaunchDrift(
 	prepared, err := buildPreparedStartWithWorkDirResolver(startCandidate{session: session, tp: tp}, cityPath, cfg, store, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: preparing relaunch config for %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
-		return false, pendingCreateResidueFold(session)
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
 	}
 	// Anti-skew gate: the launch-only-drift verdict was computed from the
 	// hash-form config; relaunch only if it still holds for the prepared config.
@@ -4885,9 +4901,32 @@ func relaunchAgentForLaunchDrift(
 	// between the hash-form and prepared configs — take the full restart rather
 	// than relaunch-then-rebaseline against an unverified baseline.
 	if prepared.coreHash != currentHash || prepared.provisionHash != storedProvisionHash || prepared.launchHash == storedLaunchHash {
-		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n",
-			name, prepared.coreHash != currentHash, prepared.provisionHash != storedProvisionHash, prepared.launchHash == storedLaunchHash) //nolint:errcheck
-		return false, pendingCreateResidueFold(session)
+		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n", //nolint:errcheck
+			name, prepared.coreHash != currentHash, prepared.provisionHash != storedProvisionHash, prepared.launchHash == storedLaunchHash)
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
+	}
+	// A warm-box relaunch resumes a TRACKED conversation. When the bead carried no
+	// session_key before preparation but buildPreparedStart minted one — a
+	// SessionIDFlag provider with no prior key (session_lifecycle_parallel.go:911)
+	// — that key is speculative: started_config_hash is set, so firstStart is false
+	// and resolveSessionCommand built `--resume <minted-key>` for a conversation
+	// that was never created. Executing that relaunch resumes a phantom, and a
+	// provider that reports success would then rebaseline and persist the minted
+	// key, tying every future start to a conversation that does not exist. Fall back
+	// to the full restart, which starts fresh; relaunchAbortResidueFold clears the
+	// speculative key so resetConfiguredNamedSessionForConfigDrift's preserve-resume
+	// gate cannot carry it forward.
+	//
+	// Scope this to an ACTUAL mint (session_key populated only during preparation),
+	// not merely "no prior key": a provider that mints no key (nil resolver, no
+	// SessionIDFlag) built no `--resume`, so its bare warm relaunch carries no
+	// phantom and must still proceed. A merely-stale prior key is also unaffected —
+	// buildPreparedStart cleared it and zeroed started_config_hash before
+	// re-minting, so firstStart is true, the command is a fresh `--session-id`, and
+	// hadResumeKeyBeforePrepare is true, so this guard does not fire.
+	if mintedSpeculativeResumeKey := !hadResumeKeyBeforePrepare && strings.TrimSpace(session.Metadata["session_key"]) != ""; mintedSpeculativeResumeKey {
+		fmt.Fprintf(stderr, "session reconciler: launch-drift relaunch for %s minted a speculative resume key (no prior conversation); falling back to full restart\n", name) //nolint:errcheck
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
 	}
 	if err := r.Relaunch(ctx, name, prepared.cfg); err != nil {
 		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
@@ -4896,7 +4935,7 @@ func relaunchAgentForLaunchDrift(
 		if !errors.Is(err, runtime.ErrRelaunchUnsupported) {
 			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
 		}
-		return false, pendingCreateResidueFold(session)
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
 	// Rebaseline the Core baseline (started_config_hash) and the partition
@@ -4918,10 +4957,13 @@ func relaunchAgentForLaunchDrift(
 		// prepare residue so the snapshot still matches the raw bead.
 		fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, rebaseErr) //nolint:errcheck
 		launchBatch = pendingCreateResidueFold(session)
-	} else if tok := session.Metadata["instance_token"]; tok != "" {
+	} else if tok := session.Metadata["instance_token"]; tok != "" && launchBatch != nil {
 		// buildPreparedStart may mint instance_token onto the raw bead + store
 		// (SetMarker) — a residue outside the rebaseline patch. Carry it in the
-		// fold so the snapshot reflects it (mirrors pendingCreateResidueFold).
+		// fold so the snapshot reflects it (mirrors pendingCreateResidueFold). Guard
+		// the write on launchBatch != nil: rebaselineLaunchDriftHashesWithBatch
+		// documents a (nil, nil) return when the session/front-door is nil, and a
+		// write to a nil map panics.
 		launchBatch["instance_token"] = tok
 	}
 	if trace != nil {
@@ -4934,6 +4976,32 @@ func relaunchAgentForLaunchDrift(
 		Message: "agent relaunched (launch-only config change)",
 	})
 	return true, launchBatch
+}
+
+// relaunchAbortResidueFold is the buildPreparedStart residue fold for the paths
+// that abort the launch-only-drift relaunch (prepare error, anti-skew skew, or
+// relaunch failure) and fall back to the full restart. It exists to keep a
+// speculatively-minted resume key from surviving the fallback.
+//
+// When the bead carried no session_key before preparation,
+// buildPreparedStartWithWorkDirResolver minted one (persisting it to the raw
+// bead + store via SetMarker) so it could build the relaunch command. That key
+// names a conversation the aborted relaunch never created. Left in place,
+// resetConfiguredNamedSessionForConfigDrift would see a non-empty session_key
+// plus the stale started_config_hash and PRESERVE both, so the next start would
+// --resume a phantom conversation instead of doing the fresh restart the
+// fallback is meant to provide. Clear the speculative key exactly as
+// buildPreparedStart's own stale-resume guard does (session_key +
+// started_config_hash + continuation_reset_pending, raw bead + store), which the
+// pendingCreateResidueFold below then folds onto the caller's snapshot.
+//
+// When a real resume key predated preparation, leave it untouched so the
+// fallback resumes the prior conversation (the intended preserve-resume path).
+func relaunchAbortResidueFold(session *beads.Bead, sessFront *sessionpkg.Store, hadResumeKeyBeforePrepare bool) map[string]string {
+	if session != nil && !hadResumeKeyBeforePrepare && strings.TrimSpace(session.Metadata["session_key"]) != "" {
+		clearStaleResumeKeyMetadata(session, sessFront)
+	}
+	return pendingCreateResidueFold(session)
 }
 
 // rebaselineLaunchDriftHashesWithBatch moves a session's Core drift baseline to
