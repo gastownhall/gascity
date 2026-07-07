@@ -4252,7 +4252,7 @@ case "$*" in
     printf 'id\n'
     printf 'non-fatal warning from dolt\n' >&2
     ;;
-  *"SELECT id FROM "*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"issues"*)
     printf 'id\nga-old\n'
     printf 'non-fatal warning from dolt\n' >&2
     ;;
@@ -4291,7 +4291,7 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "close ga-old --force --reason stale:auto-closed by reaper") {
+	if !strings.Contains(bdLogText, "close ga-old --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not act on row-query stdout when Dolt emitted stderr warning:\n%s", bdLogText)
 	}
 	if strings.Contains(bdLogText, "non-fatal warning") {
@@ -5177,7 +5177,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"issues"*)
     printf 'id\nga-old\n'
     ;;
   *"COUNT("*)
@@ -5249,10 +5249,10 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
-  *"SELECT id FROM "*"rigdb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"rigdb"*"issues"*)
     printf 'id\nrig-old\n'
     ;;
   *"COUNT("*)
@@ -5290,7 +5290,10 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "close ga-city --force --reason stale:auto-closed by reaper") {
+	// ga-city is unassigned, so its stale close is bare. The assigned/unassigned
+	// force split itself is covered by
+	// TestReaperStaleAutoCloseForcesAssignedIssueButKeepsUnassignedBare.
+	if !strings.Contains(bdLogText, "close ga-city --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not close city-scoped stale issue:\n%s", bdLogText)
 	}
 	if strings.Contains(bdLogText, "rig-old") {
@@ -5307,6 +5310,101 @@ exit 0
 	}
 	if strings.Contains(gcLogText, "mail send human -s ESCALATION") || strings.Contains(gcLogText, "non-city database") {
 		t.Fatalf("reaper escalated expected non-city stale issue skips:\n%s", gcLogText)
+	}
+}
+
+// TestReaperStaleAutoCloseForcesAssignedIssueButKeepsUnassignedBare locks in the
+// per-row force decision: the reaper (order:reaper) closes an assigned stale bead
+// with --force because that is a cross-actor close under bd's guard, but closes an
+// open/unassigned stale bead bare so a concurrent re-claim after the select is
+// still rejected by the guard rather than clobbered.
+func TestReaperStaleAutoCloseForcesAssignedIssueButKeepsUnassignedBare(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// The stale query selects id plus a per-row 'force'/'bare' flag computed from
+	// the bead's assignee. This stub stands in for Dolt and returns one assigned
+	// row (force) and one unassigned row (bare).
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
+    printf 'id,close_mode\nga-assigned,force\nga-open,bare\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("reaper.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	// The reaper must ask Dolt for the per-row close mode; otherwise the stub's
+	// force/bare split would not reflect the real query.
+	if !strings.Contains(string(doltData), "CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END") {
+		t.Fatalf("stale query did not carry the per-row assignment-state flag:\n%s", doltData)
+	}
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	if !strings.Contains(bdLogText, "close ga-assigned --force --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not force-close the assigned stale issue:\n%s", bdLogText)
+	}
+	if !strings.Contains(bdLogText, "close ga-open --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not close the unassigned stale issue bare:\n%s", bdLogText)
+	}
+	if strings.Contains(bdLogText, "close ga-open --force") {
+		t.Fatalf("reaper force-closed an open/unassigned stale issue; it must stay bare:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "closed:2") {
+		t.Fatalf("reaper summary did not report both stale closes:\n%s", gcData)
 	}
 }
 
@@ -5330,7 +5428,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     case "$*" in
       *"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''"*)
         printf 'id\n'
@@ -5416,7 +5514,7 @@ case "$*" in
   *"gc:nudge"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     printf 'id\n'
     ;;
   *"COUNT("*)
@@ -5454,11 +5552,14 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "close ga-expired") {
-		t.Fatalf("reaper did not close elapsed nudge bead:\n%s", bdLogText)
+	// The expired nudge bead is unassigned, so the reaper must close it bare; an
+	// inserted --force would defeat bd's cross-actor guard. Pin the full argv and
+	// assert --force is absent so a regression toward forcing is caught.
+	if !strings.Contains(bdLogText, "close ga-expired --reason ttl:expired by reaper") {
+		t.Fatalf("reaper did not close elapsed nudge bead with the expected bare argv:\n%s", bdLogText)
 	}
-	if !strings.Contains(bdLogText, "ttl:expired by reaper") {
-		t.Fatalf("reaper closed nudge bead without ttl:expired reason:\n%s", bdLogText)
+	if strings.Contains(bdLogText, "close ga-expired --force") {
+		t.Fatalf("reaper force-closed an unassigned expired nudge bead; the bare close must be preserved:\n%s", bdLogText)
 	}
 
 	gcData, err := os.ReadFile(gcLog)
@@ -5497,7 +5598,7 @@ case "$*" in
   *"gc:nudge"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     case "$*" in
       *"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''"*)
         printf 'id\n'
@@ -5575,7 +5676,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
   *"COUNT("*)
@@ -5612,7 +5713,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "close ga-city --force --reason stale:auto-closed by reaper") {
+	if !strings.Contains(string(bdData), "close ga-city --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not resolve city metadata through GC_CITY_PATH:\n%s", bdData)
 	}
 
@@ -5661,7 +5762,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
   *"COUNT("*)
@@ -5700,7 +5801,7 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "args=close ga-city --force --reason stale:auto-closed by reaper") {
+	if !strings.Contains(bdLogText, "args=close ga-city --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not close city issue:\n%s", bdLogText)
 	}
 	if !strings.Contains(bdLogText, "pwd="+canonicalCityDir) {
@@ -5734,10 +5835,10 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
-  *"SELECT id FROM "*"wrongdb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"wrongdb"*"issues"*)
     printf 'id\nga-wrong\n'
     ;;
   *"COUNT("*)
@@ -5821,7 +5922,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"issues"*)
     printf 'id\nga-old\n'
     ;;
   *"COUNT("*)
@@ -5898,7 +5999,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"citydb"*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
   *"COUNT("*)
@@ -5935,7 +6036,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "close ga-city --force --reason stale:auto-closed by reaper") {
+	if !strings.Contains(string(bdData), "close ga-city --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not close city issue through metadata fallback:\n%s", bdData)
 	}
 
@@ -5978,7 +6079,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"issues"*)
     printf 'id\nga-old\n'
     ;;
   *"COUNT("*)
@@ -6051,7 +6152,7 @@ case "$*" in
   *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
     printf 'id\n'
     ;;
-  *"SELECT id FROM "*"issues"*)
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"issues"*)
     printf 'id\nga-old\n'
     ;;
   *"COUNT("*)
