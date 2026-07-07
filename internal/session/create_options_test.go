@@ -20,7 +20,7 @@ func TestCreateOptionsDefaultSessionOrigin(t *testing.T) {
 func TestCreateSessionStartedDefaultsToManualOrigin(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "helper",
@@ -50,7 +50,7 @@ func TestCreateSessionStartedDefaultsToManualOrigin(t *testing.T) {
 func TestCreateSessionBeadOnlyDefaultsToEphemeralOrigin(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		BeadOnly: true,
@@ -81,7 +81,7 @@ func TestCreateSessionBeadOnlyDefaultsToEphemeralOrigin(t *testing.T) {
 func TestCreateSessionExtraMetaOverridesOriginDefault(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template:  "helper",
@@ -107,7 +107,7 @@ func TestCreateSessionExtraMetaOverridesOriginDefault(t *testing.T) {
 func TestCreateSessionFieldNamedSpecMapsCorrectly(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Alias:        "sky",
@@ -144,7 +144,7 @@ func TestCreateSessionFieldNamedSpecMapsCorrectly(t *testing.T) {
 // CreateSession path and the historical Create wrapper it now backs.
 func TestCreateSessionMatchesLegacyWrapper(t *testing.T) {
 	viaWrapper := createOriginMetadata(t, func(mgr *Manager) (Info, error) {
-		return mgr.Create(context.Background(), "helper", "chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+		return mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	})
 	viaSpec := createOriginMetadata(t, func(mgr *Manager) (Info, error) {
 		return mgr.CreateSession(context.Background(), CreateOptions{
@@ -160,7 +160,7 @@ func TestCreateSessionMatchesLegacyWrapper(t *testing.T) {
 func createOriginMetadata(t *testing.T, create func(*Manager) (Info, error)) string {
 	t.Helper()
 	store := beads.NewMemStore()
-	mgr := NewManager(store, runtime.NewFake())
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
 	info, err := create(mgr)
 	if err != nil {
 		t.Fatalf("create: %v", err)

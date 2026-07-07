@@ -136,9 +136,9 @@ func TestInterruptStrategyUsesPiProviderFamilyAlias(t *testing.T) {
 func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -171,9 +171,9 @@ func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testi
 func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -203,9 +203,9 @@ func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testin
 func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -239,9 +239,9 @@ func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T)
 func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -267,9 +267,9 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "gemini", t.TempDir(), "gemini", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -305,9 +305,9 @@ func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testi
 func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "gemini", t.TempDir(), "gemini", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	workDir := t.TempDir()
 	sessionName := "s-live-create"
@@ -388,9 +388,9 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithCityPath(store, sp, cityPath)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -761,9 +761,9 @@ func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithCityPath(store, sp, cityPath)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -796,9 +796,9 @@ func TestSubmitFollowUpOnSuspendedSessionFallsBackToImmediateSend(t *testing.T) 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithCityPath(store, sp, cityPath)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 
-	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -839,9 +839,9 @@ func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithCityPath(store, sp, cityPath)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 
-	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -885,9 +885,9 @@ func TestSubmitDefaultQueuesWhenWakeAlreadyRequested(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithCityPath(store, sp, cityPath)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 
-	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -994,9 +994,9 @@ func TestSubmissionCapabilitiesDisableInterruptNowForWrappedAntigravity(t *testi
 func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "antigravity", t.TempDir(), "antigravity", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "antigravity", WorkDir: t.TempDir(), Provider: "antigravity", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1019,9 +1019,9 @@ func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "gemini", t.TempDir(), "gemini", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1088,9 +1088,9 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1149,9 +1149,9 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1201,9 +1201,9 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.WaitForIdleErrors = map[string]error{}
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1237,9 +1237,9 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1286,9 +1286,9 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1322,9 +1322,9 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1426,9 +1426,9 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1500,9 +1500,9 @@ func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.
 func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi --session target", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1571,9 +1571,9 @@ func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi --session target", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1618,9 +1618,9 @@ func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1675,9 +1675,9 @@ func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi --session missing", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session missing", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1716,13 +1716,13 @@ func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
-	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1753,9 +1753,9 @@ func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1790,9 +1790,9 @@ func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 func TestStopTurnUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

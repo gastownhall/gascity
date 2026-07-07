@@ -573,7 +573,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -623,7 +623,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestVerifiedInterrupt_MismatchedToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

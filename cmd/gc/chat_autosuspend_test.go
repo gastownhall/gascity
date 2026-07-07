@@ -16,16 +16,16 @@ import (
 func TestAutoSuspendChatSessions(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManager(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp)
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
 	// Create two sessions.
-	s1, err := mgr.Create(context.Background(), "default", "S1", "echo s1", "/tmp", "test", nil, session.ProviderResume{}, runtime.Config{})
+	s1, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "S1", Command: "echo s1", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := mgr.Create(context.Background(), "default", "S2", "echo s2", "/tmp", "test", nil, session.ProviderResume{}, runtime.Config{})
+	s2, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "S2", Command: "echo s2", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +71,11 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManager(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp)
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
-	s1, err := mgr.Create(context.Background(), "default", "Attached", "echo a", "/tmp", "test", nil, session.ProviderResume{}, runtime.Config{})
+	s1, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "Attached", Command: "echo a", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}

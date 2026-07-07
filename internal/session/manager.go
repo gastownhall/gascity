@@ -620,98 +620,15 @@ func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...Manag
 	return m
 }
 
-// NewManager creates a Manager backed by the given bead store and session provider.
-func NewManager(store beads.Store, sp runtime.Provider) *Manager {
-	return NewManagerWithOptions(store, sp)
-}
-
-// NewManagerWithTransportResolver creates a Manager that can infer session
-// transport from template or provider config when older beads do not have
-// transport metadata.
-func NewManagerWithTransportResolver(store beads.Store, sp runtime.Provider, resolver func(template, provider string) string) *Manager {
-	return NewManagerWithOptions(store, sp, WithTransportResolver(resolver))
-}
-
-// NewManagerWithCityPath creates a Manager that can persist deferred submits
-// into the city's nudge queue.
-func NewManagerWithCityPath(store beads.Store, sp runtime.Provider, cityPath string) *Manager {
-	return NewManagerWithOptions(store, sp, WithCityPath(cityPath))
-}
-
-// NewManagerWithTransportResolverAndCityPath creates a Manager that can infer
-// session transport from template or provider config and persist deferred
-// submits into the city's nudge queue.
-func NewManagerWithTransportResolverAndCityPath(store beads.Store, sp runtime.Provider, cityPath string, resolver func(template, provider string) string) *Manager {
-	return NewManagerWithOptions(store, sp, WithCityPath(cityPath), WithTransportResolver(resolver))
-}
-
-// NewManagerWithTransportPolicyResolverAndCityPath creates a Manager that can
-// infer transport from config and, when the resolver marks it safe, continue
-// using that transport for stopped legacy sessions without persisted
-// transport metadata.
-func NewManagerWithTransportPolicyResolverAndCityPath(
-	store beads.Store,
-	sp runtime.Provider,
-	cityPath string,
-	resolver func(template, provider string) (string, bool),
-) *Manager {
-	return NewManagerWithOptions(store, sp, WithCityPath(cityPath), WithTransportPolicyResolver(resolver))
-}
-
 // CreateSession is the single entry point for creating a session. It reads a
-// field-named CreateSpec and either starts the runtime immediately or, when
+// field-named CreateOptions and either starts the runtime immediately or, when
 // spec.BeadOnly is set, creates a start-pending bead for the reconciler to
-// start later. All the Create* wrappers below are thin spec-builders over it.
+// start later.
 func (m *Manager) CreateSession(ctx context.Context, spec CreateOptions) (Info, error) {
 	if spec.BeadOnly {
 		return m.createBeadOnly(spec)
 	}
 	return m.createStarted(ctx, spec)
-}
-
-// Create creates a new chat session bead and starts the runtime session.
-// The command is the full provider command to execute (e.g., "claude --dangerously-skip-permissions").
-// The resume parameter carries provider resume capabilities; if the provider
-// supports SessionIDFlag, a UUID session key is generated and injected.
-// The caller is responsible for attaching after Create returns.
-func (m *Manager) Create(ctx context.Context, template, title, command, workDir, provider string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateSession(ctx, CreateOptions{
-		Template: template, Title: title, Command: command, WorkDir: workDir,
-		Provider: provider, Env: env, Resume: resume, Hints: hints,
-		ExtraMeta: map[string]string{"session_origin": "manual"},
-	})
-}
-
-// CreateWithTransport creates a new chat session bead and starts the runtime
-// session, preserving the transport override separately from the provider name
-// so ACP-routed sessions can be resumed correctly.
-func (m *Manager) CreateWithTransport(ctx context.Context, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateSession(ctx, CreateOptions{
-		Template: template, Title: title, Command: command, WorkDir: workDir,
-		Provider: provider, Transport: transport, Env: env, Resume: resume, Hints: hints,
-		ExtraMeta: map[string]string{"session_origin": "manual"},
-	})
-}
-
-// CreateAliasedNamedWithTransport creates a new chat session bead with an
-// optional public alias and optional explicit runtime session_name.
-func (m *Manager) CreateAliasedNamedWithTransport(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateSession(ctx, CreateOptions{
-		Alias: alias, ExplicitName: explicitName, Template: template, Title: title,
-		Command: command, WorkDir: workDir, Provider: provider, Transport: transport,
-		Env: env, Resume: resume, Hints: hints,
-		ExtraMeta: map[string]string{"session_origin": "manual"},
-	})
-}
-
-// CreateAliasedNamedWithTransportAndMetadata creates a new chat session bead
-// with additional metadata published atomically at bead creation time.
-func (m *Manager) CreateAliasedNamedWithTransportAndMetadata(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config, extraMeta map[string]string) (Info, error) {
-	return m.CreateSession(ctx, CreateOptions{
-		Alias: alias, ExplicitName: explicitName, Template: template, Title: title,
-		Command: command, WorkDir: workDir, Provider: provider, Transport: transport,
-		Env: env, Resume: resume, Hints: hints, ExtraMeta: extraMeta,
-	})
 }
 
 func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, error) {
@@ -942,21 +859,6 @@ func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error 
 	return nil
 }
 
-// CreateNamedWithTransport creates a new chat session bead with an optional
-// explicit session_name and starts the runtime session.
-//
-// WARNING: withSessionNameReservationLock only serializes callers inside this
-// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
-// when explicitName is non-empty so duplicate names cannot race across processes.
-func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateSession(ctx, CreateOptions{
-		ExplicitName: explicitName, Template: template, Title: title, Command: command,
-		WorkDir: workDir, Provider: provider, Transport: transport, Env: env,
-		Resume: resume, Hints: hints,
-		ExtraMeta: map[string]string{"session_origin": "manual"},
-	})
-}
-
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
 	if sp == nil {
 		return false
@@ -976,37 +878,6 @@ func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanc
 		return false
 	}
 	return strings.TrimSpace(liveToken) == instanceToken
-}
-
-// CreateBeadOnly creates a session bead without starting the runtime process.
-// The bead is created with state "start-pending" — the controller's
-// reconciler will detect it in buildDesiredState and start the process on its
-// next tick.
-//
-// This is the Phase 2 path: CLI creates intent (bead), reconciler executes.
-func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume) (Info, error) {
-	return m.CreateBeadOnlyNamed("", template, title, command, workDir, provider, transport, env, resume)
-}
-
-// CreateAliasedBeadOnlyNamed creates a session bead without starting the
-// runtime process, preserving an optional public alias and explicit runtime
-// session_name for the reconciler.
-func (m *Manager) CreateAliasedBeadOnlyNamed(alias, explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
-	return m.CreateSession(context.Background(), CreateOptions{
-		BeadOnly: true, Alias: alias, ExplicitName: explicitName, Template: template,
-		Title: title, Command: command, WorkDir: workDir, Provider: provider,
-		Transport: transport, Resume: resume,
-	})
-}
-
-// CreateAliasedBeadOnlyNamedWithMetadata creates a session bead without
-// starting the runtime process, publishing extra metadata atomically.
-func (m *Manager) CreateAliasedBeadOnlyNamedWithMetadata(alias, explicitName, template, title, command, workDir, provider, transport string, resume ProviderResume, extraMeta map[string]string) (Info, error) {
-	return m.CreateSession(context.Background(), CreateOptions{
-		BeadOnly: true, Alias: alias, ExplicitName: explicitName, Template: template,
-		Title: title, Command: command, WorkDir: workDir, Provider: provider,
-		Transport: transport, Resume: resume, ExtraMeta: extraMeta,
-	})
 }
 
 func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
@@ -1118,16 +989,6 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		return Info{}, err
 	}
 	return info, nil
-}
-
-// CreateBeadOnlyNamed creates a session bead without starting the runtime
-// process, preserving an optional explicit session_name for the reconciler.
-//
-// WARNING: withSessionNameReservationLock only serializes callers inside this
-// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
-// when explicitName is non-empty so duplicate names cannot race across processes.
-func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
-	return m.CreateAliasedBeadOnlyNamed("", explicitName, template, title, command, workDir, provider, transport, nil, resume)
 }
 
 // Attach attaches the user's terminal to the session. If the session is

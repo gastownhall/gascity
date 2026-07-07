@@ -183,7 +183,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
