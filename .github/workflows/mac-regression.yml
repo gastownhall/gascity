@@ -75,7 +75,7 @@ concurrency:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.0.4"
+  BD_VERSION: "v1.1.0"
 
 # Trigger gate re-used by every job below via `if:`.
 # We want each job to run when EITHER:

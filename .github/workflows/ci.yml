@@ -175,7 +175,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -237,7 +237,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -266,7 +266,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     strategy:
       fail-fast: false
       matrix:
@@ -298,7 +298,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -498,7 +498,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -630,7 +630,7 @@ jobs:
             command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1131,7 +1131,7 @@ jobs:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
   # so TS drift against the spec (e.g. a query param tightening from
