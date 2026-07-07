@@ -4763,6 +4763,100 @@ func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
 	}
 }
 
+// TestNudgePollHelpersSkipDoltOpenOnEmptyQueue pins the connection-churn fix:
+// on the common idle tick the flock'd state.json queue is empty, so the per-tick
+// poll helpers must NOT open the Dolt-backed front-door store at all. Every open
+// dials ~2 sql-server connections (main pool + a SHOW DATABASES init probe); N
+// idle `gc nudge poll` sidecars each opening once per 2s tick is the measured
+// churn that pins the server. Pre-fix these helpers opened unconditionally
+// (opens == N calls); post-fix an empty queue yields opens == 0.
+func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
+	opens, closes := installCountingNudgeStoreSeam(t)
+	dir := t.TempDir()
+	now := time.Now()
+
+	// No enqueue: the state.json queue is empty (the idle-session steady state).
+	const ticks = 5
+	for i := 0; i < ticks; i++ {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true }); err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
+			t.Fatalf("listQueuedNudges: %v", err)
+		}
+		target := nudgeTarget{cityPath: dir}
+		if _, _, _, err := listQueuedNudgesForTarget(dir, target, now); err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
+			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
+		}
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+		}
+	}
+
+	if *opens != 0 {
+		t.Fatalf("empty-queue poll opened the Dolt store %d times, want 0 (idle ticks must not dial the sql-server)", *opens)
+	}
+	if *closes != 0 {
+		t.Fatalf("empty-queue poll closed a store %d times, want 0 (nothing should have been opened)", *closes)
+	}
+}
+
+// TestNudgePollHelpersOpenOnceWhenQueueHasWork pins the no-regression edge: when
+// the queue is non-empty the maintenance passes (recover/prune/terminalize) must
+// still run against Dolt, so each helper opens the front-door store exactly once
+// per call and releases it (open == close, no leak, no double-open).
+func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
+	now := time.Now()
+
+	assertOneOpenOneClose := func(t *testing.T, name string, run func(dir string)) {
+		t.Helper()
+		opens, closes := installCountingNudgeStoreSeam(t)
+		dir := t.TempDir()
+		item := newQueuedNudgeWithOptions("worker", "do work", "session", now, queuedNudgeOptions{ID: "n-work"})
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatalf("%s: enqueueQueuedNudge: %v", name, err)
+		}
+		// enqueue opened+closed its own store; measure deltas around the helper.
+		opensBefore, closesBefore := *opens, *closes
+		run(dir)
+		if got := *opens - opensBefore; got != 1 {
+			t.Fatalf("%s: opens delta=%d, want 1 (non-empty queue must open the front door exactly once)", name, got)
+		}
+		if got := *closes - closesBefore; got != 1 {
+			t.Fatalf("%s: closes delta=%d, want 1 (the opened store must be released)", name, got)
+		}
+	}
+
+	assertOneOpenOneClose(t, "claim", func(dir string) {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "list", func(dir string) {
+		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
+			t.Fatalf("listQueuedNudges: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "listForTarget", func(dir string) {
+		if _, _, _, err := listQueuedNudgesForTarget(dir, nudgeTarget{cityPath: dir}, now); err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "release", func(dir string) {
+		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
+			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
+		}
+	})
+	assertOneOpenOneClose(t, "ack", func(dir string) {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "", "test-boundary"); err != nil {
+			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+		}
+	})
+}
+
 // TestEnqueueQueuedNudgeWithStoreClosesOnlyOwnedStore pins the ownStore guard:
 // enqueueQueuedNudgeWithStore must close the store it opens itself (store==nil
 // path) but must NOT close a store passed in by the caller, since the caller
