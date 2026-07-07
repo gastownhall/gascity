@@ -348,6 +348,14 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 	}
 	parent, err := q.Get(parentID)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			// A genuinely deleted parent is not a transient store hiccup: the
+			// routed child is orphaned, so finalize must re-run to recreate its
+			// missing auto-convoy. Return recovery-needed rather than failing
+			// closed. Only ambiguous/transient store errors fail closed below
+			// (assuming the convoy already exists, #2987).
+			return true, nil
+		}
 		return false, fmt.Errorf("reading parent %s for convoy recovery of %s: %w", parentID, b.ID, err)
 	}
 	if parent.Type == "convoy" {
