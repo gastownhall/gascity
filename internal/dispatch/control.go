@@ -566,7 +566,7 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 		Metadata: map[string]string{
 			beadmeta.IdempotencyKeyMetadataKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 			beadmeta.RootBeadIDMetadataKey:     rootID,
-			"molecule_failed":                  "true",
+			beadmeta.MoleculeFailedMetadataKey: "true",
 		},
 	})
 	if err != nil {
@@ -1339,7 +1339,7 @@ func recipeStepRef(step formula.RecipeStep) string {
 }
 
 func isFailedPartialMolecule(bead beads.Bead) bool {
-	return strings.TrimSpace(bead.Metadata["molecule_failed"]) == "true"
+	return strings.TrimSpace(bead.Metadata[beadmeta.MoleculeFailedMetadataKey]) == "true"
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control bead.

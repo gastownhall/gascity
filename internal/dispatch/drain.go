@@ -1012,7 +1012,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
 	}
 	for _, candidate := range existing {
-		if candidate.Metadata["molecule_failed"] == "true" {
+		if candidate.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
 			continue
 		}
 		return candidate.ID, false, nil
@@ -1125,7 +1125,7 @@ func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string)
 		return fmt.Errorf("%s: looking up failed drain item roots for key %s: %w", controlID, itemRootKey, err)
 	}
 	for _, root := range matches {
-		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
