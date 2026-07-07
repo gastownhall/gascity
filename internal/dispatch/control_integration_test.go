@@ -1185,14 +1185,15 @@ func TestApplyAttemptControlStepRoute_UsesExecutionRigContextForDirectSessionTar
 	}
 }
 
-// TestApplyAttemptControlStepRoute_PrefersCitySingletonOverRigScoped covers the
+// TestApplyAttemptControlStepRoute_PrefersRigScopedOverCitySingleton covers the
 // attempt-time analog of the graph.v2 decoration fix: with a bound city-level
-// singleton (core.control-dispatcher, Dir="", max_active_sessions=1) plus a
-// per-rig copy (fixture/core.control-dispatcher), an attempt-kind control bead
-// whose execution target lives in the rig must still route to the city singleton
-// — the session that actually runs — not the rig-scoped copy that no session
-// claims (which would re-strand the control bead at attempt time).
-func TestApplyAttemptControlStepRoute_PrefersCitySingletonOverRigScoped(t *testing.T) {
+// singleton (core.control-dispatcher, Dir="") plus a per-rig copy
+// (fixture/core.control-dispatcher), an attempt-kind control bead whose execution
+// target lives in the rig must route to the rig-scoped dispatcher the rig runs and
+// owns — not the city singleton. Rig ownership is static (this selection);
+// liveness of an asleep rig dispatcher is graphroute's #3454 runtime concern.
+// Inverts #3765's static city-preference.
+func TestApplyAttemptControlStepRoute_PrefersRigScopedOverCitySingleton(t *testing.T) {
 	t.Parallel()
 
 	maxActive := 1
@@ -1232,8 +1233,8 @@ func TestApplyAttemptControlStepRoute_PrefersCitySingletonOverRigScoped(t *testi
 	if step.Assignee != "" {
 		t.Fatalf("assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != "core.control-dispatcher" {
-		t.Fatalf("gc.routed_to = %q, want city-level singleton core.control-dispatcher", got)
+	if got := step.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("gc.routed_to = %q, want rig-scoped fixture/core.control-dispatcher", got)
 	}
 	if got := step.Metadata["gc.execution_routed_to"]; got != "fixture/superpowers.brainstorming" {
 		t.Fatalf("gc.execution_routed_to = %q, want fixture/superpowers.brainstorming", got)

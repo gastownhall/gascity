@@ -93,36 +93,39 @@ func IsDeterministicControlDispatcher(agent *Agent) bool {
 }
 
 // PreferredDeterministicControlDispatcher returns the deterministic control-
-// dispatcher to route a scope's control beads to, binding-agnostic. The
-// city-level singleton (Dir == "") is preferred for every scope — given
-// max_active_sessions=1, it is the one whose session actually runs and claims
-// the control queue — and a rig-scoped instance (Dir == rigContext) is used only
-// when no city-level deterministic dispatcher is configured. Routing to a
-// rig-scoped copy when a city singleton exists strands the control bead, since
-// the singleton session never claims a <rig>/... route. This is the canonical
-// selection shared by the graph.v2 decoration path (internal/graphroute) and the
-// attempt-time control re-route path (internal/dispatch); keep them in lockstep.
+// dispatcher to route a scope's control beads to, binding-agnostic. A rig-scoped
+// instance (Dir == rigContext, when rigContext != "") is preferred for its own
+// scope — a rig that runs its own dispatcher owns its control queue, so its
+// control beads must be stamped with the <rig>/... route that instance claims —
+// and the city-level singleton (Dir == "") is used only when the rig runs none
+// of its own. This selection is purely about static ownership; the liveness of a
+// configured-but-asleep rig dispatcher is handled downstream by graphroute's
+// ControlDispatcherRuntimeMissing demotion (#3454), not here. This is the
+// canonical selection shared by the graph.v2 decoration path
+// (internal/graphroute) and the attempt-time control re-route path
+// (internal/dispatch); keep them in lockstep.
 func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agent, bool) {
 	if cfg == nil {
 		return Agent{}, false
 	}
 	rigContext = strings.TrimSpace(rigContext)
-	var rigScoped Agent
-	haveRigScoped := false
+	var cityScoped Agent
+	haveCityScoped := false
 	for _, a := range cfg.Agents {
 		if !IsDeterministicControlDispatcher(&a) {
 			continue
 		}
-		if strings.TrimSpace(a.Dir) == "" {
+		dir := strings.TrimSpace(a.Dir)
+		if rigContext != "" && dir == rigContext {
 			return a, true
 		}
-		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
-			rigScoped = a
-			haveRigScoped = true
+		if !haveCityScoped && dir == "" {
+			cityScoped = a
+			haveCityScoped = true
 		}
 	}
-	if haveRigScoped {
-		return rigScoped, true
+	if haveCityScoped {
+		return cityScoped, true
 	}
 	return Agent{}, false
 }

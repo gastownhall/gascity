@@ -7859,11 +7859,12 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 	return tracePath, args
 }
 
-// TestPreferredDeterministicControlDispatcher locks the singleton-first
-// selection both graphroute and dispatch route control beads with. The city-
-// level singleton (Dir == "") must win for every scope; a rig-scoped instance is
-// used only when no city-level deterministic dispatcher exists. Non-deterministic
-// control-dispatcher agents (no convoy-control StartCommand) are ignored.
+// TestPreferredDeterministicControlDispatcher locks the rig-scoped-first
+// selection both graphroute and dispatch route control beads with. A rig-scoped
+// instance (Dir == rigContext) must win for its own scope; the city-level
+// singleton (Dir == "") is used only when the rig runs none of its own, and for
+// the empty scope. Non-deterministic control-dispatcher agents (no convoy-control
+// StartCommand) are ignored.
 func TestPreferredDeterministicControlDispatcher(t *testing.T) {
 	deterministic := func(dir string) Agent {
 		return Agent{
@@ -7886,10 +7887,10 @@ func TestPreferredDeterministicControlDispatcher(t *testing.T) {
 		wantOK     bool
 	}{
 		{
-			name:       "singleton preferred over rig copy for rig scope",
+			name:       "rig copy preferred over singleton for its own scope",
 			agents:     []Agent{rigCopy, citySingleton},
 			rigContext: "fixture",
-			wantQN:     "core.control-dispatcher",
+			wantQN:     "fixture/core.control-dispatcher",
 			wantOK:     true,
 		},
 		{

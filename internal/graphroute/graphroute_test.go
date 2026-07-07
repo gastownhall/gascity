@@ -312,6 +312,56 @@ func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
 	}
 }
 
+// TestDecorateGraphWorkflowRecipe_ControlStepPrefersRigScopedDispatcher is the
+// instantiation-level proof of the sc-mfx8l3 fix: a graph.v2 recipe with an
+// auto-injected control-kind step (workflow-finalize), decorated under a config
+// that holds BOTH a city-level deterministic dispatcher (core.control-dispatcher,
+// Dir="") and a rig-scoped one (fixture/core.control-dispatcher, Dir="fixture"),
+// with the run routed into the rig, must stamp the control step's gc.routed_to
+// with the rig-scoped dispatcher the rig owns and claims. Pre-fix (#3765's static
+// city-preference) this stamped the unprefixed core.control-dispatcher, which the
+// rig dispatcher never claimed — stranding the finalize step and stalling the
+// compound build at its first control gate.
+func TestDecorateGraphWorkflowRecipe_ControlStepPrefersRigScopedDispatcher(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{Name: "worker", Dir: "fixture", MaxActiveSessions: intPtr(4)},
+	}}
+	r := &formula.Recipe{
+		Name: "wf-test",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			}},
+			{ID: "wf-test.finalize", Metadata: map[string]string{
+				"gc.kind": "workflow-finalize",
+			}},
+		},
+	}
+	deps := Deps{Resolver: testAgentResolver{}}
+	// Root routed into the rig ("fixture/worker") → routingRigContext == "fixture".
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "fixture/worker", "", nil, "test-city", cfg, deps); err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+	finalize := r.Steps[1]
+	if got := finalize.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("finalize gc.routed_to = %q, want rig-scoped fixture/core.control-dispatcher (the rig owns and claims its own control queue; sc-mfx8l3 / revert #3765)", got)
+	}
+}
+
 func TestDecorateGraphWorkflowRecipe_NilRecipe(t *testing.T) {
 	err := DecorateGraphWorkflowRecipe(nil, nil, "", "", "", "", "", "", nil, "", nil, Deps{})
 	if err == nil {
@@ -727,15 +777,16 @@ func TestControlDispatcherBinding_ConfiguredDispatcherUsesCanonicalQueue(t *test
 	}
 }
 
-// TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped covers the
+// TestControlDispatcherBinding_PrefersRigScopedOverCitySingleton covers the
 // production shape after 9fa6b7fec: a bound city-level singleton
-// (core.control-dispatcher, Dir="", max_active_sessions=1) plus a per-rig
-// materialized copy (fixture/core.control-dispatcher). For every scope the
-// binding must resolve to the city-level singleton — the one whose session
-// actually runs — not the rig-scoped copy (which would strand the control bead).
-// The resolver returns no match, exercising the binding-agnostic deterministic
-// lookup directly.
-func TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped(t *testing.T) {
+// (core.control-dispatcher, Dir="") plus a per-rig materialized copy
+// (fixture/core.control-dispatcher). A rig that runs its own dispatcher owns its
+// control queue, so the rig scope must resolve to the rig-scoped instance while
+// the empty scope falls back to the city singleton. The resolver returns no
+// match, exercising the binding-agnostic deterministic lookup directly. Inverts
+// #3765's static city-preference; the static lookup is about ownership, the
+// runtime-missing demotion (#3454) is about liveness — kept separate.
+func TestControlDispatcherBinding_PrefersRigScopedOverCitySingleton(t *testing.T) {
 	maxActive := 1
 	cfg := &config.City{Agents: []config.Agent{
 		{
@@ -753,14 +804,21 @@ func TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped(t *testing.T
 		},
 	}}
 
-	for _, rigContext := range []string{"", "fixture"} {
-		t.Run("rigContext="+rigContext, func(t *testing.T) {
-			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, rigContext, Deps{Resolver: noMatchAgentResolver{}})
+	cases := []struct {
+		rigContext string
+		wantQN     string
+	}{
+		{rigContext: "", wantQN: "core.control-dispatcher"},                // no rig scope → city fallback
+		{rigContext: "fixture", wantQN: "fixture/core.control-dispatcher"}, // rig owns its queue → rig-scoped
+	}
+	for _, tc := range cases {
+		t.Run("rigContext="+tc.rigContext, func(t *testing.T) {
+			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, tc.rigContext, Deps{Resolver: noMatchAgentResolver{}})
 			if err != nil {
 				t.Fatalf("ControlDispatcherBinding: %v", err)
 			}
-			if binding.QualifiedName != "core.control-dispatcher" {
-				t.Fatalf("QualifiedName = %q, want city-level singleton core.control-dispatcher", binding.QualifiedName)
+			if binding.QualifiedName != tc.wantQN {
+				t.Fatalf("QualifiedName = %q, want %q", binding.QualifiedName, tc.wantQN)
 			}
 			if binding.SessionName != "" {
 				t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)

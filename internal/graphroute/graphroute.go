@@ -324,10 +324,13 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	// match. Since 9fa6b7fec the dispatcher ships bound (core.control-dispatcher),
 	// so AgentMatchesIdentity rejects the bare-name fallback for it and the
 	// per-rig fleet makes the bare-name scan ambiguous — both break a
-	// Resolver-based lookup. PreferredDeterministicControlDispatcher prefers the
-	// city-level singleton (Dir == "") across every scope, keeping the stamped
-	// route on the one session that actually runs (max_active_sessions=1) and
-	// curing the stranded-control-bead.
+	// Resolver-based lookup. PreferredDeterministicControlDispatcher prefers a
+	// rig-scoped dispatcher (Dir == rigContext) for its own scope, so a rig that
+	// runs its own dispatcher gets the <rig>/... route it claims, and falls back
+	// to the city-level singleton (Dir == "") only when the rig runs none. The
+	// liveness of an asleep rig-local dispatcher is handled by the
+	// ControlDispatcherRuntimeMissing demotion in ControlDispatcherBinding (#3454),
+	// not by this static ownership lookup.
 	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
 		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 	}

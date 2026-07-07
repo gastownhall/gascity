@@ -1049,12 +1049,12 @@ func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext strin
 			rigContext = executionTarget[:slash]
 		}
 	}
-	// Prefer the city-level singleton deterministic dispatcher for every scope
-	// (the one whose session actually runs given max_active_sessions=1), falling
-	// back to a rig-scoped instance only when no city-level dispatcher exists.
+	// Prefer a rig-scoped deterministic dispatcher for its own scope (a rig that
+	// runs its own dispatcher owns and claims its <rig>/... control queue), falling
+	// back to the city-level singleton only when the rig runs none of its own.
 	// This keeps attempt-time control re-routing in lockstep with the graph.v2
-	// decoration path; without it an attempt-kind control bead would re-stamp a
-	// <rig>/control-dispatcher route the lone singleton session never claims.
+	// decoration path; liveness of an asleep rig-local dispatcher is a downstream
+	// (#3454) concern, not conflated into this static ownership selection.
 	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
 		return agentCfg.QualifiedName()
 	}
