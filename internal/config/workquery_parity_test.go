@@ -203,6 +203,32 @@ func TestEffectiveQueryParity(t *testing.T) {
 	}
 }
 
+// TestQueryTableCoversAllKinds guards against a queryKind added to the enum
+// but not the table: a missing row would panic via a nil spec.override at
+// runtime. Every declared kind must have both funcs set.
+func TestQueryTableCoversAllKinds(t *testing.T) {
+	kinds := []queryKind{
+		queryWork, queryAssignedInProgress, queryAssignedReady,
+		queryRoutedPool, queryPoolDemand, queryOnDeath, queryOnBoot,
+	}
+	if len(queryTable) != len(kinds) {
+		t.Fatalf("queryTable has %d rows, expected %d kinds", len(queryTable), len(kinds))
+	}
+	for _, k := range kinds {
+		spec, ok := queryTable[k]
+		if !ok {
+			t.Errorf("queryKind %d missing from queryTable", k)
+			continue
+		}
+		if spec.override == nil {
+			t.Errorf("queryKind %d has nil override", k)
+		}
+		if spec.build == nil {
+			t.Errorf("queryKind %d has nil build", k)
+		}
+	}
+}
+
 // TestOnDeathOnBootFlagBlind pins invariant I6: OnDeath/OnBoot ignore the
 // includeEphemeral flag, so their ForBeads variant equals the plain variant.
 func TestOnDeathOnBootFlagBlind(t *testing.T) {

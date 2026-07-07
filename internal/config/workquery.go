@@ -255,6 +255,60 @@ func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) s
 	return shellquote.Join(args)
 }
 
+// queryKind names one of the built-in agent query shapes.
+type queryKind int
+
+const (
+	queryWork queryKind = iota
+	queryAssignedInProgress
+	queryAssignedReady
+	queryRoutedPool
+	queryPoolDemand
+	queryOnDeath
+	queryOnBoot
+)
+
+// querySpec describes how one query kind resolves: which user override
+// field short-circuits the default, and how the default script is built.
+type querySpec struct {
+	// override returns the user-supplied command that replaces the
+	// default entirely, or "" when the default applies.
+	override func(*Agent) string
+	// build returns the default command. includeEphemeralReady carries
+	// beads.UsesBD105ReadySemantics(); the onDeath/onBoot builders ignore
+	// it today and MUST keep ignoring it (S04b invariant I6).
+	build func(a *Agent, includeEphemeralReady bool) string
+}
+
+// queryTable maps every query kind to its override field and default
+// builder. It is populated once at init and only read afterward.
+var queryTable = map[queryKind]querySpec{
+	queryWork:               {override: func(a *Agent) string { return a.WorkQuery }, build: buildWorkQuery},
+	queryAssignedInProgress: {override: func(a *Agent) string { return a.WorkQuery }, build: buildAssignedInProgressQuery},
+	queryAssignedReady:      {override: func(a *Agent) string { return a.WorkQuery }, build: buildAssignedReadyQuery},
+	queryRoutedPool:         {override: func(a *Agent) string { return a.WorkQuery }, build: buildRoutedPoolQuery},
+	queryPoolDemand:         {override: func(a *Agent) string { return a.ScaleCheck }, build: buildPoolDemandQuery},
+	queryOnDeath:            {override: func(a *Agent) string { return a.OnDeath }, build: buildOnDeath},
+	queryOnBoot:             {override: func(a *Agent) string { return a.OnBoot }, build: buildOnBoot},
+}
+
+// effectiveQuery is the single resolver behind every Effective*Query
+// accessor: the kind's user override verbatim if set, else the kind's
+// default builder.
+func (a *Agent) effectiveQuery(kind queryKind, includeEphemeralReady bool) string {
+	spec := queryTable[kind]
+	if o := spec.override(a); o != "" {
+		return o
+	}
+	return spec.build(a, includeEphemeralReady)
+}
+
+// effectiveQueryForBeads resolves a kind using the bd compatibility
+// semantics configured for the city.
+func (a *Agent) effectiveQueryForBeads(kind queryKind, beads BeadsConfig) string {
+	return a.effectiveQuery(kind, beads.UsesBD105ReadySemantics())
+}
+
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
@@ -292,19 +346,16 @@ func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) s
 // EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
-	return a.effectiveWorkQuery(false)
+	return a.effectiveQuery(queryWork, false)
 }
 
 // EffectiveWorkQueryForBeads returns the default work query using the bd
 // compatibility semantics configured for the city.
 func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryWork, beads)
 }
 
-func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
@@ -329,19 +380,16 @@ func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
 // A custom WorkQuery is treated as the caller-owned full discovery contract, so
 // split-tier prompts may run that same custom command in each query slot.
 func (a *Agent) EffectiveAssignedInProgressQuery() string {
-	return a.effectiveAssignedInProgressQuery(false)
+	return a.effectiveQuery(queryAssignedInProgress, false)
 }
 
 // EffectiveAssignedInProgressQueryForBeads returns the assigned-in-progress
 // query using the bd compatibility semantics configured for the city.
 func (a *Agent) EffectiveAssignedInProgressQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveAssignedInProgressQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryAssignedInProgress, beads)
 }
 
-func (a *Agent) effectiveAssignedInProgressQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
 		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
@@ -354,19 +402,16 @@ func (a *Agent) effectiveAssignedInProgressQuery(includeEphemeralReady bool) str
 // custom WorkQuery is treated as the caller-owned full discovery contract, so
 // split-tier prompts may run that same custom command in each query slot.
 func (a *Agent) EffectiveAssignedReadyQuery() string {
-	return a.effectiveAssignedReadyQuery(false)
+	return a.effectiveQuery(queryAssignedReady, false)
 }
 
 // EffectiveAssignedReadyQueryForBeads returns the assigned-ready-only query
 // using the bd compatibility semantics configured for the city.
 func (a *Agent) EffectiveAssignedReadyQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveAssignedReadyQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryAssignedReady, beads)
 }
 
-func (a *Agent) effectiveAssignedReadyQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
 		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
@@ -378,19 +423,16 @@ func (a *Agent) effectiveAssignedReadyQuery(includeEphemeralReady bool) string {
 // templates that spell out claim-first startup in separate tiers. It is the
 // prompt-side counterpart to EffectiveWorkQuery's routed pool tier.
 func (a *Agent) EffectiveRoutedPoolQuery() string {
-	return a.effectiveRoutedPoolQuery(false)
+	return a.effectiveQuery(queryRoutedPool, false)
 }
 
 // EffectiveRoutedPoolQueryForBeads returns the routed-pool-only command using
 // the bd compatibility semantics configured for the city.
 func (a *Agent) EffectiveRoutedPoolQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveRoutedPoolQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryRoutedPool, beads)
 }
 
-func (a *Agent) effectiveRoutedPoolQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
@@ -474,19 +516,16 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // correspondence" and the protocol-mismatch class regression addressed
 // by PR #1516.
 func (a *Agent) EffectivePoolDemandQuery() string {
-	return a.effectivePoolDemandQuery(false)
+	return a.effectiveQuery(queryPoolDemand, false)
 }
 
 // EffectivePoolDemandQueryForBeads returns the count-form demand query using
 // the bd compatibility semantics configured for the city.
 func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
-	return a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryPoolDemand, beads)
 }
 
-func (a *Agent) effectivePoolDemandQuery(includeEphemeralReady bool) string {
-	if a.ScaleCheck != "" {
-		return a.ScaleCheck
-	}
+func buildPoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	return poolDemandCountShell(target, includeEphemeralReady)
 }
@@ -642,19 +681,16 @@ func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.
 func (a *Agent) EffectiveOnDeath() string {
-	return a.effectiveOnDeath(false)
+	return a.effectiveQuery(queryOnDeath, false)
 }
 
 // EffectiveOnDeathForBeads returns the default on_death command using the bd
 // compatibility semantics configured for the city.
 func (a *Agent) EffectiveOnDeathForBeads(beads BeadsConfig) string {
-	return a.effectiveOnDeath(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryOnDeath, beads)
 }
 
-func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
-	if a.OnDeath != "" {
-		return a.OnDeath
-	}
+func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
@@ -687,19 +723,16 @@ func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
 // If OnBoot is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work routed to this backing config.
 func (a *Agent) EffectiveOnBoot() string {
-	return a.effectiveOnBoot(false)
+	return a.effectiveQuery(queryOnBoot, false)
 }
 
 // EffectiveOnBootForBeads returns the default on_boot command using the bd
 // compatibility semantics configured for the city.
 func (a *Agent) EffectiveOnBootForBeads(beads BeadsConfig) string {
-	return a.effectiveOnBoot(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryOnBoot, beads)
 }
 
-func (a *Agent) effectiveOnBoot(includeEphemeralInProgress bool) string {
-	if a.OnBoot != "" {
-		return a.OnBoot
-	}
+func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
