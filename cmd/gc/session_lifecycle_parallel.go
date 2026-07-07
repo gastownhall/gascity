@@ -923,7 +923,12 @@ func buildPreparedStartWithWorkDirResolver(
 		}
 		session.Metadata["session_key"] = sessionKey
 	}
-	firstStart := session.Metadata["started_config_hash"] == ""
+	// firstStart classification routes through the level-triggered converge core
+	// (deriveFirstStart). This call passes sessTranscriptUnknown, which reproduces
+	// the legacy durable-only signal (started_config_hash == "") byte-for-byte;
+	// probing the transcript here to activate the #3849 crash-loop fix is the
+	// remaining wiring (see session_level_converge.go).
+	firstStart := deriveFirstStart(session.Metadata["started_config_hash"], sessTranscriptUnknown)
 	forceFresh := session.Metadata["wake_mode"] == "fresh"
 	// Fork-launch validation (fail loud, never silent fresh). A session carrying
 	// gc.brain_parent_sid is a warm arm that must fork off a pre-built brain;
