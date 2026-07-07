@@ -1524,12 +1524,15 @@ func terminalAbortScopeFailure(bead beads.Bead) bool {
 	if !beadOutcomeFailed(bead) {
 		return false
 	}
-	switch strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) {
-	case beadmeta.FailureClassTransient:
+	if strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassTransient {
 		return false
-	case beadmeta.FailureClassHard:
-		return true
-	default:
-		return !isRetryAttemptSubject(bead)
 	}
+	// The hard and absent/unknown classes are terminal only when the bead is
+	// NOT a superseded attempt. A superseded attempt carries gc.attempt +
+	// gc.logical_bead_id, meaning a later attempt/iteration of the same logical
+	// bead ran; its own failure must not outvote a passing later iteration at
+	// finalize (#4008). The logical bead's own final disposition is the
+	// authoritative signal. A genuinely terminal, non-superseded hard failure
+	// still returns true.
+	return !isRetryAttemptSubject(bead)
 }

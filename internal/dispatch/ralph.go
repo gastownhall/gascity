@@ -77,6 +77,33 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
 
+	// A hard-class subject failure is terminal: stop the loop immediately in a
+	// single attempt instead of cloning further attempts (the treadmill that
+	// abort_scope-killed molecules). This mirrors the retry dispatcher's hard
+	// handling (see processRetryEval in retry.go) so both loops read
+	// gc.failure_class identically. Only an explicit "hard" class terminates;
+	// an empty or transient class stays repairable and clones up to
+	// gc.max_attempts below.
+	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
+		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
+		if err := store.SetMetadataBatch(logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
+			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    retryFailureReason(subject),
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
+		}); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
+		}
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing hard-failed check: %w", bead.ID, err)
+		}
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "hard-fail"}, nil
+	}
+
 	if attempt >= maxAttempts {
 		if err := store.SetMetadataBatch(logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
