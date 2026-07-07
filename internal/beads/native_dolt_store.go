@@ -110,6 +110,19 @@ func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
 	return os.Environ()
 }
 
+// AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
+// under nativeDoltOpenEnvMu so it reflects the restored ambient environment
+// rather than a value a concurrent native Dolt open is temporarily projecting.
+// withNativeDoltOpenEnv mutates the keys in nativeDoltOpenEnvKeys (which include
+// BEADS_DOLT_SERVER_TLS) under this mutex, so a bare os.Getenv of one of those
+// keys can observe another scope's transient projection; this guarded read
+// cannot. It mirrors os.Getenv: an unset key returns "".
+func AmbientNativeDoltOpenEnv(key string) string {
+	nativeDoltOpenEnvMu.Lock()
+	defer nativeDoltOpenEnvMu.Unlock()
+	return os.Getenv(key)
+}
+
 func processEnvSnapshotExcludingNativeDoltOpen() []string {
 	return ProcessEnvSnapshotExcludingNativeDoltOpen()
 }

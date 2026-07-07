@@ -16,12 +16,6 @@ type PreflightBDContext struct {
 	DoltMode      string
 	BDVersion     string
 	SchemaVersion int
-	// ProjectID is the authoritative database project_id as reported by
-	// `bd context`. Unlike the direct SQL probe, bd context authenticates via
-	// the configured credential command, so it can confirm identity against a
-	// hosted beads-gateway (EIA-as-username + TLS) where a root/plaintext probe
-	// cannot. Empty when bd context is unreachable or reports no project_id.
-	ProjectID string
 }
 
 // PreflightChecker evaluates whether a beads scope may use native storage.
@@ -34,6 +28,16 @@ type PreflightChecker struct {
 	BDContext func(scope string) (PreflightBDContext, error)
 	// DatabaseProjectID reads the authoritative database _project_id for the scope.
 	DatabaseProjectID func(scope string) (string, bool, error)
+	// DeferIdentityToNativeOpen reports whether, when the direct database probe
+	// cannot confirm project_id, the scope should stay native-eligible and defer
+	// authoritative identity verification to beadslib's native-open path
+	// (verifyProjectIdentity over the authenticated connection) instead of
+	// degrading off the native store. It is true for external endpoints such as
+	// a hosted beads-gateway, whose EIA-as-username + TLS credential-command auth
+	// the control-plane root/plaintext probe cannot replicate, but whose database
+	// _project_id beadslib still verifies at open time — refusing to connect, and
+	// falling back to BdStore, on mismatch. Nil defaults to no deferral (Warn).
+	DeferIdentityToNativeOpen func(scope string) bool
 	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
 	// version. Empty means infer it from build info.
 	BeadsLibraryVersion string
@@ -52,7 +56,7 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		c.checkMetadataBackend(metadata),
 		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
 		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata, bdCtx),
+		c.checkIdentityMatch(scope, metadata),
 		c.checkVersionCompat(bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
@@ -195,7 +199,7 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	}
 }
 
-func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata, bdCtx PreflightBDContext) PreflightCheckResult {
+func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata) PreflightCheckResult {
 	details := PreflightDetails{MetadataProjectID: metadata.ProjectID}
 	if metadata.ProjectID == "" {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "metadata project_id is missing", details)
@@ -206,17 +210,20 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 	dbProjectID, ok, err := c.DatabaseProjectID(scope)
 	details.DBProjectID = strings.TrimSpace(dbProjectID)
 	if err != nil || !ok || details.DBProjectID == "" {
-		// The direct SQL probe (root/plaintext) cannot authenticate a hosted
-		// beads-gateway. Fall back to bd context's project_id, which is read
-		// through the authenticated credential-command path and is therefore an
-		// authoritative confirmation on hosted deployments. A genuine mismatch
-		// still blocks; only an unconfirmable-and-unavailable identity degrades.
-		if bdCtxProjectID := strings.TrimSpace(bdCtx.ProjectID); bdCtxProjectID != "" {
-			details.DBProjectID = bdCtxProjectID
-			if metadata.ProjectID != bdCtxProjectID {
-				return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "project_id mismatch", details)
-			}
-			return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "project_id matches (confirmed via bd context)", details)
+		// The direct SQL probe connects as root over plaintext and cannot
+		// authenticate an external hosted beads-gateway, whose identity is proven
+		// by an EIA-as-username + TLS credential command the control plane does
+		// not replicate here. For such endpoints the authoritative database
+		// _project_id is verified by beadslib at native-open time
+		// (verifyProjectIdentity over the authenticated connection), which
+		// refuses to connect on mismatch and drops the scope to BdStore — the
+		// same open-time gate BdStore itself relies on. Defer to that gate rather
+		// than claiming a confirmation the control plane cannot make, so the
+		// scope stays native-eligible without a false proof. A local endpoint,
+		// whose probe should have succeeded, still degrades so its genuine probe
+		// failure is not silently ignored.
+		if c.DeferIdentityToNativeOpen != nil && c.DeferIdentityToNativeOpen(scope) {
+			return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "database identity deferred to native-open verification (external endpoint)", details)
 		}
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckWarn, "database project_id could not be confirmed", details)
 	}

@@ -249,25 +249,30 @@ func TestPreflightWarnsWhenDatabaseIdentityUnavailable(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
 }
 
-// TestPreflightConfirmsIdentityFromBDContextWhenDBProbeUnavailable covers hosted
+// TestPreflightDefersIdentityToNativeOpenForExternalEndpoint covers hosted
 // beads-gateway endpoints: the direct project_id SQL probe (managedDoltOpenDatabase)
 // connects as root over plaintext and cannot authenticate the EIA-as-username +
-// TLS gateway, so it never confirms project_id. `bd context --json` DOES authenticate
-// (it runs the credential command) and reports the authoritative database project_id.
-// The identity check must accept that confirmation so the native store stays eligible
-// on hosted deployments instead of degrading to the shell BdStore.
-func TestPreflightConfirmsIdentityFromBDContextWhenDBProbeUnavailable(t *testing.T) {
+// TLS gateway, so it never confirms project_id. For an external endpoint the
+// authoritative database _project_id is verified by beadslib at native-open time
+// (verifyProjectIdentity over the authenticated connection), so the identity
+// check defers to that gate and keeps the scope native-eligible instead of
+// degrading to the shell BdStore — without claiming a control-plane confirmation
+// it cannot make.
+func TestPreflightDefersIdentityToNativeOpenForExternalEndpoint(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
 		"backend": "dolt",
 		"dolt_mode": "server",
 		"dolt_database": "bd_prj_c069247fbac36e2b",
 		"project_id": "prj_c069247fbac36e2b"
-	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server", ProjectID: "prj_c069247fbac36e2b"}, "")
-	// Direct DB probe fails to authenticate the hosted gateway (root/plaintext).
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server"}, "")
+	// Direct DB probe fails to authenticate the hosted gateway (root/plaintext)...
 	checker.DatabaseProjectID = func(string) (string, bool, error) {
 		return "", false, errors.New("dial hosted gateway: access denied")
 	}
+	// ...and the scope resolves to an external endpoint, so identity is deferred
+	// to beadslib's native-open verification rather than degraded.
+	checker.DeferIdentityToNativeOpen = func(string) bool { return true }
 
 	result, err := checker.Check(scope)
 	if err != nil {
@@ -278,20 +283,20 @@ func TestPreflightConfirmsIdentityFromBDContextWhenDBProbeUnavailable(t *testing
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
 }
 
-// TestPreflightBlocksOnBDContextIdentityMismatch guards the same hosted path: when
-// the DB probe is unavailable but bd context reports a project_id that DISAGREES with
-// metadata, that is a genuine mismatch and must still block native activation.
-func TestPreflightBlocksOnBDContextIdentityMismatch(t *testing.T) {
+// TestPreflightExternalEndpointStillBlocksOnProbeMismatch guards the deferral:
+// deferring to native-open verification only applies when the direct probe is
+// UNAVAILABLE. If the probe does reach the database and reports a project_id that
+// disagrees with metadata, that is a genuine cross-project mismatch and must
+// still block native activation even for an external endpoint.
+func TestPreflightExternalEndpointStillBlocksOnProbeMismatch(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
 		"backend": "dolt",
 		"dolt_mode": "server",
 		"dolt_database": "gascity",
 		"project_id": "metadata-id"
-	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server", ProjectID: "different-db-id"}, "")
-	checker.DatabaseProjectID = func(string) (string, bool, error) {
-		return "", false, errors.New("dial hosted gateway: access denied")
-	}
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server"}, "database-id")
+	checker.DeferIdentityToNativeOpen = func(string) bool { return true }
 
 	result, err := checker.Check(scope)
 	if err != nil {

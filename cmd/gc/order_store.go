@@ -301,7 +301,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 		env["GC_DOLT_MANAGED_LOCAL"] = "1"
 		applyManagedDoltRuntimeLayoutEnv(env, cityPath)
 	}
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
