@@ -65,18 +65,22 @@ func BuildRunDetailFromSnapshot(snap RunSnapshot, sessions []DashboardSession, f
 }
 
 // BuildRunDetailForRun folds a run ONCE and returns both the detail DTO and the
-// run's compiled-formula target in one scan. It is the combined entry point the
-// dashboard BFF uses: previously detail() scanned the run twice (once via
-// RunFormulaTargetForRun to decide which formula to fetch, once via
-// BuildRunDetailWithSessionsAndFormula to build), which this collapses to a
-// single snapshotForRun.
+// run's compiled-formula target in one scan. It is a combined convenience entry
+// point for callers (and tests) that already hold the formula and want the
+// target plus the detail off a single fold. The dashboard BFF does NOT call it:
+// its detail() drives the same primitives directly (SnapshotForRun →
+// FormulaTargetFromSnapshot → BuildRunDetailFromSnapshot) so it can cache the
+// folded snapshot across requests and layer request-time sessions/formula
+// enrichment per build — a chicken-and-egg this combined form cannot express,
+// since it needs the fetched formula as input but only returns the target used
+// to fetch it. Keeping the composition here gives it one tested home.
 //
 // The (name, target, scopeKind, scopeRef, targetOK) return is the formula target
 // resolved off the SAME snapshot as the detail, so it equals what
-// RunFormulaTargetForRun would report for the run. The caller fetches the
-// compiled formula from that target and passes it back in on the next request's
-// build (the formula detail is request-time enrichment, layered per build, not
-// carried in the snapshot).
+// RunFormulaTargetForRun would report for the run. A caller fetches the compiled
+// formula from that target and passes it back in on a later build (the formula
+// detail is request-time enrichment, layered per build, not carried in the
+// snapshot).
 func BuildRunDetailForRun(beadList []beads.Bead, runID string, version int, eventSeq int64, sessions []DashboardSession, formulaDetail *FormulaOrderingDetail, fetchFailure RunFormulaDetailFetchFailure) (detail FormulaRunDetail, name, target, scopeKind, scopeRef string, targetOK bool, err error) {
 	snap, err := SnapshotForRun(beadList, runID, version, eventSeq)
 	if err != nil {

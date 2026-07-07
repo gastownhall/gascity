@@ -16,11 +16,13 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// warmRunTailer builds a plane over a temp event log, starts it, and blocks
-// until the run's detail is servable (the cold replay has folded the root). It
-// returns the plane and the city's tailer so a test can drive detail() directly.
-func warmRunTailer(t *testing.T, city string, evts ...events.Event) (*Plane, *cityRunTailer) {
+// warmRunTailer builds a plane over a temp event log for the "alpha" city,
+// starts it, and blocks until the run's detail is servable (the cold replay has
+// folded the root). It returns the plane and the city's tailer so a test can
+// drive detail() directly.
+func warmRunTailer(t *testing.T, evts ...events.Event) (*Plane, *cityRunTailer) {
 	t.Helper()
+	const city = "alpha"
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, ".gc", "events.jsonl")
 	writeEventLog(t, logPath, evts...)
@@ -45,7 +47,7 @@ func warmRunTailer(t *testing.T, city string, evts ...events.Event) (*Plane, *ci
 // fold generation build exactly once (the second is served from the memo) and
 // return byte-identical results.
 func TestRunDetailMemoBuildsOncePerGeneration(t *testing.T) {
-	_, tl := warmRunTailer(t, "alpha",
+	_, tl := warmRunTailer(t,
 		runDetailRootEvent(),
 		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
 	)
@@ -172,7 +174,7 @@ func TestRunDetailMemoRebuildsOnSessionsVersionBump(t *testing.T) {
 // newline the JSON encoder emits — i.e. writeJSONBytes is byte-identical to the
 // old writeJSON(w, detail) path.
 func TestRunDetailServedBytesEqualFreshMarshal(t *testing.T) {
-	p, tl := warmRunTailer(t, "alpha",
+	p, tl := warmRunTailer(t,
 		runDetailRootEvent(),
 		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
 	)
@@ -207,7 +209,7 @@ func TestRunDetailServedBytesEqualFreshMarshal(t *testing.T) {
 // return byte-identical results. Run under -race, it also proves the memo is
 // race-clean.
 func TestRunDetailMemoConcurrentSingleBuild(t *testing.T) {
-	_, tl := warmRunTailer(t, "alpha",
+	_, tl := warmRunTailer(t,
 		runDetailRootEvent(),
 		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
 	)
@@ -282,6 +284,123 @@ func TestRunDetailMemoEvictsLRU(t *testing.T) {
 	// Builds: gen1, gen2, gen3, (gen2 hit), gen1-rebuild = 4.
 	if builds := detailBuildCount.Load() - before; builds != 4 {
 		t.Fatalf("builds = %d, want 4 (gen2 cached, evicted gen1 rebuilt)", builds)
+	}
+}
+
+// TestRunDetailMemoRecoversAfterBuildPanic proves a panic inside build() does
+// not poison the memo with a zero-value entry. The dashboardbff plane runs under
+// withRecovery, so a build panic is caught and the process keeps serving; the
+// deferred cleanup in getOrBuild must store NOTHING (completed stays false),
+// clear the in-flight handshake, and let the next caller re-elect and build a
+// real value — never read cached empty bytes. Mirrors
+// TestSingleFlightCacheRecoversAfterComputePanic for the LRU memo.
+func TestRunDetailMemoRecoversAfterBuildPanic(t *testing.T) {
+	m := newRunDetailMemo()
+	key := runDetailMemoKey{runID: "run1", lastSeq: 1}
+
+	// First caller: build panics. Recover it here, mimicking withRecovery. The
+	// panic MUST propagate out of getOrBuild (not be swallowed) while the deferred
+	// cleanup clears the key and stores nothing.
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = m.getOrBuild(key, func() (runDetailMemoValue, error) {
+			panic("boom")
+		})
+		t.Fatal("expected the panicking build to propagate out of getOrBuild")
+	}()
+
+	// A subsequent caller for the SAME key must re-elect (not deadlock on an
+	// orphaned inflight channel) and must build a fresh value rather than read a
+	// cached zero-value entry a poisoning store would have left.
+	done := make(chan struct{})
+	var (
+		got runDetailMemoValue
+		err error
+	)
+	go func() {
+		defer close(done)
+		got, err = m.getOrBuild(key, func() (runDetailMemoValue, error) {
+			return runDetailMemoValue{bytes: []byte("real")}, nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-panic getOrBuild deadlocked on an orphaned inflight channel")
+	}
+	if err != nil {
+		t.Fatalf("post-panic getOrBuild: %v", err)
+	}
+	if string(got.bytes) != "real" {
+		t.Fatalf("post-panic getOrBuild returned bytes %q, want the freshly built %q "+
+			"(a poisoned zero-value entry would be empty)", got.bytes, "real")
+	}
+}
+
+// TestRunDetailSameGenerationSkipsSnapshotFold proves two detail() calls at the
+// same fold generation fold the run's snapshot exactly once — the second is
+// served from the snapshot cache with no re-scan. Before the snapshot cache the
+// detail memo skipped the build+marshal on a hit, but detail() still re-ran
+// SnapshotForRun on every request, so the hot repeat GET kept scanning the run.
+func TestRunDetailSameGenerationSkipsSnapshotFold(t *testing.T) {
+	_, tl := warmRunTailer(t,
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	ctx := context.Background()
+
+	before := snapshotFoldCount.Load()
+	if _, ready, err := tl.detail(ctx, "run1"); err != nil || !ready {
+		t.Fatalf("first detail: err=%v ready=%v", err, ready)
+	}
+	if _, ready, err := tl.detail(ctx, "run1"); err != nil || !ready {
+		t.Fatalf("second detail: err=%v ready=%v", err, ready)
+	}
+	if folds := snapshotFoldCount.Load() - before; folds != 1 {
+		t.Fatalf("snapshot folds = %d across two same-generation detail() calls, want 1 "+
+			"(the second must hit the snapshot cache)", folds)
+	}
+}
+
+// TestRunDetailNewGenerationRefolds proves appending a bead event (which advances
+// lastSeq) invalidates the snapshot cache, so the next detail() re-folds — the
+// snapshot cache must not serve a stale fold across generations.
+func TestRunDetailNewGenerationRefolds(t *testing.T) {
+	defer func(prev time.Duration) { runTailPollInterval = prev }(runTailPollInterval)
+	runTailPollInterval = 15 * time.Millisecond
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath,
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+	tl, _ := p.cityRunTailer("alpha")
+	select {
+	case <-tl.readyCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cold replay did not complete")
+	}
+	ctx := context.Background()
+
+	before := snapshotFoldCount.Load()
+	if _, _, err := tl.detail(ctx, "run1"); err != nil {
+		t.Fatalf("first detail: %v", err)
+	}
+	seqBefore := currentLastSeq(tl)
+
+	// Append a new step event; the tail folds it and bumps lastSeq → a new key.
+	appendEvents(t, logPath, runDetailStepEvent(3, "run1.2", "run1", "rebase-check", "open"))
+	waitForLastSeqAbove(t, tl, seqBefore)
+
+	if _, _, err := tl.detail(ctx, "run1"); err != nil {
+		t.Fatalf("second detail after append: %v", err)
+	}
+	if folds := snapshotFoldCount.Load() - before; folds != 2 {
+		t.Fatalf("snapshot folds = %d, want 2 (a new fold generation must re-fold)", folds)
 	}
 }
 

@@ -87,7 +87,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 	defer m.mu.Unlock()
 	t, ok := m.cities[name]
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), detailMemo: newRunDetailMemo()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo()}
 		m.cities[name] = t
 	}
 	if m.enabled && m.ctx != nil && !t.started {
@@ -111,10 +111,13 @@ type cityRunTailer struct {
 	started bool
 	readyCh chan struct{} // closed once the cold replay attempt completes
 
-	// detailMemo caches the built+marshaled run detail per fold generation so an
-	// unchanged fold costs ~zero CPU (no re-projection, no re-marshal). See
-	// rundetail_memo.go.
-	detailMemo *runDetailMemo
+	// snapshotCache caches the folded run snapshot (and the formula target
+	// derived from it) per fold generation so a same-generation repeat request
+	// reuses the fold instead of re-scanning the city's beads. detailMemo then
+	// caches the built+marshaled detail on top, so an unchanged fold costs ~zero
+	// CPU (no re-scan, no re-projection, no re-marshal). See rundetail_memo.go.
+	snapshotCache *runSnapshotCache
+	detailMemo    *runDetailMemo
 
 	mu      sync.RWMutex
 	summary runproj.RunSummary
@@ -338,9 +341,15 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 const runDetailSnapshotVersion = 1
 
 // detailBuildCount counts every run-detail build+marshal the tailer performs
-// (i.e. a memo miss). It exists so a test can prove two requests at the same fold
-// generation build once. It carries no production behavior.
+// (i.e. a detail-memo miss). It exists so a test can prove two requests at the
+// same fold generation build once. It carries no production behavior.
 var detailBuildCount atomic.Int64
+
+// snapshotFoldCount counts every run-snapshot fold the detail path performs
+// (i.e. a snapshot-cache miss). It exists so a test can prove repeated detail()
+// calls at the same fold generation fold the run exactly once — a same-generation
+// hit must not re-scan the city's beads. It carries no production behavior.
+var snapshotFoldCount atomic.Int64
 
 // detail projects one run into the run-detail DTO off the warm bead snapshot,
 // layering request-time session links from one loopback /v0 sessions read. It
@@ -348,11 +357,15 @@ var detailBuildCount atomic.Int64
 // enrichedSummary. The bool reports whether the cold replay had completed (a
 // not-found run during warming is reported as warming, not a hard 404).
 //
-// The result is memoized per fold generation: keyed by (runID, lastSeq,
-// sessions-version, formula-version+failure), a repeat request whose fold and
-// enrichments have not changed returns the cached DTO and its marshaled bytes
-// with zero re-projection and zero re-marshal. A new bead event (lastSeq++) or a
-// bumped enrichment version yields a new key → a miss → a rebuild.
+// Two caches keyed on the fold generation make a same-generation repeat cheap.
+// The snapshot cache (keyed by runID+lastSeq) folds the run's beads once per
+// generation and serves the fold + formula target to every later request, so a
+// repeat poll re-scans nothing. The detail memo (keyed by runID+lastSeq+
+// sessions-version+formula-version/failure) then caches the built+marshaled DTO,
+// so an unchanged fold with unchanged enrichments returns the cached bytes with
+// zero re-scan, zero re-projection, and zero re-marshal. A new bead event
+// (lastSeq++) invalidates both; a bumped enrichment version invalidates only the
+// detail memo (the fold is reused) → a rebuild off the cached snapshot.
 func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemoValue, bool, error) {
 	select {
 	case <-t.readyCh:
@@ -366,12 +379,25 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 	ready := t.ready
 	t.mu.RUnlock()
 
-	// Fold the run ONCE: the snapshot serves both the formula-target extraction
-	// (which formula to fetch) and the build. The old path scanned the city's
-	// beads twice — RunFormulaTargetForRun at version/seq 0, then
-	// BuildRunDetailWithSessionsAndFormula at the real version/seq — for identical
-	// (name,target,scope), since those are snapshot-identity-independent fields.
-	snap, err := runproj.SnapshotForRun(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
+	// Fold the run's snapshot ONCE per fold generation and cache it: the snapshot
+	// serves both the formula-target extraction (which formula to fetch) and the
+	// build, and a same-generation repeat request (the hot dashboard poll) reuses
+	// it with no re-scan. The old path scanned the city's beads on EVERY request —
+	// even a detail-memo hit re-ran SnapshotForRun before the memo lookup — so the
+	// single-scan win only spanned distinct requests, never repeat polls at the
+	// same generation. SnapshotForRun still returns an error only when the run root
+	// is absent, which stays uncached so a run that appears in a later fold folds
+	// then instead of pinning a not-found.
+	snapKey := runSnapshotCacheKey{runID: runID, lastSeq: lastSeq}
+	snapValue, err := t.snapshotCache.getOrBuild(snapKey, func() (runSnapshotCacheValue, error) {
+		snap, buildErr := runproj.SnapshotForRun(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
+		if buildErr != nil {
+			return runSnapshotCacheValue{}, buildErr
+		}
+		snapshotFoldCount.Add(1)
+		name, target, scopeKind, scopeRef, ok := runproj.FormulaTargetFromSnapshot(snap)
+		return runSnapshotCacheValue{snap: snap, name: name, target: target, scopeKind: scopeKind, scopeRef: scopeRef, targetOK: ok}, nil
+	})
 	if err != nil {
 		return runDetailMemoValue{}, ready, err
 	}
@@ -396,8 +422,8 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 	var formulaDetail *runproj.FormulaOrderingDetail
 	formulaDetailFailure := runproj.FormulaDetailUpstreamError
 	var formulaVersion uint64
-	if name, target, scopeKind, scopeRef, ok := runproj.FormulaTargetFromSnapshot(snap); ok {
-		if fetched, failure, version, fetchedOK := t.mgr.fetchFormulaDetailVersioned(ctx, t.name, name, target, scopeKind, scopeRef); fetchedOK {
+	if snapValue.targetOK {
+		if fetched, failure, version, fetchedOK := t.mgr.fetchFormulaDetailVersioned(ctx, t.name, snapValue.name, snapValue.target, snapValue.scopeKind, snapValue.scopeRef); fetchedOK {
 			formulaDetail = fetched
 			formulaVersion = version
 		} else {
@@ -418,7 +444,7 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 		formulaFailure:  formulaDetailFailure,
 	}
 	value, err := t.detailMemo.getOrBuild(key, func() (runDetailMemoValue, error) {
-		d, buildErr := runproj.BuildRunDetailFromSnapshot(snap, sessions, formulaDetail, formulaDetailFailure)
+		d, buildErr := runproj.BuildRunDetailFromSnapshot(snapValue.snap, sessions, formulaDetail, formulaDetailFailure)
 		if buildErr != nil {
 			return runDetailMemoValue{}, buildErr
 		}
