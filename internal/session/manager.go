@@ -1131,15 +1131,67 @@ func (m *Manager) Suspend(id string) error {
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
+//
+// In addition to flagging the bead, this clears the provider-identity spawn
+// metadata (command, resume_flag, resume_style, resume_command,
+// continuation_epoch) so the next reconcile tick re-materializes them from
+// the current agent.toml/provider spec. Without this, an edit to agent.toml
+// between two `gc session reset` invocations (e.g. switching wake_mode from
+// "resume" to "fresh", or changing the spawn command) is not honored on the
+// next wake because the bead still carries the previous resolved values.
+//
+// When the bead's wake_mode metadata is "fresh", session_key and the runtime
+// hash fields (started_config_hash, started_live_hash, live_hash) are ALSO
+// cleared. This is the empirical fix for zk-city's researcher/designer/grader
+// pools: even after the provider-identity refill leaves resume_flag empty,
+// the spawn path at session_lifecycle_parallel.go:825 still calls
+// resolveSessionCommand with the preserved session_key, which builds
+// `claude ... --resume <prior-key>` because the live provider spec
+// (config.ResolvedProvider) still has ResumeFlag="--resume" even when
+// agent.toml says wake_mode="fresh". Clearing session_key on reset for
+// fresh-mode agents forces session_lifecycle_parallel to regenerate a key
+// and use --session-id, which is the intended behavior.
+//
+// For resume-capable templates (wake_mode = "" or "resume" — e.g., the
+// long-lived operator sessions like mayor / mm / hs / sb / n), the
+// session_key and hash fields are PRESERVED, preserving the existing
+// resume-continuity contract enforced by
+// TestCmdSessionReset_RequestsFreshRestartWithController and
+// resetConfiguredNamedSessionForConfigDrift: the reconciler decides on
+// the next tick whether the prior conversation is still resumable by
+// hash-comparing the started_config_hash, and reuses the session_key
+// when the hashes match so the wake is `--resume <prior-key>`.
 func (m *Manager) RequestFreshRestart(id string) error {
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		b, _, err := m.sessionBead(id)
+		if err != nil {
 			return err
 		}
-		return m.store.SetMetadataBatch(id, map[string]string{
+		batch := map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
-		})
+			// Provider-identity spawn metadata: cleared so the reconciler
+			// refills from the current agent.toml/provider spec on the
+			// next tick. Empty values in the new spec stay empty
+			// (resume_flag is only refilled when non-empty in the spec),
+			// which is what flips a wake_mode="fresh" agent from
+			// `claude --resume <key>` to a bare spawn command.
+			"command":            "",
+			"resume_flag":        "",
+			"resume_style":       "",
+			"resume_command":     "",
+			"continuation_epoch": "",
+		}
+		// For wake_mode="fresh" templates, also clear session_key and
+		// runtime hashes so the spawn path generates a new key and uses
+		// --session-id rather than --resume. See doc comment above.
+		if strings.TrimSpace(b.Metadata["wake_mode"]) == "fresh" {
+			batch["session_key"] = ""
+			batch["started_config_hash"] = ""
+			batch["started_live_hash"] = ""
+			batch["live_hash"] = ""
+		}
+		return m.store.SetMetadataBatch(id, batch)
 	})
 }
 

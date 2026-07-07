@@ -351,3 +351,31 @@ func TestRegistryRegisterPanicsOnHostPath(t *testing.T) {
 	}()
 	_ = reg.Register(t.TempDir(), "test-city")
 }
+
+// TestSupervisorPatrolIntervalEnvOverride verifies that
+// GC_SUPERVISOR_PATROL_INTERVAL overrides the configured supervisor patrol
+// interval when set to a valid positive Go duration. This is the
+// fast-iteration knob documented on PatrolIntervalDuration; the env
+// override is read on every call.
+func TestSupervisorPatrolIntervalEnvOverride(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_PATROL_INTERVAL", "2s")
+	s := Section{PatrolInterval: "10s"}
+	if got := s.PatrolIntervalDuration(); got != 2*time.Second {
+		t.Errorf("PatrolIntervalDuration() with env=2s, config=10s = %v, want 2s", got)
+	}
+}
+
+// TestSupervisorPatrolIntervalEnvInvalidFallsThrough verifies that an
+// invalid or non-positive env override is ignored and the configured value
+// (or default) is used.
+func TestSupervisorPatrolIntervalEnvInvalidFallsThrough(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_PATROL_INTERVAL", "garbage")
+	s := Section{PatrolInterval: "15s"}
+	if got := s.PatrolIntervalDuration(); got != 15*time.Second {
+		t.Errorf("PatrolIntervalDuration() with bad env, config=15s = %v, want 15s", got)
+	}
+	t.Setenv("GC_SUPERVISOR_PATROL_INTERVAL", "-1s")
+	if got := s.PatrolIntervalDuration(); got != 15*time.Second {
+		t.Errorf("PatrolIntervalDuration() with -1s env, config=15s = %v, want 15s", got)
+	}
+}

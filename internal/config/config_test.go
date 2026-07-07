@@ -3449,6 +3449,33 @@ func TestDaemonPatrolIntervalInvalid(t *testing.T) {
 	}
 }
 
+// TestDaemonPatrolIntervalEnvOverride verifies that GC_PATROL_INTERVAL
+// overrides the configured value when set to a valid positive duration.
+// This is the fast-iteration knob documented on PatrolIntervalDuration; it
+// is intended for development and is not validated by the doctor.
+func TestDaemonPatrolIntervalEnvOverride(t *testing.T) {
+	t.Setenv("GC_PATROL_INTERVAL", "5s")
+	d := DaemonConfig{PatrolInterval: "30s"}
+	if got := d.PatrolIntervalDuration(); got != 5*time.Second {
+		t.Errorf("PatrolIntervalDuration() with env=5s, config=30s = %v, want 5s", got)
+	}
+}
+
+// TestDaemonPatrolIntervalEnvInvalidFallsThrough verifies that an invalid
+// or non-positive env override is ignored and the configured value (or
+// default) is used.
+func TestDaemonPatrolIntervalEnvInvalidFallsThrough(t *testing.T) {
+	t.Setenv("GC_PATROL_INTERVAL", "nonsense")
+	d := DaemonConfig{PatrolInterval: "45s"}
+	if got := d.PatrolIntervalDuration(); got != 45*time.Second {
+		t.Errorf("PatrolIntervalDuration() with bad env, config=45s = %v, want 45s", got)
+	}
+	t.Setenv("GC_PATROL_INTERVAL", "0s")
+	if got := d.PatrolIntervalDuration(); got != 45*time.Second {
+		t.Errorf("PatrolIntervalDuration() with 0s env, config=45s = %v, want 45s", got)
+	}
+}
+
 func TestParseDaemonConfig(t *testing.T) {
 	data := []byte(`
 [workspace]

@@ -128,8 +128,17 @@ func (s Section) PortOrDefault() int {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 10s on empty or unparseable values.
+// Defaults to 10s on empty or unparseable values. When the environment
+// variable GC_SUPERVISOR_PATROL_INTERVAL is set to a valid positive Go
+// duration (e.g. "2s", "30s"), it overrides the configured value. This is
+// intended for fast-iteration debugging; the env override is read on every
+// call and is not validated by the doctor/duration checks.
 func (s Section) PatrolIntervalDuration() time.Duration {
+	if override := os.Getenv("GC_SUPERVISOR_PATROL_INTERVAL"); override != "" {
+		if d, err := time.ParseDuration(override); err == nil && d > 0 {
+			return d
+		}
+	}
 	if s.PatrolInterval == "" {
 		return 10 * time.Second
 	}

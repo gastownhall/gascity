@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -2559,8 +2560,17 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 30s if empty or unparseable.
+// Defaults to 30s if empty or unparseable. When the environment variable
+// GC_PATROL_INTERVAL is set to a valid Go duration (e.g. "5s", "1m"), it
+// overrides the configured value. This is intended for fast-iteration
+// debugging in development; the env override is read once per call and
+// is not validated by the doctor/duration checks.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
+	if override := os.Getenv("GC_PATROL_INTERVAL"); override != "" {
+		if dur, err := time.ParseDuration(override); err == nil && dur > 0 {
+			return dur
+		}
+	}
 	if d.PatrolInterval == "" {
 		return 30 * time.Second
 	}
