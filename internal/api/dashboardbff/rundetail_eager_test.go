@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,35 +93,40 @@ func TestPlaneStartEagerEmptyCitiesNoop(t *testing.T) {
 
 // TestPlaneStartDoesNotBlockOnColdLoad proves Start stays non-blocking: a city
 // whose event log is large enough that its cold replay takes hundreds of
-// milliseconds must not delay Start, which only spawns the fold goroutine. We
-// assert Start returns well under the cold-load duration.
+// milliseconds must not delay Start, which only spawns the fold goroutine. It
+// asserts the causal property (Start returns before the fold finishes) rather
+// than a wall-clock ceiling, so it cannot flake under scheduler contention.
 func TestPlaneStartDoesNotBlockOnColdLoad(t *testing.T) {
 	dir := t.TempDir()
 	writeLargeRunLog(t, cityEventsPath(dir), 20000)
 
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"big": dir}}})
 
-	start := time.Now()
 	p.Start(t.Context())
-	elapsed := time.Since(start)
 	t.Cleanup(p.Stop)
 
-	// The cold replay of 20k events takes hundreds of ms (measured ~290ms). Start
-	// only spawns the fold goroutine, so it must return in a tiny fraction of that.
-	// A generous 100ms ceiling still proves Start did not wait on the fold while
-	// tolerating a slow CI box.
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("Plane.Start took %v; it must not block on the cold replay", elapsed)
-	}
-
-	// And the fold still completes in the background — Start being fast did not
-	// skip the warm-up.
+	// eagerWarmTailers runs synchronously inside Start, so the tailer is in the map
+	// the moment Start returns.
 	p.runTailers.mu.Lock()
 	tl := p.runTailers.cities["big"]
 	p.runTailers.mu.Unlock()
 	if tl == nil {
 		t.Fatal("big city was not eager-started")
 	}
+
+	// Causal non-blocking proof: Start only spawns the fold goroutine, so the cold
+	// replay of 20k events (measured ~290ms) is still running when Start returns —
+	// readyCh must not be closed yet. Asserting this instead of a wall-clock
+	// ceiling proves exactly the same thing (Start did not wait on the cold load)
+	// without depending on scheduler timing under the fleet's heavy parallelism.
+	select {
+	case <-tl.readyCh:
+		t.Fatal("Plane.Start returned only after the cold replay completed; it must not block on the fold")
+	default:
+	}
+
+	// And the fold still completes in the background — Start being fast did not
+	// skip the warm-up.
 	select {
 	case <-tl.readyCh:
 	case <-time.After(5 * time.Second):
@@ -184,6 +190,86 @@ func TestPlaneStartPrimesSessionsCache(t *testing.T) {
 	if got := sessionsHits.Load(); got != 1 {
 		t.Fatalf("sessions upstream hits after a warm detail() = %d, want 1 (cache served from the prime)", got)
 	}
+}
+
+// TestPlaneStopDoesNotBlockOnWedgedSessionsPrime is the regression guard for the
+// startup sessions-prime pinning shutdown: the best-effort prime elects a
+// single-flight compute that detaches from the plane ctx (enrichment_cache.go)
+// and is bounded only by the HTTP client timeout, so a prime that waited on that
+// compute inside the plane waitgroup would keep Plane.Stop blocked for up to
+// runSessionsFetchTimeout on a wedged /sessions read — even though the prime is
+// optional. A /sessions handler that never responds stands in for the wedged
+// loopback; Stop must return promptly and let the detached fetch drain on its own.
+func TestPlaneStopDoesNotBlockOnWedgedSessionsPrime(t *testing.T) {
+	var sessionsHits atomic.Int64
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/sessions") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		sessionsHits.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"total":0}`))
+	}))
+	defer supervisor.Close()
+
+	dir := t.TempDir()
+	writeEventLog(t, cityEventsPath(dir), runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
+
+	p := New(Deps{
+		Resolver:          fakeResolver{paths: map[string]string{"alpha": dir}},
+		SupervisorBaseURL: supervisor.URL,
+	})
+	p.Start(t.Context())
+
+	p.runTailers.mu.Lock()
+	tl := p.runTailers.cities["alpha"]
+	p.runTailers.mu.Unlock()
+	if tl == nil {
+		t.Fatal("alpha was not eager-started")
+	}
+	waitReady(t, tl)
+
+	// Wait until the prime is genuinely in-flight and parked in the wedged
+	// /sessions read, so Stop races a stalled prime rather than one that already
+	// returned.
+	deadline := time.Now().Add(2 * time.Second)
+	for sessionsHits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := sessionsHits.Load(); got != 1 {
+		t.Fatalf("sessions prime not in-flight after cold replay: hits=%d, want 1", got)
+	}
+
+	// Stop must not wait on the wedged prime. The /sessions read is never released,
+	// so a Stop that drained the prime inline would block for up to the 10s HTTP
+	// client timeout; the child-goroutine race must let Stop return promptly while
+	// the detached fetch drains on its own bounded deadline.
+	stopped := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Plane.Stop blocked on the wedged best-effort sessions prime; shutdown must not wait on the optional detached fetch")
+	}
+
+	// Release the wedged handler now that the Stop assertion has held. Otherwise
+	// the leaked child's /sessions read stays parked and the deferred
+	// supervisor.Close() blocks for the full HTTP client timeout draining it,
+	// adding ~10s of pure teardown plus an alarming httptest blocked-close warning.
+	unblock()
 }
 
 // writeLargeRunLog writes n run-molecule events to path so a cold replay is

@@ -95,7 +95,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			t.loop(m.ctx)
+			t.loop(m.ctx, m.wg)
 		}()
 	}
 	return t
@@ -161,7 +161,7 @@ func captureTailCursor(path string) *tailState {
 // loop cold-replays the event log, publishes the bead-derived summary, then
 // tails newly appended events and republishes on each change. All folding and
 // summary-building happens on loop-owned locals; only the publish takes the lock.
-func (t *cityRunTailer) loop(ctx context.Context) {
+func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 	proj := runproj.NewProjector()
 
 	// Capture the active log size and identity BEFORE the cold replay so the tail
@@ -180,12 +180,40 @@ func (t *cityRunTailer) loop(ctx context.Context) {
 
 	// Best-effort prime the per-city sessions cache now that the fold is warm, so
 	// the first detail() serves a fully-warm read instead of paying the loopback
-	// sessions fetch inline. It degrades silently (the cache already falls back to
-	// (nil, false) when the supervisor loopback isn't serving yet — e.g. mid-start
-	// before the /v0 API is up) and respects ctx cancellation via the request it
-	// issues, so it never blocks the tail loop below. Formulas stay lazy: they are
-	// per-run, compile fast, and are cached with a long TTL once first fetched.
-	t.mgr.fetchSessions(ctx, t.name)
+	// sessions fetch inline. It runs in its OWN goroutine, NOT on this poll loop:
+	// the prime issues a /v0 sessions loopback read that can block for up to the
+	// HTTP client timeout (runSessionsFetchTimeout) when the supervisor API is slow
+	// or not yet serving, and the elected single-flight compute detaches from ctx
+	// (see enrichment_cache.go), so a caller-side deadline cannot shorten it. Doing
+	// it inline here would delay the tail's first foldNext by that long, leaving
+	// events appended right after readyCh closed unfolded during the exact startup
+	// window this warm-up exists to cover.
+	//
+	// The prime is tracked in the plane waitgroup so a graceful shutdown still
+	// drains a fast, in-flight prime — but it must not PIN shutdown. Because the
+	// elected compute detaches from ctx and is bounded only by its own fetch
+	// timeout, waiting on that compute inline would keep Plane.Stop's wg.Wait()
+	// blocked for up to runSessionsFetchTimeout on a wedged /sessions read, even
+	// though the prime is optional and the cache it warms is being torn down. So
+	// run the fetch in a child goroutine and stop waiting on it the moment ctx is
+	// canceled: Stop returns promptly while the detached fetch drains on its own
+	// bounded deadline. The prime degrades silently (the cache falls back to
+	// (nil, false) when the loopback isn't serving yet — e.g. mid-start before the
+	// /v0 API is up). Formulas stay lazy: they are per-run, compile fast, and are
+	// cached with a long TTL once first fetched.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		primed := make(chan struct{})
+		go func() {
+			defer close(primed)
+			t.mgr.fetchSessions(ctx, t.name)
+		}()
+		select {
+		case <-primed:
+		case <-ctx.Done():
+		}
+	}()
 
 	poll := time.NewTicker(runTailPollInterval)
 	defer poll.Stop()
@@ -792,6 +820,16 @@ func cityEventsPath(cityRoot string) string {
 // Start never waits on any city's cold load. A nil resolver or an empty city
 // set is a no-op, and cities registered after Start keep the lazy start on
 // their first request.
+//
+// Cost scales with TOTAL registered cities, not active ones: warm-up starts one
+// cold-replay goroutine per city at Start and keeps every city's folded bead
+// slice resident for the plane's lifetime, so boot CPU/disk (JSON decode + .gz
+// archive walks) and baseline memory grow with the registry. Because ColdLoad is
+// context-blind (internal/runproj/projector.go), a Stop landing in the boot
+// window also waits on the slowest in-flight replay. This is deliberate for the
+// current few-city deployments; scaling to a large fleet would want a bounded
+// warm-up pool and/or a ctx-aware ColdLoad so Start-time work and shutdown stay
+// bounded.
 func (p *Plane) eagerWarmTailers() {
 	if p.deps.Resolver == nil {
 		return
