@@ -116,15 +116,27 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		if err := waitManagedDoltSIGKILLLockGate(targetPID, layout.DataDir, managedStopPIDAlive, gracePeriod, lockWindow, pollInterval); err != nil {
 			return report, err
 		}
-		if managedStopPIDAlive(targetPID) {
+		// Re-verify the PID still belongs to our managed dolt server before the
+		// forced kill. It outlived the SIGTERM grace, but if it actually exited
+		// during the grace and the numeric PID was reused, managedStopPIDAlive now
+		// reports that unrelated process as alive and a bare-PID SIGKILL would hit
+		// it. managedDoltProcessControllable re-runs the ownership inspection
+		// (cmdline/data-dir/cwd), which a reused unrelated PID fails.
+		if managedDoltProcessControllable(targetPID, layout) {
 			report.Forced = true
 			if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
 			}
 			time.Sleep(time.Second)
+		} else {
+			managedDoltCleanupLogf("skipping SIGKILL of pid %d: no longer an owned managed dolt process (PID reused)", targetPID)
 		}
 	}
-	if managedStopPIDAlive(targetPID) {
+	// Fail only when OUR server is still alive AND still owned. A live-but-unowned
+	// PID here means our server exited during the grace and the number was reused:
+	// the stop succeeded (our server is gone), and the data-dir lock wait below
+	// still guarantees the dir is released before we report success.
+	if managedDoltProcessControllable(targetPID, layout) {
 		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
 	}
 	// The server process is gone, but descendants (e.g. dolt gc workers) can
