@@ -35,11 +35,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing fanout: %w", bead.ID, err)
 		}
-		closedBead, err := store.Get(bead.ID)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading closed fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -77,11 +73,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed fanout: %w", bead.ID, err)
 		}
-		closedBead, err := store.Get(bead.ID)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading failed fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -96,11 +88,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing empty fanout: %w", bead.ID, err)
 		}
-		closedBead, err := store.Get(bead.ID)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading empty fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
