@@ -191,7 +191,11 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		return ControlResult{}, fmt.Errorf("%s: recording expanded drain: %w", bead.ID, err)
 	}
 	if len(manifest.Rows) == 0 {
-		return completeDrain(store, mustReloadDrain(store, bead), opts)
+		reloaded, err := reloadDrain(store, bead)
+		if err != nil {
+			return ControlResult{}, err
+		}
+		return completeDrain(store, reloaded, opts)
 	}
 	return ControlResult{Processed: true, Action: "drain-expanded", Created: totalCreated}, nil
 }
@@ -1468,10 +1472,14 @@ func drainOnItemFailure(bead beads.Bead) string {
 	return beadmeta.DrainOnItemFailureContinue
 }
 
-func mustReloadDrain(store beads.Store, bead beads.Bead) beads.Bead {
+// reloadDrain re-reads the drain control bead so completeDrain sees the freshly
+// persisted post-expansion state. On a read error it returns the error rather
+// than the stale pre-transition bead, so the caller can retry next tick instead
+// of completing the drain against a stale snapshot.
+func reloadDrain(store beads.Store, bead beads.Bead) (beads.Bead, error) {
 	reloaded, err := store.Get(bead.ID)
 	if err != nil {
-		return bead
+		return beads.Bead{}, fmt.Errorf("%s: reloading drain before completion: %w", bead.ID, err)
 	}
-	return reloaded
+	return reloaded, nil
 }

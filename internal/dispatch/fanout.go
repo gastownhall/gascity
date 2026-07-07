@@ -286,7 +286,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 	}
 	executionRoute := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
-	routeCfg := loadAttemptRouteConfig(opts.CityPath)
+	routeCfg, _ := opts.routeConfig()
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
 		if step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
