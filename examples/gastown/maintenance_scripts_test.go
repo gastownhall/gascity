@@ -4291,7 +4291,7 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "close ga-old --reason stale:auto-closed by reaper") {
+	if !strings.Contains(bdLogText, "close ga-old --force --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not act on row-query stdout when Dolt emitted stderr warning:\n%s", bdLogText)
 	}
 	if strings.Contains(bdLogText, "non-fatal warning") {
@@ -5290,7 +5290,7 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "close ga-city --reason stale:auto-closed by reaper") {
+	if !strings.Contains(bdLogText, "close ga-city --force --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not close city-scoped stale issue:\n%s", bdLogText)
 	}
 	if strings.Contains(bdLogText, "rig-old") {
@@ -5612,7 +5612,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "close ga-city --reason stale:auto-closed by reaper") {
+	if !strings.Contains(string(bdData), "close ga-city --force --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not resolve city metadata through GC_CITY_PATH:\n%s", bdData)
 	}
 
@@ -5700,7 +5700,7 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "args=close ga-city --reason stale:auto-closed by reaper") {
+	if !strings.Contains(bdLogText, "args=close ga-city --force --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not close city issue:\n%s", bdLogText)
 	}
 	if !strings.Contains(bdLogText, "pwd="+canonicalCityDir) {
@@ -5935,7 +5935,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "close ga-city --reason stale:auto-closed by reaper") {
+	if !strings.Contains(string(bdData), "close ga-city --force --reason stale:auto-closed by reaper") {
 		t.Fatalf("reaper did not close city issue through metadata fallback:\n%s", bdData)
 	}
 

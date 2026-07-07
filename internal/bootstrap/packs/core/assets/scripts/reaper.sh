@@ -699,6 +699,13 @@ SQL_CHANGE_ROWS_RESULT=0
 close_city_issue() {
     local issue_id="$1"
     local reason="$2"
+    # Pass a non-empty third arg to add --force. Required when reaping a bead
+    # still assigned to another actor (e.g. an in_progress bead owned by a live
+    # agent session) while the reaper runs as order:reaper: bd's close-authority
+    # guard (gastownhall/beads#3734) refuses a cross-actor close without --force.
+    # Reaps of unassigned beads must stay bare so the guard keeps protecting
+    # against overriding a concurrent re-claim.
+    local force="${3:-}"
 
     if [ ! -d "$CITY_BEADS_DIR" ]; then
         printf 'city bead store %s is unavailable' "$CITY_BEADS_DIR"
@@ -707,7 +714,11 @@ close_city_issue() {
 
     (
         cd "$CITY_ABS"
-        BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --reason "$reason"
+        if [ -n "$force" ]; then
+            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --force --reason "$reason"
+        else
+            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --reason "$reason"
+        fi
     )
 }
 
@@ -1051,7 +1062,7 @@ while IFS= read -r DB; do
         else
             while IFS= read -r issue_id; do
                 [ -z "$issue_id" ] && continue
-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" 2>&1); then
+                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" force 2>&1); then
                     DB_ISSUES_CLOSED=$((DB_ISSUES_CLOSED + 1))
                     TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
                     DB_MUTATIONS=$((DB_MUTATIONS + 1))
