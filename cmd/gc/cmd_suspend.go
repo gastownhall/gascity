@@ -80,7 +80,7 @@ func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -101,7 +101,7 @@ func cmdResume(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, false, jsonOut)
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

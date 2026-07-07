@@ -1354,9 +1354,14 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
 	}
 	// Gate city-config mutations on a signed write grant when configured. Fail
-	// closed at boot if write-auth is required but no key is set, so the
+	// closed at boot if write-auth is required but no key is set, or if a
+	// non-loopback + allow_mutations bind has no key and no ack knob (G10), so the
 	// multi-city supervisor cannot silently serve mutations unguarded.
-	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); err != nil {
+	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired, api.WriteAuthBindContext{
+		NonLocal:        nonLocal,
+		AllowMutations:  supCfg.Supervisor.AllowMutations,
+		AllowUnverified: supCfg.Supervisor.WriteAuthAllowUnverified,
+	}); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1366,6 +1371,17 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if err := api.InstallReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
+	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
+	// the standalone controller seam) so an operator sees the read surface needs a
+	// network front. grantGated is resolved the same way InstallWriteAuth did.
+	if nonLocal && supCfg.Supervisor.AllowMutations {
+		grantGated := false
+		if v, verr := api.ResolveWriteAuthVerifier(supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); verr == nil && v != nil {
+			grantGated = true
+		}
+		warnUnauthenticatedReadPlane(stderr, bind, grantGated)
 	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same
@@ -2100,6 +2116,14 @@ func reconcileCities(
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
+
+		// G13 §6 sweep-before-serve: reconcile this city's orphan in_flight
+		// rig-create idem records before it is published into the registry (and
+		// thus before the SupervisorMux can route a rig-create/sling request to
+		// it), so a same-id retry can never re-clone over un-torn-down debris.
+		if err := cs.sweepOrphanRigProvisions(cityCtx); err != nil {
+			fmt.Fprintf(stderr, "api: rig-create boot sweep (%s): %v\n", cityName, err) //nolint:errcheck // best-effort stderr
+		}
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

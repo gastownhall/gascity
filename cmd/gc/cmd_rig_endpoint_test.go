@@ -1062,27 +1062,6 @@ func TestSyncRigEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
 	}
 }
 
-func TestRestoreSnapshotUsesAtomicWrite(t *testing.T) {
-	fs := fsys.NewFake()
-	snap := fileSnapshot{path: "/city/city.toml", data: []byte("updated = true\n"), exists: true}
-	if err := restoreSnapshot(fs, snap); err != nil {
-		t.Fatalf("restoreSnapshot: %v", err)
-	}
-	var renamed bool
-	for _, call := range fs.Calls {
-		if call.Method == "Rename" && strings.HasPrefix(call.Path, snap.path+".tmp.") {
-			renamed = true
-			break
-		}
-	}
-	if !renamed {
-		t.Fatalf("fs calls = %+v, want atomic rename", fs.Calls)
-	}
-	if got := string(fs.Files[snap.path]); got != "updated = true\n" {
-		t.Fatalf("restored file = %q", got)
-	}
-}
-
 // setupSymlinkedCityToml creates cityDir/city.toml as a symlink into a
 // checkout directory holding the original content, mirroring the ga-lurp5d
 // production layout where city.toml links into a checked-out repo.

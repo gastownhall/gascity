@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
+	"github.com/gastownhall/gascity/internal/ssrf"
 )
 
 func TestValidateHTTPPackSource_AllowsPublicRemotes(t *testing.T) {
@@ -223,16 +224,16 @@ func TestPackAddImportFenced_ThreadsSSRFPolicyIntoImportsvc(t *testing.T) {
 	}
 }
 
-// stubPackSourceResolver swaps the DNS seam for the test and returns a restore
-// func. Hosts absent from table resolve with an error (no address).
+// stubPackSourceResolver swaps the shared ssrf DNS seam for the test and returns
+// a restore func. Hosts absent from table resolve with an error (no address).
 func stubPackSourceResolver(t *testing.T, table map[string][]net.IP) func() {
 	t.Helper()
-	orig := packSourceHostResolver
-	packSourceHostResolver = func(host string) ([]net.IP, error) {
+	orig := ssrf.HostResolver
+	ssrf.HostResolver = func(host string) ([]net.IP, error) {
 		if ips, ok := table[strings.ToLower(host)]; ok {
 			return ips, nil
 		}
 		return nil, errors.New("no such host")
 	}
-	return func() { packSourceHostResolver = orig }
+	return func() { ssrf.HostResolver = orig }
 }

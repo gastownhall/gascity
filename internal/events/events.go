@@ -132,7 +132,13 @@ const (
 	RequestResultSessionCreate  = "request.result.session.create"
 	RequestResultSessionMessage = "request.result.session.message"
 	RequestResultSessionSubmit  = "request.result.session.submit"
+	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
+
+	// RigProvisionProgress reports one provisioning step of a server-side
+	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
+	// the terminal outcome is RequestResultRigCreate or RequestFailed.
+	RigProvisionProgress = "rig.provision.progress"
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
@@ -248,7 +254,8 @@ var KnownEventTypes = []string{
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
-	RequestResultSessionSubmit, RequestFailed,
+	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
+	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,

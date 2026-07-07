@@ -1343,6 +1343,15 @@ func runController(
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
+	// G13 §6 sweep-before-serve: reconcile orphan in_flight rig-create idem
+	// records (their goroutines did not survive this restart) BEFORE the API mux
+	// starts serving, so a same-id retry can never re-clone over un-torn-down
+	// debris. Best-effort — a partial-teardown failure is logged and leaves that
+	// one record un-retryable, never blocking startup.
+	if err := cs.sweepOrphanRigProvisions(ctx); err != nil {
+		fmt.Fprintf(stderr, "api: rig-create boot sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+
 	// Start API server if configured. Standalone city mode wraps the
 	// single city in a SupervisorMux so every endpoint is served at its
 	// real scoped path (/v0/city/{cityName}/...) — matching the
@@ -1362,8 +1371,13 @@ func runController(
 		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
 		apiMux.WithAnyHostAllowed()
 		// Gate city-config mutations on a signed write grant when configured.
-		// Fail closed at boot if write-auth is required but no key is set.
-		if err := api.InstallWriteAuth(apiMux, cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); err != nil {
+		// Fail closed at boot if write-auth is required but no key is set, or if a
+		// non-loopback + allow_mutations bind has no key and no ack knob (G10).
+		if err := api.InstallWriteAuth(apiMux, cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired, api.WriteAuthBindContext{
+			NonLocal:        nonLocal,
+			AllowMutations:  cfg.API.AllowMutations,
+			AllowUnverified: cfg.API.WriteAuthAllowUnverified,
+		}); err != nil {
 			fmt.Fprintf(stderr, "api: write-auth: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -1372,6 +1386,18 @@ func runController(
 		if err := api.InstallReadAuth(apiMux, cfg.API.ReadAuthVerifyKey, cfg.API.ReadAuthRequired); err != nil {
 			fmt.Fprintf(stderr, "api: read-auth: %v\n", err) //nolint:errcheck
 			return 1
+		}
+		// G23: a hardened bind (non-loopback + allow_mutations) previously booted
+		// silent. Emit the loud unauthenticated-read-plane warning so an operator
+		// cannot stand one up without seeing that the read surface needs a network
+		// front. grantGated is resolved the same way InstallWriteAuth did (which
+		// already succeeded, so a configured key is valid).
+		if nonLocal && cfg.API.AllowMutations {
+			grantGated := false
+			if v, verr := api.ResolveWriteAuthVerifier(cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); verr == nil && v != nil {
+				grantGated = true
+			}
+			warnUnauthenticatedReadPlane(stderr, bind, grantGated)
 		}
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)

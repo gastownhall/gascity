@@ -309,6 +309,30 @@ type StateMutator interface {
 	// CreateRig adds a new rig to city.toml.
 	CreateRig(r config.Rig) error
 
+	// ProvisionRigFromGit clones gitURL into the rig's working tree and
+	// provisions the rig, reusing CreateRig's config-write handshake under the
+	// per-city guard. The clone runs OUTSIDE that guard (a WAN fetch must not
+	// freeze config writes); the git URL host is SSRF-fenced (fail-closed)
+	// before any clone. When r.Path is empty the server derives rigs/<name>.
+	// onStep, when non-nil, receives incremental provisioning progress (step
+	// name, human detail, warn flag) for typed-event projection. onManifest,
+	// when non-nil, is called record-then-create at each resource-creation
+	// checkpoint (before the clone with CreatedDir set; after init with any
+	// minted DoltDB) so the caller can persist the G14 rollback manifest and
+	// capture it for teardown. It returns the provisioned rig so the caller can
+	// report its resolved prefix/branch. This is the async server-side rig-add
+	// path (C4b/C4c); the sync CreateRig stays git-blind.
+	ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error)
+
+	// TeardownPartialRig removes the created rig working tree and drops the
+	// managed Dolt database named in the manifest (best-effort), then repairs
+	// routes from the on-disk config. It is the physical half of the G14 atomic
+	// rollback the async goroutine, the re-clone poison pre-drop, and the boot
+	// sweep all share. It never removes a dir or store the manifest does not
+	// claim this request created. A non-nil return means debris may remain, so
+	// the caller must not mark the idempotency record rolled_back.
+	TeardownPartialRig(ctx context.Context, m RigProvisionManifest) error
+
 	// UpdateRig partially updates a rig in city.toml.
 	UpdateRig(name string, patch RigUpdate) error
 

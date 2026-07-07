@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
@@ -69,6 +69,8 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var defaultBranchFlag string
 	var adoptFlag bool
 	var jsonOutput bool
+	var gitURLFlag string
+	var requestIDFlag string
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -105,6 +107,56 @@ check remains informational.`,
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			// Remote city: drive server-side provisioning over the control plane
+			// before any local city/config/store work. The branch runs ahead of both
+			// resolveCity() paths below so a resolved remote target never touches
+			// local disk (gate G1). A remote error is non-fallbackable.
+			remoteC, isRemote, target, rerr := resolveWriteTarget()
+			if rerr != nil {
+				if jsonOutput {
+					if writeJSONError(stdout, stderr, "city_resolve_failed", fmt.Sprintf("gc rig add: %v", rerr), 1) != 0 {
+						return errExit
+					}
+					return nil
+				}
+				fmt.Fprintf(stderr, "gc rig add: %v\n", rerr) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if isRemote {
+				if cmdRigAddRemote(remoteC, target, args, gitURLFlag, requestIDFlag, nameFlag, prefixFlag, defaultBranchFlag, includes, startSuspended, adoptFlag, jsonOutput, stdout, stderr) != 0 {
+					return errExit
+				}
+				return nil
+			}
+			// LOCAL path (byte-identical to the pre-C7 behavior). --git-url is a
+			// remote-only feature in C7: local clone semantics are un-specced, and
+			// teaching the local path to clone would risk the byte-identical local
+			// output the gate protects. Refuse it loudly.
+			if strings.TrimSpace(gitURLFlag) != "" {
+				msg := "gc rig add: --git-url requires a remote city target (--context/--city-url); for a local city run `git clone` then `gc rig add <path>`"
+				if jsonOutput {
+					if writeJSONError(stdout, stderr, "unsupported_local", msg, 1) != 0 {
+						return errExit
+					}
+					return nil
+				}
+				fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			// --request-id is the idempotency key for a server-side --git-url
+			// provision; it has no meaning locally. Refuse it loudly rather than
+			// silently ignoring it (symmetric with the --git-url guard above).
+			if strings.TrimSpace(requestIDFlag) != "" {
+				msg := "gc rig add: --request-id requires a remote city target (--context/--city-url); it is the idempotency key for a server-side --git-url provision"
+				if jsonOutput {
+					if writeJSONError(stdout, stderr, "unsupported_local", msg, 1) != 0 {
+						return errExit
+					}
+					return nil
+				}
+				fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			if jsonOutput {
 				cityPath, err := resolveCity()
 				if err != nil {
@@ -133,12 +185,14 @@ check remains informational.`,
 		},
 	}
 	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack source for rig agents (repeatable; writes canonical rig imports)")
-	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename)")
+	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename, or git URL basename for --git-url)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	cmd.Flags().StringVar(&gitURLFlag, "git-url", "", "git URL to clone into a new rig on a REMOTE city (server-side provisioning)")
+	cmd.Flags().StringVar(&requestIDFlag, "request-id", "", "idempotency key for a remote --git-url add; reuse it to resume/retry a provision")
 	return cmd
 }
 
@@ -213,498 +267,123 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 }
 
 func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) (config.Rig, int) {
-	// Trim and drop empty --include entries so `--include=` or `--include " "`
-	// doesn't persist a blank pack path that downstream resolution reads
-	// as the city root.
-	cleaned := includes[:0:0]
-	for _, inc := range includes {
-		if trimmed := strings.TrimSpace(inc); trimmed != "" {
-			cleaned = append(cleaned, trimmed)
-		}
-	}
-	includes = cleaned
-
-	rigPathExists := false
-	if fi, err := fs.Stat(rigPath); err != nil {
-		if adopt {
-			fmt.Fprintf(stderr, "gc rig add: --adopt requires an existing directory: %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-	} else if !fi.IsDir() {
-		fmt.Fprintf(stderr, "gc rig add: %s is not a directory\n", rigPath) //nolint:errcheck // best-effort stderr
+	// Preflight the rig path before loading config so an invalid rig path is
+	// reported ahead of a config-load failure (Provision re-checks it as
+	// step 2). This preserves the original error ordering.
+	if _, err := rig.StatRigPath(fs, rigPath, adopt); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
-	} else {
-		rigPathExists = true
 	}
-
-	name := nameOverride
-	if name == "" {
-		name = filepath.Base(rigPath)
-	}
-
-	_, gitErr := fs.Stat(filepath.Join(rigPath, ".git"))
-	hasGit := gitErr == nil
-	defaultBranchOverride = strings.TrimSpace(defaultBranchOverride)
-	resolvedDefaultBranch := defaultBranchOverride
-	if resolvedDefaultBranch == "" && hasGit {
-		resolvedDefaultBranch = git.New(rigPath).ProbeDefaultBranch()
-	}
-
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
 	}
-
-	// Canonicalize --include tokens that name a materialized builtin pack so the
-	// flag honors its --help promise of "canonical rig imports". Done after the
-	// config load (so [packs] references are honored) but before the imports are
-	// built and the re-add comparison below, so both the written city.toml and
-	// that comparison use the resolvable path (gascity#3137).
-	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes, cfg.Packs)
-
-	explicitRigImports, commitRigImports, err := ensureBundledRigImportsInstalled(cityPath, boundImportsFromLegacySources(includes, cfg.Packs))
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
-		return config.Rig{}, 1
-	}
+	// Register the city dolt config for the duration of provisioning so the
+	// beads-init path can read the process-global lifecycle fields. The
+	// register/clear pair must stay in one lexical scope wrapping the whole
+	// Provision call.
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
 		registerCityDoltConfig(cityPath, cfg.Dolt)
 		defer clearCityDoltConfig(cityPath)
 	}
-	var reAdd bool
-	var reAddNeedsConfigWrite bool
-	existingRigIdx := -1
-	var existingRig *config.Rig
-	for i, r := range cfg.Rigs {
-		if r.Name != name {
-			continue
-		}
-		existingRigIdx = i
-		existingRig = &cfg.Rigs[i]
-		existPath := r.Path
-		if strings.TrimSpace(existPath) == "" {
-			reAdd = true
-			reAddNeedsConfigWrite = true
-			break
-		}
-		if !filepath.IsAbs(existPath) {
-			existPath = filepath.Join(cityPath, existPath)
-		}
-		if filepath.Clean(existPath) != filepath.Clean(rigPath) {
-			fmt.Fprintf(stderr, "gc rig add: rig %q already registered at %s (not %s)\n", name, r.Path, rigPath) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		reAdd = true
-		break
+	name := nameOverride
+	if name == "" {
+		name = filepath.Base(rigPath)
 	}
 
-	var prefix string
-	switch {
-	case reAdd:
-		prefix = existingRig.EffectivePrefix()
-	case prefixOverride != "":
-		prefix = strings.ToLower(prefixOverride)
-	default:
-		prefix = config.DeriveBeadsPrefix(name)
-	}
-
-	if !reAdd {
-		prefixKey := strings.ToLower(prefix)
-		if prefixKey == strings.ToLower(config.EffectiveHQPrefix(cfg)) {
-			fmt.Fprintf(stderr, "gc rig add: rig %q: prefix %q collides with HQ. Use --prefix to specify a different prefix.\n", name, prefixKey) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		for _, rig := range cfg.Rigs {
-			if prefixKey == strings.ToLower(rig.EffectivePrefix()) {
-				fmt.Fprintf(stderr, "gc rig add: rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.\n", name, prefixKey, rig.Name) //nolint:errcheck // best-effort stderr
-				return config.Rig{}, 1
+	deps := rig.Deps{
+		FS:           fs,
+		CityPath:     cityPath,
+		Cfg:          cfg,
+		InitStore:    initDirIfReady,
+		InitAndHook:  initAndHookDir,
+		ComposePacks: ensureBundledRigImportsInstalled,
+		WriteRoutes: func(cp string, c *config.City) error {
+			return writeAllRigRoutes(collectRigRoutes(cp, c))
+		},
+		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		NormalizeScopes: func(cp string, c *config.City) error {
+			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
+		},
+		PrepareAdopt:  prepareRigAdoptProviderState,
+		StoreContract: cityUsesBdStoreContract,
+		DoltSkip:      gcDoltSkip,
+		PostProvision: func(pc rig.ProvisionContext) error {
+			if adopt {
+				if err := installBeadHooks(rigPath, cityPath); err != nil {
+					fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+				}
 			}
-		}
-	}
-	if reAdd && existingRig != nil && existingRig.EffectiveDefaultBranch() == "" && resolvedDefaultBranch != "" {
-		reAddNeedsConfigWrite = true
-	}
-
-	nextCfg := cfg
-	var defaultRigImports []config.BoundImport
-	needsValidation := !reAdd || reAddNeedsConfigWrite
-	if reAddNeedsConfigWrite {
-		next := *cfg
-		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
-		if strings.TrimSpace(next.Rigs[existingRigIdx].Path) == "" {
-			next.Rigs[existingRigIdx].Path = rigPath
-		}
-		if next.Rigs[existingRigIdx].EffectiveDefaultBranch() == "" && resolvedDefaultBranch != "" {
-			next.Rigs[existingRigIdx].DefaultBranch = resolvedDefaultBranch
-		}
-		nextCfg = &next
-	} else if !reAdd {
-		storedPrefix := ""
-		if prefixOverride != "" {
-			storedPrefix = strings.ToLower(prefixOverride)
-		}
-		rig := config.Rig{
-			Name:             name,
-			Path:             rigPath,
-			Prefix:           storedPrefix,
-			DefaultBranch:    resolvedDefaultBranch,
-			SuspendedOnStart: startSuspended,
-		}
-		switch {
-		case len(explicitRigImports) > 0:
-			rig.Imports = boundImportsMap(explicitRigImports)
-		default:
-			rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
-				return config.Rig{}, 1
+			if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
+				fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
-			// Default-rig imports take the same pin/cache hardening as
-			// explicit --include imports: a version-less bundled source
-			// arriving from root-pack defaults or legacy
-			// default_rig_includes must not persist version-less.
-			defaultRigImports, commitRigImports, err = ensureBundledRigImportsInstalled(cityPath, composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs))
-			if err != nil {
-				fmt.Fprintf(stderr, "gc rig add: installing bundled rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
-				return config.Rig{}, 1
+			if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
+				resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
+				if err := hooks.InstallWithResolver(fs, cityPath, rigPath, ih, resolver); err != nil {
+					fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+				}
 			}
-			if len(defaultRigImports) > 0 {
-				rig.Imports = boundImportsMap(defaultRigImports)
+
+			reloadedCfg, prov, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+			emitLoadCityConfigWarnings(stderr, prov)
+			if reloadedCfg != nil {
+				layers, ok := reloadedCfg.FormulaLayers.Rigs[name]
+				if !ok || len(layers) == 0 {
+					layers = reloadedCfg.FormulaLayers.City
+				}
+				if len(layers) > 0 {
+					if rfErr := ResolveFormulas(rigPath, layers); rfErr != nil {
+						fmt.Fprintf(stderr, "gc rig add: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
+					}
+				}
 			}
-		}
-		next := *cfg
-		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
-		nextCfg = &next
-	}
-	if needsValidation {
-		if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-	}
 
-	if !rigPathExists {
-		if err := fs.MkdirAll(rigPath, 0o755); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: creating %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-	}
-
-	if adopt {
-		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
-		if _, err := fs.Stat(metaPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: --adopt requires .beads/metadata.json in %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		if _, ok := readBeadsPrefix(fs, rigPath); !ok {
-			fmt.Fprintf(stderr, "gc rig add: --adopt requires a valid issue_prefix in .beads/config.yaml in %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-	}
-
-	if existingPrefix, ok := readBeadsPrefix(fs, rigPath); ok && existingPrefix != prefix {
-		switch {
-		case reAdd:
-			// On re-add, --prefix is ignored (we use the existing rig's
-			// configured prefix). Direct the user to edit city.toml.
-			fmt.Fprintf(stderr, "gc rig add: rig %q has bead prefix %q but city.toml has %q; "+ //nolint:errcheck // best-effort stderr
-				"edit city.toml to set prefix = %q, or remove %s/.beads to reinitialize\n",
-				name, existingPrefix, prefix, existingPrefix, rigPath)
-		case adopt:
-			// On --adopt, the user explicitly wants the existing store.
-			// "Remove .beads to reinitialize" is the wrong recovery here:
-			// nudge them toward matching the existing prefix instead.
-			fmt.Fprintf(stderr, "gc rig add: --adopt: rig %q already has bead prefix %q (requested %q); "+ //nolint:errcheck // best-effort stderr
-				"use --prefix %s (or omit --prefix) to match the existing store\n",
-				name, existingPrefix, prefix, existingPrefix)
-		default:
-			fmt.Fprintf(stderr, "gc rig add: rig %q already has bead prefix %q (requested %q); "+ //nolint:errcheck // best-effort stderr
-				"use --prefix %s to match, or remove %s/.beads to reinitialize\n",
-				name, existingPrefix, prefix, existingPrefix, rigPath)
-		}
-		return config.Rig{}, 1
-	}
-
-	// Guard: on a fresh add (not a re-add) without --adopt, refuse to run
-	// if .beads/ already holds a beads store. Without this, doRigAdd falls
-	// through to bd init against an existing Dolt store and typically dies
-	// with "bd init: signal: killed" after the probe times out.
-	//
-	// We treat .beads/ as a store only when metadata.json or config.yaml is
-	// present. A directory that happens to be named .beads/ but contains
-	// only unrelated content (e.g. the beads project's own .beads/formulas/
-	// convention for formula source files) is not a store, so the init path
-	// decides how to create the missing store files in place.
-	if !reAdd && !adopt {
-		beadsPath := filepath.Join(rigPath, ".beads")
-		fi, err := fs.Stat(beadsPath)
-		if err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", beadsPath, err) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		if err == nil && fi.IsDir() {
-			containsStore, containsErr := beadsDirContainsStore(fs, beadsPath)
-			if containsErr != nil {
-				fmt.Fprintf(stderr, "gc rig add: %v\n", containsErr) //nolint:errcheck // best-effort stderr
-				return config.Rig{}, 1
+			if err := writeBeadsEnvGTRoot(fs, rigPath, cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
-			if containsStore {
-				fmt.Fprintf(stderr, "gc rig add: %s/.beads already contains a beads store; "+ //nolint:errcheck // best-effort stderr
-					"use --adopt to register it, or remove %s/.beads to reinitialize\n",
-					rigPath, rigPath)
-				return config.Rig{}, 1
-			}
-		}
-	}
 
-	// --- Phase 1: Infrastructure (all fallible, before touching city.toml) ---
-
-	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
-	if reAdd {
-		w(fmt.Sprintf("Re-initializing rig '%s'...", name))
-		if startSuspended && startSuspended != existingRig.EffectiveSuspendedOnStart() {
-			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended_on_start=%v); edit city.toml to change\n", existingRig.EffectiveSuspendedOnStart()) //nolint:errcheck // best-effort stderr
-		}
-		if len(explicitRigImports) > 0 {
-			existingRigImports, err := effectiveRigBoundImports(existingRig, cfg.Packs)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored; existing rig imports could not be normalized (%v). Edit city.toml to change\n", includes, err) //nolint:errcheck // best-effort stderr
-			} else if !slices.Equal(existingRigImports, explicitRigImports) {
-				fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored (existing imports: %s); edit city.toml to change\n", includes, formatBoundImports(existingRigImports)) //nolint:errcheck // best-effort stderr
+			if err := rigReloadControllerConfig(cityPath); err == nil && pc.Deferred && cityUsesBdStoreContract(cityPath) {
+				if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
+					fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
+				}
 			}
-		}
-		if prefixOverride != "" && strings.ToLower(prefixOverride) != existingRig.EffectivePrefix() {
-			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", prefixOverride, existingRig.EffectivePrefix()) //nolint:errcheck // best-effort stderr
-		}
-		if defaultBranchOverride != "" &&
-			defaultBranchOverride != existingRig.EffectiveDefaultBranch() &&
-			(existingRig.EffectiveDefaultBranch() != "" || resolvedDefaultBranch != defaultBranchOverride) {
-			fmt.Fprintf(stderr, "gc rig add: warning: --default-branch=%s ignored (existing: %s); edit city.toml to change\n", defaultBranchOverride, existingRig.EffectiveDefaultBranch()) //nolint:errcheck // best-effort stderr
-		}
-	} else {
-		w(fmt.Sprintf("Adding rig '%s'...", name))
-	}
-	if hasGit {
-		w(fmt.Sprintf("  Detected git repo at %s", rigPath))
-	}
-	w(fmt.Sprintf("  Prefix: %s", prefix))
-	if !reAdd && resolvedDefaultBranch != "" {
-		w(fmt.Sprintf("  Default branch: %s", resolvedDefaultBranch))
-	}
-	if !reAdd {
-		switch {
-		case len(explicitRigImports) > 0:
-			w(fmt.Sprintf("  Import: %s", formatBoundImports(explicitRigImports)))
-		default:
-			if len(defaultRigImports) > 0 {
-				w(fmt.Sprintf("  Import: %s (default)", formatBoundImports(defaultRigImports)))
-			}
-		}
-	}
-
-	deferred := false
-	if adopt {
-		if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: prepare adopted rig store: %v\n", err) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		if cityUsesBdStoreContract(cityPath) {
-			deferred, err = initDirIfReady(cityPath, rigPath, prefix)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-				return config.Rig{}, 1
-			}
-		}
-		w("  Adopted existing beads database")
-	} else {
-		deferred, err = initDirIfReady(cityPath, rigPath, prefix)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-			return config.Rig{}, 1
-		}
-		if deferred {
-			if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-				w("  Beads init deferred to controller")
-			} else if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
-				w("  Beads init deferred to controller")
+			return nil
+		},
+		OnStep: func(s rig.ProvisionStep) {
+			if s.Warn {
+				fmt.Fprintf(stderr, "gc rig add: %s\n", s.Detail) //nolint:errcheck // best-effort stderr
 			} else {
-				w("  Initialized beads database")
+				fmt.Fprintln(stdout, s.Detail) //nolint:errcheck // best-effort stdout
 			}
-		} else {
-			w("  Initialized beads database")
-		}
+		},
 	}
 
-	snapshots, err := snapshotRigAddTopologyFiles(fs, cityPath, nextCfg)
+	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
+		Name:           name,
+		Path:           rigPath,
+		Prefix:         prefixOverride,
+		DefaultBranch:  defaultBranchOverride,
+		Includes:       includes,
+		StartSuspended: startSuspended,
+		Adopt:          adopt,
+	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
 	}
-	if !reAdd || reAddNeedsConfigWrite {
-		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg, io.Discard); err != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
-			return config.Rig{}, 1
-		}
-
-		var writeErr error
-		if !reAdd {
-			// Surgical append: preserve existing comments by appending only the
-			// new [[rigs]] block instead of re-serializing the whole file.
-			newRig := nextCfg.Rigs[len(nextCfg.Rigs)-1]
-			writeErr = config.AppendRigAndWriteSiteBindingsForEdit(fs, tomlPath, nextCfg, newRig)
-		} else {
-			writeErr = writeCityConfigForEditFS(fs, tomlPath, nextCfg)
-		}
-		if writeErr != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", writeErr)
-			return config.Rig{}, 1
-		}
-	}
-
-	// Persist packs.lock and materialize bundled rig imports only after the
-	// city config write succeeds, so the lockfile honors the same
-	// "city.toml written last" contract: any earlier failure leaves
-	// packs.lock untouched, and a failure here rolls back through the
-	// snapshot (which now covers packs.lock).
-	if commitRigImports != nil {
-		if err := commitRigImports(); err != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "installing bundled rig imports", err)
-			return config.Rig{}, 1
-		}
-	}
-	cfg = nextCfg
-
-	allRigs := collectRigRoutes(cityPath, cfg)
-	if err := writeAllRigRoutes(allRigs); err != nil {
-		writeRigAddRollbackError(fs, stderr, snapshots, "writing routes", err)
-		return config.Rig{}, 1
-	}
-	w("  Generated routes.jsonl for cross-rig routing")
-
-	if adopt {
-		if err := installBeadHooks(rigPath, cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-	}
-	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
-		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		resolver := func(name string) string { return config.BuiltinFamily(name, cfg.Providers) }
-		if err := hooks.InstallWithResolver(fs, cityPath, rigPath, ih, resolver); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-	}
-
-	reloadedCfg, prov, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	emitLoadCityConfigWarnings(stderr, prov)
-	if reloadedCfg != nil {
-		layers, ok := reloadedCfg.FormulaLayers.Rigs[name]
-		if !ok || len(layers) == 0 {
-			layers = reloadedCfg.FormulaLayers.City
-		}
-		if len(layers) > 0 {
-			if rfErr := ResolveFormulas(rigPath, layers); rfErr != nil {
-				fmt.Fprintf(stderr, "gc rig add: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
-			}
-		}
-	}
-
-	if err := writeBeadsEnvGTRoot(fs, rigPath, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-
-	if err := rigReloadControllerConfig(cityPath); err == nil && deferred && cityUsesBdStoreContract(cityPath) {
-		if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
-			fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
-		}
-	}
-
-	switch {
-	case reAdd:
-		w("Rig re-initialized.")
-	case startSuspended:
-		w("Rig added (suspended — use 'gc rig resume' to activate).")
-	default:
-		w("Rig added.")
-	}
-	for _, rig := range cfg.Rigs {
-		if rig.Name == name {
-			return rig, 0
-		}
-	}
-	return config.Rig{
-		Name:          name,
-		Path:          rigPath,
-		Prefix:        strings.ToLower(prefixOverride),
-		DefaultBranch: resolvedDefaultBranch,
-		Suspended:     startSuspended,
-	}, 0
+	return r, 0
 }
 
-func formatBoundImports(imports []config.BoundImport) string {
-	parts := make([]string, 0, len(imports))
-	for _, bound := range sortedBoundImports(imports) {
-		part := bound.Binding
-		if source := strings.TrimSpace(bound.Import.Source); source != "" {
-			part += "=" + source
-		}
-		parts = append(parts, part)
-	}
-	return strings.Join(parts, ", ")
-}
-
-// canonicalizeBuiltinPackIncludes rewrites --include tokens that name a
-// bundled pack to its canonical remote source. Builtin packs compose from
-// the user-global repo cache and are not registered in [packs], so a bare
-// "<name>" or "packs/<name>" token (the form documented in `gc rig add
-// --help`) would otherwise be persisted as the non-resolvable literal
-// "./<token>", breaking pack expansion citywide (gascity#3137). A token
-// whose raw form or derived single-segment name is a key in packs, or
-// that resolves to a real local pack directory in the city, is left
-// unchanged so explicit references keep their configured/local source
-// rather than being shadowed by the builtin.
-func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource) []string {
-	out := make([]string, len(includes))
-	for i, inc := range includes {
-		out[i] = inc
-		tok := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(inc)), "./")
-		name := tok
-		if rest, ok := strings.CutPrefix(tok, "packs/"); ok {
-			name = rest
-		}
-		// Only accept a single-segment pack name; arbitrary nested paths are
-		// treated as real local imports, not builtin-pack references.
-		if name == "" || strings.Contains(name, "/") {
-			continue
-		}
-		// Don't shadow an explicitly configured [packs] reference: a token
-		// that names a registered pack keeps its configured source.
-		if _, ok := packs[tok]; ok {
-			continue
-		}
-		if _, ok := packs[name]; ok {
-			continue
-		}
-		// A token that resolves to a real local pack in the city is a local
-		// import, not a builtin-pack reference.
-		if !filepath.IsAbs(tok) {
-			if _, err := fs.Stat(filepath.Join(cityPath, filepath.FromSlash(tok), "pack.toml")); err == nil {
-				continue
-			}
-		}
-		if source, ok := builtinpacks.CanonicalImportSource(name); ok {
-			out[i] = source
-		}
-	}
-	return out
-}
+// The following one-line aliases keep cmd/gc test files compiling against the
+// helpers extracted into internal/rig (C2.3). They are removed once the tests
+// are repointed at the rig package.
+var (
+	readBeadsPrefix             = rig.ReadBeadsPrefix
+	mergeBoundImports           = rig.MergeBoundImports
+	snapshotRigAddTopologyFiles = rig.SnapshotTopologyFiles
+)
 
 // ensureBundledRigImportsInstalled pins any bundled-source rig imports so
 // the new rig composes offline without a manual "gc import install". It
@@ -763,178 +442,6 @@ func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImp
 
 func boundImportsFromLegacySources(sources []string, packs map[string]config.PackSource) []config.BoundImport {
 	return config.BoundImportsFromLegacySources(sources, packs)
-}
-
-func boundImportsFromImportMap(imports map[string]config.Import) []config.BoundImport {
-	if len(imports) == 0 {
-		return nil
-	}
-	bindings := make([]string, 0, len(imports))
-	for binding := range imports {
-		bindings = append(bindings, binding)
-	}
-	slices.Sort(bindings)
-	bound := make([]config.BoundImport, 0, len(bindings))
-	for _, binding := range bindings {
-		bound = append(bound, config.BoundImport{
-			Binding: binding,
-			Import:  imports[binding],
-		})
-	}
-	return bound
-}
-
-func effectiveRigBoundImports(rig *config.Rig, packs map[string]config.PackSource) ([]config.BoundImport, error) {
-	if rig == nil {
-		return nil, nil
-	}
-	legacy := boundImportsFromLegacySources(rig.Includes, packs)
-	return mergeBoundImports(boundImportsFromImportMap(rig.Imports), legacy)
-}
-
-func composeDefaultRigImports(root []config.BoundImport, legacyIncludes []string, packs map[string]config.PackSource) []config.BoundImport {
-	if len(root) == 0 {
-		return boundImportsFromLegacySources(legacyIncludes, packs)
-	}
-	target := make(map[string]config.Import, len(root)+len(legacyIncludes))
-	order := make([]string, 0, len(root)+len(legacyIncludes))
-	for _, bound := range root {
-		if _, exists := target[bound.Binding]; !exists {
-			order = append(order, bound.Binding)
-		}
-		target[bound.Binding] = bound.Import
-	}
-	order, _ = config.AddOrderedLegacyImports(target, order, legacyIncludes, packs)
-	out := make([]config.BoundImport, 0, len(order))
-	for _, binding := range order {
-		imp, ok := target[binding]
-		if !ok {
-			continue
-		}
-		out = append(out, config.BoundImport{Binding: binding, Import: imp})
-	}
-	return out
-}
-
-func sortedBoundImports(imports []config.BoundImport) []config.BoundImport {
-	if len(imports) == 0 {
-		return nil
-	}
-	sorted := append([]config.BoundImport(nil), imports...)
-	slices.SortFunc(sorted, func(a, b config.BoundImport) int {
-		if a.Binding != b.Binding {
-			return strings.Compare(a.Binding, b.Binding)
-		}
-		return strings.Compare(a.Import.Source, b.Import.Source)
-	})
-	return sorted
-}
-
-// mergeBoundImports is for already-bound import sets. Legacy default-rig
-// includes use composeDefaultRigImports so binding collisions can be
-// uniquified with the migration policy.
-func mergeBoundImports(primary, secondary []config.BoundImport) ([]config.BoundImport, error) {
-	if len(primary) == 0 && len(secondary) == 0 {
-		return nil, nil
-	}
-	merged := make([]config.BoundImport, 0, len(primary)+len(secondary))
-	seenByBinding := make(map[string]config.Import, len(primary)+len(secondary))
-	appendImport := func(bound config.BoundImport) error {
-		if prior, exists := seenByBinding[bound.Binding]; exists {
-			if prior.Source == bound.Import.Source {
-				return nil
-			}
-			return fmt.Errorf("binding %q maps to both %q and %q", bound.Binding, prior.Source, bound.Import.Source)
-		}
-		seenByBinding[bound.Binding] = bound.Import
-		merged = append(merged, bound)
-		return nil
-	}
-	for _, bound := range primary {
-		if err := appendImport(bound); err != nil {
-			return nil, err
-		}
-	}
-	for _, bound := range secondary {
-		if err := appendImport(bound); err != nil {
-			return nil, err
-		}
-	}
-	return sortedBoundImports(merged), nil
-}
-
-func boundImportsMap(imports []config.BoundImport) map[string]config.Import {
-	if len(imports) == 0 {
-		return nil
-	}
-	out := make(map[string]config.Import, len(imports))
-	for _, bound := range imports {
-		out[bound.Binding] = bound.Import
-	}
-	return out
-}
-
-func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
-	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+6)
-	cityToml, err := snapshotResolvedFile(fs, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		return nil, err
-	}
-	snapshots = append(snapshots, cityToml)
-	// packs.lock is written by the deferred bundled-rig-import commit after
-	// the city config write, so it must be covered by the rollback snapshot
-	// to keep rig add atomic across the lockfile.
-	packsLock, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "packs.lock"))
-	if err != nil {
-		return nil, err
-	}
-	snapshots = append(snapshots, packsLock)
-	siteToml, err := snapshotResolvedFile(fs, config.SiteBindingPath(cityPath))
-	if err != nil {
-		return nil, err
-	}
-	snapshots = append(snapshots, siteToml)
-	citySnapshots, err := snapshotRigCanonicalFiles(fs, cityPath)
-	if err != nil {
-		return nil, err
-	}
-	snapshots = append(snapshots, citySnapshots...)
-	cityPort, err := snapshotResolvedFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
-	if err != nil {
-		return nil, err
-	}
-	snapshots = append(snapshots, cityPort)
-	seen := map[string]struct{}{}
-	for _, rig := range cfg.Rigs {
-		rigPath := rig.Path
-		if !filepath.IsAbs(rigPath) {
-			rigPath = filepath.Join(cityPath, rigPath)
-		}
-		rigPath = filepath.Clean(rigPath)
-		if _, ok := seen[rigPath]; ok {
-			continue
-		}
-		seen[rigPath] = struct{}{}
-		rigSnapshots, err := snapshotRigCanonicalFiles(fs, rigPath)
-		if err != nil {
-			return nil, err
-		}
-		snapshots = append(snapshots, rigSnapshots...)
-		rigPort, err := snapshotResolvedFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
-		if err != nil {
-			return nil, err
-		}
-		snapshots = append(snapshots, rigPort)
-	}
-	return snapshots, nil
-}
-
-func writeRigAddRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fileSnapshot, action string, cause error) {
-	if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
-		fmt.Fprintf(stderr, "gc rig add: %s: %v (rollback failed: %v)\n", action, cause, restoreErr) //nolint:errcheck // best-effort stderr
-		return
-	}
-	fmt.Fprintf(stderr, "gc rig add: %s: %v\n", action, cause) //nolint:errcheck // best-effort stderr
 }
 
 var writeAllRigRoutes = writeAllRoutes
@@ -1035,12 +542,12 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 			logRoute(stderr, cmdName, "api", "")
 			return renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, jsonOutput, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -1423,7 +930,7 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1537,7 +1044,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1747,33 +1254,4 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)
-}
-
-// beadsDirContainsStore reports whether beadsPath contains evidence that it
-// would be dangerous to initialize over. Either canonical marker is enough to
-// stop fresh initialization because partial stores should fail closed; only
-// missing marker files are ignored.
-func beadsDirContainsStore(fs fsys.FS, beadsPath string) (bool, error) {
-	for _, name := range [...]string{"metadata.json", "config.yaml"} {
-		path := filepath.Join(beadsPath, name)
-		if _, err := fs.Stat(path); err == nil {
-			return true, nil
-		} else if !os.IsNotExist(err) {
-			return false, fmt.Errorf("checking %s: %w", path, err)
-		}
-	}
-	return false, nil
-}
-
-// readBeadsPrefix reads the issue_prefix from an existing .beads/config.yaml
-// in the given rig directory. Returns the prefix and true if found, or empty
-// string and false if the file doesn't exist or has no prefix. Checks both
-// the underscore form (issue_prefix) and dash form (issue-prefix) since the
-// lifecycle code writes both.
-func readBeadsPrefix(fs fsys.FS, rigPath string) (string, bool) {
-	prefix, ok, err := contract.ReadIssuePrefix(fs, filepath.Join(rigPath, ".beads", "config.yaml"))
-	if err != nil || !ok {
-		return "", false
-	}
-	return strings.ToLower(prefix), true
 }

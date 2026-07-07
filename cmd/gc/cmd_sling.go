@@ -215,6 +215,22 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Remote city: forward the mutation over the control plane before any local
+	// city/config/store work. A remote sling resolves everything server-side and
+	// carries a request-bound X-GC-City-Write grant (gate G18); a remote error is
+	// non-fallbackable (gate G1).
+	// A "no city discoverable" error is deferred to the local path: resolveCity()
+	// below re-resolves it and reports the same error, so local input validation
+	// (e.g. --stdin empty input) surfaces first. Genuine resolution errors (a bad
+	// --context, a remote client that fails to build) still fail immediately and
+	// non-fallbackably (gate G1).
+	remoteC, isRemote, _, rerr := resolveWriteTarget()
+	if rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		return fail("city_resolve_failed", fmt.Sprintf("gc sling: %v", rerr))
+	}
+	if isRemote {
+		return cmdSlingRemote(remoteC, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
+	}
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
 	var stdinDescription string

@@ -734,12 +734,12 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 			logRoute(stderr, cmdName, "api", "")
 			return renderSessionListFromAPI(cr, jsonOutput, stdout)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -869,10 +869,13 @@ func sessionViewLastActive(lastActive string) string {
 // through the supervisor API when a controller is up and falls back to the
 // local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if isRemote {
+		return routeSessionList("", stateFilter, templateFilter, remoteC, "", jsonOutput, stdout, stderr)
 	}
 	c, reason := sessionListAPIClient(cityPath)
 	return routeSessionList(cityPath, stateFilter, templateFilter, c, reason, jsonOutput, stdout, stderr)
@@ -2113,12 +2116,12 @@ func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason stri
 			logRoute(stderr, cmdName, "api", "")
 			return renderSessionPeekFromAPI(cr, target, lines, jsonOutput, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -2159,10 +2162,13 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 // through the supervisor API when a controller is up and falls back to the
 // local runtime provider otherwise.
 func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if isRemote {
+		return routeSessionPeek("", args[0], lines, remoteC, "", jsonOutput, stdout, stderr)
 	}
 	c, reason := sessionPeekAPIClient(cityPath)
 	return routeSessionPeek(cityPath, args[0], lines, c, reason, jsonOutput, stdout, stderr)
@@ -2483,7 +2489,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		if err == nil {
 			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

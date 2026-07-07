@@ -62,6 +62,12 @@ type Server struct {
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
+	// rigIdem is the in-process live index + request_id state machine backing
+	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
+	// starts empty at boot and is authoritative for admission (G13). One index
+	// per per-city Server (the supervisor caches one Server per city).
+	rigIdem *rigIdemIndex
+
 	// lookPathCache caches exec.LookPath results with a short TTL to avoid
 	// repeated filesystem scans on every GET /v0/agents request.
 	lookPathMu      sync.Mutex
@@ -234,6 +240,7 @@ func newServer(state State, readOnly bool) *Server {
 		mux:            mux,
 		readOnly:       readOnly,
 		idem:           newIdempotencyCache(30 * time.Minute),
+		rigIdem:        newRigIdemIndex(),
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
 	}

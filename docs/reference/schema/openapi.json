@@ -2364,6 +2364,12 @@
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
           {
+            "$ref": "#/components/schemas/RigCreateSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/RigProvisionProgressPayload"
+          },
+          {
             "$ref": "#/components/schemas/RotatedPayload"
           },
           {
@@ -6233,7 +6239,8 @@
               "city.unregister",
               "session.create",
               "session.message",
-              "session.submit"
+              "session.submit",
+              "rig.create"
             ],
             "type": "string"
           },
@@ -6296,11 +6303,15 @@
         ],
         "type": "object"
       },
-      "RigCreateInputBody": {
+      "RigCreateBody": {
         "additionalProperties": false,
         "properties": {
           "default_branch": {
             "description": "Mainline branch (e.g. main, master). Auto-detected when omitted.",
+            "type": "string"
+          },
+          "git_url": {
+            "description": "Git URL to clone (triggers async provisioning).",
             "type": "string"
           },
           "name": {
@@ -6309,39 +6320,86 @@
             "type": "string"
           },
           "path": {
-            "description": "Filesystem path.",
-            "minLength": 1,
+            "description": "Filesystem path (server-derived for git_url clones).",
             "type": "string"
           },
           "prefix": {
             "description": "Session name prefix.",
             "type": "string"
+          },
+          "request_id": {
+            "description": "Client-supplied idempotency key; reuse across retries.",
+            "type": "string"
           }
         },
         "required": [
-          "name",
-          "path"
+          "name"
         ],
         "type": "object"
       },
-      "RigCreatedOutputBody": {
+      "RigCreateResponseBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Resolved mainline branch (created/exists).",
+            "type": "string"
+          },
+          "event_cursor": {
+            "description": "City event-stream cursor captured before accept (202 only); pass as after_seq to the events stream to receive request.result.rig.create / rig.provision.progress / request.failed without replaying unrelated backlog.",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Resolved session-name prefix (created/exists).",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID; echo of the request's request_id, or a server-minted id on 202.",
+            "type": "string"
+          },
           "rig": {
-            "description": "Created rig name.",
+            "description": "Rig name (created/exists).",
             "type": "string"
           },
           "status": {
-            "description": "Operation result.",
-            "examples": [
-              "created"
+            "description": "created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).",
+            "enum": [
+              "created",
+              "accepted",
+              "exists"
             ],
             "type": "string"
           }
         },
         "required": [
-          "status",
-          "rig"
+          "status"
+        ],
+        "type": "object"
+      },
+      "RigCreateSucceededPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "default_branch": {
+            "description": "Resolved mainline branch.",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Resolved session-name prefix.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
+            "type": "string"
+          },
+          "rig": {
+            "description": "Rig name that was provisioned.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "rig",
+          "prefix",
+          "default_branch"
         ],
         "type": "object"
       },
@@ -6423,6 +6481,36 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "RigProvisionProgressPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "description": "Human-readable step detail.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID from the 202 response (empty on sync 201 provisions).",
+            "type": "string"
+          },
+          "rig": {
+            "description": "Rig name being provisioned.",
+            "type": "string"
+          },
+          "step": {
+            "description": "Provisioning step that completed (clone, beads-init, packs, config, routes, …).",
+            "type": "string"
+          },
+          "warn": {
+            "description": "True when the step reports a warn-and-continue condition.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rig",
+          "step"
+        ],
         "type": "object"
       },
       "RigResponse": {
@@ -8455,6 +8543,10 @@
             ],
             "type": "string"
           },
+          "request_id": {
+            "description": "The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line.",
+            "type": "string"
+          },
           "status": {
             "description": "HTTP response status code. Start-phase records use 0 before the final response status is known.",
             "format": "int64",
@@ -8672,9 +8764,11 @@
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
             "request.result.city.unregister": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityUnregister",
+            "request.result.rig.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultRigCreate",
             "request.result.session.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
+            "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
@@ -8847,6 +8941,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityUnregister"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultRigCreate"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate"
           },
           {
@@ -8854,6 +8951,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
@@ -9822,7 +9922,9 @@
                 "request.result.session.create",
                 "request.result.session.message",
                 "request.result.session.submit",
+                "request.result.rig.create",
                 "request.failed",
+                "rig.provision.progress",
                 "city.created",
                 "city.unregister_requested",
                 "order.fired",
@@ -11504,6 +11606,57 @@
         "title": "TypedEventStreamEnvelope request.result.city.unregister",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeRequestResultRigCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RigCreateSucceededPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.rig.create",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result.rig.create",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeRequestResultSessionCreate": {
         "additionalProperties": false,
         "properties": {
@@ -11655,6 +11808,57 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeRigProvisionProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RigProvisionProgressPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "rig.provision.progress",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope rig.provision.progress",
         "type": "object"
       },
       "TypedEventStreamEnvelopeSessionColdStartTimeout": {
@@ -12882,9 +13086,11 @@
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
             "request.result.city.unregister": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityUnregister",
+            "request.result.rig.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultRigCreate",
             "request.result.session.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
+            "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
@@ -13057,6 +13263,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityUnregister"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultRigCreate"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate"
           },
           {
@@ -13064,6 +13273,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
@@ -14099,7 +14311,9 @@
                 "request.result.session.create",
                 "request.result.session.message",
                 "request.result.session.submit",
+                "request.result.rig.create",
                 "request.failed",
+                "rig.provision.progress",
                 "city.created",
                 "city.unregister_requested",
                 "order.fired",
@@ -15910,6 +16124,61 @@
         "title": "TypedTaggedEventStreamEnvelope request.result.city.unregister",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeRequestResultRigCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RigCreateSucceededPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.rig.create",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result.rig.create",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeRequestResultSessionCreate": {
         "additionalProperties": false,
         "properties": {
@@ -16073,6 +16342,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRigProvisionProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RigProvisionProgressPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "rig.provision.progress",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope rig.provision.progress",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionColdStartTimeout": {
@@ -35853,6 +36177,7 @@
         "summary": "Get v0 city by city name rigs"
       },
       "post": {
+        "description": "Create a rig. Without git_url, appends the rig to city.toml synchronously (201). With git_url, clones and provisions asynchronously: returns 202 with an event_cursor — watch the city event stream for request.result.rig.create, rig.provision.progress, or request.failed carrying the request_id — or 200 for an idempotent replay of a succeeded create.",
         "operationId": "create-rig",
         "parameters": [
           {
@@ -35892,18 +36217,33 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RigCreateInputBody"
+                "$ref": "#/components/schemas/RigCreateBody"
               }
             }
           },
           "required": true
         },
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RigCreateResponseBody"
+                }
+              }
+            },
+            "description": "Rig already exists — idempotent request_id replay of a succeeded async create.",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
           "201": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RigCreatedOutputBody"
+                  "$ref": "#/components/schemas/RigCreateResponseBody"
                 }
               }
             },
@@ -35914,22 +36254,22 @@
               }
             }
           },
-          "400": {
+          "202": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/RigCreateResponseBody"
                 }
               }
             },
-            "description": "Bad Request",
+            "description": "Provisioning accepted; watch the city event stream from event_cursor for request.result.rig.create, rig.provision.progress, or request.failed with this request_id.",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
-          "401": {
+          "default": {
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -35937,97 +36277,7 @@
                 }
               }
             },
-            "description": "Unauthorized",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "403": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Forbidden",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "404": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Not Found",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "409": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Conflict",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Unprocessable Entity",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "500": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Internal Server Error",
-            "headers": {
-              "X-GC-Request-Id": {
-                "$ref": "#/components/headers/X-GC-Request-Id"
-              }
-            }
-          },
-          "501": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Not Implemented",
+            "description": "Error",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

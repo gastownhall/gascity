@@ -115,6 +115,17 @@ func clearCityDoltConfig(cityPath string) {
 	cityDoltConfigs.Delete(normalizePathForCompare(cityPath))
 }
 
+// registerCityDoltConfigIfAbsent registers cfg for cityPath only when nothing is
+// registered yet, returning true when it added the entry (so the caller knows to
+// clear it). It never overwrites an existing registration: in the controller
+// process the city dolt config is registered persistently at boot and on every
+// reload by startBeadsLifecycle, and a transient per-request provisioning window
+// must not delete or clobber it.
+func registerCityDoltConfigIfAbsent(cityPath string, cfg config.DoltConfig) (added bool) {
+	_, loaded := cityDoltConfigs.LoadOrStore(normalizePathForCompare(cityPath), cfg)
+	return !loaded
+}
+
 var resolveProviderLifecycleGCBinary = func() string {
 	if isTestBinary() {
 		return ""
