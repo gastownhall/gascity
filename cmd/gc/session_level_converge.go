@@ -65,9 +65,6 @@ const (
 // of truth per fact rather than a precedence ladder. Time enters as a fact
 // (now, primingAttemptedAt) so the core stays clock-free and table-testable.
 type durableFacts struct {
-	// startedConfigHash mirrors "started_config_hash": "" means no durable record
-	// of a completed start yet.
-	startedConfigHash string
 	// primedAt mirrors "primed_at": non-empty means the startup prompt delivery
 	// was durably CONFIRMED (stamped only after a delivery mechanism reported
 	// success). It makes "live but never primed" detectable by any observer,
@@ -112,8 +109,6 @@ type runtimeFacts struct {
 	observed bool
 	// live is true when a matching runtime session is present and alive.
 	live bool
-	// transcript is whether the keyed transcript exists on disk (tri-state).
-	transcript sessTranscriptState
 	// primedEnv is true when the live runtime env carries
 	// GC_STARTUP_PROMPT_DELIVERED — the prompt was delivered this runtime but may
 	// not yet be durably recorded.
