@@ -1431,7 +1431,7 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 				clearProjectedDoltEnv(source)
 			}
 		}
-		keys := execProjectedBackendEnvKeys()
+		keys := execProjectedBackendCopyKeys()
 		keys = append(keys, "BEADS_DOLT_AUTO_START")
 		for _, key := range keys {
 			if value, ok := source[key]; ok {
@@ -1506,6 +1506,42 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 		env["BEADS_DOLT_PASSWORD"] = pass
 	} else {
 		delete(env, "BEADS_DOLT_PASSWORD")
+	}
+	// Carry the hosted beads-gateway credential command into the projected env.
+	// bd authenticates to the gateway by running the helper named in
+	// BEADS_DOLT_CREDENTIAL_COMMAND; without it bd falls back to the static/root
+	// user and the gateway rejects the connection (MySQL Error 1045). That key
+	// contains "CREDENTIAL", so execenv.FilterInherited strips it from every
+	// gc-spawned bd subprocess and agent session. preserveHostedBeadsCredentialEnv
+	// re-adds it on the slice-merge paths (overlayEnvEntries / mergeRuntimeEnv),
+	// but only when it is already present in the pre-filter environ and only on
+	// those paths — the agent session env is built from this projected map, which
+	// does not carry the ambient value, and a controller that exports the helper
+	// under only the non-sensitive GC_DOLT_CRED_CMD (which survives filtering) has
+	// nothing for that pass to preserve. Mirror GC_DOLT_CRED_CMD into
+	// BEADS_DOLT_CREDENTIAL_COMMAND here (map value wins, else the ambient value
+	// of either key) so bd authenticates the same way the in-process native store
+	// does.
+	//
+	// Two intentional asymmetries with the sibling BEADS_DOLT_* branches above,
+	// kept deliberately (do not "normalize" them into the map->map convention):
+	//  1. Ambient fallback: this is the only branch that reads process env
+	//     (os.Getenv), because a controller commonly exports only the helper and
+	//     never seeds it into the projected map.
+	//  2. Preserve-not-clear: when no source exists this branch leaves any
+	//     existing target value untouched instead of deleting/emptying it. The
+	//     siblings clear their target to defeat stale tmux inheritance; the
+	//     credential key is instead preserved from ambient by
+	//     preserveHostedBeadsCredentialEnv on the slice-merge paths, so clearing
+	//     it here would fight that pass.
+	if cred := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if cred := strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if ambient := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
 	}
 }
 

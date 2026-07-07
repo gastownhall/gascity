@@ -26,7 +26,7 @@ func (m *SessionReconcilerTracer) beginCycle(info sessionReconcilerTraceCycleInf
 	}
 	if cycle != nil && sessionBeads != nil {
 		cycle.RecordSessionBaseline("", "", traceRecordPayload{
-			"open_count": len(sessionBeads.Open()),
+			"open_count": len(sessionBeads.OpenInfos()),
 		})
 		_ = cycle.flushCurrentBatch(TraceDurabilityDurable)
 	}

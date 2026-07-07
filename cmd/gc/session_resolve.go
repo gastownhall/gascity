@@ -144,10 +144,13 @@ func resolveSessionIDWithOptions(
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
 		if cfg != nil {
-			if bead, getErr := store.Get(id); getErr == nil && isNamedSessionBead(bead) {
-				identity := namedSessionIdentity(bead)
-				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
-					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+			if bead, getErr := store.Get(id); getErr == nil {
+				info := session.InfoFromPersistedBead(bead)
+				if isNamedSessionInfo(info) {
+					identity := namedSessionIdentityInfo(info)
+					if identity != "" && config.FindNamedSession(cfg, identity) == nil {
+						return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+					}
 				}
 			}
 		}
@@ -194,7 +197,7 @@ func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (st
 			continue
 		}
 		session.RepairEmptyType(store, &b)
-		alias := strings.TrimSpace(b.Metadata["alias"])
+		alias := strings.TrimSpace(session.InfoFromPersistedBead(b).Alias)
 		if alias == "" || !strings.Contains(alias, "/") || session.TargetBasename(alias) != identifier {
 			continue
 		}
@@ -208,7 +211,7 @@ func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (st
 	default:
 		labels := make([]string, 0, len(matches))
 		for _, match := range matches {
-			labels = append(labels, fmt.Sprintf("%s (%s)", match.ID, strings.TrimSpace(match.Metadata["alias"])))
+			labels = append(labels, fmt.Sprintf("%s (%s)", match.ID, strings.TrimSpace(session.InfoFromPersistedBead(match).Alias)))
 		}
 		return "", fmt.Errorf("%w: %q matches %d sessions: %s", session.ErrAmbiguous, identifier, len(matches), strings.Join(labels, ", "))
 	}

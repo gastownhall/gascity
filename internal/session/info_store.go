@@ -2,9 +2,11 @@ package session
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -32,6 +34,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 
 	info := Info{
 		ID:            b.ID,
+		Type:          b.Type,
 		Template:      b.Metadata["template"],
 		State:         state,
 		Closed:        closed,
@@ -51,6 +54,91 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 
 		ContinuationEpoch: b.Metadata["continuation_epoch"],
 		SleepReason:       b.Metadata["sleep_reason"],
+
+		// identity / pool / named-session cluster
+		ConfiguredNamedIdentity: b.Metadata[NamedSessionIdentityMetadata],
+		ConfiguredNamedSession:  strings.TrimSpace(b.Metadata[NamedSessionMetadataKey]) == "true",
+		ConfiguredNamedMode:     b.Metadata[NamedSessionModeMetadata],
+		CommonName:              b.Metadata["common_name"],
+		PoolSlot:                b.Metadata["pool_slot"],
+		PoolManaged:             strings.TrimSpace(b.Metadata["pool_managed"]) == "true",
+		SessionOrigin:           b.Metadata["session_origin"],
+		DependencyOnly:          strings.TrimSpace(b.Metadata["dependency_only"]) == "true",
+		DependencyOnlyMetadata:  b.Metadata["dependency_only"],
+		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
+		ManualSessionMetadata:   b.Metadata["manual_session"],
+		Labels:                  b.Labels,
+		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
+		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
+
+		// health / provider-terminal-error cluster. The key literals mirror the
+		// cmd/gc session_reconcile constants (session_health, session_drainable,
+		// …); the classifier-equivalence test guards against drift.
+		ProviderTerminalError: b.Metadata["provider_terminal_error"],
+		HealthState:           b.Metadata["session_health"],
+		HealthReason:          b.Metadata["session_health_reason"],
+		Drainable:             strings.TrimSpace(b.Metadata["session_drainable"]) == "true",
+
+		// trigger / brain-parent cluster (canonical gc.* keys via beadmeta).
+		TriggerBeadID:       b.Metadata[beadmeta.TriggerBeadIDMetadataKey],
+		TriggerBeadStoreRef: b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey],
+		BrainParentSID:      b.Metadata[beadmeta.BrainParentSIDMetadataKey],
+		Pack:                b.Metadata[beadmeta.PackMetadataKey],
+
+		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
+		// kept verbatim so the reconciler classifiers read the same value the
+		// bead carried (Info.State above is the normalized, closed-blanked form).
+		MetadataState:              b.Metadata["state"],
+		SessionNameMetadata:        b.Metadata["session_name"],
+		PendingCreateClaim:         strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true",
+		PendingCreateClaimMetadata: b.Metadata["pending_create_claim"],
+		PendingCreateStartedAt:     b.Metadata["pending_create_started_at"],
+		QuarantinedUntil:           b.Metadata["quarantined_until"],
+		AliasHistory:               AliasHistory(b.Metadata),
+		ContinuityEligible:         b.Metadata["continuity_eligible"],
+		TransportMetadata:          b.Metadata["transport"],
+		LastWokeAt:                 b.Metadata["last_woke_at"],
+		StateReason:                b.Metadata["state_reason"],
+		CreationCompleteAt:         b.Metadata["creation_complete_at"],
+		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],
+		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
+		Generation:                 b.Metadata["generation"],
+		StartedConfigHash:          b.Metadata["started_config_hash"],
+		PinAwake:                   b.Metadata["pin_awake"],
+
+		// reconciler decision-read cluster (front-door Phase 5). Raw mirrors of
+		// the keys the reconciler decision paths still crack inline. The key
+		// literals mirror the cmd/gc reconciler constants (config_drift_deferred_*,
+		// attached_config_drift_deferred_*, stranded_event_emitted_at, …); the
+		// classifier-equivalence oracle feeds those constants and so guards these
+		// literals against drift. CurrentBeadIDKey is a session-package constant.
+		HeldUntil:                      b.Metadata["held_until"],
+		WaitHold:                       b.Metadata["wait_hold"],
+		ChurnCount:                     b.Metadata["churn_count"],
+		WakeMode:                       b.Metadata["wake_mode"],
+		SleepIntent:                    b.Metadata["sleep_intent"],
+		InstanceToken:                  b.Metadata["instance_token"],
+		DetachedAt:                     b.Metadata["detached_at"],
+		CurrentlyProcessingBeadID:      b.Metadata[CurrentBeadIDKey],
+		CoreHashBreakdown:              b.Metadata["core_hash_breakdown"],
+		StartedProvisionHash:           b.Metadata["started_provision_hash"],
+		StartedLaunchHash:              b.Metadata["started_launch_hash"],
+		StartedLiveHash:                b.Metadata["started_live_hash"],
+		ConfigDriftDeferredAt:          b.Metadata["config_drift_deferred_at"],
+		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
+		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
+		AttachedConfigDriftDeferredKey: b.Metadata["attached_config_drift_deferred_key"],
+		StrandedEventEmittedAt:         b.Metadata["stranded_event_emitted_at"],
+		SessionNameExplicit:            b.Metadata["session_name_explicit"],
+		WakeRequest:                    b.Metadata["wake_request"],
+		RestartRequested:               b.Metadata["restart_requested"],
+		SessionIDFlag:                  b.Metadata["session_id_flag"],
+		TemplateOverrides:              b.Metadata["template_overrides"],
+		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
+		ProviderKind:                   b.Metadata["provider_kind"],
+	}
+	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
+		info.WakeAttempts = n
 	}
 	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
 		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
@@ -60,35 +148,34 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 	return info
 }
 
-// InfoStore is an Info-typed domain store over a session-class bead store. It
-// speaks session.Info: callers read and list sessions without touching
-// *beads.Bead. Bead serialization is confined inside this type via the
-// InfoFromPersistedBead codec.
+// Store is the session-domain front door over a session-class bead store: the
+// single typed seam through which callers read and write sessions without
+// touching *beads.Bead. The read half (Get / List, projecting via
+// InfoFromPersistedBead) lives here; the write half (ApplyPatch + the typed
+// lifecycle methods) lives in store.go. Bead serialization — SetMetadataBatch,
+// Update, Close, the metadata-key vocabulary — is confined inside this type.
+// (Formerly named InfoStore, after its read return type, when it was read-only.)
 //
-// InfoStore returns the persisted projection only — no live runtime overlay.
-//
-// NOTE: this is the intended next-step read seam for the persisted view; it has
-// no production callers yet. The API/response-building layer currently routes
-// its persisted reads through Manager.GetWithPersistedResponse (which already
-// uses the same InfoFromPersistedBead codec internally), not through InfoStore.
-// Wiring the read path through InfoStore is a follow-up; until then this type is
-// the documented seam, not a live path. Callers that need live runtime
-// enrichment (liveness, attachment, detected transport) still go through
-// session.Manager.
-type InfoStore struct {
+// The Get/List projection is the persisted view only — no live runtime overlay.
+// Callers that need live runtime enrichment (liveness, attachment, detected
+// transport) still go through session.Manager. The API/response-building layer
+// currently reads persisted state via Manager.GetWithPersistedResponse (same
+// InfoFromPersistedBead codec); routing that read path through Store is a
+// follow-up. The reconciler already routes its writes through this type.
+type Store struct {
 	store beads.SessionStore
 }
 
-// NewInfoStore wraps a strongly-typed session-class store as an Info-typed
-// domain store. The wrapper holds the typed beads.SessionStore by value; the
+// NewStore wraps a strongly-typed session-class store as the session-domain
+// front door. The wrapper holds the typed beads.SessionStore by value; the
 // embedded .Store is used for all bead access internally.
-func NewInfoStore(store beads.SessionStore) *InfoStore {
-	return &InfoStore{store: store}
+func NewStore(store beads.SessionStore) *Store {
+	return &Store{store: store}
 }
 
 // Get returns the persisted session.Info for the given id. It returns
 // ErrSessionNotFound when no session bead exists for the id.
-func (s *InfoStore) Get(id string) (Info, error) {
+func (s *Store) Get(id string) (Info, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return Info{}, fmt.Errorf("loading session %q: %w", id, err)
@@ -103,7 +190,7 @@ func (s *InfoStore) Get(id string) (Info, error) {
 // same state and template filtering semantics as the catalog listing. An empty
 // stateFilter excludes closed sessions; stateFilter "all" includes everything.
 // Only session.Info is returned — no raw beads cross this boundary.
-func (s *InfoStore) List(stateFilter, templateFilter string) ([]Info, error) {
+func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	// IncludeClosed so the in-memory filter below can honor state=closed and
 	// state=all; sessionMatchesFilters drops closed beads for the default and
 	// non-closed filters, matching Manager.ListFullFromBeads semantics.

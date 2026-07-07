@@ -29,14 +29,6 @@ import { getActiveCity } from '../api/cityBase';
 
 const RUN_DETAIL_EVENT_PREFIXES = [GC_EVENT_PREFIX.bead, GC_EVENT_PREFIX.session] as const;
 const NO_EVENT_PREFIXES: readonly string[] = [];
-const TERMINAL_STATUSES: readonly RunNodeStatus[] = ['completed', 'done', 'failed', 'skipped'];
-const NON_TERMINAL_STATUSES: readonly RunNodeStatus[] = [
-  'pending',
-  'ready',
-  'running',
-  'active',
-  'blocked',
-];
 
 export function FormulaRunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -86,14 +78,22 @@ export function FormulaRunDetailPage() {
       : readyRun !== null && readyRun.refreshState.kind === 'failed'
         ? readyRun.refreshState.error
         : null;
+  // P4: the run DETAIL streams (useFormulaRunDetail owns the per-run SSE stream,
+  // which pushes the whole DTO with zero refetch), so when the stream is live
+  // this nudge lane refreshes ONLY the run DIFF (a separate git-exec read the
+  // stream does not carry). But when the stream is UNAVAILABLE — a runtime with
+  // no EventSource, where detail would otherwise be fetched once then frozen —
+  // the nudge must ALSO refresh the detail so its auto-refresh survives. P5
+  // decouples the diff (tab-gated, cheapRefresh); until then it rides this nudge.
+  const streamActive = runDetail.streamActive;
   useGcEventRefresh(
     routeError ? NO_EVENT_PREFIXES : RUN_DETAIL_EVENT_PREFIXES,
-    () => void refreshRunResources(runDetail.refresh, runDiff.refresh),
+    () => void runDetailNudgeRefresh(streamActive, runDetail.refresh, runDiff.refresh),
     {
       matches: (event) => {
         if (detail === null) return false;
         const identity = runEventIdentity(event);
-        if (isTerminalProgress(detail.progress) && identityIsAmbient(identity)) return false;
+        if (detail.progress.terminal && identityIsAmbient(identity)) return false;
         return formulaRunDetailEventMatches(identity, {
           runId: detail.runId,
           rootBeadId: detail.rootBeadId,
@@ -241,22 +241,24 @@ async function refreshRunResources(
   await Promise.all([refreshDetail(), refreshDiff()]);
 }
 
-function identityIsAmbient(identity: ReturnType<typeof runEventIdentity>): boolean {
-  return identity.runIds.size === 0 && identity.rootBeadIds.size === 0;
+/**
+ * The bead/session nudge callback (P4). When the per-run detail stream is live it
+ * carries detail on its own, so the nudge refreshes ONLY the run diff (a separate
+ * git-exec read the stream does not push) — avoiding a double detail refetch. When
+ * the stream is UNAVAILABLE (a runtime with no EventSource), detail would freeze
+ * after first paint, so the nudge must refresh detail AND diff. Exported so the
+ * branch is unit-tested directly without the coupled EventSource harness.
+ */
+export function runDetailNudgeRefresh(
+  streamActive: boolean,
+  refreshDetail: () => Promise<void>,
+  refreshDiff: () => Promise<void>,
+): Promise<void> {
+  return streamActive ? refreshDiff() : refreshRunResources(refreshDetail, refreshDiff);
 }
 
-function isTerminalProgress(progress: FormulaRunProgress): boolean {
-  if (progress.visibleNodeCount <= 0) return false;
-  const nonTerminal = NON_TERMINAL_STATUSES.reduce(
-    (count, status) => count + (progress.statusCounts[status] ?? 0),
-    0,
-  );
-  if (nonTerminal > 0) return false;
-  const terminal = TERMINAL_STATUSES.reduce(
-    (count, status) => count + (progress.statusCounts[status] ?? 0),
-    0,
-  );
-  return terminal >= progress.visibleNodeCount;
+function identityIsAmbient(identity: ReturnType<typeof runEventIdentity>): boolean {
+  return identity.runIds.size === 0 && identity.rootBeadIds.size === 0;
 }
 
 function RunMetadata({ detail }: { detail: FormulaRunDetailData }) {

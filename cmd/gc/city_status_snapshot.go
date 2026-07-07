@@ -146,7 +146,7 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
-	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, store, stderr), stderr)
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stderr)
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
@@ -335,8 +335,8 @@ func namedSessionStatusForCity(
 		return status
 	}
 	if statusSnapshot != nil {
-		if bead, ok := statusSnapshot.FindSessionBeadByNamedIdentity(identity); ok {
-			if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+		if info, ok := statusSnapshot.FindInfoByNamedIdentity(identity); ok {
+			if state := strings.TrimSpace(info.MetadataState); state != "" {
 				return state
 			}
 			return "materialized"
@@ -351,7 +351,11 @@ func namedSessionStatusForCity(
 		return status
 	}
 
-	id, err := resolveSessionIDWithConfig(cityPath, cfg, store, identity)
+	// Route the session-ID resolve and the bead fetch through the session
+	// coordination-class store so a [beads.classes.sessions] relocation reaches
+	// this named-session status lookup. Identity to store at the default backend.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identity)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return status
@@ -359,11 +363,13 @@ func namedSessionStatusForCity(
 		return "lookup error: " + err.Error()
 	}
 
-	bead, err := store.Get(id)
+	bead, err := sessStore.Get(id)
 	if err != nil {
 		return "lookup error: " + err.Error()
 	}
-	if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+	// Read the raw state through the session.Info codec (verbatim MetadataState)
+	// rather than cracking bead.Metadata inline (class-store leak closure).
+	if state := strings.TrimSpace(session.InfoFromPersistedBead(bead).MetadataState); state != "" {
 		return state
 	}
 	return "materialized"
@@ -385,7 +391,10 @@ func collectCitySessionCounts(cityPath string, store beads.Store, sp runtime.Pro
 	if store == nil {
 		return summary, nil
 	}
-	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
+	// Route the session catalog through the session coordination-class store so a
+	// [beads.classes.sessions] relocation reaches the active/suspended counts.
+	// Identity to store at the default backend.
+	catalog, err := workerSessionCatalogWithConfig(cityPath, cliSessionStore(store, cfg, cityPath), sp, cfg)
 	if err != nil {
 		return summary, err
 	}
@@ -409,11 +418,11 @@ func countCitySessionsFromSnapshot(snapshot *sessionBeadSnapshot) StatusSummaryJ
 	if snapshot == nil {
 		return summary
 	}
-	for _, bead := range snapshot.Open() {
-		if bead.Status == "closed" || !session.IsSessionBeadOrRepairable(bead) {
+	for _, info := range snapshot.OpenInfos() {
+		if info.Closed || !session.IsSessionBeadOrRepairableInfo(info) {
 			continue
 		}
-		switch sessionMetadataState(bead) {
+		switch sessionMetadataStateInfo(info) {
 		case string(session.StateActive):
 			summary.ActiveSessions++
 		case string(session.StateSuspended):

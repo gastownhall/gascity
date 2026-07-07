@@ -1497,7 +1497,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get claimed bead: %v", err)
 	}
-	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, []beads.Bead{{
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, sessionInfosFromBeads([]beads.Bead{{
 		ID:     polecatSession,
 		Status: "open",
 		Type:   sessionBeadType,
@@ -1505,7 +1505,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 			"template":     "saitoc/polecat",
 			"session_name": polecatSession,
 		},
-	}}, map[string]int{"saitoc/polecat": 0})
+	}}), map[string]int{"saitoc/polecat": 0})
 	if len(states) != 1 || len(states[0].Requests) != 1 {
 		t.Fatalf("resume states = %#v, want one polecat resume request", states)
 	}

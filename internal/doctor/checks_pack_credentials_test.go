@@ -15,6 +15,10 @@ func credCtx(t *testing.T) *CheckContext {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("GC_GIT_CREDENTIALS_FILE", "")
 	t.Setenv("GC_GIT_CREDENTIAL_COMMAND", "")
+	// Clear the ambient GitHub token so the built-in github.com default rule
+	// stays inert and these checks observe only their own configured rules.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	return &CheckContext{CityPath: city}
 }
 

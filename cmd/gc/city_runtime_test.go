@@ -366,11 +366,11 @@ func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testin
 }
 
 func TestPoolSessionBeadRuntimeRunningUsesRuntimeNotFoundSentinel(t *testing.T) {
-	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{}, nil, nil); !errors.Is(err, runtime.ErrSessionNotFound) {
-		t.Fatalf("nil provider error = %v, want runtime.ErrSessionNotFound", err)
+	if running, err := poolSessionBeadRuntimeRunning(beads.Bead{}, nil, nil); running || !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("nil provider: running=%v err=%v, want false + runtime.ErrSessionNotFound", running, err)
 	}
-	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{Metadata: map[string]string{}}, runtime.NewFake(), nil); !errors.Is(err, runtime.ErrSessionNotFound) {
-		t.Fatalf("missing session name error = %v, want runtime.ErrSessionNotFound", err)
+	if running, err := poolSessionBeadRuntimeRunning(beads.Bead{Metadata: map[string]string{}}, runtime.NewFake(), nil); running || !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("missing session name: running=%v err=%v, want false + runtime.ErrSessionNotFound", running, err)
 	}
 }
 

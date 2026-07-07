@@ -13,10 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
-
-const mailReadMetadataKey = "mail.read"
 
 // closeAbandonedEnv is the opt-in environment variable that enables the
 // abandoned-root closer. It DEFAULTS TO DRY-RUN: with the variable unset (or
@@ -197,7 +196,7 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	}
 
 	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
-		mailEntries, mailErr := readMessageWispGCEntries(mailStore.Store)
+		mailEntries, mailErr := beadmail.ReadMessageWispEntries(mailStore.Store)
 		if mailErr == nil {
 			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(mailStore.Store, mailEntries, now.Add(-m.mailRetentionTTL))
 			purged += mailPurged
@@ -541,19 +540,6 @@ func beadLastActivity(b beads.Bead) time.Time {
 // exempt filters.
 func openWispGCRootCandidates(store beads.Store) ([]beads.Bead, error) {
 	return enumerateWispGCRoots(store, "open", "in_progress")
-}
-
-func readMessageWispGCEntries(store beads.Store) ([]beads.Bead, error) {
-	entries, err := store.List(beads.ListQuery{
-		Type:          "message",
-		Metadata:      map[string]string{mailReadMetadataKey: "true"},
-		IncludeClosed: true,
-		TierMode:      beads.TierWisps,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return entries, nil
 }
 
 // purgeExpiredBeadClosures purges aged closed roots, deleting each root's full

@@ -1,5 +1,9 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import type { RunDisplayNode, RunNodeStatus } from 'gas-city-dashboard-shared';
+import type {
+  RunDisplayNode,
+  RunExecutionInstance,
+  RunNodeStatus,
+} from 'gas-city-dashboard-shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RunNodeSessionPanel } from './RunNodeSessionPanel';
 
@@ -26,7 +30,66 @@ describe('RunNodeSessionPanel', () => {
     expect(screen.getByText('Bead')).toBeTruthy();
     expect(screen.getByText('review-bead')).toBeTruthy();
   });
+
+  it('shows the server-picked visible instance even when the old heuristic would pick another', () => {
+    // The retired client heuristic preferred the last attempt in sort order
+    // (attempt 2). The server points visibleExecutionInstanceId at attempt 1, so
+    // that instance must be shown — proving the server pick wins.
+    render(<RunNodeSessionPanel node={multiAttemptNode('review-a1')} visible />);
+
+    expect(screen.getByText('review-bead-a1')).toBeTruthy();
+    expect(screen.queryByText('review-bead-a2')).toBeNull();
+  });
+
+  it('falls back to the last instance when the server id is absent or unknown', () => {
+    // An empty visibleExecutionInstanceId (or one that matches no instance) falls
+    // back to the last instance in sort order — attempt 2 here.
+    render(<RunNodeSessionPanel node={multiAttemptNode('')} visible />);
+
+    expect(screen.getByText('review-bead-a2')).toBeTruthy();
+    expect(screen.queryByText('review-bead-a1')).toBeNull();
+  });
 });
+
+function attempt(value: number, status: RunNodeStatus): RunExecutionInstance {
+  return {
+    id: `review-a${value}`,
+    semanticNodeId: 'review',
+    beadId: `review-bead-a${value}`,
+    iteration: { kind: 'base' },
+    attempt: { kind: 'attempt', value },
+    label: `attempt ${value}`,
+    status,
+    session: { kind: 'none', reason: 'not_started' },
+    currentIteration: value === 2,
+    historical: false,
+  };
+}
+
+function multiAttemptNode(visibleExecutionInstanceId: string): RunDisplayNode {
+  return {
+    id: 'review',
+    semanticNodeId: 'review',
+    title: 'Review',
+    kind: 'step',
+    constructKind: 'step',
+    status: 'active',
+    currentBeadId: 'review',
+    scope: { kind: 'run' },
+    visibleInGraph: true,
+    historicalOnly: false,
+    iterationSummary: { kind: 'single' },
+    attemptSummary: {
+      kind: 'tracked',
+      count: 2,
+      badge: { kind: 'bounded', label: '2/3' },
+      active: { kind: 'idle' },
+    },
+    visibleExecutionInstanceId,
+    executionInstances: [attempt(1, 'failed'), attempt(2, 'active')],
+    controlBadges: [],
+  };
+}
 
 function node(status: RunNodeStatus, reason: 'not_started' | 'session_unresolved'): RunDisplayNode {
   return {

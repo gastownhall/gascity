@@ -102,7 +102,7 @@ func httpsInjection(gcExe, cityRoot string, matched bool, origin string) (Inject
 // helper can serve.
 func isHTTPCloneURL(cloneURL string) bool {
 	_, _, tr := hostPathTransport(cloneURL)
-	return tr == transportHTTP
+	return tr == transportHTTP || tr == transportHTTPS
 }
 
 // shellQuote single-quotes s for git's "!"-helper, which git runs via sh. A

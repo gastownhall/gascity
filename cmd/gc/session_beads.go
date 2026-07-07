@@ -127,6 +127,21 @@ func beadOwnsPoolSessionName(b beads.Bead) bool {
 	return strings.HasSuffix(sn, "-"+id)
 }
 
+// infoOwnsPoolSessionName is the session.Info mirror of beadOwnsPoolSessionName.
+// It reads the RAW session_name (Info.SessionNameMetadata), not the
+// fallback-populated Info.SessionName.
+func infoOwnsPoolSessionName(i session.Info) bool {
+	id := strings.TrimSpace(i.ID)
+	sn := strings.TrimSpace(i.SessionNameMetadata)
+	if id == "" || sn == "" {
+		return false
+	}
+	if template := strings.TrimSpace(i.Template); template != "" && sn == PoolSessionName(template, id) {
+		return true
+	}
+	return strings.HasSuffix(sn, "-"+id)
+}
+
 func pendingPoolSessionName(template, instanceToken string) string {
 	base := targetBasename(template)
 	if base == "" {
@@ -288,6 +303,47 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 		// Status=closed atomically. A Status=open + state="failed-create"
 		// combination means a write failed mid-rollback — release the
 		// alias so the next spawn can recover.
+		return false
+	}
+	return true
+}
+
+// preserveConfiguredNamedSessionBeadInfo is the session.Info sibling of
+// preserveConfiguredNamedSessionBead. Equivalence-proven. It reads the RAW
+// metadata mirrors (Info.SessionNameMetadata, Info.MetadataState, Info.SleepReason,
+// Info.LastWokeAt) so the identity match and terminal-state gate are byte-identical
+// to the raw form; isNamedSessionInfo / namedSessionIdentityInfo are the proven
+// leaf siblings and findNamedSessionSpec keys off the same projected identity.
+func preserveConfiguredNamedSessionBeadInfo(i session.Info, cfg *config.City, cityName string) bool {
+	if cfg == nil || !isNamedSessionInfo(i) {
+		return false
+	}
+	identity := namedSessionIdentityInfo(i)
+	if identity == "" {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(i.SessionNameMetadata) != spec.SessionName {
+		return false
+	}
+	// Identity match. Gate on terminal-ish state so a dead bead releases its
+	// alias instead of holding it forever (ga-ue1r / gm-0fl34g5 incident).
+	state := strings.TrimSpace(i.MetadataState)
+	switch state {
+	case "stopped":
+		if strings.TrimSpace(i.SleepReason) != "" {
+			return true
+		}
+		if lastWoke, ok := parseRFC3339Metadata(i.LastWokeAt); ok {
+			if time.Since(lastWoke) < staleCreatingStateTimeout {
+				return true
+			}
+		}
+		return false
+	case string(session.StateFailedCreate):
 		return false
 	}
 	return true
@@ -874,7 +930,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// closeFailedCreateBead/syncDesiredPoolSlots); the raw store stays for the
 	// snapshot/Get and work-release/close residual. Same underlying store, so
 	// every session bead write is byte-identical.
-	sessFront := session.NewInfoStore(sessStore)
+	sessFront := session.NewStore(sessStore)
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -1655,7 +1711,7 @@ func queueAliasChangeDriftRebaseline(b beads.Bead, tp TemplateParams, queueMeta 
 }
 
 func syncDesiredPoolSlots(
-	sessFront *session.InfoStore,
+	sessFront *session.Store,
 	desiredState map[string]TemplateParams,
 	openBeads []beads.Bead,
 	indexBySessionName map[string]int,
@@ -1786,8 +1842,8 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 		runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)
 		if sessionBeads != nil {
 			if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-				if b, ok := findCanonicalNamedSessionBead(sessionBeads, spec); ok {
-					if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
+				if info, ok := findCanonicalNamedSessionInfo(sessionBeads, spec); ok {
+					if sn := strings.TrimSpace(info.SessionNameMetadata); sn != "" {
 						names[sn] = true
 					}
 				}
@@ -1801,7 +1857,7 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 
 // setMeta wraps store.SetMetadata with error logging. Returns the error
 // so callers can abort dependent writes (e.g., skip config_hash on failure).
-func setMeta(sessFront *session.InfoStore, id, key, value string, stderr io.Writer) error {
+func setMeta(sessFront *session.Store, id, key, value string, stderr io.Writer) error {
 	if err := sessFront.SetMarker(id, key, value); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
 		return err
@@ -1816,11 +1872,11 @@ func setMeta(sessFront *session.InfoStore, id, key, value string, stderr io.Writ
 // session-class store (or the single-store default that backs it); the wrapper
 // holds beads.SessionStore by value and never traps a typed nil (it carries the
 // raw store directly).
-func sessionFrontDoor(store beads.Store) *session.InfoStore {
-	return session.NewInfoStore(beads.SessionStore{Store: store})
+func sessionFrontDoor(store beads.Store) *session.Store {
+	return session.NewStore(beads.SessionStore{Store: store})
 }
 
-func setMetaBatch(sessFront *session.InfoStore, id string, batch map[string]string, stderr io.Writer) error {
+func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -1831,7 +1887,7 @@ func setMetaBatch(sessFront *session.InfoStore, id string, batch map[string]stri
 	return nil
 }
 
-func closeFailedCreateBead(sessFront *session.InfoStore, id string, now time.Time, stderr io.Writer) bool {
+func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
@@ -2136,7 +2192,7 @@ func reapRuntimesBoundToClosedBeads(
 
 		// A runtime whose bead is still open is healthy (or is mid-wake and
 		// will be); the snapshot holds only open beads, so a hit means leave it.
-		if _, ok := sessionBeads.FindByID(liveID); ok {
+		if _, ok := sessionBeads.FindInfoByID(liveID); ok {
 			continue
 		}
 

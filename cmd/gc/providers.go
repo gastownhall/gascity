@@ -218,7 +218,14 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	if err != nil {
 		return nil
 	}
-	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	// This snapshot reads only session-class beads (the gc:session label) to
+	// drive transport/ACP routing decisions, so route through the session
+	// coordination-class store for relocation-safety. openSessionProviderStore
+	// opens its own generic store (independent of the caller), so routing here
+	// closes the gap on both the CLI and controller provider-construction paths.
+	// Identity to the opened store today (resolveClassStore is pure identity).
+	sessStore := cliSessionStore(store, ctx.cfg, ctx.cityPath)
+	all, err := sessStore.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
 		return nil
 	}
@@ -388,14 +395,14 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	if snapshot == nil {
 		return nil
 	}
-	open := snapshot.Open()
+	open := snapshot.OpenInfos()
 	names := make([]string, 0, len(open))
 	seen := make(map[string]bool, len(open))
-	for _, bead := range open {
-		if !beadUsesACPTransport(bead, cfg) {
+	for _, info := range open {
+		if !infoUsesACPTransport(info, cfg) {
 			continue
 		}
-		sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+		sessionName := strings.TrimSpace(info.SessionNameMetadata)
 		if sessionName == "" || seen[sessionName] {
 			continue
 		}
@@ -405,6 +412,9 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	return names
 }
 
+// beadUsesACPTransport is the raw-bead form retained as the byte-identical
+// oracle for infoUsesACPTransport (TestSessionClassifierInfoEquivalence). No
+// production caller reads it — observedACPSessionNames consumes the Info form.
 func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 	transport := strings.TrimSpace(bead.Metadata["transport"])
 	if transport != "" {
@@ -448,6 +458,55 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 		}
 		if strings.TrimSpace(bead.Metadata["command"]) == "" &&
 			strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+			return providerLegacyDefaultsToACP(cfg, providerName)
+		}
+	}
+	return false
+}
+
+func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
+	transport := strings.TrimSpace(info.Transport)
+	if transport != "" {
+		return transport == "acp"
+	}
+	providerName := strings.TrimSpace(info.Provider)
+	if providerName == "acp" {
+		return true
+	}
+	if strings.TrimSpace(info.MCPIdentity) != "" ||
+		strings.TrimSpace(info.MCPServersSnapshot) != "" {
+		return true
+	}
+	templateName := strings.TrimSpace(info.Template)
+	if cfg != nil {
+		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
+			if strings.TrimSpace(agentCfg.Session) != "" && agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if strings.TrimSpace(info.Command) == "" &&
+				info.PendingCreateClaim &&
+				agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if providerName == "" {
+				providerName = strings.TrimSpace(agentCfg.Provider)
+			}
+		}
+		if providerName == "" {
+			providerName = templateName
+		}
+		resolved := resolveProviderForACPTransport(cfg, providerName)
+		if resolved != nil {
+			acpCommand := strings.TrimSpace(resolved.ACPCommandString())
+			defaultCommand := strings.TrimSpace(resolved.CommandString())
+			storedCommand := strings.TrimSpace(info.Command)
+			if acpCommand != "" && acpCommand != defaultCommand &&
+				(storedCommand == acpCommand || strings.HasPrefix(storedCommand, acpCommand+" ")) {
+				return true
+			}
+		}
+		if strings.TrimSpace(info.Command) == "" &&
+			info.PendingCreateClaim {
 			return providerLegacyDefaultsToACP(cfg, providerName)
 		}
 	}
@@ -746,6 +805,16 @@ func newMailProvider(store beads.Store) mail.Provider {
 	return newMailProviderNamed(mailProviderName(), store, true)
 }
 
+// newMailProviderWithSessionStore builds the configured mail provider with
+// distinct message-persistence (messaging class) and session-addressing (session
+// class) stores. Byte-identical to newMailProvider(store) at the single-store bd
+// backend where msgStore == sessStore; once a class relocates, mail's message
+// beads and its session reads follow their respective backends instead of
+// splitting off one generic store.
+func newMailProviderWithSessionStore(msgStore, sessStore beads.Store) mail.Provider {
+	return newMailProviderNamedWithSessionStore(mailProviderName(), msgStore, sessStore, true)
+}
+
 func newCommandMailProvider(store beads.Store) mail.Provider {
 	return newMailProviderNamed(mailProviderName(), store, true)
 }
@@ -755,6 +824,10 @@ func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
 }
 
 func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provider {
+	return newMailProviderNamedWithSessionStore(v, store, store, cached)
+}
+
+func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.Store, cached bool) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
 		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
 	}
@@ -765,14 +838,23 @@ func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provide
 		return mail.NewFailFake()
 	default:
 		if cached {
-			return beadmail.NewCached(store)
+			return beadmail.NewCachedWithStores(msgStore, sessStore)
 		}
-		return beadmail.New(store)
+		return beadmail.NewWithStores(msgStore, sessStore)
 	}
 }
 
 // openCityMailProvider opens the city's bead store and wraps it in a
 // mail.Provider. Returns (nil, exitCode) on failure.
+//
+// Relocation: the beadmail provider does messaging-class message persistence AND
+// session-class reads/writes for mail addressing/identity (session.ListAllSessionBeads
+// / ResolveSessionID / RepairEmptyType). Both are routed through their
+// coordination-class seams — messages via resolveMailMessagesStore, session reads
+// via cliSessionStore — so a [beads.classes.messaging] or [beads.classes.sessions]
+// relocation reaches CLI mail the same way it reaches the running controller
+// (newCityMailProvider, class_store.go). Byte-identical until a class backend is
+// configured (both resolvers are identity at the single-store bd backend).
 func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int) {
 	// For exec: and test doubles, no store needed.
 	v := mailProviderName()
@@ -780,11 +862,17 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 		return newCommandMailProvider(nil), 0
 	}
 
-	store, code := openCityStore(stderr, cmdName)
+	store, cityPath, code := openCityStoreWithPath(stderr, cmdName)
 	if store == nil {
 		return nil, code
 	}
-	return newCommandMailProvider(store), 0
+	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
+	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
+	// failed load yields nil cfg, which the class resolvers treat as identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	return newMailProviderWithSessionStore(msgStore, sessStore), 0
 }
 
 // eventsProviderName returns the events provider name.

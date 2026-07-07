@@ -204,11 +204,9 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 	if store == nil || sessionBead.ID == "" {
 		return nil, nil
 	}
-	view := ProjectLifecycle(LifecycleInput{
-		Status:   sessionBead.Status,
-		Metadata: sessionBead.Metadata,
-		Now:      now,
-	})
+	lcInput := LifecycleInputFromMetadata(sessionBead.Status, sessionBead.Metadata)
+	lcInput.Now = now
+	view := ProjectLifecycle(lcInput)
 	if state, conflict := lifecycleWakeConflictState(view); conflict {
 		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
 	}

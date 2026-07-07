@@ -270,7 +270,11 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	cityName := loadedCityName(cfg, cityPath)
 
 	store, _ := openCityStoreAt(cityPath)
-	markCityStopSessionSleepReason(sessionFrontDoor(store), stderr)
+	// Every store consumer in this stop flow is session-class (sleep-reason marks,
+	// session-name lookups, session-runtime stop, orphan cleanup), so route the
+	// whole flow through the session coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	markCityStopSessionSleepReason(sessionFrontDoor(sessStore), stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopControllerWithForce(cityPath, stdout, force) {
@@ -295,12 +299,12 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		qn := a.QualifiedName()
 		if !a.SupportsInstanceExpansion() {
 			// Non-expanding template.
-			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
+			sn := lookupSessionNameOrLegacy(sessStore, cityName, qn, st)
 			sessionNames = append(sessionNames, sn)
 			desired[sn] = true
 		} else {
 			// Pool agent: resolve runtime session names from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
+			for _, ref := range resolvePoolSessionRefs(sessStore, cfg, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
 				sessionNames = append(sessionNames, ref.sessionName)
 				desired[ref.sessionName] = true
 			}
@@ -318,11 +322,11 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		graceTimeout = 0
 	}
 
-	code := doStop(sessionNames, sp, cfg, store, graceTimeout, recorder, stdout, stderr)
+	code := doStop(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, sessionFrontDoor(store), graceTimeout, recorder, stdout, stderr)
+	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
 
 	teardownServerForStop(sp, stderr)
 
@@ -345,8 +349,8 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
 	}
 }
 
-func markCityStopSessionSleepReason(sessFront *session.InfoStore, stderr io.Writer) {
-	if sessFront == nil || sessFront.Store().Store == nil {
+func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
+	if !sessFront.Backed() {
 		return
 	}
 	sessions, err := sessFront.Store().ListByLabel("gc:session", 0)
@@ -443,7 +447,7 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.InfoStore,
+func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) {
 	running, err := sp.ListRunning("")

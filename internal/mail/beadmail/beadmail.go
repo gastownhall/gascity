@@ -33,8 +33,14 @@ const (
 )
 
 // Provider implements [mail.Provider] using [beads.Store] as the backend.
+//
+// store persists message beads (messaging class); sessionStore serves the
+// session-bead reads/writes mail uses for addressing and identity resolution
+// (session class). They are the same work store at the single-store bd backend
+// and diverge only once [beads.classes.sessions] relocates the session backend.
 type Provider struct {
 	store        beads.Store
+	sessionStore beads.Store
 	sessionCache *sessionBeadCache
 }
 
@@ -47,12 +53,23 @@ type sessionBeadCache struct {
 	fetched         bool
 }
 
-// New returns a beadmail provider backed by the given store.
+// New returns a beadmail provider backed by the given store for both message
+// persistence and session addressing. It is the single-store form of
+// [NewWithStores].
 //
 // The default provider is stateless so long-lived shared users such as the API
 // always see fresh session topology.
 func New(store beads.Store) *Provider {
-	return &Provider{store: store}
+	return NewWithStores(store, store)
+}
+
+// NewWithStores returns a stateless beadmail provider whose message beads
+// persist in msgStore (messaging class) and whose session reads/writes for mail
+// addressing and identity resolution use sessionStore (session class). Pass the
+// same store for both at the single-store bd backend; pass the relocated session
+// store once [beads.classes.sessions] moves so mail addressing follows it.
+func NewWithStores(msgStore, sessionStore beads.Store) *Provider {
+	return &Provider{store: msgStore, sessionStore: sessionStore}
 }
 
 // NewCached returns a beadmail provider backed by the given store with a
@@ -60,10 +77,18 @@ func New(store beads.Store) *Provider {
 // avoid repeated session scans during one command. Long-lived API providers use
 // it to keep steady-state mail reads cheap; they refresh session topology after
 // a bounded interval so new and closed sessions are observed without controller
-// restart.
+// restart. It is the single-store form of [NewCachedWithStores].
 func NewCached(store beads.Store) *Provider {
+	return NewCachedWithStores(store, store)
+}
+
+// NewCachedWithStores is the two-store form of [NewCached]: message persistence
+// on msgStore, session addressing on sessionStore, with the provider-local
+// session enumeration cache reading from sessionStore.
+func NewCachedWithStores(msgStore, sessionStore beads.Store) *Provider {
 	return &Provider{
-		store:        store,
+		store:        msgStore,
+		sessionStore: sessionStore,
 		sessionCache: &sessionBeadCache{refreshInterval: cachedSessionBeadRefreshInterval},
 	}
 }
@@ -72,13 +97,13 @@ func NewCached(store beads.Store) *Provider {
 // Cached providers reuse a single enumeration; stateless providers fetch
 // fresh results on every call.
 func (p *Provider) cachedSessionBeads() ([]beads.Bead, error) {
-	if p.store == nil {
+	if p.sessionStore == nil {
 		return nil, nil
 	}
 	if p.sessionCache == nil {
-		return session.ListAllSessionBeads(p.store, beads.ListQuery{IncludeClosed: true})
+		return session.ListAllSessionBeads(p.sessionStore, beads.ListQuery{IncludeClosed: true})
 	}
-	return p.sessionCache.get(p.store)
+	return p.sessionCache.get(p.sessionStore)
 }
 
 func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
@@ -181,17 +206,17 @@ func (p *Provider) createMessageBead(title, body, from, to string, labels []stri
 
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
 	from = strings.TrimSpace(from)
-	if from == "" || from == "human" || p.store == nil {
+	if from == "" || from == "human" || p.sessionStore == nil {
 		return from, nil, nil
 	}
-	sessionID, err := session.ResolveSessionID(p.store, from)
+	sessionID, err := session.ResolveSessionID(p.sessionStore, from)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
 			return from, nil, nil
 		}
 		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
 	}
-	b, err := p.store.Get(sessionID)
+	b, err := p.sessionStore.Get(sessionID)
 	if err != nil {
 		return "", nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
 	}
@@ -684,6 +709,36 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	return msgs, nil
 }
 
+// ReadMessagesBefore lists read message beads created before `before`, oldest
+// first — the candidate set for the stale-mail retention sweep. It returns raw
+// beads (the caller closes them via the store); the message-bead query shape
+// (Type + "read" label) stays confined to this package, per the package invariant
+// that callers above beadmail never construct a message-bead query directly.
+// limit == 0 means unbounded.
+func ReadMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		Type:          "message",
+		Label:         "read",
+		CreatedBefore: before,
+		Limit:         limit,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+}
+
+// ReadMessageWispEntries lists read message beads in the wisp tier (open or
+// closed) — the candidate set for the wisp-GC retention sweep. It returns raw
+// beads (the caller deletes them); like ReadMessagesBefore it keeps the
+// message-bead query shape confined to this package.
+func ReadMessageWispEntries(store beads.Store) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		Type:          "message",
+		Metadata:      map[string]string{mail.ReadMetadataKey: "true"},
+		IncludeClosed: true,
+		TierMode:      beads.TierWisps,
+	})
+}
+
 // Recipient route helpers expand an operator-facing recipient into every
 // stable mailbox address that might hold mail for that recipient.
 func (p *Provider) recipientRoutes(recipient string) []string {
@@ -693,7 +748,7 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 	}
 	routes := make([]string, 0, 4)
 	routes = appendRecipientRoute(routes, recipient)
-	if recipient == "human" || p.store == nil {
+	if recipient == "human" || p.sessionStore == nil {
 		return routes
 	}
 
@@ -725,9 +780,9 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 
 func (p *Provider) recipientSessionMatchesByCurrentAddress(recipient string, closed bool) ([]beads.Bead, error) {
 	var matches []beads.Bead
-	b, err := p.store.Get(recipient)
+	b, err := p.sessionStore.Get(recipient)
 	if err == nil && session.IsSessionBeadOrRepairable(b) && sessionRouteStatusMatches(b, closed) {
-		session.RepairEmptyType(p.store, &b)
+		session.RepairEmptyType(p.sessionStore, &b)
 		matches = appendUniqueSessionRecipientMatch(matches, b)
 	} else if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return nil, fmt.Errorf("looking up session %q: %w", recipient, err)
@@ -757,7 +812,7 @@ func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status stri
 	if status != "" {
 		query.Status = status
 	}
-	items, err := p.store.List(query)
+	items, err := p.sessionStore.List(query)
 	if err != nil {
 		return nil, err
 	}
@@ -766,7 +821,7 @@ func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status stri
 		if !session.IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		session.RepairEmptyType(p.store, &b)
+		session.RepairEmptyType(p.sessionStore, &b)
 		if !sessionRouteStatusMatches(b, status == "closed") {
 			continue
 		}

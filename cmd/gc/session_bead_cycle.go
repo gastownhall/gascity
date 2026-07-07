@@ -18,35 +18,44 @@ import (
 // when the assignee has been pointed at a different bead. The metadata
 // survives session restart, so crash recovery can resume the same bead
 // instead of jumping to a sibling assignment.
-func recordCurrentBeadIDOnWake(session *beads.Bead, sessFront *sessionpkg.InfoStore, beadID string, stderr io.Writer) {
+// recordCurrentBeadIDOnWake returns the metadata patch it applied (the
+// currently_processing_bead_id write) so the reconciler can fold it onto the
+// infoByID snapshot (write-returns-Info), or nil when it was a no-op. The raw
+// mirror onto session.Metadata is kept: the freshly-mutated bead pointer is
+// appended to startCandidates and read again by the start-execution path this
+// tick.
+func recordCurrentBeadIDOnWake(session *beads.Bead, sessFront *sessionpkg.Store, beadID string, stderr io.Writer) sessionpkg.MetadataPatch {
 	if session == nil || sessFront == nil {
-		return
+		return nil
 	}
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
-		return
+		return nil
 	}
 	if session.Metadata[sessionpkg.CurrentBeadIDKey] == beadID {
-		return
+		return nil
 	}
 	if err := sessFront.RecordCurrentBead(session.ID, beadID); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, session.Metadata["session_name"], err) //nolint:errcheck
 		}
-		return
+		return nil
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, 1)
 	}
 	session.Metadata[sessionpkg.CurrentBeadIDKey] = beadID
+	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
 // session whose assigned bead has changed, then primes the bead so the
 // next reconciler tick wakes the session on a brand-new conversation.
-// Returns true when the cycle ran; the caller must `continue` so it does
-// not double-process the drain/idle bookkeeping for a session it just
-// killed.
+// Returns (true, fold) when the cycle ran; the caller must `continue` so it
+// does not double-process the drain/idle bookkeeping for a session it just
+// killed. The fold is the in-memory mirror it applied (RestartRequestPatch
+// minus ResetCommittedAtKey), for the reconciler to fold onto the infoByID
+// snapshot (write-returns-Info).
 //
 // The teardown path mirrors the agent-initiated restart handoff
 // (`gc runtime request-restart`): kill the process, reset the named-session
@@ -68,27 +77,27 @@ func cycleAliveSessionForFreshReassign(
 	now time.Time,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
-) bool {
+) (bool, sessionpkg.MetadataPatch) {
 	if session == nil || store == nil {
-		return false
+		return false, nil
 	}
 	newBeadID = strings.TrimSpace(newBeadID)
 	if newBeadID == "" {
-		return false
+		return false, nil
 	}
 	prevBeadID := strings.TrimSpace(session.Metadata[sessionpkg.CurrentBeadIDKey])
 	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping fresh-cycle %s: %v\n", name, err) //nolint:errcheck
 		}
-		return false
+		return false, nil
 	}
 	if identity := namedSessionIdentity(*session); identity != "" {
 		if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
 			if stderr != nil {
 				fmt.Fprintf(stderr, "session reconciler: clearing session circuit breaker for fresh-cycle %s: %v\n", name, err) //nolint:errcheck
 			}
-			return false
+			return false, nil
 		}
 	}
 	newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
@@ -101,11 +110,12 @@ func cycleAliveSessionForFreshReassign(
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording fresh-cycle handoff for %s: %v\n", name, err) //nolint:errcheck
 		}
-		return false
+		return false, nil
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
 	}
+	fold := make(sessionpkg.MetadataPatch, len(batch))
 	for key, value := range batch {
 		// The durable reset commit marker is for the next reconciler
 		// pass; keeping it out of this tick's in-memory bead mirrors the
@@ -115,6 +125,7 @@ func cycleAliveSessionForFreshReassign(
 			continue
 		}
 		session.Metadata[key] = value
+		fold[key] = value
 	}
 	if stdout != nil {
 		fmt.Fprintf(stdout, "Cycled fresh-mode session '%s' for bead reassign: %s → %s\n", name, prevBeadID, newBeadID) //nolint:errcheck
@@ -125,5 +136,5 @@ func cycleAliveSessionForFreshReassign(
 			"new_bead_id":      newBeadID,
 		}, nil, "")
 	}
-	return true
+	return true, fold
 }

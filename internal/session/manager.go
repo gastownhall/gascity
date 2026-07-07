@@ -72,7 +72,13 @@ const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
 // Info holds the user-facing details of a chat session.
 type Info struct {
-	ID            string
+	ID string
+	// Type is the raw bead type (BeadType for a proper session bead, or empty
+	// for a crash/migration-damaged bead that still carries the gc:session
+	// label). IsSessionBeadOrRepairableInfo reads it to classify repairable
+	// beads without touching the raw bead. Additive, internal-only (absent from
+	// the HTTP wire).
+	Type          string
 	Template      string
 	State         State
 	Closed        bool
@@ -106,6 +112,255 @@ type Info struct {
 	// clear path to decide whether to clear sleep_reason. Additive,
 	// internal-only: NOT emitted on the HTTP session-response wire.
 	SleepReason string
+
+	// --- identity / pool / named-session cluster (controller read surface) ---
+	//
+	// These complete the codec so the session reconciler, the bead snapshot,
+	// and the classifier predicates read typed Info fields instead of raw bead
+	// metadata/labels. Additive, internal-only (absent from the HTTP wire).
+	// Each is the raw projected value; the *semantics* (is-pool-managed,
+	// resolved origin, agent identity with the agent:<name> label fallback) are
+	// predicate methods on Info, not these fields.
+	ConfiguredNamedIdentity string // configured_named_identity
+	ConfiguredNamedSession  bool   // configured_named_session == "true"
+	ConfiguredNamedMode     string // configured_named_mode
+	CommonName              string // common_name
+	PoolSlot                string // pool_slot (raw; pool helpers parse it)
+	PoolManaged             bool   // pool_managed == "true"
+	SessionOrigin           string // session_origin (raw; resolved origin is a method)
+	DependencyOnly          bool   // dependency_only == "true"
+	// DependencyOnlyMetadata is the RAW dependency_only metadata, verbatim and
+	// UNTRIMMED. The pin-awake wake-reason display path (cmd/gc) compares it
+	// exactly (== "true") WITHOUT trimming, a distinction the trimmed
+	// DependencyOnly bool cannot reproduce on whitespace-padded input; the mirror
+	// keeps the raw value so that read stays byte-identical. Additive,
+	// internal-only mirror; see ManualSessionMetadata for the precedent.
+	DependencyOnlyMetadata string // dependency_only (raw)
+	ManualSession          bool   // manual_session (trimmed) == "true"
+	// ManualSessionMetadata is the RAW manual_session metadata, verbatim.
+	// isManualSessionBead compares it WITHOUT trimming, so the Info mirror
+	// keeps the raw value to stay byte-identical on whitespace-padded inputs.
+	ManualSessionMetadata string
+	Labels                []string // bead labels (agent:<name> identity fallback + canonical checks)
+
+	// MCPIdentity / MCPServersSnapshot mirror the raw mcp_identity and
+	// mcp_servers_snapshot metadata (verbatim). The ACP-transport classifier
+	// treats a non-empty value on either key as evidence the session speaks ACP,
+	// so the Info form must carry them to stay byte-identical. Additive,
+	// internal-only (absent from the HTTP wire).
+	MCPIdentity        string // mcp_identity (raw)
+	MCPServersSnapshot string // mcp_servers_snapshot (raw)
+
+	// --- health / provider-terminal-error cluster (controller read surface) ---
+	//
+	// The pool-demand and reconciler paths treat a session with a persisted
+	// provider terminal error (or an unhealthy+drainable+reasoned health record)
+	// as spent, excluding it from resume and in-flight demand. These mirror the
+	// raw markers so the Info form of that classifier stays byte-identical.
+	// Additive, internal-only (absent from the HTTP wire).
+	ProviderTerminalError string // provider_terminal_error (raw)
+	HealthState           string // session_health (raw)
+	HealthReason          string // session_health_reason (raw)
+	Drainable             bool   // session_drainable == "true"
+
+	// --- trigger / brain-parent cluster (controller read surface) ---
+	//
+	// poolInFlightNewRequests stamps these onto the new-tier SessionRequest it
+	// emits for a pool-managed creating session. Raw mirrors of the gc.* keys.
+	// Additive, internal-only (absent from the HTTP wire).
+	TriggerBeadID       string // gc.trigger_bead_id (raw)
+	TriggerBeadStoreRef string // gc.trigger_bead_store_ref (raw)
+	BrainParentSID      string // gc.brain_parent_sid (raw)
+	Pack                string // gc.pack (raw); resolveTemplateForSessionBead threads it into GC_PACKER_PACK
+
+	// --- state / bookkeeping cluster (controller read surface) ---
+	//
+	// These complete the codec for the classifier predicates that read raw
+	// state and create/wake/quarantine bookkeeping keys. Additive,
+	// internal-only (absent from the HTTP wire).
+	//
+	// MetadataState is the RAW persisted state metadata (untrimmed, not
+	// normalized, and NOT blanked on closed beads), distinct from the
+	// liveness-shaped Info.State. The reconciler's known-state, failed-create,
+	// drained, and metadata-state classifiers key off the raw value, so it must
+	// be carried verbatim.
+	MetadataState string // raw state metadata (verbatim; see State for the normalized form)
+	// SessionNameMetadata is the RAW session_name metadata, verbatim and
+	// WITHOUT the sessionNameFor(ID) fallback that Info.SessionName applies.
+	// Classifiers that branch on "no session_name was persisted" (pool-name
+	// ownership, ephemeral pool-slot detection, assignee identities) must read
+	// this raw value, not the always-populated Info.SessionName.
+	SessionNameMetadata string
+	PendingCreateClaim  bool // pending_create_claim == "true"
+	// PendingCreateClaimMetadata is the RAW pending_create_claim metadata string,
+	// kept verbatim (untrimmed) so trace payloads reproduce a non-canonical raw
+	// value (e.g. "yes") that the PendingCreateClaim bool cannot. Additive,
+	// internal-only mirror; see WakeAttemptsMetadata for the precedent.
+	PendingCreateClaimMetadata string
+	PendingCreateStartedAt     string   // pending_create_started_at (raw RFC3339; stale-create sweep parses it)
+	WakeAttempts               int      // wake_attempts parsed as int (0 on missing/invalid)
+	QuarantinedUntil           string   // quarantined_until (raw RFC3339; quarantine check parses it)
+	AliasHistory               []string // prior aliases (alias_history, normalized via session.AliasHistory)
+	// ContinuityEligible is the RAW continuity_eligible metadata, verbatim.
+	// NamedSessionContinuityEligibleInfo compares it (trimmed) against "false"/
+	// "true", so the Info mirror keeps the raw value. Additive, internal-only.
+	ContinuityEligible string // continuity_eligible (raw)
+	// TransportMetadata is the RAW transport metadata, verbatim and WITHOUT the
+	// normalizeTransport(provider, …) derivation that Info.Transport applies.
+	// The nudge-target resolver reads the raw value (it falls back to the agent's
+	// configured transport when the metadata is empty), so a consumer replacing
+	// that raw read must use this field, not the normalized Info.Transport (which
+	// would be non-empty even when no transport was persisted). Additive,
+	// internal-only (absent from the HTTP wire).
+	TransportMetadata string // transport (raw)
+	// LastWokeAt is the RAW last_woke_at metadata (RFC3339 or empty). The
+	// pending-create lease helpers branch on its emptiness (never-started vs
+	// start-in-flight) and parse it for the in-flight deadline, so the Info
+	// mirror keeps the raw value.
+	LastWokeAt string // last_woke_at (raw)
+	// StateReason is the RAW state_reason metadata. The pool sweep's
+	// post-create-protection window matches state_reason == "creation_complete".
+	StateReason string // state_reason (raw)
+	// CreationCompleteAt is the RAW creation_complete_at metadata (RFC3339 or
+	// empty). The pool sweep parses it to age out the post-create protection
+	// window; a missing/zero value is treated as stale (sweepable).
+	CreationCompleteAt string // creation_complete_at (raw)
+	// ContinuationResetPending is the RAW continuation_reset_pending metadata.
+	// The reconciler's restart-handoff path branches on it (trimmed) == "true"
+	// via resetPendingCommittedAt; the Info mirror keeps the raw value.
+	ContinuationResetPending string // continuation_reset_pending (raw)
+	// ResetCommittedAt is the RAW reset_committed_at metadata (RFC3339 or empty),
+	// the durable marker for when a restart handoff committed. resetPendingCommittedAt
+	// parses it; the Info mirror keeps the raw value.
+	ResetCommittedAt string // reset_committed_at (raw)
+	// Generation is the RAW generation metadata, verbatim. The drain/wake
+	// staleness checks read it BOTH as strconv.Atoi (numeric compare against the
+	// in-memory drain generation) AND strings.TrimSpace (string compare against
+	// the persisted GC_DRAIN_GENERATION ack). A parsed int would lose the
+	// whitespace fidelity the TrimSpace path relies on, so the mirror keeps the
+	// raw string. Additive, internal-only (absent from the HTTP wire).
+	Generation string // generation (raw)
+	// StartedConfigHash is the RAW started_config_hash metadata, verbatim — the
+	// Core fingerprint captured when the session last started. The reconciler's
+	// config-drift detection reads it both as a direct string compare (stored
+	// hash vs the recomputed Core fingerprint) and via strings.TrimSpace (the
+	// emptiness gate that forces firstStart), so the mirror keeps the raw bytes
+	// exactly as the drift path relies on. Additive, internal-only (absent from
+	// the HTTP wire).
+	StartedConfigHash string // started_config_hash (raw)
+	// PinAwake is the RAW pin_awake metadata, verbatim. The reconciler's wake
+	// pass suppresses config-driven wake only when it is != "true", an exact
+	// string compare, so the mirror keeps the raw value. Additive, internal-only
+	// (absent from the HTTP wire).
+	PinAwake string // pin_awake (raw)
+
+	// --- reconciler decision-read cluster (front-door migration, Phase 5) ---
+	//
+	// These complete the codec for the raw session-bead metadata the reconciler
+	// decision paths still crack inline (held/wait/churn/wake/sleep/config-drift/
+	// detach bookkeeping). Each is the RAW projected value, verbatim, so the
+	// eventual Info-routed read stays byte-identical to the current
+	// session.Metadata[...] read (several are compared both trimmed and untrimmed,
+	// or parsed as RFC3339/int, so an int/bool mirror could not preserve fidelity).
+	// Additive, internal-only (absent from the HTTP wire). The classifier-
+	// equivalence oracle guards these against codec drift.
+
+	// HeldUntil is the RAW held_until metadata. evaluateWakeReasons suppresses ALL
+	// wake reasons while it is non-empty; healExpiredTimers clears it once elapsed.
+	HeldUntil string // held_until (raw)
+	// WaitHold is the RAW wait_hold metadata. The reconcile hold path branches on
+	// its emptiness; compute_awake_bridge maps it to LifecycleInput.WaitHold via an
+	// exact == "true" compare, so the mirror keeps the raw value.
+	WaitHold string // wait_hold (raw)
+	// ChurnCount is the RAW churn_count metadata. The death-spiral quarantine path
+	// reads it BOTH via strconv.Atoi (numeric threshold) AND as == "" / == "0"
+	// (clear/first-increment gates), so the mirror keeps the raw string.
+	ChurnCount string // churn_count (raw)
+	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
+	// branch on an exact == "fresh" compare.
+	WakeMode string // wake_mode (raw)
+	// SleepIntent is the RAW sleep_intent metadata. The sleep-intent branch reads
+	// it as != "" and == "idle-stop-pending".
+	SleepIntent string // sleep_intent (raw)
+	// InstanceToken is the RAW instance_token metadata. The wake path compares it
+	// against the live instance token to detect a superseded session.
+	InstanceToken string // instance_token (raw)
+	// DetachedAt is the RAW detached_at metadata (RFC3339 or empty). The detach
+	// gate reads it as != "" and parses it via time.Parse, so the mirror keeps the
+	// raw bytes.
+	DetachedAt string // detached_at (raw)
+	// CurrentlyProcessingBeadID is the RAW currently_processing_bead_id metadata
+	// (CurrentBeadIDKey). compute_awake_bridge maps it (trimmed) onto
+	// LifecycleInput.CurrentlyProcessingBeadID.
+	CurrentlyProcessingBeadID string // currently_processing_bead_id (raw)
+	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
+	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
+	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the
+	// raw JSON exactly.
+	CoreHashBreakdown string // core_hash_breakdown (raw)
+	// StartedProvisionHash / StartedLaunchHash / StartedLiveHash are the RAW
+	// provision/launch/live sub-fingerprints captured at start. The launch-only-
+	// drift decision compares StartedProvisionHash against the recomputed provision
+	// fingerprint and StartedLaunchHash against the launch fingerprint (both exact
+	// string compares, both gated on != ""); the live-hash drift path compares
+	// StartedLiveHash. Mirrors keep the raw values.
+	StartedProvisionHash string // started_provision_hash (raw)
+	StartedLaunchHash    string // started_launch_hash (raw)
+	StartedLiveHash      string // started_live_hash (raw)
+	// ConfigDriftDeferredAt / ConfigDriftDeferredKey mirror the named-session
+	// config-drift deferral timer (config_drift_deferred_at / _key). The deferral
+	// path compares the stored key against the current drift key (exact compare)
+	// and parses the timestamp (RFC3339). Mirrors keep the raw values.
+	ConfigDriftDeferredAt  string // config_drift_deferred_at (raw)
+	ConfigDriftDeferredKey string // config_drift_deferred_key (raw)
+	// AttachedConfigDriftDeferredAt / AttachedConfigDriftDeferredKey mirror the
+	// attached-session config-drift deferral timer (attached_config_drift_deferred_at
+	// / _key), the same shape as the named pair above but for the attached path.
+	AttachedConfigDriftDeferredAt  string // attached_config_drift_deferred_at (raw)
+	AttachedConfigDriftDeferredKey string // attached_config_drift_deferred_key (raw)
+	// StrandedEventEmittedAt is the RAW stranded_event_emitted_at metadata, the
+	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
+	// before firing once.
+	StrandedEventEmittedAt string // stranded_event_emitted_at (raw)
+	// SessionNameExplicit is the RAW session_name_explicit metadata. The lifecycle
+	// projection's LifecycleIdentifiersReleased predicate reads it (trimmed == "")
+	// alongside alias / session_name, and build_desired_state / the parallel
+	// lifecycle path branch on it (trimmed == "true"). Mirror keeps the raw value.
+	SessionNameExplicit string // session_name_explicit (raw)
+	// WakeRequest is the RAW wake_request metadata. ProjectLifecycle's wake-cause
+	// projection reads it (trimmed == string(WakeCauseExplicit)) to raise the
+	// explicit-wake cause. Mirror keeps the raw value so a typed LifecycleInput can
+	// be populated from Info without touching the bead.
+	WakeRequest string // wake_request (raw)
+	// RestartRequested is the RAW restart_requested metadata, the §5.2 intra-tick
+	// restart marker compute_awake_bridge reads (trimmed == "true") to surface a
+	// pending restart on the awake scan. Under raw-refresh coexistence the mirror
+	// reflects the in-memory value; Step 6 handles the Get-cutover intra-tick carrier.
+	RestartRequested string // restart_requested (raw)
+	// SessionIDFlag is the RAW session_id_flag metadata. freshRestartSessionKey
+	// (cmd/gc) reads it (trimmed != "") to decide whether the provider can inject a
+	// fresh session ID on a restart handoff. Additive mirror so that read can move off
+	// the raw bead in Step 6b. (Distinct from the resume-time SessionIDFlag field
+	// above, which is the CLI flag string resolved from config, not bead metadata.)
+	SessionIDFlag string // session_id_flag (raw)
+	// TemplateOverrides is the RAW template_overrides metadata (a JSON object string).
+	// ParseTemplateOverrides decodes it on the config-drift hash path; the mirror keeps
+	// the verbatim string so that decode can be fed from Info instead of the bead map
+	// in Step 6b.
+	TemplateOverrides string // template_overrides (raw JSON)
+	// WakeAttemptsMetadata is the RAW wake_attempts metadata string, kept verbatim
+	// alongside the int-parsed WakeAttempts above. clearWakeFailures (cmd/gc) gates on
+	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
+	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
+	WakeAttemptsMetadata string // wake_attempts (raw)
+	// ProviderKind is the RAW provider_kind metadata, verbatim — the provider
+	// FAMILY marker (claude/codex/gemini) stamped from ResolvedProvider, distinct
+	// from Provider (the concrete provider name). The session-logs / mcp-integration
+	// CLI paths and the worker invocation-telemetry path read it as a family value
+	// (TrimSpace, with a fall-back to provider when empty), so the mirror keeps the
+	// raw value. Additive, internal-only (absent from the HTTP wire). Session-class
+	// periphery front-door migration.
+	ProviderKind string // provider_kind (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a
@@ -1073,10 +1328,7 @@ func (m *Manager) Reactivate(id string) error {
 		if err != nil {
 			return err
 		}
-		view := ProjectLifecycle(LifecycleInput{
-			Status:   b.Status,
-			Metadata: b.Metadata,
-		})
+		view := ProjectLifecycle(LifecycleInputFromMetadata(b.Status, b.Metadata))
 		// Note: quarantine_cycle is intentionally preserved across reactivations.
 		// It tracks how many quarantine rounds the session has been through,
 		// enabling eviction after quarantine_max_attempts.

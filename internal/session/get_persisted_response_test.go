@@ -1,6 +1,7 @@
 package session
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -37,7 +38,7 @@ func TestGetWithPersistedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if info != wantInfo {
+	if !reflect.DeepEqual(info, wantInfo) {
 		t.Fatalf("Info mismatch:\n got = %+v\nwant = %+v", info, wantInfo)
 	}
 

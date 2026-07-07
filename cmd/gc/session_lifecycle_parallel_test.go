@@ -4085,7 +4085,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	if !recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil) {
+	if ok, _ := recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
 
@@ -4099,6 +4099,81 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	if got.Metadata["creation_complete_at"] != clkTime.Format(time.RFC3339) {
 		t.Fatalf("creation_complete_at = %q, want %q — sweep guard would treat healed bead as stale without this stamp",
 			got.Metadata["creation_complete_at"], clkTime.Format(time.RFC3339))
+	}
+}
+
+// recoverRunningPendingCreate's buildPreparedStart mints a fresh instance_token
+// onto the store when the bead carried none — a residue OUTSIDE CommitStartedPatch.
+// The reconciler folds the returned batch onto its infoByID snapshot, and the
+// Phase-2 drain scan reads info.InstanceToken (verifiedStop, Step 2b). If the mint
+// were left out of the returned batch, the snapshot token would stay "" this tick,
+// verifiedStop would skip the incarnation check, and a re-woken runtime the old
+// raw-bead read spared would be killed. The returned batch MUST carry the mint.
+func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+			// No instance_token — buildPreparedStart mints one during recovery.
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+
+	ok, batch := recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
+	if !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want true")
+	}
+	persisted, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mintedToken := persisted.Metadata["instance_token"]
+	if mintedToken == "" {
+		t.Fatal("recovery did not mint an instance_token; test cannot exercise the residue fold")
+	}
+	if batch["instance_token"] != mintedToken {
+		t.Fatalf("returned fold batch instance_token = %q, want %q (the persisted mint) — the reconciler snapshot would go stale and verifiedStop would kill a re-woken runtime",
+			batch["instance_token"], mintedToken)
+	}
+}
+
+// TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear pins the
+// Step-5a fix: buildPreparedStart's stale-resume guard (clearStaleResumeKeyMetadata)
+// clears started_config_hash on the raw bead + store outside any folded batch. On the
+// recoverRunningPendingCreate abort paths, the fold must carry that clear so the
+// reconciler snapshot's Info.StartedConfigHash matches the raw bead — otherwise the
+// forward-pass config-drift gate (which now reads Info.StartedConfigHash) would see a
+// stale non-empty hash and wrongly enter the drift block (#127 startup-window skip).
+func TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear(t *testing.T) {
+	// A bead whose started_config_hash was just cleared by the stale-resume guard.
+	session := &beads.Bead{ID: "s", Metadata: map[string]string{
+		"instance_token":      "tok",
+		"started_config_hash": "", // cleared
+	}}
+	fold := pendingCreateResidueFold(session)
+	if v, ok := fold["started_config_hash"]; !ok || v != "" {
+		t.Fatalf("fold[started_config_hash] = %q, present=%v; want present and empty (carry the clear)", v, ok)
+	}
+	if fold["instance_token"] != "tok" {
+		t.Fatalf("fold[instance_token] = %q, want tok", fold["instance_token"])
+	}
+
+	// A bead the guard did NOT clear: the fold carries the current hash verbatim (a
+	// no-op fold against a coherent snapshot).
+	kept := &beads.Bead{ID: "s", Metadata: map[string]string{"started_config_hash": "H"}}
+	if v := pendingCreateResidueFold(kept)["started_config_hash"]; v != "H" {
+		t.Fatalf("fold[started_config_hash] = %q, want H (current value carried verbatim)", v)
 	}
 }
 

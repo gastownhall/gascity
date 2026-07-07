@@ -8,11 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -368,16 +367,19 @@ func resolveConfiguredAgentMCPProjection(
 func resolveSessionMCPProjection(
 	cityPath string,
 	cfg *config.City,
-	store beads.Store,
+	sessFront *session.Store,
 	sessionID string,
 	lookPath config.LookPathFunc,
 ) (resolvedMCPProjection, error) {
 	if cfg == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("city config unavailable")
 	}
-	if store == nil {
+	if !sessFront.Backed() {
 		return resolvedMCPProjection{}, fmt.Errorf("session store unavailable")
 	}
+	// Reach the raw session-class store the front door wraps for the named-session
+	// resolver and the by-id load; same underlying store, so behavior is unchanged.
+	store := sessFront.Store().Store
 	id, err := resolveSessionIDAllowClosedWithConfig(cityPath, cfg, store, sessionID)
 	if err != nil {
 		return resolvedMCPProjection{}, err
@@ -386,29 +388,30 @@ func resolveSessionMCPProjection(
 	if err != nil {
 		return resolvedMCPProjection{}, fmt.Errorf("loading session %q: %w", sessionID, err)
 	}
+	info := session.InfoFromPersistedBead(bead)
 	template := normalizedSessionTemplate(bead, cfg)
 	if template == "" {
-		template = strings.TrimSpace(bead.Metadata["agent_name"])
+		template = strings.TrimSpace(info.AgentName)
 	}
 	template = resolveAgentTemplate(template, cfg)
 	agent := findAgentByTemplate(cfg, template)
 	if agent == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("session %q maps to unknown agent template %q", sessionID, template)
 	}
-	identity := strings.TrimSpace(bead.Metadata["agent_name"])
+	identity := strings.TrimSpace(info.AgentName)
 	if identity == "" {
 		identity = agent.QualifiedName()
 	}
-	workDir := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
 		workDir, err = resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
 		if err != nil {
 			return resolvedMCPProjection{}, fmt.Errorf("resolving workdir for session %q: %w", sessionID, err)
 		}
 	}
-	providerKind := strings.TrimSpace(bead.Metadata["provider_kind"])
+	providerKind := strings.TrimSpace(info.ProviderKind)
 	if providerKind == "" {
-		providerKind = strings.TrimSpace(bead.Metadata["provider"])
+		providerKind = strings.TrimSpace(info.Provider)
 	}
 	return resolveProjectedMCPForTarget(cityPath, cfg, agent, identity, workDir, providerKind, lookPath)
 }

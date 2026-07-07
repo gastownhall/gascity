@@ -73,7 +73,7 @@ func ExtmsgHandleSource(b beads.Bead) string {
 // error is returned verbatim (beads.ErrNotFound-wrapped when the bead is
 // absent), matching the raw mail path it replaces — the callers pass an
 // already-resolved session id and surface the error to the operator.
-func (s *InfoStore) MailboxAddress(id string) (string, error) {
+func (s *Store) MailboxAddress(id string) (string, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return "", err
@@ -84,7 +84,7 @@ func (s *InfoStore) MailboxAddress(id string) (string, error) {
 // MailboxAddresses loads the session bead for id and returns all addresses it
 // can receive mail at. The Get error is returned verbatim, matching the raw
 // mail path it replaces.
-func (s *InfoStore) MailboxAddresses(id string) ([]string, error) {
+func (s *Store) MailboxAddresses(id string) ([]string, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func (s *InfoStore) MailboxAddresses(id string) ([]string, error) {
 // false) return signals "no session bead / load error" so the caller can fall
 // back to its selector, matching the raw extmsg handler which fell back on any
 // Get error.
-func (s *InfoStore) ExtmsgHandleSource(id string) (string, bool) {
+func (s *Store) ExtmsgHandleSource(id string) (string, bool) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return "", false

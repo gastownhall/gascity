@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -61,13 +62,7 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		nudgeQueryLimit = 0
 	}
 	// nudge/mail beads are NoHistory (wisp-tier); read both tiers explicitly.
-	nudgeCandidates, err := nudgeStore.List(beads.ListQuery{
-		Label:         nudgeBeadLabel,
-		CreatedBefore: nudgeCutoff,
-		Limit:         nudgeQueryLimit,
-		Sort:          beads.SortCreatedAsc,
-		TierMode:      beads.TierBoth,
-	})
+	nudgeCandidates, err := nudgequeue.StaleCandidatesBefore(nudgeStore, nudgeCutoff, nudgeQueryLimit)
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep: listing stale nudge beads: %w", err)
 	}
@@ -108,14 +103,7 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if limit == 0 {
 			mailQueryLimit = 0
 		}
-		mailCandidates, err := mailStore.List(beads.ListQuery{
-			Type:          "message",
-			Label:         "read",
-			CreatedBefore: mailCutoff,
-			Limit:         mailQueryLimit,
-			Sort:          beads.SortCreatedAsc,
-			TierMode:      beads.TierBoth,
-		})
+		mailCandidates, err := beadmail.ReadMessagesBefore(mailStore.Store, mailCutoff, mailQueryLimit)
 		if err != nil {
 			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", err)
 		}
@@ -156,13 +144,7 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	if nudgeQueryLimit < 0 {
 		nudgeQueryLimit = 0
 	}
-	nudgeCandidates, err := nudgeStore.List(beads.ListQuery{
-		Label:         nudgeBeadLabel,
-		CreatedBefore: nudgeCutoff,
-		Limit:         nudgeQueryLimit,
-		Sort:          beads.SortCreatedAsc,
-		TierMode:      beads.TierBoth,
-	})
+	nudgeCandidates, err := nudgequeue.StaleCandidatesBefore(nudgeStore, nudgeCutoff, nudgeQueryLimit)
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing stale nudge beads: %w", err)
 	}
@@ -187,14 +169,7 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if limit == 0 {
 			mailQueryLimit = 0
 		}
-		mailCandidates, err := mailStore.List(beads.ListQuery{
-			Type:          "message",
-			Label:         "read",
-			CreatedBefore: mailCutoff,
-			Limit:         mailQueryLimit,
-			Sort:          beads.SortCreatedAsc,
-			TierMode:      beads.TierBoth,
-		})
+		mailCandidates, err := beadmail.ReadMessagesBefore(mailStore.Store, mailCutoff, mailQueryLimit)
 		if err != nil {
 			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
 		}

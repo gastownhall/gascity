@@ -18,7 +18,7 @@ import (
 func buildAwakeInputFromReconciler(
 	cfg *config.City,
 	cityPath string,
-	sessionBeads []beads.Bead,
+	sessionInfos []session.Info,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	workSet map[string]bool,
@@ -93,48 +93,52 @@ func buildAwakeInputFromReconciler(
 		}
 	}
 
-	// Session beads
-	for i := range sessionBeads {
-		b := &sessionBeads[i]
-		if b.Status == "closed" {
+	// Session infos. The reconciler passes its coherent typed snapshot — one
+	// session.Info per session bead, in the reconciler's `ordered` slice order.
+	// Slice order is load-bearing: ComputeAwakeSet resolves SessionName by
+	// last-write-wins and first-match, and SessionName is non-unique (a retired
+	// duplicate and its winner share it), so the iteration domain must stay
+	// order-preserving. Each Info already carries the typed persisted facts, so no
+	// raw session bead is cracked here.
+	for i := range sessionInfos {
+		info := sessionInfos[i]
+		if info.Closed {
 			continue
 		}
-		name := strings.TrimSpace(b.Metadata["session_name"])
+		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
 			continue
 		}
-		lifecycle := session.ProjectLifecycle(session.LifecycleInput{
-			Status:   b.Status,
-			Metadata: b.Metadata,
-			Now:      clk,
-		})
+		lcInput := session.LifecycleInputFromInfo(info)
+		lcInput.Now = clk
+		lifecycle := session.ProjectLifecycle(lcInput)
 		bead := AwakeSessionBead{
-			ID:          b.ID,
+			ID:          info.ID,
 			SessionName: name,
 			// Canonicalize so adopted beads persisted under a legacy identity
 			// (e.g. a removed binding) key the awake engine by the current
 			// agent template. Unresolvable templates pass through unchanged.
-			Template:               normalizeAgentTemplateIdentity(cfg, b.Metadata["template"]),
+			Template:               normalizeAgentTemplateIdentity(cfg, info.Template),
 			State:                  string(lifecycle.CompatState),
-			SleepReason:            b.Metadata["sleep_reason"],
-			ManualSession:          isManualSessionBead(*b),
+			SleepReason:            info.SleepReason,
+			ManualSession:          isManualSessionInfo(info),
 			PendingCreate:          lifecycle.HasWakeCause(session.WakeCausePendingCreate),
 			ExplicitWake:           lifecycle.HasWakeCause(session.WakeCauseExplicit),
-			DependencyOnly:         b.Metadata["dependency_only"] == "true",
+			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
-			ConfiguredNamedSession: isNamedSessionBead(*b),
+			ConfiguredNamedSession: isNamedSessionInfo(info),
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,
-			WaitHold:               b.Metadata["wait_hold"] == "true",
-			RestartRequested:       strings.TrimSpace(b.Metadata["restart_requested"]) == "true",
-			ContinuationResetPending: strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" &&
-				strings.TrimSpace(b.Metadata[session.ResetCommittedAtKey]) != "",
-			CurrentlyProcessingBeadID: strings.TrimSpace(b.Metadata[session.CurrentBeadIDKey]),
+			WaitHold:               info.WaitHold == "true",
+			RestartRequested:       strings.TrimSpace(info.RestartRequested) == "true",
+			ContinuationResetPending: strings.TrimSpace(info.ContinuationResetPending) == "true" &&
+				strings.TrimSpace(info.ResetCommittedAt) != "",
+			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
-		bead.CreatedAt = b.CreatedAt
-		if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
+		bead.CreatedAt = info.CreatedAt
+		if t, err := time.Parse(time.RFC3339, info.DetachedAt); err == nil && !t.IsZero() {
 			bead.IdleSince = t
 		}
 		input.SessionBeads = append(input.SessionBeads, bead)
@@ -159,16 +163,27 @@ func buildAwakeInputFromReconciler(
 
 	// Runtime liveness comes from wakeTargets. Attachment is probed only when
 	// it can affect the awake decision; the common active desired-session path
-	// is already awake and has no idle reference to suppress.
+	// is already awake and has no idle reference to suppress. Index the typed
+	// snapshot by (unique) session ID for the per-target reads — keying by ID is
+	// order-independent, so it does not disturb the SessionName last-write-wins
+	// ordering the session scan above depends on. Every wakeTarget's bead is one
+	// of the sessionInfos (both derive from the reconciler's `ordered` set), so a
+	// miss yields a zero Info whose empty SessionNameMetadata skips the target —
+	// the same skip the former empty-session_name read produced.
+	infoBy := make(map[string]session.Info, len(sessionInfos))
+	for _, in := range sessionInfos {
+		infoBy[in.ID] = in
+	}
 	for _, target := range wakeTargets {
-		name := strings.TrimSpace(target.session.Metadata["session_name"])
+		info := infoBy[target.session.ID]
+		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
 			continue
 		}
 		if target.alive {
 			input.RunningSessions[name] = true
 		}
-		if shouldProbeAttachmentForAwakeInput(target, cfg, poolDesired) {
+		if shouldProbeAttachmentForAwakeInput(info, target.alive, cfg, poolDesired) {
 			if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
 				input.AttachedSessions[name] = true
 			}
@@ -181,23 +196,24 @@ func buildAwakeInputFromReconciler(
 	return input
 }
 
-func shouldProbeAttachmentForAwakeInput(target wakeTarget, cfg *config.City, poolDesired map[string]int) bool {
-	if target.session == nil {
+func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, poolDesired map[string]int) bool {
+	if !alive {
 		return false
 	}
-	if !target.alive {
-		return false
-	}
-	state := target.session.Metadata["state"]
+	// MetadataState is the RAW state metadata (verbatim), matching the former
+	// raw state field read off the session bead — NOT the normalized,
+	// closed-blanked Info.State, which would flip the probe verdict for a closed
+	// bead whose raw state is still "active".
+	state := info.MetadataState
 	if state != string(session.StateActive) && state != string(session.StateAwake) {
 		return true
 	}
-	if target.session.Metadata["detached_at"] != "" {
+	if info.DetachedAt != "" {
 		return true
 	}
-	template := normalizedSessionTemplate(*target.session, cfg)
+	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
-		template = target.session.Metadata["template"]
+		template = info.Template
 	}
 	if template != "" && poolDesired[template] > 0 {
 		return false

@@ -30,7 +30,7 @@ var errTokenMismatch = errors.New("instance token mismatch")
 // Returns the new generation and instance token on success.
 func preWakeCommit(
 	session *beads.Bead,
-	sessFront *sessions.InfoStore,
+	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, err error) {
 	name := session.Metadata["session_name"]
@@ -157,22 +157,37 @@ func validateWorkDir(dir string) error {
 // Without this, a single bad tick can interrupt a working agent mid-tool-call.
 func beginSessionDrain(
 	session beads.Bead,
+	sp runtime.Provider,
+	dt *drainTracker,
+	reason string,
+	clk clock.Clock,
+	timeout time.Duration,
+) bool {
+	return beginSessionDrainInfo(sessions.InfoFromPersistedBead(session), sp, dt, reason, clk, timeout)
+}
+
+// beginSessionDrainInfo is the typed core of beginSessionDrain for the
+// reconciler's post-Phase-1 wake loop. It reads only session_name, generation,
+// and id — all carried verbatim on Info — so it is byte-identical to the raw
+// form it backs.
+func beginSessionDrainInfo(
+	info sessions.Info,
 	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrains
 	dt *drainTracker,
 	reason string,
 	clk clock.Clock,
 	timeout time.Duration,
 ) bool {
-	name := session.Metadata["session_name"]
-	if dt.get(session.ID) != nil {
+	name := info.SessionNameMetadata
+	if dt.get(info.ID) != nil {
 		if os.Getenv("GC_TMUX_TRACE") == "1" {
 			log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s noop=already-draining", name, reason)
 		}
 		return false
 	}
-	gen, _ := strconv.Atoi(session.Metadata["generation"])
+	gen, _ := strconv.Atoi(info.Generation)
 
-	dt.set(session.ID, &drainState{
+	dt.set(info.ID, &drainState{
 		startedAt:  clk.Now(),
 		deadline:   clk.Now().Add(timeout),
 		reason:     reason,
@@ -246,8 +261,28 @@ func cancelSessionDrain(session beads.Bead, sp runtime.Provider, dt *drainTracke
 	return cancelSessionDrainIf(session, sp, dt, drainReasonCancelable)
 }
 
+// cancelSessionDrainInfo is the typed sibling of cancelSessionDrain for the
+// reconciler's post-Phase-1 wake loop, reading the session id/generation/name
+// off the Info snapshot instead of the raw bead.
+func cancelSessionDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, drainReasonCancelable)
+}
+
 func cancelSessionDrainForPending(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
 	return cancelSessionDrainIf(session, sp, dt, pendingDrainReasonCancelable)
+}
+
+// cancelSessionDrainForPendingInfo is the typed sibling of
+// cancelSessionDrainForPending for the reconciler's Phase-2 drain scan, which
+// works off the Info snapshot rather than a raw bead.
+func cancelSessionDrainForPendingInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, pendingDrainReasonCancelable)
+}
+
+// cancelSessionDrainForAssignedWorkInfo is the typed sibling of
+// cancelSessionDrainForAssignedWork for the reconciler's Phase-2 drain scan.
+func cancelSessionDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, assignedWorkDrainReasonCancelable)
 }
 
 func assignedWorkDrainReasonCancelable(reason string) bool {
@@ -264,27 +299,41 @@ func cancelSessionDrainForAssignedWork(session beads.Bead, sp runtime.Provider, 
 }
 
 func cancelSessionConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+	return cancelSessionConfigDriftDrainInfo(sessions.InfoFromPersistedBead(session), sp, dt)
+}
+
+// cancelSessionConfigDriftDrainInfo is the session.Info form of
+// cancelSessionConfigDriftDrain: byte-identical, threading Info straight into
+// the typed drain-cancel core (cancelSessionDrainIfInfo).
+func cancelSessionConfigDriftDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
 	if dt == nil {
 		return false
 	}
-	return cancelSessionDrainIf(session, sp, dt, func(reason string) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, func(reason string) bool {
 		return reason == "config-drift"
 	})
 }
 
 func cancelSessionDrainIf(session beads.Bead, sp runtime.Provider, dt *drainTracker, canCancel func(string) bool) bool {
-	ds := dt.get(session.ID)
+	return cancelSessionDrainIfInfo(sessions.InfoFromPersistedBead(session), sp, dt, canCancel)
+}
+
+// cancelSessionDrainIfInfo is the typed core of the drain-cancel helpers. It
+// reads only the session id, generation, and session_name — all carried raw and
+// verbatim on Info — so it is byte-identical to the raw-bead form it backs.
+func cancelSessionDrainIfInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, canCancel func(string) bool) bool {
+	ds := dt.get(info.ID)
 	if ds == nil {
 		return false
 	}
 	if !canCancel(ds.reason) {
 		return false
 	}
-	gen, _ := strconv.Atoi(session.Metadata["generation"])
+	gen, _ := strconv.Atoi(info.Generation)
 	if gen == ds.generation {
-		dt.clearIdleProbe(session.ID)
-		dt.remove(session.ID)
-		name := session.Metadata["session_name"]
+		dt.clearIdleProbe(info.ID)
+		dt.remove(info.ID)
+		name := info.SessionNameMetadata
 		// Clear GC_DRAIN_ACK if it was set — prevents stale ack from
 		// killing the session on the next Phase 1 drain-ack check.
 		if ds.ackSet {
@@ -422,26 +471,46 @@ func advanceSessionDrainsWithSessions(
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) {
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, sessionLookup, sessions, wakeEvals, cfg, poolDesired, workSet, readyWaitSet, clk, nil)
+	// Non-reconciler drain entry points (and their tests) still carry raw beads.
+	// Derive the wake evaluations from them here when the caller supplied none —
+	// the traced core requires a non-nil wakeEvals map (Step 5d moved this fallback
+	// off the prod core; computeWakeEvaluations/evaluateWakeReasons stay for the
+	// CLI wake column and these wrappers).
+	if wakeEvals == nil {
+		wakeEvals = computeWakeEvaluations(sessions, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
+	}
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(sessionLookup), wakeEvals, cfg, clk, nil)
+}
+
+// infoLookupFromBeadLookup adapts a raw *beads.Bead lookup to the typed Info
+// lookup the drain scan consumes. Used by the non-reconciler drain entry points
+// (and their tests), which still carry raw beads; the reconciler builds its Info
+// lookup directly from the coherent infoByID snapshot instead.
+func infoLookupFromBeadLookup(sessionLookup func(id string) *beads.Bead) func(id string) (sessions.Info, bool) {
+	return func(id string) (sessions.Info, bool) {
+		b := sessionLookup(id)
+		if b == nil {
+			return sessions.Info{}, false
+		}
+		return sessions.InfoFromPersistedBead(*b), true
+	}
 }
 
 func advanceSessionDrainsWithSessionsTraced(
 	dt *drainTracker,
 	sp runtime.Provider,
 	store beads.Store,
-	sessionLookup func(id string) *beads.Bead,
-	sessions []beads.Bead,
+	infoLookup func(id string) (sessions.Info, bool),
 	wakeEvals map[string]wakeEvaluation,
 	cfg *config.City,
-	poolDesired map[string]int,
-	workSet map[string]bool,
-	readyWaitSet map[string]bool,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
 ) {
-	if wakeEvals == nil {
-		wakeEvals = computeWakeEvaluations(sessions, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
-	}
+	// wakeEvals is required. The reconciler builds it from the coherent infoByID
+	// snapshot; the non-reconciler wrappers derive it via computeWakeEvaluations
+	// from their raw beads before calling in. Step 5d dropped the raw-bead
+	// wakeEvals==nil fallback and its now-unused sessionBeads/poolDesired/workSet/
+	// readyWaitSet inputs from this prod core — the scan runs entirely off infoLookup.
 	// Session front door constructed once from the same store; nil when store is
 	// nil so completeDrain keeps its store==nil short-circuit.
 	sessFront := sessionFrontDoor(store)
@@ -449,16 +518,20 @@ func advanceSessionDrainsWithSessionsTraced(
 		sessFront = nil
 	}
 	for id, ds := range dt.all() {
-		session := sessionLookup(id)
-		if session == nil {
+		info, ok := infoLookup(id)
+		if !ok {
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			continue
 		}
-		name := session.Metadata["session_name"]
+		// The whole scan runs off the typed Info: decision reads (session_name,
+		// generation, template), the drain-complete write (completeDrain → store),
+		// the cancel checks (cancelSessionDrainFor*Info), verifiedStop, and the
+		// process-running probe (by info.ID). Nothing reads the raw bead.
+		name := info.SessionNameMetadata
 
 		// Stale check: if session was re-woken (generation changed), cancel drain.
-		gen, _ := strconv.Atoi(session.Metadata["generation"])
+		gen, _ := strconv.Atoi(info.Generation)
 		if gen != ds.generation {
 			dt.clearIdleProbe(id)
 			if ds.ackSet {
@@ -466,7 +539,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			dt.remove(id)
 			if trace != nil {
-				trace.recordDecision("reconciler.drain.stale", normalizedSessionTemplate(*session, cfg), name, "stale_generation", "cancel", traceRecordPayload{
+				trace.recordDecision("reconciler.drain.stale", normalizedSessionTemplateInfo(info, cfg), name, "stale_generation", "cancel", traceRecordPayload{
 					"drain_reason":       ds.reason,
 					"drain_generation":   ds.generation,
 					"session_generation": gen,
@@ -476,42 +549,42 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 
 		// Check if process exited.
-		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, session.ID)
+		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 		if err != nil {
 			running = false
 		}
 		if !running {
 			// Process exited — drain complete.
-			completeDrain(session, sessFront, ds, clk)
+			completeDrain(info, sessFront, ds, clk)
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
 			if trace != nil {
-				trace.recordDecision("reconciler.drain.complete", normalizedSessionTemplate(*session, cfg), name, ds.reason, "complete", traceRecordPayload{
+				trace.recordDecision("reconciler.drain.complete", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "complete", traceRecordPayload{
 					"drain_started_at": ds.startedAt,
 				}, nil, "")
 			}
 			continue
 		}
 
-		if eval, ok := wakeEvals[session.ID]; ok &&
+		if eval, ok := wakeEvals[info.ID]; ok &&
 			containsWakeReason(eval.Reasons, WakePending) &&
 			pendingDrainReasonCancelable(ds.reason) {
-			if cancelSessionDrainForPending(*session, sp, dt) {
+			if cancelSessionDrainForPendingInfo(info, sp, dt) {
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel_pending", nil, nil, "")
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel_pending", nil, nil, "")
 				}
 				continue
 			}
 		}
 
-		if eval, ok := wakeEvals[session.ID]; ok &&
+		if eval, ok := wakeEvals[info.ID]; ok &&
 			eval.Reason == "assigned-work" &&
 			containsWakeReason(eval.Reasons, WakeWork) &&
 			assignedWorkDrainReasonCancelable(ds.reason) {
-			if cancelSessionDrainForAssignedWork(*session, sp, dt) {
+			if cancelSessionDrainForAssignedWorkInfo(info, sp, dt) {
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel_assigned_work", nil, nil, "")
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel_assigned_work", nil, nil, "")
 				}
 				continue
 			}
@@ -521,7 +594,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// drain. Orphaned, suspended, and ordinary config-drift drains are not
 		// canceled here.
 		if drainReasonCancelable(ds.reason) {
-			if eval, ok := wakeEvals[session.ID]; ok && len(eval.Reasons) > 0 {
+			if eval, ok := wakeEvals[info.ID]; ok && len(eval.Reasons) > 0 {
 				dt.clearIdleProbe(id)
 				// Clear GC_DRAIN_ACK if it was set — prevents stale ack
 				// from killing the session on the next Phase 1 check.
@@ -530,7 +603,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				}
 				dt.remove(id)
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel", nil, nil, "")
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel", nil, nil, "")
 				}
 				continue
 			}
@@ -565,7 +638,7 @@ func advanceSessionDrainsWithSessionsTraced(
 					outcome = "failed"
 					fields["error"] = err.Error()
 				}
-				trace.recordMutation("runtime_meta", normalizedSessionTemplate(*session, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
+				trace.recordMutation("runtime_meta", normalizedSessionTemplateInfo(info, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
 			}
 		}
 
@@ -573,7 +646,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
 			// Drain timed out — force stop.
-			if err := verifiedStop(*session, store, sp, cfg); err != nil {
+			if err := verifiedStop(info, store, sp, cfg); err != nil {
 				if errors.Is(err, errTokenMismatch) {
 					// Session was re-woken by a different incarnation.
 					// This drain is stale — cancel it.
@@ -583,7 +656,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				// Other errors (transient stop failure): keep drain
 				// active for retry on next tick.
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplate(*session, cfg), name, ds.reason, "retry", traceRecordPayload{
+					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "retry", traceRecordPayload{
 						"error": err.Error(),
 					}, nil, "")
 				}
@@ -591,17 +664,17 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			// Re-probe after stop to confirm process actually exited
 			// before marking metadata as asleep.
-			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, session.ID)
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 			if err != nil {
 				running = false
 			}
 			if !running {
-				completeDrain(session, sessFront, ds, clk)
+				completeDrain(info, sessFront, ds, clk)
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplate(*session, cfg), name, ds.reason, "complete", nil, nil, "")
+					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "complete", nil, nil, "")
 				}
 			}
 			// If still running after stop, keep drain for next tick.
@@ -610,20 +683,19 @@ func advanceSessionDrainsWithSessionsTraced(
 	}
 }
 
-// completeDrain writes drain-complete metadata to the bead.
-func completeDrain(session *beads.Bead, sessFront *sessions.InfoStore, ds *drainState, clk clock.Clock) {
-	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
-	if sessFront != nil {
-		if err := sessFront.ApplyPatch(session.ID, batch); err != nil {
-			return
-		}
+// completeDrain writes drain-complete metadata to the store for the drained
+// session. It reads only the typed Info (id + raw wake_mode); the raw-bead
+// mirror the reconciler used to keep is dropped. Nothing reads a drained
+// session's metadata later in the tick — the awake scan runs before
+// advanceSessionDrains, and completeDrain is always followed by dt.remove +
+// continue — so the store write is the sole observable effect (all completeDrain
+// tests assert on store.Get). With no store there is nothing to persist.
+func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState, clk clock.Clock) {
+	if sessFront == nil {
+		return
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
+	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
+	_ = sessFront.ApplyPatch(info.ID, batch)
 }
 
 // verifiedStop stops a session after verifying the instance_token matches.
@@ -634,16 +706,16 @@ func completeDrain(session *beads.Bead, sessFront *sessions.InfoStore, ds *drain
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
-	name := session.Metadata["session_name"]
-	expectedToken := session.Metadata["instance_token"]
+func verifiedStop(info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	name := info.SessionNameMetadata
+	expectedToken := info.InstanceToken
 	if expectedToken != "" {
 		actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
 		if actualToken != "" && actualToken != expectedToken {
-			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
+			return fmt.Errorf("%w for session %s", errTokenMismatch, info.ID)
 		}
 	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
+	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, info.ID)
 	if err != nil {
 		return err
 	}

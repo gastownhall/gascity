@@ -1,4 +1,4 @@
-import { cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { FormulaRunDetail } from 'gas-city-dashboard-shared';
 import { invalidate } from '../api/cache';
@@ -10,6 +10,7 @@ import { formulaRunDetailCacheKey, useFormulaRunDetail } from './useFormulaRunDe
 vi.mock('../api/cityBase', () => ({
   getActiveCity: () => 'test-city',
   activeCityOrThrow: () => 'test-city',
+  cityPath: (suffix: string) => `/api/city/test-city${suffix}`,
 }));
 
 vi.mock('../lib/clientErrorReporting', () => ({
@@ -191,6 +192,153 @@ describe('useFormulaRunDetail', () => {
   });
 });
 
+describe('useFormulaRunDetail SSE stream integration (P4)', () => {
+  const eventSources = streamEventSources;
+
+  beforeEach(() => {
+    eventSources.length = 0;
+    vi.stubGlobal('EventSource', StreamFakeEventSource);
+    mockLoadDetail.mockResolvedValue(runDetail({ title: 'first paint (GET)' }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('renders a pushed frame with ZERO extra GET after first paint', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    // First paint comes from the GET (one call).
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    if (result.current.kind !== 'ready') throw new Error('did not reach ready');
+    expect(result.current.detail.title).toBe('first paint (GET)');
+    expect(mockLoadDetail).toHaveBeenCalledTimes(1);
+
+    // A pushed frame must update the rendered detail — and must NOT trigger any
+    // additional GET.
+    act(() => eventSources[0]?.open());
+    act(() =>
+      eventSources[0]?.emit('detail', JSON.stringify(runDetail({ title: 'pushed frame' }))),
+    );
+
+    await waitFor(() => {
+      if (result.current.kind !== 'ready') throw new Error('lost ready');
+      expect(result.current.detail.title).toBe('pushed frame');
+    });
+    expect(mockLoadDetail).toHaveBeenCalledTimes(1); // still exactly the first-paint GET
+  });
+
+  it('falls back to the GET-backed value when the stream errors (no frame)', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // Stream errors before delivering any frame: the GET first-paint value stays
+    // rendered (the fallback), never blanked.
+    act(() => eventSources[0]?.fail());
+    if (result.current.kind !== 'ready') throw new Error('fallback lost ready');
+    expect(result.current.detail.title).toBe('first paint (GET)');
+  });
+
+  it('closes the stream on unmount', async () => {
+    const { result, unmount } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    expect(eventSources[0]?.closed).toBe(false);
+    unmount();
+    expect(eventSources[0]?.closed).toBe(true);
+  });
+
+  it('renders the fresh GET on a manual Refresh even after a stream frame (F3)', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // A stream frame pins the rendered detail.
+    act(() => eventSources[0]?.open());
+    act(() => eventSources[0]?.emit('detail', JSON.stringify(runDetail({ title: 'streamed' }))));
+    await waitFor(() => {
+      if (result.current.kind !== 'ready') throw new Error('lost ready');
+      expect(result.current.detail.title).toBe('streamed');
+    });
+
+    // A manual Refresh returns a NEWER GET result; it must render (the streamed
+    // frame must not permanently shadow the refetch — the Refresh no-op bug).
+    mockLoadDetail.mockResolvedValueOnce(runDetail({ title: 'manual refresh GET' }));
+    if (result.current.kind !== 'ready') throw new Error('lost ready before refresh');
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    await waitFor(() => {
+      if (result.current.kind !== 'ready') throw new Error('lost ready after refresh');
+      expect(result.current.detail.title).toBe('manual refresh GET');
+    });
+  });
+
+  it('reports streamActive true when EventSource is present', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    expect(result.current.streamActive).toBe(true);
+  });
+
+  it('releases the nudge fallback (streamActive false) when the stream terminally closes', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // A live stream carries detail, so the nudge lane refreshes only the diff.
+    act(() => eventSources[0]?.open());
+    await waitFor(() => expect(result.current.streamActive).toBe(true));
+
+    // A fatal precheck (422/404/503) sets EventSource CLOSED with no reconnect,
+    // so the stream will push no further detail. streamActive MUST flip false so
+    // runDetailNudgeRefresh (tested directly in FormulaRunDetail.test.tsx) resumes
+    // refreshing detail as well as the diff — otherwise detail freezes at the last
+    // frame forever. A terminal close previously stayed "active" and froze detail.
+    act(() => eventSources[0]?.fail());
+    await waitFor(() => expect(result.current.streamActive).toBe(false));
+  });
+
+  it('keeps a ready run streaming but tears the stream down once the run resolves unsupported (F4)', async () => {
+    const { result: readyResult } = renderHook(() =>
+      useFormulaRunDetail('wf-ready', 'city', 'test-city'),
+    );
+    await waitFor(() => expect(readyResult.current.kind).toBe('ready'));
+    expect(eventSources).toHaveLength(1);
+    expect(eventSources[0]?.closed).toBe(false); // ready run → stream stays open
+
+    eventSources.length = 0;
+    mockLoadDetail.mockRejectedValueOnce(
+      new ApiClientError(422, 'run is not a graph.v2 run', undefined, 'not_run_view'),
+    );
+    const { result: unsupportedResult } = renderHook(() =>
+      useFormulaRunDetail('wf-v1', 'city', 'test-city'),
+    );
+    await waitFor(() => expect(unsupportedResult.current.kind).toBe('unsupported'));
+    // The stream may open optimistically during loading, but once the GET
+    // resolves the run as definitively non-streamable (422 not_run_view) it must
+    // be torn down — never left open on a fatal 4xx (F4).
+    await waitFor(() => {
+      expect(eventSources.every((source) => source.closed)).toBe(true);
+    });
+  });
+});
+
+describe('useFormulaRunDetail without EventSource (F2)', () => {
+  beforeEach(() => {
+    // No EventSource stub → the stream is permanently unavailable.
+    vi.stubGlobal('EventSource', undefined);
+    mockLoadDetail.mockResolvedValue(runDetail({ title: 'no-stream GET' }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('reports streamActive false so the caller keeps detail on the nudge', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    expect(result.current.streamActive).toBe(false);
+  });
+});
+
 describe('formulaRunDetailCacheKey (bvu4)', () => {
   // SCOPE_REF_RE permits ':' in scopeRef (and run ids can carry it), so a bare
   // ':'-join let two distinct (runId, scopeKind, scopeRef) tuples collapse to the
@@ -210,3 +358,53 @@ describe('formulaRunDetailCacheKey (bvu4)', () => {
     );
   });
 });
+
+const streamEventSources: StreamFakeEventSource[] = [];
+
+class StreamFakeEventSource {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  readyState = StreamFakeEventSource.CONNECTING;
+  closed = false;
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  constructor(readonly url: string | URL) {
+    streamEventSources.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  close(): void {
+    this.readyState = StreamFakeEventSource.CLOSED;
+    this.closed = true;
+  }
+
+  open(): void {
+    this.readyState = StreamFakeEventSource.OPEN;
+    this.onopen?.(new Event('open'));
+  }
+
+  fail(): void {
+    this.readyState = StreamFakeEventSource.CLOSED;
+    this.onerror?.(new Event('error'));
+  }
+
+  emit(type: string, data: string): void {
+    const event = new MessageEvent<string>(type, { data });
+    this.listeners.get(type)?.forEach((listener) => listener(event));
+    if (type === 'message') this.onmessage?.(event);
+  }
+}

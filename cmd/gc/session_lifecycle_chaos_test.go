@@ -1385,11 +1385,9 @@ func (h *sessionChaosHarness) reactivateSession() {
 	if !ok || b.Status == "closed" {
 		return
 	}
-	view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInput{
-		Status:   b.Status,
-		Metadata: b.Metadata,
-		Now:      h.env.clk.Now(),
-	})
+	lcInput := sessionpkg.LifecycleInputFromMetadata(b.Status, b.Metadata)
+	lcInput.Now = h.env.clk.Now()
+	view := sessionpkg.ProjectLifecycle(lcInput)
 	switch view.BaseState {
 	case sessionpkg.BaseStateArchived, sessionpkg.BaseStateQuarantined:
 	default:
@@ -1412,11 +1410,9 @@ func (h *sessionChaosHarness) injectStartFailure() {
 		h.record("start-failure skipped: wake conflict state=%s", state)
 		return
 	}
-	view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInput{
-		Status:   b.Status,
-		Metadata: b.Metadata,
-		Now:      h.env.clk.Now(),
-	})
+	lcInput := sessionpkg.LifecycleInputFromMetadata(b.Status, b.Metadata)
+	lcInput.Now = h.env.clk.Now()
+	view := sessionpkg.ProjectLifecycle(lcInput)
 	switch view.BaseState {
 	case sessionpkg.BaseStateActive, sessionpkg.BaseStateAsleep, sessionpkg.BaseStateStopped:
 	default:

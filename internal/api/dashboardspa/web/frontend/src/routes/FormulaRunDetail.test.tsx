@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FormulaRunDetailPage } from './FormulaRunDetail';
+import { FormulaRunDetailPage, runDetailNudgeRefresh } from './FormulaRunDetail';
 import { invalidate, setCached } from '../api/cache';
 import { setActiveCity } from '../api/cityBase';
 import { NowProvider } from '../contexts/NowContext';
@@ -263,7 +263,10 @@ describe('FormulaRunDetailPage', () => {
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     expect(nodePressed(reviewPipelineName)).toBe('false');
     expect(nodePressed(applyFixesName)).toBe('true');
-    await screen.findByText(/apply the iteration 1 review fixes/i);
+    // Server-picked visible instance is the current iteration 2 (not-started),
+    // so the default panel shows the not-started copy, not the historical
+    // iteration 1 transcript.
+    await screen.findByText('This node has not started a session yet.');
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     expect(nodePressed(applyFixesName)).toBe('false');
@@ -314,21 +317,25 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByText(/checking graph\.v2 node grouping/i);
   });
 
-  it('refreshes the whole run projection when matching city events arrive', async () => {
+  it('renders a pushed detail frame from the per-run stream with no re-GET (P4)', async () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
+    const detailStream = requireRunDetailStream();
+    // First paint spent exactly one detail GET; the stream must not add another.
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
-    currentDetail = {
+    detailStream.open();
+    detailStream.dispatch('detail', {
       ...detail,
       title: 'Adopt PR #42 refreshed',
       snapshotVersion: 12,
       snapshotEventSeq: { kind: 'known', seq: 92 },
-    };
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.bead}updated` });
+    });
 
     await screen.findByRole('heading', { name: /adopt pr #42 refreshed/i });
     expect(screen.getByText(/v12 · seq 92/i)).toBeTruthy();
+    // The pushed frame rendered with ZERO additional detail GET.
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
   });
 
   it('does not refresh terminal runs from ambient city events without run identity', async () => {
@@ -343,6 +350,26 @@ describe('FormulaRunDetailPage', () => {
 
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
     expect(diffUrls()).toHaveLength(1);
+  });
+
+  it('drives ambient suppression from the server progress.terminal flag, not a client taxonomy', async () => {
+    // An all-`done` census that the OLD client fold would classify terminal, but
+    // the server reports progress.terminal=false. The retired isTerminalProgress
+    // derivation would suppress here; the server flag must win and the ambient
+    // event must still refresh — proving the flag, not a re-derived taxonomy,
+    // gates suppression. P4 moved detail to the stream, so this ambient nudge now
+    // refreshes the DIFF; the terminal flag still gates whether it fires.
+    currentDetail = {
+      ...terminalDetail(),
+      progress: { ...terminalDetail().progress, terminal: false },
+    };
+    renderPage();
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    const cityStream = requireCityEventSource();
+    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    await waitFor(() => expect(diffUrls()).toHaveLength(2));
   });
 
   it('does not refresh from city events before the initial run detail identifies the run', async () => {
@@ -417,14 +444,14 @@ describe('FormulaRunDetailPage', () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     const cityStream = requireCityEventSource();
-    const runFetchCount = runUrls().length;
+    const detailStream = requireRunDetailStream();
+    detailStream.open();
+    // The diff nudge must not fire for an unrelated run; capture the current
+    // count so a stray refresh is detectable. (Detail no longer re-GETs on the
+    // nudge — it streams — so this asserts the diff-lane match filter.)
+    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+    const diffCount = diffUrls().length;
 
-    currentDetail = {
-      ...detail,
-      title: 'Different formula run should not refresh this page',
-      snapshotVersion: 99,
-      snapshotEventSeq: { kind: 'known', seq: 199 },
-    };
     cityStream.dispatch('event', {
       type: `${GC_EVENT_PREFIX.bead}updated`,
       payload: {
@@ -438,29 +465,21 @@ describe('FormulaRunDetailPage', () => {
     });
 
     await Promise.resolve();
-    expect(runUrls()).toHaveLength(runFetchCount);
+    expect(diffUrls()).toHaveLength(diffCount);
     expect(screen.getByRole('heading', { name: /adopt pr #42/i })).toBeTruthy();
 
-    currentDetail = {
+    // A pushed frame for THIS run (the stream is per-run, so a frame is always
+    // this run's) updates the rendered detail — with zero re-GET.
+    detailStream.dispatch('detail', {
       ...detail,
       title: 'Adopt PR #42 current formula run refresh',
       snapshotVersion: 12,
       snapshotEventSeq: { kind: 'known', seq: 92 },
-    };
-    cityStream.dispatch('event', {
-      type: `${GC_EVENT_PREFIX.bead}updated`,
-      payload: {
-        bead: {
-          metadata: {
-            'gc.run_id': detail.runId,
-            'gc.root_bead_id': detail.rootBeadId,
-          },
-        },
-      },
     });
 
     await screen.findByRole('heading', { name: /adopt pr #42 current formula run refresh/i });
     expect(screen.getByText(/v12 · seq 92/i)).toBeTruthy();
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a half-specified scope query without loading the formula run', async () => {
@@ -603,7 +622,10 @@ describe('FormulaRunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     openSessionTab();
-    await screen.findByText(/apply the iteration 1 review fixes/i);
+    // apply-fixes defaults to the server-picked current iteration 2 (not-started),
+    // so switching nodes shows the not-started copy — and must close the prior
+    // review-pipeline stream.
+    await screen.findByText('This node has not started a session yet.');
     await waitFor(() => expect(firstStream?.closed).toBe(true));
 
     fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
@@ -623,11 +645,14 @@ describe('FormulaRunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     openSessionTab();
-    await screen.findByText(/apply the iteration 1 review fixes/i);
-
-    fireEvent.click(screen.getByRole('radio', { name: /iteration 2/i }));
-
+    // The server's visibleExecutionInstanceId points at the current iteration 2
+    // instance (not the historical attached iteration 1 the old heuristic
+    // surfaced), so the not-started current instance shows by default.
     await screen.findByText('This node has not started a session yet.');
+
+    fireEvent.click(screen.getByRole('radio', { name: /iteration 1/i }));
+
+    await screen.findByText(/apply the iteration 1 review fixes/i);
   });
 
   it('keeps the Session tab available so a selected node can explain unresolved sessions', async () => {
@@ -762,6 +787,27 @@ describe('FormulaRunDetailPage', () => {
     expect(screen.getByRole('radio', { name: /attempt 1/i })).toBeTruthy();
     expect(screen.getByRole('radio', { name: /attempt 2/i })).toBeTruthy();
     await screen.findByText(/rebased cleanly/i);
+  });
+});
+
+describe('runDetailNudgeRefresh (P4 stream-vs-nudge division)', () => {
+  it('refreshes only the diff when the detail stream is live', async () => {
+    const refreshDetail = vi.fn(() => Promise.resolve());
+    const refreshDiff = vi.fn(() => Promise.resolve());
+    await runDetailNudgeRefresh(true, refreshDetail, refreshDiff);
+    // The stream carries detail, so a nudge must NOT re-GET it (no double refetch).
+    expect(refreshDetail).not.toHaveBeenCalled();
+    expect(refreshDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes BOTH detail and diff when the stream is unavailable (F2)', async () => {
+    const refreshDetail = vi.fn(() => Promise.resolve());
+    const refreshDiff = vi.fn(() => Promise.resolve());
+    // No EventSource → the stream can't carry detail, so the nudge must keep the
+    // detail auto-refresh alive (otherwise detail freezes after first paint).
+    await runDetailNudgeRefresh(false, refreshDetail, refreshDiff);
+    expect(refreshDetail).toHaveBeenCalledTimes(1);
+    expect(refreshDiff).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -921,12 +967,18 @@ function requireCityEventSource(): FakeEventSource {
   return source;
 }
 
-function sessionEventSources(): FakeEventSource[] {
-  return eventSources.filter((eventSource) => eventSource.url.includes('/session/'));
+// P4: the per-run detail stream is a distinct BFF EventSource
+// (/api/city/.../runs/{id}/detail/stream) that pushes the whole FormulaRunDetail
+// as a `detail` frame. Detail refresh now arrives here instead of via a nudge
+// re-GET.
+function requireRunDetailStream(): FakeEventSource {
+  const source = eventSources.find((eventSource) => eventSource.url.endsWith('/detail/stream'));
+  if (source === undefined) throw new Error('expected run-detail stream source');
+  return source;
 }
 
-function runUrls(): string[] {
-  return fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
+function sessionEventSources(): FakeEventSource[] {
+  return eventSources.filter((eventSource) => eventSource.url.includes('/session/'));
 }
 
 function diffUrls(): string[] {
@@ -943,6 +995,7 @@ function terminalDetail(): FormulaRunDetail {
       visibleNodeCount: 8,
       statusCounts: { done: 8 },
       allStatusCounts: { done: 8 },
+      terminal: true,
     },
     nodes: detail.nodes.map((node) => ({
       ...node,

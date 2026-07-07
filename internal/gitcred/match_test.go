@@ -23,6 +23,33 @@ func layered(layers ...[]Rule) *Rules {
 	return r
 }
 
+func TestMatchRequestProtocolGatesGitHubDefault(t *testing.T) {
+	// The built-in ambient github.com default is httpsOnly: MatchRequest serves
+	// it for protocol=https but withholds it for plaintext protocol=http so the
+	// bearer token is never sent over cleartext.
+	clearCredEnv(t)
+	t.Setenv("GITHUB_TOKEN", "ghp_example")
+	rules, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := rules.MatchRequest(Request{Protocol: "https", Host: "github.com", Path: "org/repo"}); !ok {
+		t.Fatalf("https request must match the github.com default")
+	}
+	if _, ok := rules.MatchRequest(Request{Protocol: "http", Host: "github.com", Path: "org/repo"}); ok {
+		t.Fatalf("plaintext http request must not match the httpsOnly github.com default")
+	}
+}
+
+func TestMatchRequestFileRuleStillServesHTTP(t *testing.T) {
+	// A user-authored file rule is not httpsOnly, so plaintext http still matches
+	// it — the HTTPS-only restriction applies only to the built-in ambient default.
+	rules := ruleset(Rule{Match: "example.com", Helper: "token"})
+	if _, ok := rules.MatchRequest(Request{Protocol: "http", Host: "example.com", Path: "o/r"}); !ok {
+		t.Fatalf("plaintext http must still match a user file rule")
+	}
+}
+
 func TestMatchSourceLongestPrefixWithinLayer(t *testing.T) {
 	rules := ruleset(
 		Rule{Match: "github.com", Helper: "broad"},

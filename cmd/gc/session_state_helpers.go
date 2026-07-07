@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func isDrainedSessionMetadata(meta map[string]string) bool {
@@ -16,6 +17,17 @@ func isDrainedSessionMetadata(meta map[string]string) bool {
 
 func isDrainedSessionBead(session beads.Bead) bool {
 	return isDrainedSessionMetadata(session.Metadata)
+}
+
+// isDrainedSessionInfo is the session.Info mirror of isDrainedSessionBead. It
+// reads the RAW metadata state (Info.MetadataState) and sleep reason
+// (Info.SleepReason), matching the bead form's untrimmed-key reads.
+func isDrainedSessionInfo(i sessionpkg.Info) bool {
+	state := strings.TrimSpace(i.MetadataState)
+	if state == "drained" {
+		return true
+	}
+	return state == "asleep" && strings.TrimSpace(i.SleepReason) == "drained"
 }
 
 // poolSessionIsLive reports whether a pool session bead represents an
@@ -62,6 +74,23 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 		return false
 	}
 	reason := strings.TrimSpace(session.Metadata["sleep_reason"])
+	switch reason {
+	case "idle", "idle-timeout", sleepReasonCityStop, "failed-create", sleepReasonRuntimeMissing,
+		sleepReasonProviderTerminalError:
+		return true
+	}
+	return false
+}
+
+// isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
+func isPoolSessionSlotFreeableInfo(i sessionpkg.Info) bool {
+	if isDrainedSessionInfo(i) {
+		return true
+	}
+	if strings.TrimSpace(i.MetadataState) != "asleep" {
+		return false
+	}
+	reason := strings.TrimSpace(i.SleepReason)
 	switch reason {
 	case "idle", "idle-timeout", sleepReasonCityStop, "failed-create", sleepReasonRuntimeMissing,
 		sleepReasonProviderTerminalError:

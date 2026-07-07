@@ -628,7 +628,43 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 		StreamableSessionIDs:   streamableSessionIDs,
 		StatusCounts:           visibleStatuses,
 		AllStatusCounts:        allStatuses,
+		Terminal:               deriveRunTerminal(visibleStatuses, visibleCount),
 	}
+}
+
+// terminalRunNodeStatuses and nonTerminalRunNodeStatuses partition every
+// RunNodeStatus value (shared/src/run-detail.ts) into its terminality class.
+// This is the single Go-side source of the taxonomy the client used to
+// duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
+// newly-added status must be explicitly classified here (or the test fails).
+var (
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped"}
+	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
+)
+
+// deriveRunTerminal reports whether the run has reached a terminal state, using
+// the visible-node status census. It matches the retired client isTerminalProgress
+// fold exactly: terminal iff there is at least one visible node, no visible node
+// sits in a non-terminal status, and the terminal-status tally covers every
+// visible node.
+func deriveRunTerminal(visibleStatuses nodeStatusCounts, visibleCount int) bool {
+	if visibleCount <= 0 {
+		return false
+	}
+	if sumStatusCounts(visibleStatuses, nonTerminalRunNodeStatuses) > 0 {
+		return false
+	}
+	return sumStatusCounts(visibleStatuses, terminalRunNodeStatuses) >= visibleCount
+}
+
+// sumStatusCounts totals the counts of the given statuses (absent statuses
+// contribute zero), mirroring the client's `?? 0` reduction.
+func sumStatusCounts(counts nodeStatusCounts, statuses []string) int {
+	total := 0
+	for _, status := range statuses {
+		total += counts.counts[status]
+	}
+	return total
 }
 
 // runSnapshotSequenceOf renders the snapshot-sequence union. Port of TS

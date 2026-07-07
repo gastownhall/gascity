@@ -494,7 +494,7 @@ func TestSessionCircuitBreaker_RestoreFromMetadata(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			cb := breakerAt(30*time.Minute, 5)
-			gotReset, err := cb.restoreFromMetadata("rig-a/session-a", tc.meta, tc.now)
+			gotReset, err := cb.restoreFromMetadata("rig-a/session-a", sessionpkg.CircuitStateFromMetadata(tc.meta), tc.now)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("restoreFromMetadata error = %v, want containing %q", err, tc.wantErr)
@@ -530,7 +530,7 @@ func TestSessionCircuitBreaker_RestoreFromMetadataDuplicateIsNoOp(t *testing.T) 
 	const id = "rig-a/session-a"
 	cb.RecordRestart(id, t0)
 
-	reset, err := cb.restoreFromMetadata(id, map[string]string{
+	reset, err := cb.restoreFromMetadata(id, sessionpkg.CircuitStateFromMetadata(map[string]string{
 		sessionCircuitStateMetadata:             circuitOpen.String(),
 		sessionCircuitRestartsMetadata:          `["2026-04-01T12:00:00Z"]`,
 		sessionCircuitLastRestartMetadata:       t0.Format(time.RFC3339Nano),
@@ -538,7 +538,7 @@ func TestSessionCircuitBreaker_RestoreFromMetadataDuplicateIsNoOp(t *testing.T) 
 		sessionCircuitProgressSignatureMetadata: "assigned-work",
 		sessionCircuitOpenedAtMetadata:          t0.Format(time.RFC3339Nano),
 		sessionCircuitOpenRestartCountMetadata:  "6",
-	}, t0.Add(time.Minute))
+	}), t0.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("restoreFromMetadata: %v", err)
 	}
@@ -565,7 +565,7 @@ func TestSessionCircuitBreaker_MetadataRoundTrip(t *testing.T) {
 		t.Fatalf("metadata: %v", err)
 	}
 	restored := breakerAt(30*time.Minute, 5)
-	if reset, err := restored.restoreFromMetadata(id, metadata, t0.Add(6*time.Minute)); err != nil || reset {
+	if reset, err := restored.restoreFromMetadata(id, sessionpkg.CircuitStateFromMetadata(metadata), t0.Add(6*time.Minute)); err != nil || reset {
 		t.Fatalf("restoreFromMetadata reset=%v err=%v", reset, err)
 	}
 	got, err := restored.metadata(id, t0.Add(6*time.Minute))
@@ -592,13 +592,13 @@ func TestPersistSessionCircuitBreakerMetadataSkipsUnchangedSnapshot(t *testing.T
 	const id = "rig-a/session-a"
 	cb.RecordRestart(id, t0)
 
-	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, id, t0); err != nil {
 		t.Fatalf("first persist: %v", err)
 	}
 	if store.writes != 1 {
 		t.Fatalf("metadata writes = %d, want 1", store.writes)
 	}
-	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, id, t0); err != nil {
 		t.Fatalf("second persist: %v", err)
 	}
 	if store.writes != 1 {
@@ -606,7 +606,7 @@ func TestPersistSessionCircuitBreakerMetadataSkipsUnchangedSnapshot(t *testing.T
 	}
 
 	cb.RecordRestart(id, t0.Add(time.Minute))
-	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0.Add(time.Minute)); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, id, t0.Add(time.Minute)); err != nil {
 		t.Fatalf("changed persist: %v", err)
 	}
 	if store.writes != 2 {
@@ -624,10 +624,10 @@ func TestSessionCircuitMetadataHelpersIncludeResetGeneration(t *testing.T) {
 	next := emptySessionCircuitMetadata()
 	existing[sessionCircuitResetGenerationMetadata] = "1"
 	next[sessionCircuitResetGenerationMetadata] = "2"
-	if sessionCircuitMetadataEqual(existing, next) {
-		t.Fatalf("metadata equality ignored %s", sessionCircuitResetGenerationMetadata)
+	if sessionpkg.CircuitStateFromMetadata(existing) == sessionpkg.CircuitStateFromMetadata(next) {
+		t.Fatalf("circuit state equality ignored %s", sessionCircuitResetGenerationMetadata)
 	}
-	if hasSessionCircuitMetadata(next) {
+	if hasSessionCircuitMetadata(sessionpkg.CircuitStateFromMetadata(next)) {
 		t.Fatalf("generation-only metadata should not restore a breaker entry")
 	}
 }
@@ -648,20 +648,20 @@ func TestPersistSessionCircuitBreakerMetadataWritesAutoResetClosedState(t *testi
 	}
 	cb := breakerAt(30*time.Minute, 5)
 	const id = "rig-a/session-a"
-	reset, err := cb.restoreFromMetadata(id, map[string]string{
+	reset, err := cb.restoreFromMetadata(id, sessionpkg.CircuitStateFromMetadata(map[string]string{
 		sessionCircuitStateMetadata:            circuitOpen.String(),
 		sessionCircuitRestartsMetadata:         `["2026-04-01T12:00:00Z"]`,
 		sessionCircuitLastRestartMetadata:      t0.Format(time.RFC3339Nano),
 		sessionCircuitOpenedAtMetadata:         t0.Format(time.RFC3339Nano),
 		sessionCircuitOpenRestartCountMetadata: "6",
-	}, t0.Add(2*time.Hour))
+	}), t0.Add(2*time.Hour))
 	if err != nil {
 		t.Fatalf("restoreFromMetadata: %v", err)
 	}
 	if !reset {
 		t.Fatal("restoreFromMetadata reset = false, want true")
 	}
-	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, id, t0.Add(2*time.Hour)); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, id, t0.Add(2*time.Hour)); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
 	updated, err := store.Get(session.ID)

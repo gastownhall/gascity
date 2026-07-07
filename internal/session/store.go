@@ -7,7 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// This file extends the session-class domain wrapper (InfoStore) with the
+// This file extends the session-class domain wrapper (Store) with the
 // WRITE half of the front door per OBJECT-MODEL-FRONT-DOOR-DESIGN sec 3.1. The
 // read half (Get / List, projecting beads.Bead -> session.Info via
 // InfoFromPersistedBead) already lives in info_store.go. Together they form the
@@ -32,7 +32,7 @@ import (
 // patch are written verbatim; the cross-backend contract that an empty-string
 // metadata value reads back as empty (observationally "cleared") is pinned by
 // TestMetadataEmptyStringClearContract.
-func (s *InfoStore) ApplyPatch(id string, patch MetadataPatch) error {
+func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	if len(patch) == 0 {
 		return nil
 	}
@@ -47,7 +47,7 @@ func (s *InfoStore) ApplyPatch(id string, patch MetadataPatch) error {
 // SetState heals a session to the given lifecycle state with a state_reason.
 // It replaces the canonical state-heal SetMetadataBatch(id, {state, state_reason})
 // in session_reconcile.go (healState / healStateWithRollback).
-func (s *InfoStore) SetState(id string, state State, reason string) error {
+func (s *Store) SetState(id string, state State, reason string) error {
 	return s.ApplyPatch(id, MetadataPatch{
 		"state":        string(state),
 		"state_reason": reason,
@@ -56,33 +56,33 @@ func (s *InfoStore) SetState(id string, state State, reason string) error {
 
 // Sleep records a non-terminal sleep/drain result via SleepPatch. It replaces
 // the max-age and idle-timeout sleep writes in session_reconciler.go.
-func (s *InfoStore) Sleep(id, reason string, now time.Time) error {
+func (s *Store) Sleep(id, reason string, now time.Time) error {
 	return s.ApplyPatch(id, SleepPatch(now, reason))
 }
 
 // BeginDrainAckStopPending moves a drain-acked session into durable
 // stop-pending state via DrainAckStopPendingPatch. Replaces markDrainAckStopPending.
-func (s *InfoStore) BeginDrainAckStopPending(id string, now time.Time) error {
+func (s *Store) BeginDrainAckStopPending(id string, now time.Time) error {
 	return s.ApplyPatch(id, DrainAckStopPendingPatch(now))
 }
 
 // RequestRestart records a controller handoff to a fresh provider conversation
 // via RestartRequestPatch. Replaces the restart-request write in session_reconciler.go.
-func (s *InfoStore) RequestRestart(id, sessionKey string, now time.Time) error {
+func (s *Store) RequestRestart(id, sessionKey string, now time.Time) error {
 	return s.ApplyPatch(id, RestartRequestPatch(sessionKey, now))
 }
 
 // ResetConfigDrift records an in-place named-session repair after core config
 // drift via ConfigDriftResetPatch. Replaces the config-drift reset writes in
 // session_reconciler.go and soft_reload.go.
-func (s *InfoStore) ResetConfigDrift(id string, next State, sessionKey string, now time.Time) error {
+func (s *Store) ResetConfigDrift(id string, next State, sessionKey string, now time.Time) error {
 	return s.ApplyPatch(id, ConfigDriftResetPatch(next, sessionKey, now))
 }
 
 // SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
 // SetMetadataBatch(sessionID, {wait_hold, sleep_intent}) writes in cmd_wait.go.
 // When on is false both keys are cleared (empty-string write).
-func (s *InfoStore) SetWaitHold(id string, on bool, reason string) error {
+func (s *Store) SetWaitHold(id string, on bool, reason string) error {
 	if on {
 		return s.ApplyPatch(id, MetadataPatch{
 			"wait_hold":    reason,
@@ -100,7 +100,7 @@ func (s *InfoStore) SetWaitHold(id string, on bool, reason string) error {
 // single session-attribute key. Unlike ApplyPatch (which emits SetMetadataBatch),
 // this emits SetMetadata so the bead op is identical to the raw single-key write
 // it replaces.
-func (s *InfoStore) setMetadataValue(id, key, value string) error {
+func (s *Store) setMetadataValue(id, key, value string) error {
 	// Bare store error — callers own their diagnostic text (see ApplyPatch).
 	return s.store.SetMetadata(id, key, value)
 }
@@ -111,14 +111,14 @@ func (s *InfoStore) setMetadataValue(id, key, value string) error {
 // city-stop sleep_reason (cmd_stop.go). It emits a single SetMetadata op,
 // byte-identical to the raw write. An empty value clears the key per the
 // empty-string-clear contract.
-func (s *InfoStore) SetMarker(id, key, value string) error {
+func (s *Store) SetMarker(id, key, value string) error {
 	return s.setMetadataValue(id, key, value)
 }
 
 // RecordCurrentBead stamps the work bead a session is currently processing.
 // Replaces recordCurrentBeadIDOnWake (session_bead_cycle.go), which uses a
 // single-key SetMetadata write — so this emits SetMetadata, not a batch.
-func (s *InfoStore) RecordCurrentBead(id, beadID string) error {
+func (s *Store) RecordCurrentBead(id, beadID string) error {
 	return s.setMetadataValue(id, CurrentBeadIDKey, beadID)
 }
 
@@ -127,9 +127,20 @@ func (s *InfoStore) RecordCurrentBead(id, beadID string) error {
 // call in closeBead, which stamps ClosePatch via setMetaBatch separately and
 // then closes the bead. It emits a single Close op, byte-identical to the raw
 // write.
-func (s *InfoStore) CloseWithoutReason(id string) error {
+func (s *Store) CloseWithoutReason(id string) error {
 	// Bare store error — callers own their diagnostic text (see ApplyPatch).
 	return s.store.Close(id)
+}
+
+// Backed reports whether this front door wraps a usable (non-nil) underlying
+// store. It is the typed probe for the `sessFront == nil || sessFront.Store().Store == nil`
+// guard at the controller/CLI roots: a front door constructed over a nil store
+// (the documented typed-nil pattern, where construction yields a real nil
+// *Store when the store is nil) reports false, and so does a nil receiver.
+// Callers use `if !sessFront.Backed() { return }` instead of reaching for the
+// raw embedded store to nil-check it.
+func (s *Store) Backed() bool {
+	return s != nil && s.store.Store != nil
 }
 
 // CircuitResetGeneration returns the persisted session-circuit-breaker reset
@@ -143,7 +154,7 @@ func (s *InfoStore) CloseWithoutReason(id string) error {
 // diagnostic wrapping (the error is returned bare — see ApplyPatch). It does NOT
 // validate the bead as a session bead: the raw read it replaces did not either,
 // so a non-session bead carrying the key reads back identically.
-func (s *InfoStore) CircuitResetGeneration(id string) (string, error) {
+func (s *Store) CircuitResetGeneration(id string) (string, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return "", err
@@ -174,7 +185,7 @@ type PersistedMarkers struct {
 // its own diagnostic wrapping (the error is returned bare — see ApplyPatch).
 // Like CircuitResetGeneration, it does NOT validate the bead as a session bead:
 // the raw reads it replaces did not either.
-func (s *InfoStore) PersistedMarkers(id string) (PersistedMarkers, error) {
+func (s *Store) PersistedMarkers(id string) (PersistedMarkers, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return PersistedMarkers{}, err
@@ -191,7 +202,7 @@ func (s *InfoStore) PersistedMarkers(id string) (PersistedMarkers, error) {
 // closed. It replaces the Get(id) + read .Status/.Metadata["state"] pattern at
 // the reconciler / session_beads close-path sites. Returns ErrSessionNotFound
 // when no session bead exists.
-func (s *InfoStore) GetState(id string) (state State, closed bool, err error) {
+func (s *Store) GetState(id string) (state State, closed bool, err error) {
 	info, err := s.Get(id)
 	if err != nil {
 		return "", false, err
@@ -208,7 +219,7 @@ func (s *InfoStore) GetState(id string) (state State, closed bool, err error) {
 // closed). PHASE 0: the work-reassignment side effect that closeBead performs
 // (releaseWorkFromClosedSessionBead) is intentionally NOT part of this method —
 // that is a cross-class WORK op owned by the Phase 6 work/assignment API.
-func (s *InfoStore) Close(id, stateCode string, now time.Time) (bool, error) {
+func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 	info, err := s.Get(id)
 	if err != nil {
 		return false, err
@@ -231,7 +242,7 @@ func (s *InfoStore) Close(id, stateCode string, now time.Time) (bool, error) {
 // the bead row after stamping archive/reopen metadata via setMetaBatch. It
 // emits a single Update op with only Status set, byte-identical to the raw
 // write.
-func (s *InfoStore) SetStatusOpen(id string) error {
+func (s *Store) SetStatusOpen(id string) error {
 	open := "open"
 	if err := s.store.Update(id, beads.UpdateOpts{Status: &open}); err != nil {
 		return err
@@ -244,7 +255,7 @@ func (s *InfoStore) SetStatusOpen(id string) error {
 // a session-labeled bead with an empty Type (left by a schema migration or a
 // partial write) is healed back to the session type. It emits a single Update
 // op with only Type set, byte-identical to the raw write.
-func (s *InfoStore) RepairType(id string) error {
+func (s *Store) RepairType(id string) error {
 	t := BeadType
 	if err := s.store.Update(id, beads.UpdateOpts{Type: &t}); err != nil {
 		return err
@@ -257,4 +268,4 @@ func (s *InfoStore) RepairType(id string) error {
 // while their reads/writes are migrated behind the typed methods above. New
 // code must prefer the typed methods; this exists so Phase 4/5 can land
 // incrementally without a flag-day rewrite.
-func (s *InfoStore) Store() beads.SessionStore { return s.store }
+func (s *Store) Store() beads.SessionStore { return s.store }

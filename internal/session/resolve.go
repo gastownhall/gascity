@@ -216,6 +216,28 @@ func IsSessionBeadOrRepairable(b beads.Bead) bool {
 	return b.Type == "" && hasSessionLabel(b)
 }
 
+// hasSessionLabelInfo is the Info mirror of hasSessionLabel: it reports whether
+// the projected labels carry the gc:session marker.
+func hasSessionLabelInfo(i Info) bool {
+	for _, l := range i.Labels {
+		if l == LabelSession {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSessionBeadOrRepairableInfo is the session.Info mirror of
+// IsSessionBeadOrRepairable: a proper session bead (Type == BeadType) or a
+// crash/migration-damaged bead (empty Type carrying the gc:session label).
+// Info.Type and Info.Labels project both inputs verbatim, so the two agree.
+func IsSessionBeadOrRepairableInfo(i Info) bool {
+	if i.Type == BeadType {
+		return true
+	}
+	return i.Type == "" && hasSessionLabelInfo(i)
+}
+
 // RepairEmptyType fixes a session bead with an empty type field by
 // setting it to "session". Only call it from paths that already mutate
 // or materialize the bead; read-only resolution normalizes in memory

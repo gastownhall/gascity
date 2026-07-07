@@ -6,6 +6,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *config.Agent) string {
@@ -87,7 +88,7 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) []beads.Bead {
@@ -99,18 +100,18 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, sb := range sessionInfos {
+		if sb.Closed {
 			continue
 		}
-		template := normalizedSessionTemplate(sb, cfg)
+		template := normalizedSessionTemplateInfo(sb, cfg)
 		if template == "" {
-			template = strings.TrimSpace(sb.Metadata["template"])
+			template = strings.TrimSpace(sb.Template)
 		}
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
@@ -147,7 +148,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) ([]beads.Bead, []string) {
@@ -186,27 +187,27 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		add(identity, assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent))
 	}
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, sb := range sessionInfos {
+		if sb.Closed {
 			continue
 		}
-		template := normalizedSessionTemplate(sb, cfg)
+		template := normalizedSessionTemplateInfo(sb, cfg)
 		if template == "" {
-			template = strings.TrimSpace(sb.Metadata["template"])
+			template = strings.TrimSpace(sb.Template)
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil {
 			continue
 		}
 		if agentIsCrossStoreEligible(agentCfg) {
-			for _, id := range sessionBeadAssigneeIdentities(sb) {
+			for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 				crossStore[strings.TrimSpace(id)] = struct{}{}
 			}
 			crossStore[strings.TrimSpace(template)] = struct{}{}
 			continue
 		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			add(id, storeRef)
 		}
 		add(template, storeRef)

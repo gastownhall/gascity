@@ -5460,3 +5460,72 @@ func TestReapStaleBdExportJSONLLeavesFileOnUnmanagedScope(t *testing.T) {
 		t.Fatalf("jsonl removed on unmanaged scope; stat err = %v, want nil", err)
 	}
 }
+
+// TestMirrorBeadsDoltEnvPropagatesCredentialCommand covers the hosted
+// beads-gateway credential helper. bd authenticates by running the command in
+// BEADS_DOLT_CREDENTIAL_COMMAND; that key contains "CREDENTIAL" so
+// execenv.FilterInherited strips it from every gc-spawned bd subprocess and
+// agent session, and the gateway then rejects the root fallback with Error
+// 1045. The controller entrypoint also exports the same helper under the
+// non-sensitive GC_DOLT_CRED_CMD (which survives filtering), so
+// mirrorBeadsDoltEnv must re-derive BEADS_DOLT_CREDENTIAL_COMMAND from it.
+func TestMirrorBeadsDoltEnvPropagatesCredentialCommand(t *testing.T) {
+	t.Run("from GC_DOLT_CRED_CMD in the map", func(t *testing.T) {
+		t.Setenv("GC_DOLT_CRED_CMD", "")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example", "GC_DOLT_CRED_CMD": "/usr/local/bin/eia-helper"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/usr/local/bin/eia-helper" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (from GC_DOLT_CRED_CMD)", got, "/usr/local/bin/eia-helper")
+		}
+	})
+	t.Run("from ambient GC_DOLT_CRED_CMD when map is unset", func(t *testing.T) {
+		t.Setenv("GC_DOLT_CRED_CMD", "/usr/local/bin/eia-helper")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/usr/local/bin/eia-helper" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (from ambient GC_DOLT_CRED_CMD)", got, "/usr/local/bin/eia-helper")
+		}
+	})
+	t.Run("from ambient BEADS_DOLT_CREDENTIAL_COMMAND fallback", func(t *testing.T) {
+		t.Setenv("GC_DOLT_CRED_CMD", "")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/usr/local/bin/eia-helper")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/usr/local/bin/eia-helper" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (from ambient fallback)", got, "/usr/local/bin/eia-helper")
+		}
+	})
+	t.Run("GC_DOLT_CRED_CMD in map wins over ambient BEADS_DOLT_CREDENTIAL_COMMAND", func(t *testing.T) {
+		t.Setenv("GC_DOLT_CRED_CMD", "")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/ambient/helper")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example", "GC_DOLT_CRED_CMD": "/map/helper"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/map/helper" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (map GC_DOLT_CRED_CMD wins)", got, "/map/helper")
+		}
+	})
+	t.Run("map BEADS_DOLT_CREDENTIAL_COMMAND wins over ambient GC_DOLT_CRED_CMD", func(t *testing.T) {
+		// Locks the branch-2-over-branch-3 precedence: an explicit map
+		// BEADS_DOLT_CREDENTIAL_COMMAND must beat an ambient GC_DOLT_CRED_CMD.
+		// Without this a branches-2/3 reorder would silently flip precedence and
+		// still pass every other subtest.
+		t.Setenv("GC_DOLT_CRED_CMD", "/ambient/helper")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example", "BEADS_DOLT_CREDENTIAL_COMMAND": "/map/helper"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/map/helper" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (explicit map value wins over ambient GC_DOLT_CRED_CMD)", got, "/map/helper")
+		}
+	})
+	t.Run("absent when no credential command anywhere", func(t *testing.T) {
+		t.Setenv("GC_DOLT_CRED_CMD", "")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example"}
+		mirrorBeadsDoltEnv(env)
+		if got, ok := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; ok && got != "" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want unset/empty", got)
+		}
+	})
+}

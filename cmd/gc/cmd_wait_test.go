@@ -1572,7 +1572,7 @@ func TestRetryClosedWait_CreatesReplacement(t *testing.T) {
 		t.Fatalf("close wait bead: %v", err)
 	}
 
-	retried, err := retryClosedWait(store, wait, time.Now().UTC().Format(time.RFC3339))
+	retried, err := retryClosedWait(store, beads.NudgesStore{Store: store}, wait, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		t.Fatalf("retryClosedWait: %v", err)
 	}
@@ -1629,7 +1629,7 @@ func TestRetryClosedWait_DropsInternalMetadata(t *testing.T) {
 		t.Fatalf("close wait bead: %v", err)
 	}
 
-	retried, err := retryClosedWait(store, wait, time.Now().UTC().Format(time.RFC3339))
+	retried, err := retryClosedWait(store, beads.NudgesStore{Store: store}, wait, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		t.Fatalf("retryClosedWait: %v", err)
 	}
@@ -1678,7 +1678,7 @@ func TestRetryClosedWait_PreservesNonDepsMetadata(t *testing.T) {
 		t.Fatalf("close wait bead: %v", err)
 	}
 
-	retried, err := retryClosedWait(store, wait, time.Now().UTC().Format(time.RFC3339))
+	retried, err := retryClosedWait(store, beads.NudgesStore{Store: store}, wait, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		t.Fatalf("retryClosedWait: %v", err)
 	}

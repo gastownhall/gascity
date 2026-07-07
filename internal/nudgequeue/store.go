@@ -35,6 +35,22 @@ const nudgeBeadLabel = "gc:nudge"
 // nudgeBeadType is the bead type used for queued-nudge shadow beads.
 const nudgeBeadType = "chore"
 
+// StaleCandidatesBefore lists queued-nudge shadow beads created before `before`,
+// oldest first — the candidate set for the stale-nudge retention sweep. It
+// returns raw beads (the caller terminalizes/closes them via the store); the
+// nudge-bead query shape (the gc:nudge label + wisp tier) stays confined to this
+// package, so callers above it never construct a nudge-bead query directly.
+// limit == 0 means unbounded.
+func StaleCandidatesBefore(store beads.NudgesStore, before time.Time, limit int) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		Label:         nudgeBeadLabel,
+		CreatedBefore: before,
+		Limit:         limit,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+}
+
 // NudgeShadow is the partial, read-only view decoded from a nudge shadow bead.
 // It carries ONLY the fields the bead is authoritative for: the controller-
 // stamped terminal fields (State / TerminalReason / CommitBoundary) plus

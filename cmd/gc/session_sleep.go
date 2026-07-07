@@ -127,19 +127,21 @@ func pendingInteractionKeepsAwake(session beads.Bead, sp runtime.Provider, name 
 	if clk != nil {
 		now = clk.Now()
 	}
-	view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInput{
-		Status:   session.Status,
-		Metadata: session.Metadata,
-		Runtime: sessionpkg.RuntimeFacts{
-			Observed: true,
-			Alive:    true,
-			Pending:  true,
-		},
-		Now: now,
-	})
+	lcInput := sessionpkg.LifecycleInputFromMetadata(session.Status, session.Metadata)
+	lcInput.Runtime = sessionpkg.RuntimeFacts{
+		Observed: true,
+		Alive:    true,
+		Pending:  true,
+	}
+	lcInput.Now = now
+	view := sessionpkg.ProjectLifecycle(lcInput)
 	return !view.HasBlocker(sessionpkg.BlockerHeld) && !view.HasBlocker(sessionpkg.BlockerQuarantined)
 }
 
+// reconcileDetachedAt tracks when a session last became detached for idle-sleep
+// accounting. Returns the mirrored {"detached_at": <value>} batch when a write
+// is persisted (clear or set), nil when no change is made. The caller folds the
+// returned batch onto the typed snapshot via ApplyPatch (nil is a no-op).
 func reconcileDetachedAt(
 	session *beads.Bead,
 	store beads.Store,
@@ -147,9 +149,9 @@ func reconcileDetachedAt(
 	alive bool,
 	sp runtime.Provider,
 	clk clock.Clock,
-) {
+) map[string]string {
 	if session == nil || store == nil {
-		return
+		return nil
 	}
 	if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() || sp == nil || !alive || policy.Capability != runtime.SessionSleepCapabilityFull {
 		if session.Metadata["detached_at"] != "" {
@@ -157,13 +159,14 @@ func reconcileDetachedAt(
 				log.Printf("session sleep: clearing detached_at for %s: %v", session.ID, err)
 			} else {
 				session.Metadata["detached_at"] = ""
+				return map[string]string{"detached_at": ""}
 			}
 		}
-		return
+		return nil
 	}
 	name := session.Metadata["session_name"]
 	if name == "" {
-		return
+		return nil
 	}
 	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, session.ID)
 	if err == nil && attached {
@@ -172,9 +175,10 @@ func reconcileDetachedAt(
 				log.Printf("session sleep: clearing detached_at for %s: %v", session.ID, err)
 			} else {
 				session.Metadata["detached_at"] = ""
+				return map[string]string{"detached_at": ""}
 			}
 		}
-		return
+		return nil
 	}
 	if session.Metadata["detached_at"] == "" {
 		ts := clk.Now().UTC().Format(time.RFC3339)
@@ -182,8 +186,10 @@ func reconcileDetachedAt(
 			log.Printf("session sleep: setting detached_at for %s: %v", session.ID, err)
 		} else {
 			session.Metadata["detached_at"] = ts
+			return map[string]string{"detached_at": ts}
 		}
 	}
+	return nil
 }
 
 func sessionIdleReference(session beads.Bead, sp runtime.Provider) time.Time {
@@ -256,7 +262,7 @@ func sessionKeepWarmEligible(
 
 func persistSleepPolicyMetadata(
 	session *beads.Bead,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	policy resolvedSessionSleepPolicy,
 	configSuppressed bool,
 ) {
@@ -303,22 +309,27 @@ func persistSleepPolicyMetadata(
 	}
 }
 
-func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.InfoStore) {
+// markIdleSleepPending returns the metadata patch it applied (sleep_intent =
+// idle-stop-pending) so the reconciler can fold it onto the infoByID snapshot
+// (write-returns-Info), or nil when it was a no-op. The raw mirror onto
+// session.Metadata is kept (dropped in Step 5).
+func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.Store) sessionpkg.MetadataPatch {
 	if session == nil || sessFront == nil || session.Metadata["sleep_intent"] == "idle-stop-pending" {
-		return
+		return nil
 	}
 	if err := sessFront.SetMarker(session.ID, "sleep_intent", "idle-stop-pending"); err != nil {
-		return
+		return nil
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, 1)
 	}
 	session.Metadata["sleep_intent"] = "idle-stop-pending"
+	return sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}
 }
 
 func recoverPendingIdleSleep(
 	session *beads.Bead,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	running bool,
 	clk clock.Clock,
 ) bool {
@@ -350,4 +361,11 @@ func boolMetadata(v bool) string {
 
 func isManualSessionBead(bead beads.Bead) bool {
 	return strings.TrimSpace(bead.Metadata["session_origin"]) == "manual" || bead.Metadata["manual_session"] == boolMetadata(true)
+}
+
+// isManualSessionInfo is the session.Info mirror of isManualSessionBead. The
+// manual_session clause compares the RAW metadata (Info.ManualSessionMetadata)
+// without trimming, exactly as the bead form does.
+func isManualSessionInfo(i sessionpkg.Info) bool {
+	return strings.TrimSpace(i.SessionOrigin) == "manual" || i.ManualSessionMetadata == boolMetadata(true)
 }

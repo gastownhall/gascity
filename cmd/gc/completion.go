@@ -247,8 +247,12 @@ func loadSessionsForCompletion() []session.Info {
 		if err != nil {
 			return
 		}
+		// loadSessionsForCompletion reads only session-class state (session beads
+		// plus the session catalog), so route through the session
+		// coordination-class store for relocation-safety.
+		sessStore := cliSessionStore(store, cfg, cityPath)
 		providerCtx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-		allSessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
+		allSessionBeads, err := session.ListAllSessionBeads(sessStore, beads.ListQuery{
 			Sort: beads.SortCreatedDesc,
 		})
 		if err != nil {
@@ -259,7 +263,7 @@ func loadSessionsForCompletion() []session.Info {
 		if err != nil {
 			return
 		}
-		catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
+		catalog, err := workerSessionCatalogWithConfig("", sessStore, sp, providerCtx.cfg)
 		if err != nil {
 			return
 		}

@@ -38,7 +38,7 @@ type CreateSpec struct {
 // [LabelSession, "agent:<AgentName>"] label pair are confined here, so no
 // caller constructs a Type="session" bead directly. The emitted Create is
 // byte-identical to the raw store.Create the create sites performed.
-func (s *InfoStore) CreateSession(spec CreateSpec) (string, error) {
+func (s *Store) CreateSession(spec CreateSpec) (string, error) {
 	created, err := s.store.Create(beads.Bead{
 		ID:       spec.ID,
 		Title:    spec.Title,

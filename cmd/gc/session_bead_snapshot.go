@@ -28,8 +28,13 @@ type sessionBeadSnapshot struct {
 	// realizePoolDesiredSessions parallelizes pool session bead creates
 	// across distinct aliases — see gastownhall/gascity#2319. All read
 	// methods take RLock; add() takes Lock.
-	mu                        sync.RWMutex
-	open                      []beads.Bead
+	mu   sync.RWMutex
+	open []beads.Bead
+	// openInfos is the session.Info projection of open, in lockstep order:
+	// openInfos[i] == InfoFromPersistedBead(open[i]). It is the typed front
+	// door the P4 consumers migrate onto; the raw open slice and the index
+	// maps below stay byte-identical for the current callers.
+	openInfos                 []sessionpkg.Info
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
@@ -96,11 +101,14 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	sessionNameByAgentName := make(map[string]string)
 	sessionNameByTemplateHint := make(map[string]string)
 
+	openInfos := make([]sessionpkg.Info, 0, len(beadsIn))
+
 	for _, b := range beadsIn {
 		if b.Status == "closed" {
 			continue
 		}
 		filtered = append(filtered, b)
+		openInfos = append(openInfos, sessionpkg.InfoFromPersistedBead(b))
 
 		sn := b.Metadata["session_name"]
 		if sn == "" {
@@ -145,6 +153,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 
 	return &sessionBeadSnapshot{
 		open:                      filtered,
+		openInfos:                 openInfos,
 		beadIDByAgentName:         beadIDByAgentName,
 		beadIDByTemplateHint:      beadIDByTemplateHint,
 		sessionNameByAgentName:    sessionNameByAgentName,
@@ -152,11 +161,36 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	}
 }
 
+// newSessionBeadSnapshotFromInfos builds a snapshot from a typed session.Info
+// feed instead of raw beads. It populates ONLY openInfos — the non-closed
+// entries (filtered by info.Closed) in the caller's order. The raw
+// open []beads.Bead slice and the agent/template index maps are left nil
+// because this constructor backs resolvePreservedConfiguredNamedSessionTemplate's
+// feed, whose sole reachable snapshot read is OpenInfos(); the beadNames
+// pre-seed short-circuits FindSessionNameByTemplate, so the index maps are never
+// consulted on that path. Do NOT call Open(), the raw Find* methods, or the
+// Find*ByTemplate index lookups on a snapshot built this way — they return
+// empty. This is the front-door replacement for newSessionBeadSnapshot(ordered)
+// at the reconciler's mid-tick preserve call: feeding the live infoByID rather
+// than the raw working set keeps membership tracking mid-tick closes once the
+// raw Status lockstep is dropped.
+func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
+	openInfos := make([]sessionpkg.Info, 0, len(infos))
+	for _, in := range infos {
+		if in.Closed {
+			continue
+		}
+		openInfos = append(openInfos, in)
+	}
+	return &sessionBeadSnapshot{openInfos: openInfos}
+}
+
 // replaceOpenLocked replaces the snapshot's open set and rebuilt lookup maps
 // from `open`. Callers must hold s.mu.
 func (s *sessionBeadSnapshot) replaceOpenLocked(open []beads.Bead) {
 	rebuilt := newSessionBeadSnapshot(open)
 	s.open = rebuilt.open
+	s.openInfos = rebuilt.openInfos
 	s.beadIDByAgentName = rebuilt.beadIDByAgentName
 	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
 	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
@@ -183,6 +217,20 @@ func (s *sessionBeadSnapshot) Open() []beads.Bead {
 	defer s.mu.RUnlock()
 	result := make([]beads.Bead, len(s.open))
 	copy(result, s.open)
+	return result
+}
+
+// OpenInfos is the typed mirror of Open: a copy of the session.Info projection
+// of every open bead, in the same order as Open(). OpenInfos()[i] equals
+// InfoFromPersistedBead(Open()[i]) for all i.
+func (s *sessionBeadSnapshot) OpenInfos() []sessionpkg.Info {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]sessionpkg.Info, len(s.openInfos))
+	copy(result, s.openInfos)
 	return result
 }
 
@@ -213,6 +261,24 @@ func (s *sessionBeadSnapshot) FindSessionBeadByTemplate(template string) (beads.
 	return beads.Bead{}, false
 }
 
+// FindInfoByTemplate is the typed mirror of FindSessionBeadByTemplate: it
+// returns the session.Info projection of the same bead that method would
+// resolve for template.
+func (s *sessionBeadSnapshot) FindInfoByTemplate(template string) (sessionpkg.Info, bool) {
+	if s == nil {
+		return sessionpkg.Info{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if id := s.beadIDByAgentName[template]; id != "" {
+		return s.findInfoByIDLocked(id)
+	}
+	if id := s.beadIDByTemplateHint[template]; id != "" {
+		return s.findInfoByIDLocked(id)
+	}
+	return sessionpkg.Info{}, false
+}
+
 func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return beads.Bead{}, false
@@ -230,6 +296,29 @@ func (s *sessionBeadSnapshot) findByIDLocked(id string) (beads.Bead, bool) {
 		}
 	}
 	return beads.Bead{}, false
+}
+
+// FindInfoByID is the typed mirror of FindByID: it returns the session.Info
+// projection of the same bead FindByID would return for id.
+func (s *sessionBeadSnapshot) FindInfoByID(id string) (sessionpkg.Info, bool) {
+	if s == nil || strings.TrimSpace(id) == "" {
+		return sessionpkg.Info{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.findInfoByIDLocked(id)
+}
+
+// findInfoByIDLocked is the typed inner lookup; callers must hold at least
+// s.mu.RLock. open and openInfos are kept in lockstep order, so the matching
+// index into open yields the corresponding Info.
+func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bool) {
+	for i, bead := range s.open {
+		if bead.ID == id {
+			return s.openInfos[i], true
+		}
+	}
+	return sessionpkg.Info{}, false
 }
 
 func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) string {
@@ -255,6 +344,25 @@ func (s *sessionBeadSnapshot) FindSessionBeadByNamedIdentity(identity string) (b
 	return beads.Bead{}, false
 }
 
+// FindInfoByNamedIdentity is the typed mirror of FindSessionBeadByNamedIdentity:
+// it returns the session.Info projection of the same bead that method would
+// resolve for identity. open and openInfos share an index, so the first
+// matching bead's Info is returned.
+func (s *sessionBeadSnapshot) FindInfoByNamedIdentity(identity string) (sessionpkg.Info, bool) {
+	if s == nil || strings.TrimSpace(identity) == "" {
+		return sessionpkg.Info{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i, bead := range s.open {
+		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
+			continue
+		}
+		return s.openInfos[i], true
+	}
+	return sessionpkg.Info{}, false
+}
+
 func stampedPoolQualifiedIdentity(bead beads.Bead) string {
 	if !isPoolManagedSessionBead(bead) {
 		return ""
@@ -264,6 +372,31 @@ func stampedPoolQualifiedIdentity(bead beads.Bead) string {
 		return ""
 	}
 	template := strings.TrimSpace(bead.Metadata["template"])
+	if template == "" {
+		return ""
+	}
+	scope, name := config.ParseQualifiedName(template)
+	if name == "" {
+		return ""
+	}
+	instance := fmt.Sprintf("%s-%d", name, slot)
+	if scope != "" {
+		return scope + "/" + instance
+	}
+	return instance
+}
+
+// stampedPoolQualifiedIdentityInfo is the session.Info mirror of
+// stampedPoolQualifiedIdentity.
+func stampedPoolQualifiedIdentityInfo(i sessionpkg.Info) string {
+	if !isPoolManagedSessionInfo(i) {
+		return ""
+	}
+	slot, err := strconv.Atoi(strings.TrimSpace(i.PoolSlot))
+	if err != nil || slot <= 0 {
+		return ""
+	}
+	template := strings.TrimSpace(i.Template)
 	if template == "" {
 		return ""
 	}

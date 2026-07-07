@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -507,14 +508,25 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 	if storeErr != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
 	}
+	// Route the SESSION-class access (restartability check, restart-request
+	// clear, restart persist through the worker boundary) to the session
+	// coordination-class store so a [beads.classes.sessions] relocation reaches
+	// gc runtime request-restart. The routing cfg is loaded refresh-free (the
+	// full cfg loads later, for timeout/template resolution). Identity today, so
+	// byte-identical.
+	var sessStore beads.Store
 	if store != nil {
-		restartable, err := sessionRestartableByController(store, current.sessionName)
+		routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+		sessStore = cliSessionStore(store, routeCfg, current.cityPath)
+	}
+	if store != nil {
+		restartable, err := sessionRestartableByController(sessStore, current.sessionName)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if !restartable {
-			if err := clearRestartRequest(store, dops, current.sessionName); err != nil {
+			if err := clearRestartRequest(sessStore, dops, current.sessionName); err != nil {
 				fmt.Fprintf(stderr, "gc runtime request-restart: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -527,7 +539,7 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 	var persistRestart func() error
 	if store != nil {
 		persistRestart = func() error {
-			handle, err := workerHandleForSessionTargetWithConfig(current.cityPath, store, sp, cfg, current.sessionName)
+			handle, err := workerHandleForSessionTargetWithConfig(current.cityPath, sessStore, sp, cfg, current.sessionName)
 			if err != nil {
 				return err
 			}

@@ -54,7 +54,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // sessions have beads).
 func runAdoptionBarrier(
 	cityPath string,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	cityName string,
@@ -67,9 +67,9 @@ func runAdoptionBarrier(
 	if sessFront == nil {
 		return result, false
 	}
-	// Session-bead list queries below go through the raw store the front door
-	// wraps (sessionpkg.ListAllSessionBeads takes a beads.Store); creates go
-	// through the front door. Same underlying store, so behavior is unchanged.
+	// Session-bead list queries below go through the raw session-class store the
+	// front door wraps (sessionpkg.ListAllSessionBeads takes a raw store); creates
+	// go through the front door. Same underlying store, so behavior is unchanged.
 	store := sessFront.Store().Store
 
 	// Step 1: List all running sessions.
@@ -103,7 +103,7 @@ func runAdoptionBarrier(
 		if b.Status == "closed" {
 			continue // closed beads don't count for dedup
 		}
-		if sn := b.Metadata["session_name"]; sn != "" {
+		if sn := sessionpkg.InfoFromPersistedBead(b).SessionNameMetadata; sn != "" {
 			bySessionName[sn] = true
 		}
 	}
@@ -274,7 +274,7 @@ func runAdoptionBarrier(
 	return result, passed
 }
 
-func openSessionBeadExists(sessFront *sessionpkg.InfoStore, sessionName string) (bool, error) {
+func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
 	existing, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
 		Metadata: map[string]string{"session_name": sessionName},
 		Live:     true,

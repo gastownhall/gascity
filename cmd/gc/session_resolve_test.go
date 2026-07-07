@@ -941,10 +941,10 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot(): %v", err)
 	}
-	if bead, conflict := findNamedSessionConflict(snapshot, spec); !conflict {
-		t.Fatalf("findNamedSessionConflict() = false, want conflict; snapshot=%#v", snapshot.Open())
-	} else if bead.Metadata["template"] != "other" {
-		t.Fatalf("findNamedSessionConflict() bead template = %q, want other", bead.Metadata["template"])
+	if info, conflict := findNamedSessionConflictInfo(snapshot, spec); !conflict {
+		t.Fatalf("findNamedSessionConflictInfo() = false, want conflict; snapshot=%#v", snapshot.Open())
+	} else if info.Template != "other" {
+		t.Fatalf("findNamedSessionConflictInfo() info template = %q, want other", info.Template)
 	}
 
 	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")

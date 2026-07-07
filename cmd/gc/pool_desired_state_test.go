@@ -127,7 +127,7 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"rig/claude": 2}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -173,7 +173,7 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAlias(t *testing.T) {
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -217,7 +217,7 @@ func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -255,7 +255,7 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testin
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	reqs := result[0].Requests
 	if len(reqs) != 1 || reqs[0].SessionBeadID != "sess-vi6hhp" {
@@ -283,7 +283,7 @@ func TestComputePoolDesiredStates_ResumeResolvesPersistedBoundTemplate(t *testin
 		},
 	}}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -363,7 +363,7 @@ func TestComputePoolDesiredStates_TerminalProviderErrorSessionsDoNotBlockNewDema
 		sessionProviderTerminalErrorMetadataKey: "model_not_found",
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{stale}, map[string]int{"claude": 1})
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{stale}), map[string]int{"claude": 1})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -387,7 +387,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 1}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -428,7 +428,7 @@ func TestComputePoolDesiredStates_MaxCapsResumeBeads(t *testing.T) {
 		sessionBead("s3", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	// Max=2: only 2 of the 3 in-progress beads get sessions.
 	if len(result) != 1 {
@@ -485,7 +485,7 @@ func TestComputePoolDesiredStates_MaxOneTemplatesStillParticipateInDemand(t *tes
 		sessionBead("worker", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1 for max=1 demand", len(result))
@@ -602,7 +602,7 @@ func TestComputePoolDesiredStates_ClosedSessionNotResumed(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("dead-session", "closed")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	// The session bead is closed, so this shouldn't be a resume request.
 	// It also shouldn't be a new request because it has an assignee.
@@ -626,7 +626,7 @@ func TestComputePoolDesiredStates_DedupsResumeForSameSession(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	// Should deduplicate — only one resume request for sess-1.
 	resumeCount := 0
@@ -658,7 +658,7 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 		sessionBead("s3", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
@@ -732,7 +732,7 @@ func TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand(
 		},
 	}
 
-	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{manual}, map[string]int{"claude": 1})
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads([]beads.Bead{manual}), map[string]int{"claude": 1})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -782,7 +782,7 @@ func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) 
 		},
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{namedBead}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{namedBead}), nil)
 
 	resumeCount := 0
 	for _, ds := range result {
@@ -845,7 +845,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 10}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -879,7 +879,7 @@ func TestComputePoolDesiredStates_OpenAssignedWorkResumes(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("expected 1 request, got %#v", result)
@@ -905,7 +905,7 @@ func TestComputePoolDesiredStates_ResumeOverridesZeroScaleCheck(t *testing.T) {
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"claude": 0}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -945,7 +945,7 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"claude": 2}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -981,7 +981,7 @@ func TestComputePoolDesiredStates_AssignedSessionsDoNotConsumeNewDemand(t *testi
 		sessions = append(sessions, sessionBead(sessionID, "open"))
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 5})
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 5})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1019,7 +1019,7 @@ func TestComputePoolDesiredStates_InFlightNewSessionsConsumeScaleDemand(t *testi
 	}
 	scaleCheck := map[string]int{"claude": 3}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), scaleCheck)
 
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 3 {
@@ -1051,7 +1051,7 @@ func TestComputePoolDesiredStates_InFlightNewSessionsDoNotCreateZeroDemand(t *te
 	}
 	scaleCheck := map[string]int{"claude": 0}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), scaleCheck)
 
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 0 {
@@ -1069,7 +1069,7 @@ func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t
 	}
 	scaleCheck := map[string]int{"claude": 5}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1113,7 +1113,7 @@ func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *te
 	}
 	scaleCheck := map[string]int{"claude": 3}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1167,7 +1167,7 @@ func TestComputePoolDesiredStates_DoesNotResumeSessionAcrossExplicitRouteMismatc
 		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{session}), nil)
 
 	for _, state := range result {
 		for _, req := range state.Requests {
@@ -1200,7 +1200,7 @@ func TestComputePoolDesiredStates_DoesNotResumeLegacySessionAcrossExplicitRouteM
 		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{session}), nil)
 
 	for _, state := range result {
 		for _, req := range state.Requests {
@@ -1230,7 +1230,7 @@ func TestComputePoolDesiredStates_InFlightPredicateBranches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{tt.session}, map[string]int{"claude": 1})
+			result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads([]beads.Bead{tt.session}), map[string]int{"claude": 1})
 
 			if len(result) != 1 || len(result[0].Requests) != 1 {
 				t.Fatalf("result = %#v, want one in-flight request", result)
@@ -1249,7 +1249,7 @@ func TestComputePoolDesiredStates_StaleCreatingBeadStillConsumesNewDemand(t *tes
 	stale := poolSessionBeadWithState("sess-stale", "creating", "")
 	stale.CreatedAt = time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Add(-2 * staleCreatingStateTimeout)
 
-	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{stale}, map[string]int{"claude": 1})
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads([]beads.Bead{stale}), map[string]int{"claude": 1})
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("result = %#v, want one stale creating request preserving already-spent demand", result)
@@ -1271,7 +1271,7 @@ func TestComputePoolDesiredStates_InFlightSelectionRespectsCapsInStableOrder(t *
 		pendingPoolSessionBeadAt("sess-tie-a", base.Add(2*time.Minute)),
 	}
 
-	result := ComputePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 10})
+	result := ComputePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10})
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1298,7 +1298,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1331,7 +1331,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -1397,7 +1397,7 @@ func TestComputePoolDesiredStates_PerRigScoping(t *testing.T) {
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
 
 	counts := PoolDesiredCounts(result)
 	if counts["claude"] != 0 {
@@ -1436,7 +1436,7 @@ func TestResumeTier_AsleepSessionWithAssignedWork(t *testing.T) {
 
 	scaleCheck := map[string]int{"hello-world/polecat": 1}
 
-	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
 
 	// Must have a resume request pointing to mc-sctve.
 	var resumeFound bool
@@ -1525,31 +1525,31 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 	}
 
 	// A live named holder occupies the singleton's slot.
-	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")})["mayor"]; !ok {
-		t.Fatalf("live named alias-holder should mark mayor held; got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("active")}))
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("active")}))["mayor"]; !ok {
+		t.Fatalf("live named alias-holder should mark mayor held; got %v", canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("active")})))
 	}
 
 	// A failed-create holder released the alias -> must NOT be treated as held.
-	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")})["mayor"]; ok {
-		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("failed-create")}))
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("failed-create")}))["mayor"]; ok {
+		t.Fatalf("failed-create holder released its alias and must NOT mark mayor held (over-suppression hang); got %v", canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("failed-create")})))
 	}
 
 	// A closed holder no longer owns the alias.
 	closed := holder("active")
 	closed.Status = "closed"
-	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{closed})["mayor"]; ok {
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{closed}))["mayor"]; ok {
 		t.Fatalf("closed holder released its alias and must NOT mark mayor held; got held")
 	}
 
 	// A pool-managed bead is the pool's own instance, not the named alias holder.
 	poolManaged := holder("active")
 	poolManaged.Metadata[poolManagedMetadataKey] = boolMetadata(true)
-	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{poolManaged})["mayor"]; ok {
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{poolManaged}))["mayor"]; ok {
 		t.Fatalf("pool-managed bead is not the named alias holder and must NOT mark mayor held; got held")
 	}
 
 	// A drained holder released its alias.
-	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, []beads.Bead{holder("drained")})["mayor"]; ok {
+	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("drained")}))["mayor"]; ok {
 		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }

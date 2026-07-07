@@ -996,6 +996,10 @@ type supervisorServiceData struct {
 	SafeName      string
 	Path          string
 	ExtraEnv      []supervisorServiceEnvVar
+	// PortInUseExitCode is the exit code the supervisor returns on a duplicate
+	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
+	// so a duplicate install does not crash-loop on the shared port.
+	PortInUseExitCode int
 }
 
 type supervisorServiceEnvVar struct {
@@ -1016,14 +1020,15 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		xdgRuntimeDir = ""
 	}
 	return &supervisorServiceData{
-		GCPath:        gcPath,
-		LogPath:       supervisorLogPath(),
-		GCHome:        home,
-		XDGRuntimeDir: xdgRuntimeDir,
-		LaunchdLabel:  supervisorLaunchdLabel(),
-		SafeName:      sanitizeServiceName(filepath.Base(home)),
-		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:      supervisorServiceExtraEnv(),
+		GCPath:            gcPath,
+		LogPath:           supervisorLogPath(),
+		GCHome:            home,
+		XDGRuntimeDir:     xdgRuntimeDir,
+		LaunchdLabel:      supervisorLaunchdLabel(),
+		SafeName:          sanitizeServiceName(filepath.Base(home)),
+		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		ExtraEnv:          supervisorServiceExtraEnv(),
+		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
 
@@ -1311,6 +1316,15 @@ func supervisorSystemdServiceName() string {
 	return defaultSupervisorSystemdUnit
 }
 
+// supervisorLaunchdTemplate has no equivalent of systemd's
+// RestartPreventExitStatus: launchd's KeepAlive dict below has no
+// per-exit-code / LastExitStatus key, so a duplicate supervisor that exits
+// with supervisorExitCodePortInUse (see cmd_supervisor.go) is still
+// "Crashed" (any nonzero exit) and gets restarted regardless of exit code.
+// The port-in-use message is worded accordingly on darwin (see
+// supervisorPortInUseMessage) instead of falsely claiming "without restart".
+// Real macOS duplicate-instance suppression is a different mechanism and is
+// tracked separately: gc-s53wv.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1370,6 +1384,9 @@ KillMode=process
 ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
+# A duplicate supervisor that loses the shared API port exits with this code.
+# Restarting it would just crash-loop forever (see ga-ceq), so don't.
+RestartPreventExitStatus={{.PortInUseExitCode}}
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"

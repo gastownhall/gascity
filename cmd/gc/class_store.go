@@ -279,12 +279,14 @@ func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string,
 	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
 }
 
-// newCityMailProvider builds the controller's mail provider over the work store.
-// Identity today: it is byte-identical to newMailProvider — message persistence
-// and session reads are both the work store, with no relocated class store and
-// no recorder. When messaging relocates, resolveMailMessagesStore diverges and
-// this is where the two-store mail provider plugs in.
+// newCityMailProvider builds the controller's mail provider as a two-store mail
+// provider: message beads persist in the messaging-class store, and mail's
+// session reads/writes for addressing/identity resolution go to the session-class
+// store. Both resolve to the work store at the single-store bd backend, so this is
+// byte-identical to newMailProvider(workStore) today and diverges only once
+// [beads.classes.messaging] or [beads.classes.sessions] relocates a class.
 func newCityMailProvider(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) mail.Provider {
-	_ = resolveMailMessagesStore(workStore, cfg, cityPath, rec)
-	return newMailProvider(workStore)
+	msgStore := resolveMailMessagesStore(workStore, cfg, cityPath, rec)
+	sessStore := resolveSessionStore(workStore, cfg, cityPath, rec)
+	return newMailProviderWithSessionStore(msgStore, sessStore)
 }

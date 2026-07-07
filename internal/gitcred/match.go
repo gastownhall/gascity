@@ -13,20 +13,40 @@ type transport int
 
 const (
 	transportUnsupported transport = iota // file://, local paths — never match
-	transportHTTP                         // http(s) — helper/token_file/token_env rules
+	transportHTTP                         // plaintext http:// — token rules, but NOT the https-only built-in default
+	transportHTTPS                        // https:// — token rules and the https-only built-in default
 	transportSSH                          // ssh://, scp-form git@host: — ssh_key_file rules
 )
 
-// Match selects the credential rule for a host + repo path. Precedence is
-// layer-order across layers (an earlier layer beats a later one regardless of
-// prefix length) and longest path-prefix within a layer. Host comparison is
-// case-insensitive; path prefixes match on "/"-segment boundaries with the
-// trailing ".git" stripped from the repo segment. The transport gate is applied
-// by the caller via MatchSource; Match itself assumes http(s) semantics for
-// path matching and does not enforce transport (use MatchSource for the full
-// contract).
+// Match selects the credential rule for a host + repo path, assuming secure
+// https transport. Precedence is layer-order across layers (an earlier layer
+// beats a later one regardless of prefix length) and longest path-prefix within
+// a layer. Host comparison is case-insensitive; path prefixes match on
+// "/"-segment boundaries with the trailing ".git" stripped from the repo
+// segment. Because Match cannot see the request protocol, callers that serve
+// live git-credential requests must use MatchRequest so the built-in HTTPS-only
+// github.com default is withheld from plaintext http.
 func (r *Rules) Match(host, path string) (LoadedRule, bool) {
-	return r.matchTransport(host, path, transportHTTP)
+	return r.matchTransport(host, path, transportHTTPS)
+}
+
+// MatchRequest resolves the credential rule for a parsed git-credential request,
+// classifying transport from req.Protocol so the built-in HTTPS-only github.com
+// default is never served over plaintext http. Only "https" (case-insensitive)
+// counts as secure transport; every other protocol value, including "http", is
+// treated as insecure.
+func (r *Rules) MatchRequest(req Request) (LoadedRule, bool) {
+	return r.matchTransport(req.Host, req.Path, transportForProtocol(req.Protocol))
+}
+
+// transportForProtocol maps a git-credential "protocol" value to its transport
+// class. Only "https" is secure http transport; "http" and any other value are
+// treated as insecure so HTTPS-only rules are not served over plaintext.
+func transportForProtocol(protocol string) transport {
+	if strings.EqualFold(strings.TrimSpace(protocol), "https") {
+		return transportHTTPS
+	}
+	return transportHTTP
 }
 
 // MatchSource parses source into a clone URL, extracts host + path, and returns
@@ -58,6 +78,12 @@ func (r *Rules) matchTransport(host, path string, tr transport) (LoadedRule, boo
 			if !transportCompatible(rule.Rule, tr) {
 				continue
 			}
+			// The built-in ambient github.com token is an https convenience; never
+			// serve it over plaintext http, where the bearer token would travel in
+			// cleartext. File/command rules leave httpsOnly false and are unaffected.
+			if rule.httpsOnly && tr != transportHTTPS {
+				continue
+			}
 			mHost, mPath := splitMatch(rule.Match)
 			if mHost != host {
 				continue
@@ -78,13 +104,14 @@ func (r *Rules) matchTransport(host, path string, tr transport) (LoadedRule, boo
 }
 
 // transportCompatible reports whether rule may serve a URL of transport tr. A
-// token-style rule (helper/token_file/token_env) serves http(s); an ssh_key_file
-// rule serves ssh.
+// token-style rule (helper/token_file/token_env) serves both http and https; an
+// ssh_key_file rule serves ssh. The plaintext-vs-secure http distinction is
+// enforced separately, per-rule, via the httpsOnly gate in matchTransport.
 func transportCompatible(rule Rule, tr transport) bool {
 	if strings.TrimSpace(rule.SSHKeyFile) != "" {
 		return tr == transportSSH
 	}
-	return tr == transportHTTP
+	return tr == transportHTTP || tr == transportHTTPS
 }
 
 // splitMatch splits a normalized rule match ("host" or "host/path-prefix") into
@@ -177,7 +204,9 @@ func hostPathTransport(cloneURL string) (host, path string, tr transport) {
 		return "", "", transportUnsupported
 	}
 	switch strings.ToLower(u.Scheme) {
-	case "http", "https":
+	case "https":
+		return u.Hostname(), strings.Trim(u.Path, "/"), transportHTTPS
+	case "http":
 		return u.Hostname(), strings.Trim(u.Path, "/"), transportHTTP
 	case "ssh":
 		return u.Hostname(), strings.Trim(u.Path, "/"), transportSSH

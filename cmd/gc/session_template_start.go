@@ -96,8 +96,8 @@ func materializeSessionForTemplateWithOptions(
 
 	if hasNamed {
 		if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
-			if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-				if sn := bead.Metadata["session_name"]; sn != "" {
+			if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+				if sn := info.SessionNameMetadata; sn != "" {
 					return sn, nil
 				}
 			}
@@ -108,7 +108,7 @@ func materializeSessionForTemplateWithOptions(
 			if bead, ok := reopenClosedConfiguredNamedSessionBead(
 				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, stderr,
 			); ok {
-				if sn := strings.TrimSpace(bead.Metadata["session_name"]); sn != "" {
+				if sn := strings.TrimSpace(session.InfoFromPersistedBead(bead).SessionNameMetadata); sn != "" {
 					snapshot.add(bead)
 					return sn, nil
 				}
@@ -200,8 +200,8 @@ func materializeSessionForTemplateWithOptions(
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
-					if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-						if sn := bead.Metadata["session_name"]; sn != "" {
+					if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+						if sn := info.SessionNameMetadata; sn != "" {
 							return sn, nil
 						}
 					}
@@ -228,8 +228,8 @@ func materializeSessionForTemplateWithOptions(
 			return info.SessionName, nil
 		}
 		if snapshot, snapErr := loadSessionBeadSnapshot(store); snapErr == nil {
-			if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-				if sn := bead.Metadata["session_name"]; sn != "" {
+			if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+				if sn := info.SessionNameMetadata; sn != "" {
 					return sn, nil
 				}
 			}

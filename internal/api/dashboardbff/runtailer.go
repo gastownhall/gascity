@@ -125,6 +125,13 @@ type cityRunTailer struct {
 	beads   []beads.Bead
 	lastSeq uint64
 	ready   bool
+
+	// subMu guards the per-run detail-stream subscriber registry. It is a distinct
+	// lock from mu so a stream broadcast never contends with the hot fold-publish
+	// path's RLock/Lock; both are taken only briefly and never across a network
+	// write. See rundetail_stream.go.
+	subMu sync.Mutex
+	subs  map[*detailStreamSub]struct{}
 }
 
 // tailState carries the fold cursor across poll iterations: the byte offset into
@@ -369,6 +376,14 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	t.lastSeq = lastSeq
 	t.ready = true
 	t.mu.Unlock()
+
+	// This is the single change-gated publish point, so it is also the single
+	// place a detail-stream broadcast fires: notify every subscriber
+	// (non-blocking). A subscriber that has not yet drained its prior notify
+	// already has a rebuild pending, so a full buffer is a no-op — the
+	// per-connection byte-dedupe collapses the coalesced wakeups into at most one
+	// frame per real change.
+	t.notifySubscribers()
 	return marks
 }
 

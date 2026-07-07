@@ -229,7 +229,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 
@@ -401,7 +401,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 

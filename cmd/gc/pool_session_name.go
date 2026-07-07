@@ -44,6 +44,31 @@ func sessionBeadAssigneeIdentities(sb beads.Bead) []string {
 	return identities
 }
 
+// sessionBeadAssigneeIdentitiesInfo is the session.Info mirror of
+// sessionBeadAssigneeIdentities. It reads the RAW session_name
+// (Info.SessionNameMetadata) and the pre-normalized Info.AliasHistory.
+func sessionBeadAssigneeIdentitiesInfo(i session.Info) []string {
+	identities := make([]string, 0, 5)
+	if id := strings.TrimSpace(i.ID); id != "" {
+		identities = append(identities, id)
+	}
+	if sn := strings.TrimSpace(i.SessionNameMetadata); sn != "" {
+		identities = append(identities, sn)
+	}
+	if ni := strings.TrimSpace(i.ConfiguredNamedIdentity); ni != "" {
+		identities = append(identities, ni)
+	}
+	if al := strings.TrimSpace(i.Alias); al != "" {
+		identities = append(identities, al)
+	}
+	for _, prior := range i.AliasHistory {
+		if prior = strings.TrimSpace(prior); prior != "" {
+			identities = append(identities, prior)
+		}
+	}
+	return identities
+}
+
 type releasedPoolAssignment struct {
 	ID    string
 	Index int

@@ -239,8 +239,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// This is what real-world apps use to link beads to session logs.
 	sessionBeadID := ""
 	if p.sessionBeads != nil {
-		for _, b := range p.sessionBeads.Open() {
-			if b.Metadata["session_name"] == sessName {
+		for _, b := range p.sessionBeads.OpenInfos() {
+			if b.SessionNameMetadata == sessName {
 				sessionBeadID = b.ID
 				break
 			}

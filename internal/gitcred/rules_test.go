@@ -25,6 +25,8 @@ func writeCredFile(t *testing.T, path, content string, mode os.FileMode) {
 func TestLoadMissingFilesNotError(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 	rules, err := Load(t.TempDir())
 	if err != nil {
@@ -43,6 +45,8 @@ func TestLoadLayeredOrder(t *testing.T) {
 	city := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 
 	writeCredFile(t, filepath.Join(home, "credentials.toml"), `
@@ -78,6 +82,8 @@ func TestLoadEnvFileReplacesFileLayers(t *testing.T) {
 	city := t.TempDir()
 	explicit := filepath.Join(t.TempDir(), "explicit.toml")
 	t.Setenv("GC_HOME", home)
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 
 	writeCredFile(t, filepath.Join(home, "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o600)
@@ -102,6 +108,8 @@ func TestLoadInsecurePermissions(t *testing.T) {
 	city := t.TempDir()
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 	writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o644)
 
@@ -117,6 +125,8 @@ func TestLoadRejectsLiteralSecretKeys(t *testing.T) {
 			city := t.TempDir()
 			t.Setenv("GC_HOME", t.TempDir())
 			t.Setenv(EnvCredentialsFile, "")
+			t.Setenv("GITHUB_TOKEN", "")
+			t.Setenv("GH_TOKEN", "")
 			t.Setenv(EnvCredentialCommand, "")
 			writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"),
 				"[[credential]]\nmatch=\"a.com\"\n"+key+"=\"ghp_secretvalue\"\n", 0o600)
@@ -141,6 +151,8 @@ func TestLoadRejectsPointerCardinality(t *testing.T) {
 			city := t.TempDir()
 			t.Setenv("GC_HOME", t.TempDir())
 			t.Setenv(EnvCredentialsFile, "")
+			t.Setenv("GITHUB_TOKEN", "")
+			t.Setenv("GH_TOKEN", "")
 			t.Setenv(EnvCredentialCommand, "")
 			writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"), body, 0o600)
 			if _, err := Load(city); err == nil {
@@ -153,6 +165,8 @@ func TestLoadRejectsPointerCardinality(t *testing.T) {
 func TestLoadRecordsCommandLayer(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "my-helper get")
 	rules, err := Load("")
 	if err != nil {
@@ -163,10 +177,35 @@ func TestLoadRecordsCommandLayer(t *testing.T) {
 	}
 }
 
+func TestLoadCommandLayerSkipsGitHubDefault(t *testing.T) {
+	// With both an ambient GitHub token and a configured command layer, the
+	// built-in github.com default must NOT be created: the command layer is a
+	// no-rule fallback consulted only when no rule matches, so a default rule
+	// would shadow the deliberately-configured helper. Skipping the default
+	// keeps command-layer precedence, which is what the Load comment promises.
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "ghp_example")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv(EnvCredentialCommand, "my-helper get")
+	rules, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := rules.MatchSource("https://github.com/org/repo"); ok {
+		t.Fatalf("github.com default must be skipped when a command layer is configured")
+	}
+	if !rules.HasCommandLayer() {
+		t.Fatalf("expected the command layer to remain recorded")
+	}
+}
+
 func TestLoadSkipsCityLayerWhenRootEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 	writeCredFile(t, filepath.Join(home, "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o600)
 	rules, err := Load("")

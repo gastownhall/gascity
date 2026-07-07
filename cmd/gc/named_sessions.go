@@ -42,8 +42,22 @@ func isNamedSessionBead(b beads.Bead) bool {
 	return session.IsNamedSessionBead(b)
 }
 
+// isNamedSessionInfo is the session.Info mirror of isNamedSessionBead:
+// session.IsNamedSessionBead reads the trimmed configured_named_session flag,
+// which Info.ConfiguredNamedSession already projects identically.
+func isNamedSessionInfo(i session.Info) bool {
+	return i.ConfiguredNamedSession
+}
+
 func namedSessionIdentity(b beads.Bead) string {
 	return session.NamedSessionIdentity(b)
+}
+
+// namedSessionIdentityInfo is the session.Info mirror of namedSessionIdentity:
+// session.NamedSessionIdentityInfo reads the trimmed configured_named_identity,
+// which Info.ConfiguredNamedIdentity carries verbatim.
+func namedSessionIdentityInfo(i session.Info) string {
+	return session.NamedSessionIdentityInfo(i)
 }
 
 func configuredNamedSessionBeadHasSpec(b beads.Bead, cfg *config.City, cityName string) bool {
@@ -51,6 +65,22 @@ func configuredNamedSessionBeadHasSpec(b beads.Bead, cfg *config.City, cityName 
 		return false
 	}
 	identity := namedSessionIdentity(b)
+	if identity == "" {
+		return false
+	}
+	_, ok := findNamedSessionSpec(cfg, cityName, identity)
+	return ok
+}
+
+// configuredNamedSessionBeadHasSpecInfo is the session.Info mirror of
+// configuredNamedSessionBeadHasSpec: isNamedSessionInfo and namedSessionIdentityInfo
+// are the equivalence-proven siblings, and findNamedSessionSpec keys off the
+// projected identity string identically.
+func configuredNamedSessionBeadHasSpecInfo(i session.Info, cfg *config.City, cityName string) bool {
+	if cfg == nil || !isNamedSessionInfo(i) {
+		return false
+	}
+	identity := namedSessionIdentityInfo(i)
 	if identity == "" {
 		return false
 	}
@@ -66,11 +96,11 @@ func namedSessionContinuityEligible(b beads.Bead) bool {
 	return session.NamedSessionContinuityEligible(b)
 }
 
-func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (beads.Bead, bool) {
+func findCanonicalNamedSessionInfo(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (session.Info, bool) {
 	if sessionBeads == nil {
-		return beads.Bead{}, false
+		return session.Info{}, false
 	}
-	return session.FindCanonicalNamedSessionBead(sessionBeads.Open(), spec)
+	return session.FindCanonicalNamedSessionInfo(sessionBeads.OpenInfos(), spec)
 }
 
 // findClosedNamedSessionBead searches for a closed bead that was previously
@@ -87,11 +117,11 @@ func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 	return bead, ok
 }
 
-func findNamedSessionConflict(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (beads.Bead, bool) {
+func findNamedSessionConflictInfo(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (session.Info, bool) {
 	if sessionBeads == nil {
-		return beads.Bead{}, false
+		return session.Info{}, false
 	}
-	return session.FindNamedSessionConflict(sessionBeads.Open(), spec)
+	return session.FindNamedSessionConflictInfo(sessionBeads.OpenInfos(), spec)
 }
 
 func findConflictingNamedSessionSpecForBead(cfg *config.City, cityName string, b beads.Bead) (namedSessionSpec, bool, error) {
