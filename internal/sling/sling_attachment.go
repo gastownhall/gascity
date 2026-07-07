@@ -395,19 +395,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	if IsCustomSlingQuery(a) {
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return BeadCheckResult{Warnings: warnings}
+		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}
 
 	target := a.QualifiedName()
@@ -433,19 +421,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			}
 			return BeadCheckResult{Idempotent: true}
 		}
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return BeadCheckResult{Warnings: warnings}
+		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}
 
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
@@ -459,6 +435,14 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			}
 		}
 	}
+	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+}
+
+// routedStateWarnings reports human-readable warnings describing any existing
+// routing state on b (assignee, gc.routed_to metadata, and pool: labels) that
+// would collide with a fresh sling of beadID. It returns nil when b carries no
+// such state.
+func routedStateWarnings(b beads.Bead, beadID string) []string {
 	var warnings []string
 	if b.Assignee != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
@@ -471,5 +455,5 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
 		}
 	}
-	return BeadCheckResult{Warnings: warnings}
+	return warnings
 }
