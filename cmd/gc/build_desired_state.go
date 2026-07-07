@@ -765,7 +765,10 @@ func buildDesiredStateWithSessionBeads(
 		subPhaseStart = time.Now()
 		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
+		singletonPending := singletonPendingDemand{
+			aliasToCanonical: deterministicControlDispatcherRouteAliases(cfg),
+			workBeads:        unassignedRoutedBeads,
+		}
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -813,16 +816,17 @@ func buildDesiredStateWithSessionBeads(
 				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
 			}
 		}
-		if len(controlDispatcherOpenDemand) > 0 {
-			if scaleCheckCounts == nil {
-				scaleCheckCounts = make(map[string]int)
-			}
-			for template, hasDemand := range controlDispatcherOpenDemand {
-				if hasDemand && scaleCheckCounts[template] < 1 {
-					scaleCheckCounts[template] = 1
-				}
-			}
+		// Singleton pending-work pass: fold the deterministic control-dispatcher
+		// pending-work floor into the one pool-demand count. This is the readiness-
+		// independent half the Ready()-gated demand above cannot express — a
+		// blocked open control bead — so an idle singleton stays warm to finish it
+		// instead of draining and never respawning (#3454). Runs on the merged
+		// scaleCheckCounts so it covers both default-probe and custom-scale_check
+		// control dispatchers; clamped to one slot per template.
+		if scaleCheckCounts == nil {
+			scaleCheckCounts = make(map[string]int)
 		}
+		applySingletonPendingDemand(scaleCheckCounts, singletonPending)
 		if len(defaultNamedScaleTargets) > 0 {
 			var namedErrs []error
 			var partialTemplates map[string]bool
@@ -1474,6 +1478,55 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	return counts, partialTemplates, errs
 }
 
+// singletonPendingDemand carries the readiness-independent pending-work probe
+// for deterministic control dispatchers, folded into the single pool-demand
+// count via applySingletonPendingDemand. A control dispatcher's pending
+// work is the *not-ready* kind — an open, unassigned, routed control bead still
+// blocked on the attempt/scope it manages — which the Ready()-gated generic scan
+// deliberately excludes. Without this, a control dispatcher that goes fully idle
+// drains on demand<=0 (by design) and, because named/generic demand is computed
+// from readiness-gated signals, never respawns to finish the blocked work
+// (gastownhall/gascity#3454). Scoped to IsDeterministicControlDispatcher and
+// clamped to one slot per template so the singleton stays warm without spawning
+// {name}-N phantoms.
+type singletonPendingDemand struct {
+	// aliasToCanonical maps every route a deterministic control dispatcher
+	// answers to — its qualified name plus the pre-1.3 binding-stripped bare
+	// alias — back to its canonical qualified template key.
+	aliasToCanonical map[string]string
+	// workBeads is the cross-store set of open, unassigned, routed candidate
+	// beads already collected for the unassigned-routed re-home pass.
+	workBeads []beads.Bead
+}
+
+// deterministicControlDispatcherRouteAliases builds the route-alias -> canonical
+// template map for every deterministic control dispatcher configured on the
+// city. Pre-1.3 builds routed control beads to the binding-stripped bare name,
+// so honoring both keeps in-flight work persisted across an upgrade scaling the
+// qualified dispatcher (keyed by the template name the scaler matches).
+func deterministicControlDispatcherRouteAliases(cfg *config.City) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	aliasToCanonical := make(map[string]string)
+	for i := range cfg.Agents {
+		if !config.IsDeterministicControlDispatcher(&cfg.Agents[i]) {
+			continue
+		}
+		qualified := cfg.Agents[i].QualifiedName()
+		aliasToCanonical[qualified] = qualified
+		if bare := controlDispatcherBareRoute(qualified); bare != "" {
+			if _, taken := aliasToCanonical[bare]; !taken {
+				aliasToCanonical[bare] = qualified
+			}
+		}
+	}
+	if len(aliasToCanonical) == 0 {
+		return nil
+	}
+	return aliasToCanonical
+}
+
 func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
@@ -1574,6 +1627,43 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget) (map[st
 		}
 	}
 	return counts, demand, partialTemplates, errs
+}
+
+// applySingletonPendingDemand folds the deterministic control-dispatcher
+// pending-work probe into the single pool-demand count. For each open,
+// unassigned, routed candidate whose route resolves to a configured control
+// dispatcher, it raises that template's count to at least one so the singleton
+// stays warm to drain the queue. It is deliberately readiness-independent (the
+// pending control bead may still be blocked) yet still requires an actual
+// open+unassigned routed bead: an in_progress or already-assigned bead — a state
+// a control bead never reaches (open -> closed with an empty assignee, see
+// internal/dispatch/control.go) — raises no demand, so no worker-unclaimable
+// shape can hold a phantom singleton awake. The clamp to one preserves the
+// singleton invariant; drain-on-idle (isPoolExcess/beginSessionDrain) is
+// untouched.
+func applySingletonPendingDemand(counts map[string]int, singleton singletonPendingDemand) {
+	if len(singleton.aliasToCanonical) == 0 || len(singleton.workBeads) == 0 || counts == nil {
+		return
+	}
+	for _, wb := range singleton.workBeads {
+		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+			continue
+		}
+		for _, candidate := range controllerDemandRouteCandidates(wb) {
+			canonical, ok := singleton.aliasToCanonical[candidate]
+			if !ok {
+				continue
+			}
+			// Clamp to a single slot: the Ready()-gated arm may leave this
+			// template absent (count 0 for a blocked-only queue), so create the
+			// key at one; a queue of N pending control beads still drains
+			// sequentially through the one singleton.
+			if counts[canonical] < 1 {
+				counts[canonical] = 1
+			}
+			break
+		}
+	}
 }
 
 func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {
@@ -1701,47 +1791,6 @@ func controllerDemandRouteTarget(b beads.Bead, templates map[string]struct{}) st
 // stamped before root routing switched to gc.routed_to.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
 	return routedToAndLegacyWorkflowCandidates(b)
-}
-
-func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {
-	demand := make(map[string]bool)
-	if cfg == nil || len(workBeads) == 0 {
-		return demand
-	}
-	// Map every route a deterministic control dispatcher answers to — its
-	// qualified name plus the pre-1.3 binding-stripped bare alias — back to its
-	// canonical qualified template key. Pre-1.3 builds routed control beads to
-	// the bare name; honoring it keeps in-flight work persisted across an
-	// upgrade scaling the qualified dispatcher (keyed by the template name the
-	// scaler matches).
-	aliasToCanonical := make(map[string]string)
-	for i := range cfg.Agents {
-		if !config.IsDeterministicControlDispatcher(&cfg.Agents[i]) {
-			continue
-		}
-		qualified := cfg.Agents[i].QualifiedName()
-		aliasToCanonical[qualified] = qualified
-		if bare := controlDispatcherBareRoute(qualified); bare != "" {
-			if _, taken := aliasToCanonical[bare]; !taken {
-				aliasToCanonical[bare] = qualified
-			}
-		}
-	}
-	if len(aliasToCanonical) == 0 {
-		return demand
-	}
-	for _, wb := range workBeads {
-		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
-			continue
-		}
-		for _, candidate := range controllerDemandRouteCandidates(wb) {
-			if canonical, ok := aliasToCanonical[candidate]; ok {
-				demand[canonical] = true
-				break
-			}
-		}
-	}
-	return demand
 }
 
 func markScaleCheckPartialTemplate(partials map[string]bool, template string) map[string]bool {

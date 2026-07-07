@@ -10983,6 +10983,92 @@ func TestBuildDesiredState_OpenBlockedControlDispatcherWorkRetainsDemand(t *test
 	}
 }
 
+// TestBuildDesiredState_ControlDispatcherDemandShapes pins the observable
+// demand contract of the consolidated singleton pending-work rule across every
+// control-bead shape. It is the regression guard that the fold neither lost the
+// real pending-work coverage nor started raising demand for a shape a worker
+// cannot claim:
+//   - open + unassigned + BLOCKED routed  -> demand 1 (the not-ready floor)
+//   - open + unassigned + READY routed     -> demand 1 (readiness-gated arm)
+//   - in_progress + assigned (dead session) -> demand 0 (a shape control beads
+//     never reach; open->closed with an empty assignee, so raising demand here
+//     would strand a phantom singleton the work_query cannot claim)
+//   - no control bead at all                -> demand 0
+func TestBuildDesiredState_ControlDispatcherDemandShapes(t *testing.T) {
+	maxActive := 1
+	newCfg := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			}},
+		}
+	}
+	controlMeta := map[string]string{"gc.kind": "retry", "gc.routed_to": "core.control-dispatcher"}
+	demandFor := func(t *testing.T, seed func(store beads.Store)) int {
+		t.Helper()
+		store := beads.NewMemStore()
+		seed(store)
+		result := buildDesiredStateWithSessionBeads(
+			"test-city", t.TempDir(), time.Now().UTC(), newCfg(),
+			runtime.NewFake(), store, nil, newSessionBeadSnapshot(nil), nil, io.Discard,
+		)
+		return result.ScaleCheckCounts["core.control-dispatcher"]
+	}
+
+	t.Run("blocked open raises demand", func(t *testing.T) {
+		got := demandFor(t, func(store beads.Store) {
+			blocker, _ := store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
+			control, _ := store.Create(beads.Bead{Title: "cleanup", Type: "task", Status: "open", Metadata: controlMeta})
+			if err := store.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatalf("block: %v", err)
+			}
+		})
+		if got != 1 {
+			t.Fatalf("blocked-open demand = %d, want 1", got)
+		}
+	})
+
+	t.Run("ready open raises demand", func(t *testing.T) {
+		got := demandFor(t, func(store beads.Store) {
+			if _, err := store.Create(beads.Bead{Title: "cleanup", Type: "task", Status: "open", Metadata: controlMeta}); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+		})
+		if got != 1 {
+			t.Fatalf("ready-open demand = %d, want 1", got)
+		}
+	})
+
+	t.Run("in_progress assigned raises no demand", func(t *testing.T) {
+		got := demandFor(t, func(store beads.Store) {
+			c, _ := store.Create(beads.Bead{Title: "cleanup", Type: "task", Status: "open", Metadata: controlMeta})
+			ip := "in_progress"
+			assignee := "s-dead-session-12345"
+			if err := store.Update(c.ID, beads.UpdateOpts{Status: &ip, Assignee: &assignee}); err != nil {
+				t.Fatalf("update: %v", err)
+			}
+		})
+		if got != 0 {
+			t.Fatalf("in_progress+assigned demand = %d, want 0 (unclaimable shape)", got)
+		}
+	})
+
+	t.Run("no control bead raises no demand", func(t *testing.T) {
+		got := demandFor(t, func(store beads.Store) {
+			if _, err := store.Create(beads.Bead{Title: "root", Type: "task", Status: "open"}); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+		})
+		if got != 0 {
+			t.Fatalf("no-control-bead demand = %d, want 0", got)
+		}
+	})
+}
+
 // TestOpenControlDispatcherDemandHonorsBareLegacyRoute guards the upgrade gap:
 // control beads created by pre-1.3 builds route to the binding-stripped bare
 // name ("control-dispatcher"), not the qualified "core.control-dispatcher".
@@ -11007,9 +11093,13 @@ func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
 			"gc.routed_to": config.ControlDispatcherAgentName, // bare, pre-1.3 route
 		},
 	}}
-	demand := openControlDispatcherDemand(cfg, work)
-	if !demand["core.control-dispatcher"] {
-		t.Fatalf("openControlDispatcherDemand = %v, want demand keyed by qualified name from bare route", demand)
+	counts := map[string]int{}
+	applySingletonPendingDemand(counts, singletonPendingDemand{
+		aliasToCanonical: deterministicControlDispatcherRouteAliases(cfg),
+		workBeads:        work,
+	})
+	if counts["core.control-dispatcher"] != 1 {
+		t.Fatalf("applySingletonPendingDemand counts = %v, want demand keyed by qualified name from bare route", counts)
 	}
 }
 
