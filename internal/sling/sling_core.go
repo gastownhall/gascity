@@ -361,11 +361,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	}); err != nil {
 		return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 	}
-	checkAttachments := CheckNoMoleculeChildren
-	if isGraph && opts.Force {
-		checkAttachments = CheckNoMoleculeChildrenAllowLiveWorkflow
-	}
-	if err := checkAttachments(querier, beadID, deps.Store, &result); err != nil {
+	// The graph path returned above, so this is the legacy (non-graph) region:
+	// isGraph is always false here, so the former `isGraph && opts.Force`
+	// live-workflow allowance could never fire. Attachments are always checked
+	// with CheckNoMoleculeChildren on this path.
+	if err := CheckNoMoleculeChildren(querier, beadID, deps.Store, &result); err != nil {
 		return result, fmt.Errorf("%w", err)
 	}
 	run := func() (SlingResult, error) {
