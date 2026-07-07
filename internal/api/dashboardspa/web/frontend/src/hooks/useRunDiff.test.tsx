@@ -102,7 +102,7 @@ describe('useRunDiff', () => {
     );
   });
 
-  it('sends refresh=false on cheapRefresh (the event-driven cheap-lane client contract)', async () => {
+  it('omits refresh on cheapRefresh (the event-driven cheap-lane client contract)', async () => {
     mockRunDiff.mockResolvedValue(okDiff());
 
     const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));

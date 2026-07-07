@@ -9,9 +9,11 @@ interface RunDiffState {
   /** TTL-bypassing refresh — the manual Refresh lane; re-runs the git diff. */
   refresh: () => Promise<void>;
   /**
-   * TTL-absorbed refresh for high-frequency event-driven nudges. Reads the diff
-   * with refresh=false so the server's diff TTL coalesces a burst instead of
-   * re-running the git-exec chain per event. Use for the bead/session nudge.
+   * TTL-absorbed refresh for high-frequency event-driven nudges. Omits the
+   * refresh flag (the manual lane sets refresh=true) as a forward-compat client
+   * contract for a future server-side diff TTL cache; today the flag is dropped
+   * on the wire, so the live burst protection is the tab-gating + event
+   * coalescing, not the flag. Use for the bead/session nudge.
    */
   cheapRefresh: () => Promise<void>;
 }
