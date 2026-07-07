@@ -184,8 +184,8 @@ func TestTraceControllerSocketCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal status reply: %v", err)
 	}
-	if !bytes.Contains(statusPayload, []byte(`"arms"`)) {
-		t.Fatalf("status reply JSON = %s, want legacy arms alias", statusPayload)
+	if bytes.Contains(statusPayload, []byte(`"arms"`)) {
+		t.Fatalf("status reply JSON = %s, must not carry legacy arms alias", statusPayload)
 	}
 	select {
 	case <-pokeCh2:
@@ -214,52 +214,13 @@ func TestTraceControllerSocketCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal stop status reply: %v", err)
 	}
-	if !bytes.Contains(stopPayload, []byte(`"arms":[]`)) {
-		t.Fatalf("stop status reply JSON = %s, want empty legacy arms alias", stopPayload)
+	if bytes.Contains(stopPayload, []byte(`"arms"`)) {
+		t.Fatalf("stop status reply JSON = %s, must not carry legacy arms alias", stopPayload)
 	}
 	select {
 	case <-pokeCh3:
 	default:
 		t.Fatal("expected pokeCh to be signaled on stop")
-	}
-}
-
-func TestTraceStatusJSONAcceptsLegacySocketArms(t *testing.T) {
-	payload := []byte(`{
-		"ok": true,
-		"status": {
-			"city_path": "/tmp/trace-town",
-			"as_of": "2026-05-21T00:00:00Z",
-			"controller_running": true,
-			"controller_pid": 123,
-			"arms": [{
-				"scope_type": "template",
-				"scope_value": "repo/polecat",
-				"source": "manual",
-				"level": "detail",
-				"armed_at": "2026-05-21T00:00:00Z",
-				"expires_at": "2026-05-21T00:15:00Z",
-				"last_extended_at": "2026-05-21T00:00:00Z",
-				"updated_at": "2026-05-21T00:00:00Z"
-			}]
-		}
-	}`)
-
-	var reply traceControlReply
-	if err := json.Unmarshal(payload, &reply); err != nil {
-		t.Fatalf("unmarshal legacy trace status reply: %v", err)
-	}
-	if reply.Status == nil {
-		t.Fatal("status is nil")
-	}
-	if reply.Status.HeadSeq != 0 {
-		t.Fatalf("head_seq = %d, want old-controller default 0", reply.Status.HeadSeq)
-	}
-	if len(reply.Status.ActiveArms) != 1 {
-		t.Fatalf("active arms = %#v, want one legacy arm", reply.Status.ActiveArms)
-	}
-	if reply.Status.ActiveArms[0].ScopeValue != "repo/polecat" {
-		t.Fatalf("scope_value = %q, want repo/polecat", reply.Status.ActiveArms[0].ScopeValue)
 	}
 }
 

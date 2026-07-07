@@ -46,23 +46,6 @@ type traceStatusJSON struct {
 	ControllerPID     int        `json:"controller_pid,omitempty"`
 	HeadSeq           uint64     `json:"head_seq"`
 	ActiveArms        []TraceArm `json:"active_arms"`
-	LegacyArms        []TraceArm `json:"arms"`
-}
-
-func (s *traceStatusJSON) UnmarshalJSON(data []byte) error {
-	type traceStatusJSONAlias traceStatusJSON
-	var decoded traceStatusJSONAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	*s = traceStatusJSON(decoded)
-	if s.ActiveArms == nil && s.LegacyArms != nil {
-		s.ActiveArms = traceArmsJSONSlice(s.LegacyArms)
-	}
-	if s.LegacyArms == nil && s.ActiveArms != nil {
-		s.LegacyArms = traceArmsJSONSlice(s.ActiveArms)
-	}
-	return nil
 }
 
 type traceStatusResultJSON struct {
@@ -732,15 +715,7 @@ func traceStatusFromState(cityPath string, state TraceArmState, now time.Time) t
 		ControllerPID:     pid,
 		HeadSeq:           head,
 		ActiveArms:        arms,
-		LegacyArms:        traceArmsJSONSlice(arms),
 	}
-}
-
-func traceArmsJSONSlice(arms []TraceArm) []TraceArm {
-	if len(arms) == 0 {
-		return []TraceArm{}
-	}
-	return append([]TraceArm(nil), arms...)
 }
 
 func traceSocketControl(cityPath, command string, req traceControlRequest) (*traceStatusJSON, string, error) {
