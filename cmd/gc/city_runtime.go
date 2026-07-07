@@ -2017,6 +2017,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
 	}
 
+	// Rebuild convergence scopes against the reloaded config so rigs added,
+	// removed, or rebound by this reload are honored live (#2403). New
+	// scopes repopulate their active index via the needsStartupReconcile
+	// path on the next tick.
+	cr.rebuildConvergenceHandler()
+
 	// Ensure drain tracker and provider-health gate are initialized when bead store becomes available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
 		cr.sessionDrains = newDrainTracker()
