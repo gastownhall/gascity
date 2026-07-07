@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1039,6 +1041,94 @@ func TestWorkflowStatusTreatsSkippedAsSkipped(t *testing.T) {
 
 	if got := workflowStatus(bead); got != "skipped" {
 		t.Fatalf("workflowStatus(closed skipped) = %q, want skipped", got)
+	}
+}
+
+// oldInlineWorkflowBeadResponse reproduces the pre-refactor inline
+// struct-literal construction that the three build loops used, so
+// TestWorkflowBeadResponseFromBeadEquivalence can pin the new codec-backed
+// mapper against it field-for-field.
+func oldInlineWorkflowBeadResponse(bead beads.Bead) workflowBeadResponse {
+	return workflowBeadResponse{
+		ID:            bead.ID,
+		Title:         bead.Title,
+		Status:        workflowStatus(bead),
+		Kind:          workflowKind(bead),
+		StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
+		Attempt:       workflowAttempt(bead),
+		LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
+		ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
+		Assignee:      strings.TrimSpace(bead.Assignee),
+		Metadata:      cloneStringMap(bead.Metadata),
+	}
+}
+
+func TestWorkflowBeadResponseFromBeadEquivalence(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{
+			name: "fully populated with padded metadata",
+			bead: beads.Bead{
+				ID:       "step-1",
+				Title:    "Do the thing",
+				Status:   "in_progress",
+				Assignee: "  worker-1  ",
+				Type:     "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:          "  run  ",
+					beadmeta.OutcomeMetadataKey:       "",
+					beadmeta.AttemptMetadataKey:       "  2  ",
+					beadmeta.StepRefMetadataKey:       "  iteration.1.review  ",
+					beadmeta.LogicalBeadIDMetadataKey: "  logical-9  ",
+					beadmeta.ScopeRefMetadataKey:      "  gascity  ",
+				},
+			},
+		},
+		{
+			name: "minimal bead with nil metadata",
+			bead: beads.Bead{ID: "root-2", Title: "bare"},
+		},
+		{
+			name: "closed with fail outcome",
+			bead: beads.Bead{
+				ID:       "step-3",
+				Title:    "failed step",
+				Status:   "closed",
+				Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := workflowBeadResponseFromBead(tc.bead)
+			want := oldInlineWorkflowBeadResponse(tc.bead)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("workflowBeadResponseFromBead mismatch:\n got=%#v\nwant=%#v", got, want)
+			}
+			// Attempt pointer semantics: nil when unset, non-nil when > 0.
+			if (got.Attempt == nil) != (want.Attempt == nil) {
+				t.Fatalf("attempt pointer nilness mismatch: got=%v want=%v", got.Attempt, want.Attempt)
+			}
+			// nil source metadata must stay nil so the wire keeps "metadata": null.
+			if tc.bead.Metadata == nil && got.Metadata != nil {
+				t.Fatalf("nil metadata projected to non-nil: %#v", got.Metadata)
+			}
+		})
+	}
+
+	// Clone independence: mutating the source metadata after projection must
+	// not change the response map.
+	src := map[string]string{beadmeta.KindMetadataKey: "workflow"}
+	resp := workflowBeadResponseFromBead(beads.Bead{ID: "root-1", Metadata: src})
+	src[beadmeta.KindMetadataKey] = "mutated"
+	if resp.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+		t.Fatalf("response metadata not independent of source: %q", resp.Metadata[beadmeta.KindMetadataKey])
 	}
 }
 
