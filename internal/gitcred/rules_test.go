@@ -25,6 +25,8 @@ func writeCredFile(t *testing.T, path, content string, mode os.FileMode) {
 func TestLoadMissingFilesNotError(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 	rules, err := Load(t.TempDir())
 	if err != nil {
@@ -43,6 +45,8 @@ func TestLoadLayeredOrder(t *testing.T) {
 	city := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 
 	writeCredFile(t, filepath.Join(home, "credentials.toml"), `
@@ -78,6 +82,8 @@ func TestLoadEnvFileReplacesFileLayers(t *testing.T) {
 	city := t.TempDir()
 	explicit := filepath.Join(t.TempDir(), "explicit.toml")
 	t.Setenv("GC_HOME", home)
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 
 	writeCredFile(t, filepath.Join(home, "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o600)
@@ -102,6 +108,8 @@ func TestLoadInsecurePermissions(t *testing.T) {
 	city := t.TempDir()
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 	writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o644)
 
@@ -117,6 +125,8 @@ func TestLoadRejectsLiteralSecretKeys(t *testing.T) {
 			city := t.TempDir()
 			t.Setenv("GC_HOME", t.TempDir())
 			t.Setenv(EnvCredentialsFile, "")
+			t.Setenv("GITHUB_TOKEN", "")
+			t.Setenv("GH_TOKEN", "")
 			t.Setenv(EnvCredentialCommand, "")
 			writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"),
 				"[[credential]]\nmatch=\"a.com\"\n"+key+"=\"ghp_secretvalue\"\n", 0o600)
@@ -141,6 +151,8 @@ func TestLoadRejectsPointerCardinality(t *testing.T) {
 			city := t.TempDir()
 			t.Setenv("GC_HOME", t.TempDir())
 			t.Setenv(EnvCredentialsFile, "")
+			t.Setenv("GITHUB_TOKEN", "")
+			t.Setenv("GH_TOKEN", "")
 			t.Setenv(EnvCredentialCommand, "")
 			writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"), body, 0o600)
 			if _, err := Load(city); err == nil {
@@ -153,6 +165,8 @@ func TestLoadRejectsPointerCardinality(t *testing.T) {
 func TestLoadRecordsCommandLayer(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "my-helper get")
 	rules, err := Load("")
 	if err != nil {
@@ -167,6 +181,8 @@ func TestLoadSkipsCityLayerWhenRootEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv(EnvCredentialCommand, "")
 	writeCredFile(t, filepath.Join(home, "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o600)
 	rules, err := Load("")

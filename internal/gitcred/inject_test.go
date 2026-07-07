@@ -14,6 +14,10 @@ func clearCredEnv(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(EnvCredentialsFile, "")
 	t.Setenv(EnvCredentialCommand, "")
+	// Clear the ambient GitHub token env so the built-in github.com default rule
+	// stays inert and tests observe only their own configured rules.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 }
 
 func stubExe(t *testing.T, path string) {
@@ -167,5 +171,66 @@ func TestInjectionCommandLayerWiresHelper(t *testing.T) {
 	}
 	if inj.Matched {
 		t.Fatalf("command-layer fallback is not a rule match")
+	}
+}
+
+func TestInjectionGitHubDefaultTokenFromEnv(t *testing.T) {
+	// With no credentials.toml but an ambient GitHub token, the built-in
+	// github.com default rule authenticates an https github.com pack clone.
+	clearCredEnv(t)
+	t.Setenv("GITHUB_TOKEN", "ghp_example")
+	stubExe(t, "/usr/bin/gc")
+	inj, err := CredentialedNetworkArgs("/usr/bin/gc", "", "https://github.com/org/repo")
+	if err != nil {
+		t.Fatalf("CredentialedNetworkArgs: %v", err)
+	}
+	if !inj.Matched {
+		t.Fatalf("expected the built-in github.com default to match, got %+v", inj)
+	}
+	if len(inj.CfgArgs) == 0 {
+		t.Fatalf("expected credential config args, got none: %+v", inj)
+	}
+}
+
+func TestInjectionGitHubDefaultPrefersGithubToken(t *testing.T) {
+	// GITHUB_TOKEN takes priority over GH_TOKEN.
+	clearCredEnv(t)
+	t.Setenv("GH_TOKEN", "gh_example")
+	t.Setenv("GITHUB_TOKEN", "ghp_example")
+	rules, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rule, ok := rules.MatchSource("https://github.com/org/repo")
+	if !ok {
+		t.Fatalf("expected github.com default rule to match")
+	}
+	if rule.TokenEnv != "GITHUB_TOKEN" {
+		t.Fatalf("TokenEnv = %q, want GITHUB_TOKEN (priority over GH_TOKEN)", rule.TokenEnv)
+	}
+}
+
+func TestInjectionGitHubDefaultOnlyGitHubHost(t *testing.T) {
+	// The default token is scoped to github.com and never offered elsewhere.
+	clearCredEnv(t)
+	t.Setenv("GITHUB_TOKEN", "ghp_example")
+	rules, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := rules.MatchSource("https://gitlab.example.com/org/repo"); ok {
+		t.Fatalf("github.com default must not match a non-github host")
+	}
+}
+
+func TestInjectionGitHubDefaultInertWithoutToken(t *testing.T) {
+	// No ambient token → byte-identical to today (no rule, no injection).
+	clearCredEnv(t)
+	inj, err := CredentialedNetworkArgs("/usr/bin/gc", "", "https://github.com/org/repo")
+	if err != nil {
+		t.Fatalf("CredentialedNetworkArgs: %v", err)
+	}
+	if len(inj.CfgArgs) != 0 || len(inj.Env) != 0 || inj.Matched {
+		t.Fatalf("expected zero injection without a token, got %+v", inj)
 	}
 }

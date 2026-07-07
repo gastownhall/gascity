@@ -118,10 +118,43 @@ func Load(cityRoot string) (*Rules, error) {
 		}
 	}
 
+	// Built-in default layer, appended LAST so any explicit file rule (or the
+	// command layer) for the same host wins. It lets `gc` clone a private
+	// github.com pack over HTTPS using the ambient GitHub token — the ubiquitous
+	// convention used by CI and the gh CLI — without requiring a hand-written
+	// credentials.toml. Scoped strictly to the github.com host: the token is
+	// never offered to any other (possibly attacker-supplied) pack source.
+	if lyr := githubDefaultTokenLayer(); lyr != nil {
+		rules.layers = append(rules.layers, *lyr)
+	}
+
 	if strings.TrimSpace(os.Getenv(EnvCredentialCommand)) != "" {
 		rules.commandLayer = true
 	}
 	return rules, nil
+}
+
+// githubDefaultTokenEnvVars are the environment variables, in priority order,
+// that the built-in github.com default rule consults for a token. GITHUB_TOKEN
+// is the GitHub Actions convention; GH_TOKEN is the gh CLI convention.
+var githubDefaultTokenEnvVars = []string{"GITHUB_TOKEN", "GH_TOKEN"}
+
+// githubDefaultTokenLayer returns a single-rule layer that authenticates
+// https://github.com clones from the ambient GitHub token, or nil when no such
+// token is set (the byte-identical guarantee — no rule, no injection). The rule
+// binds to whichever env var is populated so the existing TokenEnv resolution
+// path (resolve.go) reads it unchanged.
+func githubDefaultTokenLayer() *layer {
+	for _, envVar := range githubDefaultTokenEnvVars {
+		if strings.TrimSpace(os.Getenv(envVar)) == "" {
+			continue
+		}
+		return &layer{rules: []LoadedRule{{
+			Rule:   Rule{Match: "github.com", TokenEnv: envVar},
+			Origin: "$" + envVar,
+		}}}
+	}
+	return nil
 }
 
 // loadFileLayer reads and validates a single credentials file. A missing file
