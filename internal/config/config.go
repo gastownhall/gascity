@@ -3401,6 +3401,18 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// EffectiveDefaultSlingFormula returns the default sling formula for
+// this agent, or "" if none is set.
+func (a *Agent) EffectiveDefaultSlingFormula() string {
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
+	}
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
+}
+
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
 // provider at both city scope and each rig scope. A provider is configured
 // only when it appears in cfg.Providers; workspace.provider selects the
