@@ -3208,6 +3208,47 @@ type Agent struct {
 	layout agentLayout
 }
 
+// Clone returns a deep copy of the agent. Every slice, map, and pointer field
+// is independently allocated so that mutating the clone never affects the
+// original (and vice versa) — the guarantee the pack-load cache and pool
+// expansion both rely on. Scalar and unexported value fields (including the
+// source/layout provenance enums) are carried over by the initial struct copy.
+//
+// This is the single deep-copy source for Agent: deepCopyAgents (pack cache)
+// and cmd/gc's pool deepCopyAgent both call through here. TestAgentCloneIsDeep
+// enforces completeness — any new reference-type field must be cloned here or
+// the build fails.
+func (a Agent) Clone() Agent {
+	out := a
+	out.PreStart = append([]string(nil), a.PreStart...)
+	out.Args = append([]string(nil), a.Args...)
+	out.ProcessNames = append([]string(nil), a.ProcessNames...)
+	out.NamepoolNames = append([]string(nil), a.NamepoolNames...)
+	out.InstallAgentHooks = append([]string(nil), a.InstallAgentHooks...)
+	out.Skills = append([]string(nil), a.Skills...)
+	out.MCP = append([]string(nil), a.MCP...)
+	out.SessionSetup = append([]string(nil), a.SessionSetup...)
+	out.SessionLive = append([]string(nil), a.SessionLive...)
+	out.InjectFragments = append([]string(nil), a.InjectFragments...)
+	out.AppendFragments = append([]string(nil), a.AppendFragments...)
+	out.InheritedAppendFragments = append([]string(nil), a.InheritedAppendFragments...)
+	out.DependsOn = append([]string(nil), a.DependsOn...)
+	out.SharedSkills = append([]string(nil), a.SharedSkills...)
+	out.SharedMCP = append([]string(nil), a.SharedMCP...)
+	out.Env = deepCopyStringMap(a.Env)
+	out.OptionDefaults = deepCopyStringMap(a.OptionDefaults)
+	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
+	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
+	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
+	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
+	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
+	out.Attach = copyBoolPtr(a.Attach)
+	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
+	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)
+	return out
+}
+
 // agentSource enumerates the configuration origins recognized by
 // describeSource. Discovery sites stamp exactly one value per agent.
 type agentSource uint8
