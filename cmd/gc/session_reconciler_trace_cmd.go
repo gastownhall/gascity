@@ -341,10 +341,6 @@ func cmdTraceStop(template string, all bool, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func cmdTraceStatus(stdout, stderr io.Writer) int {
-	return cmdTraceStatusWithJSON(false, stdout, stderr)
-}
-
 func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {

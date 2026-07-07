@@ -47,8 +47,8 @@ func TestTraceStartStopStatusOfflineFallback(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdTraceStatus(&stdout, &stderr); code != 0 {
-		t.Fatalf("cmdTraceStatus = %d; stderr=%s", code, stderr.String())
+	if code := cmdTraceStatusWithJSON(false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON = %d; stderr=%s", code, stderr.String())
 	}
 	if got := stdout.String(); !strings.Contains(got, "Head seq: 0") || !strings.Contains(got, "repo/polecat") {
 		t.Fatalf("status output = %q, want head_seq and arm info", got)
