@@ -100,6 +100,22 @@ describe('useFormulaRunDetailStream', () => {
     expect(cached).toMatchObject({ kind: 'loaded', detail: { title: 'Pushed title' } });
   });
 
+  it('tags each pushed frame with the effect-scoped cache key the stream was opened for', async () => {
+    // The frame must carry the (runId, scope) key the STREAM was opened for, not
+    // the caller's render-time key. During an A→B navigation the callback ref
+    // already points at run B while run A's EventSource is still open; without
+    // this tag, a late frame from A would be stored under B's key and flash A's
+    // detail as B's. Storing the frame under A's key lets the consumer drop it.
+    const onDetail = vi.fn();
+    renderHook(() => useFormulaRunDetailStream('wf-1', true, onDetail, 'rig', 'app'));
+
+    act(() => eventSources[0]?.open());
+    act(() => eventSources[0]?.emit('detail', JSON.stringify(runDetail({ title: 'A' }))));
+
+    await waitFor(() => expect(onDetail).toHaveBeenCalledTimes(1));
+    expect(onDetail.mock.calls[0]?.[1]).toBe(formulaRunDetailCacheKey('wf-1', 'rig', 'app'));
+  });
+
   it('reports a stream error via connection state so the caller can fall back', async () => {
     const { result } = renderHook(() => useFormulaRunDetailStream('wf-1', true, undefined));
     expect(result.current).toBe('connecting');

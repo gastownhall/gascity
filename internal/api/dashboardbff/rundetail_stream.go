@@ -2,6 +2,7 @@ package dashboardbff
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -62,14 +63,13 @@ func (t *cityRunTailer) subscriberCount() int {
 	return len(t.subs)
 }
 
-// notifySubscribers bumps the publish generation and wakes every subscriber with
-// a NON-BLOCKING send: a subscriber whose buffer is already full has a rebuild
-// pending, so dropping the extra wakeup coalesces bursts without ever blocking
-// the fold-publish path. The lock is held only to walk the registry (never
-// across a network write). Called from build().
+// notifySubscribers wakes every detail-stream subscriber with a NON-BLOCKING
+// send: a subscriber whose buffer is already full has a rebuild pending, so
+// dropping the extra wakeup coalesces bursts without ever blocking the
+// fold-publish path. The lock is held only to walk the registry (never across a
+// network write). Called from build().
 func (t *cityRunTailer) notifySubscribers() {
 	t.subMu.Lock()
-	t.generation++
 	for sub := range t.subs {
 		select {
 		case sub.notify <- struct{}{}:
@@ -88,114 +88,148 @@ func (t *cityRunTailer) notifySubscribers() {
 // frame into events.jsonl). The frame body is the same struct the GET serves, so
 // the client renders a pushed frame with zero refetch.
 func (p *Plane) registerRunDetailStream() {
-	p.mux.HandleFunc("GET /api/city/{cityName}/runs/{runId}/detail/stream", func(w http.ResponseWriter, r *http.Request) {
-		t, ok := p.cityRunTailer(r.PathValue("cityName"))
-		if !ok {
-			writeError(w, http.StatusNotFound, "unknown city")
-			return
-		}
-		runID := r.PathValue("runId")
+	p.mux.HandleFunc("GET /api/city/{cityName}/runs/{runId}/detail/stream", p.handleRunDetailStream)
+}
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			// A ResponseWriter that cannot flush cannot stream; fail closed so the
-			// SPA falls back to the GET + nudge path rather than hanging on a stream
-			// that never delivers a frame.
-			writeError(w, http.StatusInternalServerError, "streaming unsupported")
-			return
-		}
+// handleRunDetailStream serves one detail-stream connection. It prechecks the run
+// exactly like the GET so a 422/404/503 is returned BEFORE any SSE body is
+// committed, commits the event-stream headers, then hands off to
+// serveRunDetailStream for the subscribe + first-frame + push loop.
+func (p *Plane) handleRunDetailStream(w http.ResponseWriter, r *http.Request) {
+	t, ok := p.cityRunTailer(r.PathValue("cityName"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown city")
+		return
+	}
+	runID := r.PathValue("runId")
 
-		// Precheck exactly like the GET so the HTTP error is returned BEFORE any SSE
-		// body is committed: 422 for an unsupported (v1/wisp) run, 404 for a missing
-		// run once warm, 503 while the projection is still warming.
-		value, ready, err := t.detail(r.Context(), runID)
-		if err != nil {
-			var unsupported *runproj.UnsupportedRunError
-			if errors.As(err, &unsupported) {
-				writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
-					Error:  unsupported.Message,
-					Reason: string(unsupported.Reason),
-				})
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// A ResponseWriter that cannot flush cannot stream; fail closed so the
+		// SPA falls back to the GET + nudge path rather than hanging on a stream
+		// that never delivers a frame.
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	// Precheck exactly like the GET so the HTTP error is returned BEFORE any SSE
+	// body is committed: 422 for an unsupported (v1/wisp) run, 404 for a missing
+	// run once warm, 503 while the projection is still warming.
+	value, ready, err := t.detail(r.Context(), runID)
+	if err != nil {
+		writeRunDetailStreamPrecheckError(w, err, ready)
+		return
+	}
+
+	writeRunDetailStreamHeaders(w)
+
+	// Test seam: stage a fold that publishes in the [precheck → connect] window.
+	if runDetailStreamAfterPrecheck != nil {
+		runDetailStreamAfterPrecheck()
+	}
+
+	t.serveRunDetailStream(r.Context(), w, flusher, runID, value)
+}
+
+// writeRunDetailStreamPrecheckError maps a failed precheck detail() read to the
+// HTTP status the SPA's stream fallback expects, returned before any SSE body is
+// committed: 422 for an unsupported (v1/wisp) run, 503 while the projection is
+// still warming, 404 for a run absent once warm.
+func writeRunDetailStreamPrecheckError(w http.ResponseWriter, err error, ready bool) {
+	var unsupported *runproj.UnsupportedRunError
+	if errors.As(err, &unsupported) {
+		writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
+			Error:  unsupported.Message,
+			Reason: string(unsupported.Reason),
+		})
+		return
+	}
+	if !ready {
+		writeError(w, http.StatusServiceUnavailable, "run view is warming")
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown run")
+}
+
+// writeRunDetailStreamHeaders commits the SSE response headers and the 200 status.
+// After this the response is an event-stream body, so every later failure is
+// surfaced by a failed frame write rather than an HTTP status.
+func writeRunDetailStreamHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	// Defeat proxy buffering (nginx and friends) so frames flush end-to-end.
+	h.Set("X-Accel-Buffering", "no")
+	h.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+}
+
+// serveRunDetailStream registers this connection as a subscriber, sends the
+// current fold as the first frame, then pushes a new frame on every real change
+// until the client disconnects. precheckValue is the already-validated precheck
+// read, used only as the first-frame fallback when the post-subscribe re-read
+// transiently fails.
+//
+// Register BEFORE re-reading the current fold, then send THAT re-read as the
+// first frame — not the precheck value. A build() landing in the
+// [precheck → subscribe] window publishes but reaches no subscriber, so a first
+// frame built from the precheck value would pin this connection on a stale fold
+// until the NEXT build (which may never come for a run that goes idle).
+// Registering first closes that window: the buffered(1) notify is
+// level-triggered, so a build in the narrower [subscribe → re-read] sub-window
+// fills the buffer, the loop's first select drains it, and byte-dedupe collapses
+// the redundant wakeup if the re-read already captured it. The precheck read is
+// kept only for the 422/404/503 HTTP decision in the caller.
+func (t *cityRunTailer) serveRunDetailStream(
+	ctx context.Context,
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	runID string,
+	precheckValue runDetailMemoValue,
+) {
+	sub := t.subscribe()
+	defer t.unsubscribe(sub)
+
+	current, _, rebuildErr := t.detail(ctx, runID)
+	if rebuildErr != nil {
+		// The precheck already proved the run exists and is renderable; a
+		// transient re-read failure just falls back to that value.
+		current = precheckValue
+	}
+	lastSent := writeDetailFrame(w, flusher, current)
+
+	heartbeat := time.NewTicker(runDetailStreamHeartbeat)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			// A comment frame keeps the connection warm without perturbing the
+			// client's rendered detail.
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
 				return
 			}
-			if !ready {
-				writeError(w, http.StatusServiceUnavailable, "run view is warming")
-				return
+			flusher.Flush()
+		case <-sub.notify:
+			rebuilt, _, rebuildErr := t.detail(ctx, runID)
+			if rebuildErr != nil {
+				// A run that vanished from the fold (rotated out) or a transient
+				// projection error: keep the connection open on the last good frame
+				// rather than tearing down — a later fold may resurface it, and the
+				// client already has a coherent snapshot.
+				continue
 			}
-			writeError(w, http.StatusNotFound, "unknown run")
-			return
-		}
-
-		h := w.Header()
-		h.Set("Content-Type", "text/event-stream")
-		h.Set("Cache-Control", "no-cache")
-		h.Set("Connection", "keep-alive")
-		// Defeat proxy buffering (nginx and friends) so frames flush end-to-end.
-		h.Set("X-Accel-Buffering", "no")
-		h.Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusOK)
-
-		ctx := r.Context()
-
-		// Test seam: stage a fold that publishes in the [precheck → connect] window.
-		if runDetailStreamAfterPrecheck != nil {
-			runDetailStreamAfterPrecheck()
-		}
-
-		// Register BEFORE re-reading the current fold, then send THAT re-read as the
-		// first frame — not the precheck value. A build() landing in the
-		// [precheck → subscribe] window bumps the generation but reaches no
-		// subscriber, so a first frame built from the precheck value would pin this
-		// connection on a stale generation until the NEXT build (which may never come
-		// for a run that goes idle). Registering first closes that window: the
-		// buffered(1) notify is level-triggered, so a build in the narrower
-		// [subscribe → re-read] sub-window fills the buffer, the loop's first select
-		// drains it, and byte-dedupe collapses the redundant wakeup if the re-read
-		// already captured it. The precheck read is kept only for the 422/404/503
-		// HTTP decision above.
-		sub := t.subscribe()
-		defer t.unsubscribe(sub)
-
-		current, _, rebuildErr := t.detail(ctx, runID)
-		if rebuildErr != nil {
-			// The precheck already proved the run exists and is renderable; a
-			// transient re-read failure just falls back to that value.
-			current = value
-		}
-		lastSent := writeDetailFrame(w, flusher, current)
-
-		heartbeat := time.NewTicker(runDetailStreamHeartbeat)
-		defer heartbeat.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-heartbeat.C:
-				// A comment frame keeps the connection warm without perturbing the
-				// client's rendered detail.
-				if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-					return
-				}
-				flusher.Flush()
-			case <-sub.notify:
-				rebuilt, _, rebuildErr := t.detail(ctx, runID)
-				if rebuildErr != nil {
-					// A run that vanished from the fold (rotated out) or a transient
-					// projection error: keep the connection open on the last good frame
-					// rather than tearing down — a later fold may resurface it, and the
-					// client already has a coherent snapshot.
-					continue
-				}
-				// Byte-dedupe: only push when THIS run's marshaled bytes actually
-				// changed. An unrelated-run event bumped the generation and woke us,
-				// but if the run's own detail is identical we send nothing.
-				if bytes.Equal(lastSent, rebuilt.bytes) {
-					continue
-				}
-				lastSent = writeDetailFrame(w, flusher, rebuilt)
+			// Byte-dedupe: only push when THIS run's marshaled bytes actually
+			// changed. An unrelated-run event published a new fold and woke us, but
+			// if the run's own detail is identical we send nothing.
+			if bytes.Equal(lastSent, rebuilt.bytes) {
+				continue
 			}
+			lastSent = writeDetailFrame(w, flusher, rebuilt)
 		}
-	})
+	}
 }
 
 // writeDetailFrame writes one `id: / event: detail / data:` SSE frame carrying

@@ -15,11 +15,15 @@ export type RunDetailStreamState = 'unavailable' | 'connecting' | 'open' | 'clos
 
 /**
  * Open the per-run detail SSE stream and push each whole-DTO frame to `onDetail`
- * (a pure renderer of pushed snapshots — no refetch). Every adopted frame also
- * warms the SWR cache under {@link formulaRunDetailCacheKey} so a remount paints
- * instantly from the last pushed frame. The stream is the DETAIL refresh channel
- * that replaces the old bead/session nudge re-GET; the initial GET stays as first
- * paint and as the fallback when the stream is unavailable or errors.
+ * (a pure renderer of pushed snapshots — no refetch). `onDetail` receives the
+ * frame together with the effect-scoped {@link formulaRunDetailCacheKey} the
+ * stream was opened for, so the consumer can tag the frame by the run it belongs
+ * to rather than by its render-time key — a navigation to a different run can
+ * never store this run's frame under the new run's key. Every adopted frame also
+ * warms the SWR cache under that same key so a remount paints instantly from the
+ * last pushed frame. The stream is the DETAIL refresh channel that replaces the
+ * old bead/session nudge re-GET; the initial GET stays as first paint and as the
+ * fallback when the stream is unavailable or errors.
  *
  * Lifecycle mirrors useSessionStream: open on mount / param change, close on
  * unmount / change, no reconnect storm (a single EventSource per (runId, scope);
@@ -29,7 +33,7 @@ export type RunDetailStreamState = 'unavailable' | 'connecting' | 'open' | 'clos
 export function useFormulaRunDetailStream(
   runId: string | undefined,
   enabled: boolean,
-  onDetail: ((detail: FormulaRunDetail) => void) | undefined,
+  onDetail: ((detail: FormulaRunDetail, frameKey: string) => void) | undefined,
   scopeKind?: RunScopeKind,
   scopeRef?: string,
 ): RunDetailStreamState {
@@ -57,9 +61,13 @@ export function useFormulaRunDetailStream(
       const detail = parseDetailFrame(event.data, runId, malformedReportedRef);
       if (detail === null) return;
       // Warm the SWR entry so a remount is cache-warm, then hand the pushed
-      // frame to the renderer — zero refetch.
+      // frame to the renderer — zero refetch. Tag it with THIS effect's cacheKey
+      // (the run the stream was opened for), not the latest render's, so a frame
+      // arriving during an A→B navigation — before this effect's cleanup closes
+      // A's source, while onDetailRef already points at B's callback — is still
+      // stored under A's key and dropped by B's key comparison.
       setCached(cacheKey, { kind: 'loaded', detail });
-      onDetailRef.current?.(detail);
+      onDetailRef.current?.(detail, cacheKey);
       setState('open');
     };
     source.addEventListener('detail', onFrame);

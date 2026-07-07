@@ -11,11 +11,13 @@ interface FormulaRunDetailState {
   kind: 'idle' | 'loading' | 'ready' | 'failed' | 'unsupported' | 'not_found';
   refresh: () => Promise<void>;
   /**
-   * Whether the per-run SSE stream can carry detail updates. False only when the
-   * runtime has no EventSource (SSR/tests, or a browser without it), where the
-   * caller must keep the nudge-driven detail refresh alive. Transient stream
-   * errors self-heal via the browser's native EventSource reconnect, so they do
-   * NOT flip this false. See the P4 stream-vs-nudge division in FormulaRunDetail.
+   * Whether the per-run SSE stream can still carry detail updates, so the caller
+   * can leave detail to the stream and nudge only the diff. False when the runtime
+   * has no EventSource (SSR/tests, or a browser without it) OR when the stream has
+   * terminally closed (a fatal precheck: 422/404/503, which EventSource does not
+   * retry) — both mean detail would freeze unless the nudge keeps refreshing it. A
+   * transient reconnect ('connecting') stays true because the browser self-heals
+   * it. See the P4 stream-vs-nudge division in FormulaRunDetail.
    */
   streamActive: boolean;
 }
@@ -82,13 +84,16 @@ export function useFormulaRunDetail(
   // on every frame; we mirror the freshest frame into local state so the render
   // updates immediately without waiting for a cache re-read. The initial GET
   // (useCachedData) is still first paint and the fallback when the stream is
-  // unavailable or errors. The streamed frame is tagged with its cache key so a
-  // navigation to a different run never shows the previous run's pushed detail
-  // before its own first frame arrives.
+  // unavailable or errors. The frame is tagged with the cache key the STREAM was
+  // opened for (passed in by the stream hook), not this render's key, so a frame
+  // that arrives mid-navigation A→B — while the callback ref already points here
+  // but A's EventSource has not yet been closed — is stored under A's key and
+  // dropped by the `streamed.key === key` guard below rather than flashing A's
+  // detail under run B.
   const [streamed, setStreamed] = useState<{ key: string; detail: FormulaRunDetail } | null>(null);
   const onStreamDetail = useCallback(
-    (detail: FormulaRunDetail) => setStreamed({ key, detail }),
-    [key],
+    (detail: FormulaRunDetail, frameKey: string) => setStreamed({ key: frameKey, detail }),
+    [],
   );
   // F4: don't open the stream for a run the GET has definitively resolved as
   // non-streamable — an unsupported (v1/wisp, 422) or not_found (404) run has no
@@ -106,12 +111,15 @@ export function useFormulaRunDetail(
   );
   const streamedDetail = streamed?.key === key ? streamed.detail : null;
 
-  // A live stream carries detail; only 'unavailable' (no EventSource) means the
-  // caller must keep detail on the nudge-driven refresh. Transient stream errors
-  // (state 'closed'/'connecting') self-heal via the browser's native reconnect,
-  // so they keep streamActive true — a permanent unavailability is the only case
-  // that needs the nudge fallback.
-  const streamActive = streamState !== 'unavailable';
+  // A live stream carries detail, so the nudge lane refreshes only the diff. Only
+  // 'open' and 'connecting' count as active: 'connecting' is a transient reconnect
+  // the browser self-heals (readyState CONNECTING), so it briefly keeps the nudge
+  // on diff-only, which is fine. 'closed' is TERMINAL — EventSource sets it after a
+  // non-200/wrong-content-type precheck (422/404/503) and never reconnects, so the
+  // stream will push no further detail; it must release the nudge back to detail,
+  // exactly like 'unavailable' (no EventSource), or the view freezes at the last
+  // GET/frame. See the P4 stream-vs-nudge division in FormulaRunDetail.
+  const streamActive = streamState === 'open' || streamState === 'connecting';
 
   // A manual refresh must clear the pinned streamed frame so the fresh GET
   // renders (otherwise streamedDetail permanently shadows the refetch — the

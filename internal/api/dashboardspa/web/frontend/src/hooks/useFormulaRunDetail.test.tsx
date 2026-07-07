@@ -279,6 +279,23 @@ describe('useFormulaRunDetail SSE stream integration (P4)', () => {
     expect(result.current.streamActive).toBe(true);
   });
 
+  it('releases the nudge fallback (streamActive false) when the stream terminally closes', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // A live stream carries detail, so the nudge lane refreshes only the diff.
+    act(() => eventSources[0]?.open());
+    await waitFor(() => expect(result.current.streamActive).toBe(true));
+
+    // A fatal precheck (422/404/503) sets EventSource CLOSED with no reconnect,
+    // so the stream will push no further detail. streamActive MUST flip false so
+    // runDetailNudgeRefresh (tested directly in FormulaRunDetail.test.tsx) resumes
+    // refreshing detail as well as the diff — otherwise detail freezes at the last
+    // frame forever. A terminal close previously stayed "active" and froze detail.
+    act(() => eventSources[0]?.fail());
+    await waitFor(() => expect(result.current.streamActive).toBe(false));
+  });
+
   it('keeps a ready run streaming but tears the stream down once the run resolves unsupported (F4)', async () => {
     const { result: readyResult } = renderHook(() =>
       useFormulaRunDetail('wf-ready', 'city', 'test-city'),
