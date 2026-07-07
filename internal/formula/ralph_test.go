@@ -698,3 +698,58 @@ func TestMarkRalphBodyOutputSinksTracksBeadmetaExemptKinds(t *testing.T) {
 		t.Error("teardown-role step was marked as an output sink")
 	}
 }
+
+func TestApplyRalph_StampsControlForOnIterationRoot(t *testing.T) {
+	// Simple ralph (no children): iteration.1 work bead carries the stamp.
+	simple := []*Step{
+		{
+			ID:    "implement",
+			Title: "Implement",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+		},
+	}
+	got, err := ApplyRalph(simple)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	control, iteration := got[0], got[2]
+	if iteration.Metadata[beadmeta.ControlForMetadataKey] != "implement" {
+		t.Fatalf("simple iteration gc.control_for = %q, want implement", iteration.Metadata[beadmeta.ControlForMetadataKey])
+	}
+	if control.Metadata[beadmeta.StepIDMetadataKey] != "implement" {
+		t.Fatalf("control gc.step_id = %q, want implement (must match iteration gc.control_for)", control.Metadata[beadmeta.StepIDMetadataKey])
+	}
+	if _, ok := control.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("control must not carry gc.control_for")
+	}
+
+	// Nested ralph: only the iteration scope root carries the stamp; body
+	// children (which are not attempt roots) must not.
+	nested := []*Step{
+		{
+			ID:    "review-loop",
+			Title: "Review loop",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+			Children: []*Step{
+				{ID: "review", Title: "Review"},
+				{ID: "apply", Title: "Apply", Needs: []string{"review"}},
+			},
+		},
+	}
+	got2, err := ApplyRalph(nested)
+	if err != nil {
+		t.Fatalf("ApplyRalph nested failed: %v", err)
+	}
+	scope, reviewChild, applyChild := got2[2], got2[3], got2[4]
+	if scope.Metadata[beadmeta.ControlForMetadataKey] != "review-loop" {
+		t.Fatalf("nested scope gc.control_for = %q, want review-loop", scope.Metadata[beadmeta.ControlForMetadataKey])
+	}
+	if _, ok := reviewChild.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("body child %q must not carry gc.control_for", reviewChild.ID)
+	}
+	if _, ok := applyChild.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("body child %q must not carry gc.control_for", applyChild.ID)
+	}
+}

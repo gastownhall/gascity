@@ -262,3 +262,36 @@ func TestApplyRetriesFrozenSpecRoundTrips(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyRetriesStampsControlForOnAttemptRoot(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "review",
+			Title: "Review change",
+			Type:  "task",
+			Retry: &RetrySpec{MaxAttempts: 3},
+		},
+	}
+
+	got, err := ApplyRetries(steps)
+	if err != nil {
+		t.Fatalf("ApplyRetries failed: %v", err)
+	}
+	control, spec, attempt := got[0], got[1], got[2]
+
+	// The attempt root carries the durable lineage pointer to the control,
+	// which equals the control's step id.
+	if attempt.Metadata["gc.control_for"] != "review" {
+		t.Fatalf("attempt gc.control_for = %q, want review", attempt.Metadata["gc.control_for"])
+	}
+	if control.Metadata["gc.step_id"] != "review" {
+		t.Fatalf("control gc.step_id = %q, want review (must match attempt gc.control_for)", control.Metadata["gc.step_id"])
+	}
+	// Control and spec beads are not attempt roots — they must not be stamped.
+	if _, ok := control.Metadata["gc.control_for"]; ok {
+		t.Fatalf("control must not carry gc.control_for, got %q", control.Metadata["gc.control_for"])
+	}
+	if _, ok := spec.Metadata["gc.control_for"]; ok {
+		t.Fatalf("spec must not carry gc.control_for, got %q", spec.Metadata["gc.control_for"])
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -633,6 +634,13 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
 	rootMeta[beadmeta.StepIDMetadataKey] = stepID
 	rootMeta[beadmeta.StepRefMetadataKey] = attemptPrefix
+	// gc.control_for is the durable lineage pointer back to the control bead.
+	// Written AFTER the step.Metadata copy loop so a formula-authored value
+	// cannot shadow it. control.ID is a real store bead ID for top-level mints
+	// and the control's namespaced step ref for nested seeds
+	// (buildNestedControlSeed) — both are covered by findLatestAttempt's
+	// identity set.
+	rootMeta[beadmeta.ControlForMetadataKey] = control.ID
 	if step.OnComplete != nil {
 		rootMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
@@ -1342,9 +1350,11 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 	return strings.TrimSpace(bead.Metadata["molecule_failed"]) == "true"
 }
 
-// findLatestAttempt finds the most recent attempt/iteration child of a control bead.
-// Matches by gc.step_ref pattern: the attempt's step_ref ends with
-// .attempt.N or .iteration.N where the prefix matches the control's step_ref.
+// findLatestAttempt finds the most recent attempt/iteration child of a control
+// bead. It lists beads under the workflow root and, on empty result, walks the
+// control's blocks-dependencies; both feed latestAttemptFromCandidates, which
+// matches the durable gc.control_for lineage stamp (with a legacy ref-string
+// fallback for pre-S38 molecules) and returns the max gc.attempt.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -1391,7 +1401,85 @@ func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads
 	return latestAttemptFromCandidates(control, candidates), nil
 }
 
+// latestAttemptFromCandidates selects the control's latest attempt/iteration
+// root among candidates.
+//
+// Primary path (S38): match the durable gc.control_for lineage stamp against
+// the control's identity set — one string equality plus an integer max, no ref
+// parsing. Every attempt/iteration root minted since S38 carries this stamp
+// (buildAttemptRecipe and the compile-time first-attempt seeds). When no
+// candidate carries a matching stamp (in-flight molecules minted before S38),
+// it falls back to the deprecated ref-string cascade.
 func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) beads.Bead {
+	identity := controlIdentitySet(control)
+
+	var latest beads.Bead
+	latestAttempt := 0
+	for _, b := range candidates {
+		if isFailedPartialMolecule(b) {
+			continue
+		}
+		// Skip beads that are control infrastructure, not actual work. On the
+		// primary path only this control's own attempt roots carry its identity,
+		// so no scope-unless-ralph skip is needed (see legacy fallback).
+		if latestAttemptCandidateIsControlInfrastructure(b.Metadata[beadmeta.KindMetadataKey]) {
+			continue
+		}
+		cf := strings.TrimSpace(b.Metadata[beadmeta.ControlForMetadataKey])
+		if cf == "" || !identity[cf] {
+			continue
+		}
+		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
+		if attemptNum > latestAttempt {
+			latestAttempt = attemptNum
+			latest = b
+		}
+	}
+	if latest.ID != "" {
+		return latest
+	}
+	return latestAttemptFromCandidatesLegacyRefSurgery(control, candidates)
+}
+
+// controlIdentitySet returns the non-empty members of the control's identity:
+// its store bead ID plus its namespaced step ref and bare step id. A
+// gc.control_for stamp equal to any member points at this control (bead-ID
+// stamps come from runtime top-level mints; step-ref/step-id stamps come from
+// compile-time and nested seeds — see S38).
+func controlIdentitySet(control beads.Bead) map[string]bool {
+	identity := make(map[string]bool, 3)
+	for _, v := range []string{
+		control.ID,
+		control.Metadata[beadmeta.StepRefMetadataKey],
+		control.Metadata[beadmeta.StepIDMetadataKey],
+	} {
+		if v = strings.TrimSpace(v); v != "" {
+			identity[v] = true
+		}
+	}
+	return identity
+}
+
+// legacyAttemptLineageHits counts attempt-lineage recoveries served by the
+// deprecated pre-S38 ref-string cascade rather than the gc.control_for stamp.
+// Operators watch this drain to zero before the legacy path is deleted (S38
+// Phase 4). Package-level counter (not an event type) per the S38
+// trace-observability note.
+var legacyAttemptLineageHits int64
+
+// legacyAttemptLineageHitCount reports the number of attempt-lineage recoveries
+// served by the deprecated ref-string cascade. Observability/test hook.
+func legacyAttemptLineageHitCount() int64 {
+	return atomic.LoadInt64(&legacyAttemptLineageHits)
+}
+
+// latestAttemptFromCandidatesLegacyRefSurgery recovers attempt lineage by
+// parsing dotted step refs through a four-stage cascade.
+//
+// DEPRECATED: remove after the release following S38 — serves only molecules
+// minted before the gc.control_for stamp existed. New attempts resolve on the
+// primary equality path in latestAttemptFromCandidates.
+func latestAttemptFromCandidatesLegacyRefSurgery(control beads.Bead, candidates []beads.Bead) beads.Bead {
 	controlRef := control.Metadata[beadmeta.StepRefMetadataKey]
 	if controlRef == "" {
 		controlRef = control.ID
@@ -1467,6 +1555,9 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 			latestAttempt = attemptNum
 			latest = b
 		}
+	}
+	if latest.ID != "" {
+		atomic.AddInt64(&legacyAttemptLineageHits, 1)
 	}
 	return latest
 }

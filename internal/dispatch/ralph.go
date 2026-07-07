@@ -548,10 +548,20 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 				return nil, fmt.Errorf("remapping logical bead for retry clone %s: %w", newID, err)
 			}
 		}
+		if remapped := remappedControlForBeadID(mapping, old.Metadata[beadmeta.ControlForMetadataKey]); remapped != "" {
+			if err := store.SetMetadata(newID, beadmeta.ControlForMetadataKey, remapped); err != nil {
+				return nil, fmt.Errorf("remapping control_for for retry clone %s: %w", newID, err)
+			}
+		}
 	}
 	if remapped := remappedLogicalBeadID(mapping, prevCheck.Metadata[beadmeta.LogicalBeadIDMetadataKey]); remapped != "" {
 		if err := store.SetMetadata(newCheck.ID, beadmeta.LogicalBeadIDMetadataKey, remapped); err != nil {
 			return nil, fmt.Errorf("remapping logical bead for retry check %s: %w", newCheck.ID, err)
+		}
+	}
+	if remapped := remappedControlForBeadID(mapping, prevCheck.Metadata[beadmeta.ControlForMetadataKey]); remapped != "" {
+		if err := store.SetMetadata(newCheck.ID, beadmeta.ControlForMetadataKey, remapped); err != nil {
+			return nil, fmt.Errorf("remapping control_for for retry check %s: %w", newCheck.ID, err)
 		}
 	}
 
@@ -653,13 +663,25 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, old.ID)
 	}
 	meta[beadmeta.StepRefMetadataKey] = rewriteRetryStepRef(meta, old.Ref, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
-	if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
-		meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
-	}
 	metadataRefs := map[string]string(nil)
+	// gc.control_for: a bead-ID-valued pointer at a bead re-minted in this plan
+	// is remapped to the clone's new ID via MetadataRefs (the applier
+	// substitutes the created ID), mirroring gc.logical_bead_id below (S38 W7).
+	// Step-ref-valued pointers stay on the string rewrite.
+	if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
+		if attemptIDs[controlFor] {
+			metadataRefs = make(map[string]string, 1)
+			metadataRefs[beadmeta.ControlForMetadataKey] = controlFor
+			delete(meta, beadmeta.ControlForMetadataKey)
+		} else {
+			meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
+		}
+	}
 	if oldLogicalID := strings.TrimSpace(old.Metadata[beadmeta.LogicalBeadIDMetadataKey]); oldLogicalID != "" {
 		if attemptIDs[oldLogicalID] {
-			metadataRefs = make(map[string]string, 1)
+			if metadataRefs == nil {
+				metadataRefs = make(map[string]string, 1)
+			}
 			metadataRefs[beadmeta.LogicalBeadIDMetadataKey] = oldLogicalID
 			delete(meta, beadmeta.LogicalBeadIDMetadataKey)
 		} else {
@@ -1112,6 +1134,21 @@ func remappedLogicalBeadID(mapping map[string]string, raw string) string {
 		return mapped
 	}
 	return logicalID
+}
+
+// remappedControlForBeadID returns the new bead ID for a bead-ID-valued
+// gc.control_for pointer that referenced a bead re-minted in this retry clone
+// (i.e. the old value is a mapping key). It returns "" for step-ref-valued
+// pointers and for bead IDs outside the clone set — those keep the value
+// produced by rewriteRetryControlFor at clone time. This mirrors the
+// gc.logical_bead_id remap so cloned attempt roots point at the cloned
+// nested control's NEW bead ID (S38 W6).
+func remappedControlForBeadID(mapping map[string]string, raw string) string {
+	controlFor := strings.TrimSpace(raw)
+	if controlFor == "" {
+		return ""
+	}
+	return mapping[controlFor]
 }
 
 func resolveExistingRalphRetryFromBeads(store beads.Store, all []beads.Bead, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string) (map[string]string, error) {

@@ -101,6 +101,9 @@ func expandRalph(step *Step) ([]*Step, error) {
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.StepRefMetadataKey:     iterationID,
+		// gc.control_for is the durable lineage pointer to the ralph control
+		// (step.ID here, which the control carries as gc.step_id).
+		beadmeta.ControlForMetadataKey: step.ID,
 	})
 	delete(iteration.Metadata, beadmeta.ScopeRefMetadataKey)
 	delete(iteration.Metadata, beadmeta.ScopeRoleMetadataKey)
@@ -142,6 +145,9 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
 		beadmeta.StepRefMetadataKey:     iterationID,
+		// gc.control_for on the scope root only (body children hang off it via
+		// gc.scope_ref and are not attempt roots — they must not be stamped).
+		beadmeta.ControlForMetadataKey: step.ID,
 	})
 	if step.OnComplete != nil {
 		iteration.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
