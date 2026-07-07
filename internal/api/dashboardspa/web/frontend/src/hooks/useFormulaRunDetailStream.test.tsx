@@ -96,6 +96,7 @@ describe('useFormulaRunDetailStream', () => {
     await waitFor(() => expect(onDetail).toHaveBeenCalledTimes(1));
     expect(onDetail).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Pushed title', runId: 'wf-1' }),
+      expect.any(String),
     );
     // The cache is warmed so a remount paints instantly from the pushed frame.
     const cached = getCached(formulaRunDetailCacheKey('wf-1'));
