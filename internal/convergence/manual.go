@@ -59,22 +59,6 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 	// Compute cumulative duration for terminated event.
 	_, cumDur := h.computeDurations(beadID, eventWispID)
 
-	// Write ordering: terminal_reason, terminal_actor, clear waiting_reason,
-	// then state=terminated, then EventTerminated (TierCritical, before CloseBead),
-	// then CloseBead, then ManualApprove (TierBestEffort), then last_processed_wisp LAST.
-	if err := h.Store.SetMetadata(beadID, FieldTerminalReason, TerminalApproved); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting terminal reason: %w", err)
-	}
-	if err := h.Store.SetMetadata(beadID, FieldTerminalActor, actor); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting terminal actor: %w", err)
-	}
-	if err := h.Store.SetMetadata(beadID, FieldWaitingReason, ""); err != nil {
-		return HandlerResult{}, fmt.Errorf("clearing waiting reason: %w", err)
-	}
-	if err := h.Store.SetMetadata(beadID, FieldState, StateTerminated); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting state to terminated: %w", err)
-	}
-
 	// Emit EventTerminated BEFORE CloseBead — TierCritical requires at-least-once
 	// delivery, so it must be emitted while the bead is still open for reconciliation
 	// replay if the controller crashes before CloseBead completes.
@@ -85,12 +69,6 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 		Actor:                actor,
 		CumulativeDurationMs: cumDur.Milliseconds(),
 	}
-	h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
-
-	if err := h.Store.CloseBead(beadID, CloseReasonManualApprove); err != nil {
-		return HandlerResult{}, fmt.Errorf("closing bead %q: %w", beadID, err)
-	}
-
 	// Emit ManualApprove AFTER CloseBead — TierBestEffort, fire-and-forget.
 	approvePayload := ManualActionPayload{
 		Actor:      actor,
@@ -99,13 +77,28 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 		Iteration:  iterationCount,
 		WispID:     NullableString(eventWispID),
 	}
-	h.emitEvent(EventManualApprove, EventIDManualApprove(beadID), beadID, approvePayload)
 
-	// last_processed_wisp LAST — dedup marker contract.
-	if lastProcessedWisp != "" {
-		if err := h.Store.SetMetadata(beadID, FieldLastProcessedWisp, lastProcessedWisp); err != nil {
-			return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
-		}
+	// Write ordering: terminal_reason, terminal_actor, clear waiting_reason,
+	// then state=terminated, then EventTerminated (TierCritical, before CloseBead),
+	// then CloseBead, then ManualApprove (TierBestEffort), then last_processed_wisp LAST.
+	if err := h.commit(beadID,
+		[]metaWrite{
+			{FieldTerminalReason, TerminalApproved, "setting terminal reason"},
+			{FieldTerminalActor, actor, "setting terminal actor"},
+			{FieldWaitingReason, "", "clearing waiting reason"},
+			{FieldState, StateTerminated, "setting state to terminated"},
+		},
+		func() error {
+			h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
+			if err := h.Store.CloseBead(beadID, CloseReasonManualApprove); err != nil {
+				return fmt.Errorf("closing bead %q: %w", beadID, err)
+			}
+			h.emitEvent(EventManualApprove, EventIDManualApprove(beadID), beadID, approvePayload)
+			return nil
+		},
+		metaWrite{FieldLastProcessedWisp, lastProcessedWisp, "setting last processed wisp"},
+	); err != nil {
+		return HandlerResult{}, err
 	}
 
 	return HandlerResult{
@@ -364,59 +357,7 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 	// Compute cumulative duration for terminated event.
 	_, cumDur := h.computeDurations(beadID, eventWispID)
 
-	// Step 6: Write ordering: terminal_reason, terminal_actor, clear waiting_reason,
-	// then state=terminated.
-	if err := h.Store.SetMetadata(beadID, FieldTerminalReason, TerminalStopped); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting terminal reason: %w", err)
-	}
-	if err := h.Store.SetMetadata(beadID, FieldTerminalActor, actor); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting terminal actor: %w", err)
-	}
-	if err := h.Store.SetMetadata(beadID, FieldWaitingReason, ""); err != nil {
-		return HandlerResult{}, fmt.Errorf("clearing waiting reason: %w", err)
-	}
-	if err := h.Store.SetMetadata(beadID, FieldState, StateTerminated); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting state to terminated: %w", err)
-	}
-
-	// Step 7a: Emit synthetic ConvergenceIteration for force-closed wisp
-	// BEFORE CloseBead — TierCritical requires at-least-once delivery.
-	if forceClosedWisp && activeWisp != "" {
-		wispIteration := iterationCount // force-closed wisp is the latest
-		iterDur, synthCumDur := h.computeDurations(beadID, activeWisp)
-		gateMode := meta[FieldGateMode]
-		if gateMode == "" {
-			gateMode = GateModeManual
-		}
-		synthPayload := IterationPayload{
-			Iteration:            wispIteration,
-			WispID:               activeWisp,
-			Action:               string(ActionStopped),
-			GateMode:             gateMode,
-			IterationDurationMs:  iterDur.Milliseconds(),
-			CumulativeDurationMs: synthCumDur.Milliseconds(),
-		}
-		h.emitEvent(EventIteration, EventIDIteration(beadID, wispIteration), beadID, synthPayload)
-	}
-
-	// Step 7b: Emit EventTerminated BEFORE CloseBead — TierCritical requires
-	// at-least-once delivery, so it must be emitted while the bead is still
-	// open for reconciliation replay if the controller crashes.
-	termPayload := TerminatedPayload{
-		TerminalReason:       TerminalStopped,
-		TotalIterations:      iterationCount,
-		FinalStatus:          "closed",
-		Actor:                actor,
-		CumulativeDurationMs: cumDur.Milliseconds(),
-	}
-	h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
-
-	// Step 8: CloseBead.
-	if err := h.Store.CloseBead(beadID, CloseReasonManualStop); err != nil {
-		return HandlerResult{}, fmt.Errorf("closing bead %q: %w", beadID, err)
-	}
-
-	// Step 9: Emit ManualStop AFTER CloseBead — TierBestEffort, fire-and-forget.
+	// Step 9: ManualStop is emitted AFTER CloseBead — TierBestEffort, fire-and-forget.
 	stopPayload := ManualActionPayload{
 		Actor:      actor,
 		PriorState: state,
@@ -424,18 +365,69 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		Iteration:  iterationCount,
 		WispID:     NullableString(eventWispID),
 	}
-	h.emitEvent(EventManualStop, EventIDManualStop(beadID), beadID, stopPayload)
 
-	// Step 10: last_processed_wisp LAST — dedup marker contract.
-	// After force-close, the force-closed wisp becomes the highest closed wisp.
+	// Step 10: after force-close, the force-closed wisp becomes the highest
+	// closed wisp, so it is the dedup marker.
 	finalLPW := lastProcessedWisp
 	if forceClosedWisp && activeWisp != "" {
 		finalLPW = activeWisp
 	}
-	if finalLPW != "" {
-		if err := h.Store.SetMetadata(beadID, FieldLastProcessedWisp, finalLPW); err != nil {
-			return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
-		}
+
+	// Steps 6-10 commit: terminal_reason, terminal_actor, clear waiting_reason,
+	// state=terminated; then (7a synthetic iteration, 7b EventTerminated,
+	// 8 CloseBead, 9 ManualStop) before the dedup marker; last_processed_wisp LAST.
+	if err := h.commit(beadID,
+		[]metaWrite{
+			{FieldTerminalReason, TerminalStopped, "setting terminal reason"},
+			{FieldTerminalActor, actor, "setting terminal actor"},
+			{FieldWaitingReason, "", "clearing waiting reason"},
+			{FieldState, StateTerminated, "setting state to terminated"},
+		},
+		func() error {
+			// Step 7a: Emit synthetic ConvergenceIteration for force-closed wisp
+			// BEFORE CloseBead — TierCritical requires at-least-once delivery.
+			if forceClosedWisp && activeWisp != "" {
+				wispIteration := iterationCount // force-closed wisp is the latest
+				iterDur, synthCumDur := h.computeDurations(beadID, activeWisp)
+				gateMode := meta[FieldGateMode]
+				if gateMode == "" {
+					gateMode = GateModeManual
+				}
+				synthPayload := IterationPayload{
+					Iteration:            wispIteration,
+					WispID:               activeWisp,
+					Action:               string(ActionStopped),
+					GateMode:             gateMode,
+					IterationDurationMs:  iterDur.Milliseconds(),
+					CumulativeDurationMs: synthCumDur.Milliseconds(),
+				}
+				h.emitEvent(EventIteration, EventIDIteration(beadID, wispIteration), beadID, synthPayload)
+			}
+
+			// Step 7b: Emit EventTerminated BEFORE CloseBead — TierCritical requires
+			// at-least-once delivery, so it must be emitted while the bead is still
+			// open for reconciliation replay if the controller crashes.
+			termPayload := TerminatedPayload{
+				TerminalReason:       TerminalStopped,
+				TotalIterations:      iterationCount,
+				FinalStatus:          "closed",
+				Actor:                actor,
+				CumulativeDurationMs: cumDur.Milliseconds(),
+			}
+			h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
+
+			// Step 8: CloseBead.
+			if err := h.Store.CloseBead(beadID, CloseReasonManualStop); err != nil {
+				return fmt.Errorf("closing bead %q: %w", beadID, err)
+			}
+
+			// Step 9: Emit ManualStop AFTER CloseBead.
+			h.emitEvent(EventManualStop, EventIDManualStop(beadID), beadID, stopPayload)
+			return nil
+		},
+		metaWrite{FieldLastProcessedWisp, finalLPW, "setting last processed wisp"},
+	); err != nil {
+		return HandlerResult{}, err
 	}
 
 	return HandlerResult{
