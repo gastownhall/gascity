@@ -346,21 +346,20 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-			ctx,
-			spec.Identity,
-			spec.SessionName,
-			qualifiedTemplate,
-			spec.Identity,
-			launchCommand.Command,
-			workDir,
-			resolved.Name,
-			transport,
-			sessionEnv,
-			resume,
-			hints,
-			extraMeta,
-		)
+		info, createErr = mgr.CreateSession(ctx, session.CreateOptions{
+			Alias:        spec.Identity,
+			ExplicitName: spec.SessionName,
+			Template:     qualifiedTemplate,
+			Title:        spec.Identity,
+			Command:      launchCommand.Command,
+			WorkDir:      workDir,
+			Provider:     resolved.Name,
+			Transport:    transport,
+			Env:          sessionEnv,
+			Resume:       resume,
+			Hints:        hints,
+			ExtraMeta:    extraMeta,
+		})
 		return createErr
 	})
 	if err == nil {
