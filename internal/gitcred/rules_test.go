@@ -177,6 +177,29 @@ func TestLoadRecordsCommandLayer(t *testing.T) {
 	}
 }
 
+func TestLoadCommandLayerSkipsGitHubDefault(t *testing.T) {
+	// With both an ambient GitHub token and a configured command layer, the
+	// built-in github.com default must NOT be created: the command layer is a
+	// no-rule fallback consulted only when no rule matches, so a default rule
+	// would shadow the deliberately-configured helper. Skipping the default
+	// keeps command-layer precedence, which is what the Load comment promises.
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "ghp_example")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv(EnvCredentialCommand, "my-helper get")
+	rules, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := rules.MatchSource("https://github.com/org/repo"); ok {
+		t.Fatalf("github.com default must be skipped when a command layer is configured")
+	}
+	if !rules.HasCommandLayer() {
+		t.Fatalf("expected the command layer to remain recorded")
+	}
+}
+
 func TestLoadSkipsCityLayerWhenRootEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)

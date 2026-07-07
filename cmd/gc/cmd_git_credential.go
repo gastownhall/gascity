@@ -58,7 +58,7 @@ func runGitCredential(op string, stdin io.Reader, stdout, stderr io.Writer) erro
 		return err
 	}
 
-	rule, matched := rules.Match(req.Host, req.Path)
+	rule, matched := rules.MatchRequest(req)
 	if !matched {
 		if !rules.HasCommandLayer() {
 			// Protocol decline: zero output, exit 0. git then fails under
