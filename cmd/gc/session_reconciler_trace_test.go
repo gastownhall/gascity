@@ -658,7 +658,7 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 		// desiredState makes it undesired.
 		session := env.createSessionBead("worker", "worker")
 
-		var store beads.Store = env.store
+		store := env.store
 		if injectLivenessErr {
 			// Fail the liveness probe's read of just this session. With sp=nil,
 			// handle construction surfaces the failure as an observation error —
