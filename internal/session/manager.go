@@ -1761,40 +1761,9 @@ func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templa
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		state := normalizeInfoState(State(b.Metadata["state"]))
-
-		// Filter by state.
-		if stateFilter != "" && stateFilter != "all" {
-			match := false
-			for _, s := range strings.Split(stateFilter, ",") {
-				switch {
-				case s == "closed" && b.Status == "closed":
-					match = true
-				case s == "open" && b.Status == "open":
-					match = true
-				case b.Status != "closed" && s == string(state):
-					// Only match metadata state for non-closed beads.
-					match = true
-				}
-				if match {
-					break
-				}
-			}
-			if !match {
-				continue
-			}
-		} else if stateFilter == "" {
-			// Default: exclude closed sessions.
-			if b.Status == "closed" {
-				continue
-			}
-		}
-
-		// Filter by template.
-		if templateFilter != "" && b.Metadata["template"] != templateFilter {
+		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
 			continue
 		}
-
 		result = append(result, m.infoFromBead(b))
 	}
 	return &ListResult{Sessions: result, Beads: all}

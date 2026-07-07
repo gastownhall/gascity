@@ -216,8 +216,8 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 }
 
 // sessionMatchesFilters reports whether a session bead passes the state and
-// template filters, using the same rules as Manager.ListFullFromBeads so the
-// Info-typed listing stays projection-identical to the existing catalog path.
+// template filters. It is the single predicate for session-list filtering,
+// shared by both InfoStore listing and Manager.ListFullFromBeads.
 func sessionMatchesFilters(b beads.Bead, stateFilter, templateFilter string) bool {
 	state := normalizeInfoState(State(b.Metadata["state"]))
 
