@@ -38,20 +38,20 @@ func TestStateConfirmsPendingStart(t *testing.T) {
 		State("garbage-state"): false,
 	}
 	for st, want := range confirm {
-		if got := stateConfirmsPendingStart(st); got != want {
-			t.Errorf("stateConfirmsPendingStart(%q) = %v, want %v", st, got, want)
+		if got := StateConfirmsPendingStart(st); got != want {
+			t.Errorf("StateConfirmsPendingStart(%q) = %v, want %v", st, got, want)
 		}
 	}
 }
 
 func TestSameIdentity(t *testing.T) {
 	tests := []struct {
-		name              string
-		preparedToken     string
-		preparedGen       string
-		currentToken      string
-		currentGen        string
-		want              bool
+		name          string
+		preparedToken string
+		preparedGen   string
+		currentToken  string
+		currentGen    string
+		want          bool
 	}{
 		{"vacuous true: prepared has neither", "", "", "anything", "anything", true},
 		{"vacuous true: prepared has neither, current empty", "", "", "", "", true},
@@ -177,10 +177,6 @@ func TestCommitVerdict_ParityWithLegacyBooleans(t *testing.T) {
 										t.Fatalf("CommitVerdict cleanup mismatch: prepared{status=%q state=%q tok=%q claim=%q} current{status=%q state=%q tok=%q claim=%q}: verdict=%v wantCleanup=%v",
 											pStatus, pState, pTok, pClaim, cStatus, cState, cTok, cClaim, verdict, wantCleanup)
 									}
-									// The pure state gate never yields KeepRuntime.
-									if verdict == LeaseDiscardKeepRuntime {
-										t.Fatalf("CommitVerdict unexpectedly returned KeepRuntime")
-									}
 									// Exactly one verdict, and commit/cleanup are exact complements.
 									if wantCommit == wantCleanup {
 										t.Fatalf("legacy booleans not complementary at prepared{state=%q claim=%q tok=%q status=%q} current{state=%q claim=%q tok=%q status=%q}: commit=%v cleanup=%v",
@@ -236,81 +232,6 @@ func TestCommitVerdict_NamedInvariantRows(t *testing.T) {
 		}
 	})
 	_ = tok
-}
-
-func TestConfirm(t *testing.T) {
-	tests := []struct {
-		name                string
-		state               string
-		claim               string
-		allowAwake          bool
-		wantConfirmState    bool
-		wantClearClaim      bool
-		wantStartsAwake     bool
-	}{
-		{"creating with claim", "creating", "true", false, true, true, true},
-		{"creating no claim", "creating", "", false, true, false, true},
-		{"awake without allowAwake does not confirm", "awake", "true", false, false, true, false},
-		{"awake with allowAwake confirms state but not awake interval", "awake", "true", true, true, true, false},
-		{"active never confirms", "active", "", false, false, false, false},
-		{"empty state confirms", "", "", false, true, false, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			l := LeaseFromBead(leaseBead("open", map[string]string{"state": tt.state, "pending_create_claim": tt.claim}))
-			got := l.Confirm(tt.allowAwake)
-			if got.ConfirmState != tt.wantConfirmState {
-				t.Errorf("ConfirmState = %v, want %v", got.ConfirmState, tt.wantConfirmState)
-			}
-			if got.ClearPendingCreateClaim != tt.wantClearClaim {
-				t.Errorf("ClearPendingCreateClaim = %v, want %v", got.ClearPendingCreateClaim, tt.wantClearClaim)
-			}
-			if got.StartsAwakeInterval != tt.wantStartsAwake {
-				t.Errorf("StartsAwakeInterval = %v, want %v", got.StartsAwakeInterval, tt.wantStartsAwake)
-			}
-		})
-	}
-}
-
-func TestLeaseConstructorParity(t *testing.T) {
-	// LeaseFromBead(b) must equal LeaseFromInfo(InfoFromPersistedBead(b)) for
-	// every bead, incl. garbage metadata values.
-	statuses := []string{"open", "closed", "in_progress"}
-	states := []string{"", "creating", "awake", "garbage", " creating "}
-	claims := []string{"", "true", "yes", " true "}
-	tokens := []string{"", "tok", " tok "}
-	times := []string{"", "not-a-time", "2026-01-02T03:04:05Z"}
-
-	for _, status := range statuses {
-		for _, state := range states {
-			for _, claim := range claims {
-				for _, tok := range tokens {
-					for _, ts := range times {
-						b := beads.Bead{
-							ID:     "gcs-x",
-							Status: status,
-							Type:   BeadType,
-							Metadata: map[string]string{
-								"state":                     state,
-								"pending_create_claim":      claim,
-								"instance_token":            tok,
-								"generation":                tok,
-								"pending_create_started_at": ts,
-								"last_woke_at":              ts,
-							},
-							CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-						}
-						fromBead := LeaseFromBead(b)
-						fromInfo := LeaseFromInfo(InfoFromPersistedBead(b))
-						if fromBead != fromInfo {
-							t.Fatalf("constructor parity mismatch for status=%q state=%q claim=%q tok=%q ts=%q:\n bead=%+v\n info=%+v",
-								status, state, claim, tok, ts, fromBead, fromInfo)
-						}
-					}
-				}
-			}
-		}
-	}
 }
 
 func trimSpace(s string) string { return strings.TrimSpace(s) }

@@ -1844,19 +1844,17 @@ func commitStartResult(
 	return commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, nil)
 }
 
-// confirmPendingStart reports whether a session in the given metadata
-// state should be transitioned to "active" after a successful runtime
-// spawn. Empty, "start-pending", "creating", "asleep", and "drained" all indicate the
-// session was pending a spawn; "awake" is treated by the reconciler as
-// equivalent to "active" and is intentionally NOT restamped (a no-op
-// metadata write on every spawn). Any other state ("draining",
-// "archived", "quarantined", ...) is left alone.
+// confirmPendingStart reports whether a session in the given metadata state
+// should be transitioned to "active" after a successful runtime spawn. It is a
+// thin string adapter over the single home for that frozen state list,
+// sessionpkg.StateConfirmsPendingStart (invariant 16): it trims and types the
+// raw metadata value, then delegates. Empty, "start-pending", "creating",
+// "asleep", and "drained" all indicate the session was pending a spawn; "awake"
+// is treated by the reconciler as equivalent to "active" and is intentionally
+// NOT restamped (a no-op metadata write on every spawn). Any other state
+// ("draining", "archived", "quarantined", ...) is left alone.
 func confirmPendingStart(currentState string) bool {
-	switch sessionpkg.State(strings.TrimSpace(currentState)) {
-	case "", sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
-		return true
-	}
-	return false
+	return sessionpkg.StateConfirmsPendingStart(sessionpkg.State(strings.TrimSpace(currentState)))
 }
 
 func commitStartResultTraced(
