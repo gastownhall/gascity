@@ -2988,6 +2988,24 @@ type SessionTranscriptGetResponse struct {
 	Turns *[]OutputTurn `json:"turns,omitempty"`
 }
 
+// SessionUnknownStatePayload defines model for SessionUnknownStatePayload.
+type SessionUnknownStatePayload struct {
+	// Escalated False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold.
+	Escalated bool `json:"escalated"`
+
+	// FirstSeen RFC3339 timestamp the reconciler first observed this unrecognized state; the escalation clock counts from here.
+	FirstSeen *string `json:"first_seen,omitempty"`
+
+	// SessionId Canonical session bead ID for the unrecognized-state session (also the envelope Subject).
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// State The raw, unrecognized metadata state value the reconciler skipped.
+	State string `json:"state"`
+}
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
 	// AttachedBeadId Bead ID to attach a formula to.
@@ -4411,6 +4429,21 @@ type TypedEventStreamEnvelopeSessionUndrained struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionUnknownState defines model for TypedEventStreamEnvelopeSessionUnknownState.
+type TypedEventStreamEnvelopeSessionUnknownState struct {
+	Actor     string                     `json:"actor"`
+	Message   *string                    `json:"message,omitempty"`
+	Payload   SessionUnknownStatePayload `json:"payload"`
+	RunId     *string                    `json:"run_id,omitempty"`
+	Seq       int64                      `json:"seq"`
+	SessionId *string                    `json:"session_id,omitempty"`
+	StepId    *string                    `json:"step_id,omitempty"`
+	Subject   *string                    `json:"subject,omitempty"`
+	Ts        time.Time                  `json:"ts"`
+	Type      string                     `json:"type"`
+	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionUpdated defines model for TypedEventStreamEnvelopeSessionUpdated.
 type TypedEventStreamEnvelopeSessionUpdated struct {
 	Actor     string                   `json:"actor"`
@@ -5588,6 +5621,22 @@ type TypedTaggedEventStreamEnvelopeSessionUndrained struct {
 	Ts        time.Time                `json:"ts"`
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionUnknownState defines model for TypedTaggedEventStreamEnvelopeSessionUnknownState.
+type TypedTaggedEventStreamEnvelopeSessionUnknownState struct {
+	Actor     string                     `json:"actor"`
+	City      string                     `json:"city"`
+	Message   *string                    `json:"message,omitempty"`
+	Payload   SessionUnknownStatePayload `json:"payload"`
+	RunId     *string                    `json:"run_id,omitempty"`
+	Seq       int64                      `json:"seq"`
+	SessionId *string                    `json:"session_id,omitempty"`
+	StepId    *string                    `json:"step_id,omitempty"`
+	Subject   *string                    `json:"subject,omitempty"`
+	Ts        time.Time                  `json:"ts"`
+	Type      string                     `json:"type"`
+	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionUpdated defines model for TypedTaggedEventStreamEnvelopeSessionUpdated.
@@ -7851,6 +7900,32 @@ func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceed
 	return err
 }
 
+// AsSessionUnknownStatePayload returns the union data inside the EventPayload as a SessionUnknownStatePayload
+func (t EventPayload) AsSessionUnknownStatePayload() (SessionUnknownStatePayload, error) {
+	var body SessionUnknownStatePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionUnknownStatePayload overwrites any union data inside the EventPayload as the provided SessionUnknownStatePayload
+func (t *EventPayload) FromSessionUnknownStatePayload(v SessionUnknownStatePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionUnknownStatePayload performs a merge with any union data inside the EventPayload, using the provided SessionUnknownStatePayload
+func (t *EventPayload) MergeSessionUnknownStatePayload(v SessionUnknownStatePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsStoreDiskCriticalPayload returns the union data inside the EventPayload as a StoreDiskCriticalPayload
 func (t EventPayload) AsStoreDiskCriticalPayload() (StoreDiskCriticalPayload, error) {
 	var body StoreDiskCriticalPayload
@@ -10025,6 +10100,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUndrained
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionUnknownState returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionUnknownState
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionUnknownState() (TypedEventStreamEnvelopeSessionUnknownState, error) {
+	var body TypedEventStreamEnvelopeSessionUnknownState
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionUnknownState overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionUnknownState
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionUnknownState(v TypedEventStreamEnvelopeSessionUnknownState) error {
+	v.Type = "session.unknown_state"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionUnknownState performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionUnknownState
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUnknownState(v TypedEventStreamEnvelopeSessionUnknownState) error {
+	v.Type = "session.unknown_state"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionUpdated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionUpdated() (TypedEventStreamEnvelopeSessionUpdated, error) {
 	var body TypedEventStreamEnvelopeSessionUpdated
@@ -10475,6 +10578,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionSuspended()
 	case "session.undrained":
 		return t.AsTypedEventStreamEnvelopeSessionUndrained()
+	case "session.unknown_state":
+		return t.AsTypedEventStreamEnvelopeSessionUnknownState()
 	case "session.updated":
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
@@ -12274,6 +12379,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionUnknownState returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionUnknownState
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionUnknownState() (TypedTaggedEventStreamEnvelopeSessionUnknownState, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionUnknownState
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionUnknownState overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionUnknownState
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionUnknownState(v TypedTaggedEventStreamEnvelopeSessionUnknownState) error {
+	v.Type = "session.unknown_state"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionUnknownState performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionUnknownState
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionUnknownState(v TypedTaggedEventStreamEnvelopeSessionUnknownState) error {
+	v.Type = "session.unknown_state"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionUpdated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionUpdated
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionUpdated() (TypedTaggedEventStreamEnvelopeSessionUpdated, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionUpdated
@@ -12724,6 +12857,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionSuspended()
 	case "session.undrained":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUndrained()
+	case "session.unknown_state":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionUnknownState()
 	case "session.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":

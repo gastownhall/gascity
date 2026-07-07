@@ -2306,6 +2306,9 @@
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionUnknownStatePayload"
+          },
+          {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
           },
           {
@@ -7218,6 +7221,37 @@
         ],
         "type": "object"
       },
+      "SessionUnknownStatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "escalated": {
+            "description": "False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold.",
+            "type": "boolean"
+          },
+          "first_seen": {
+            "description": "RFC3339 timestamp the reconciler first observed this unrecognized state; the escalation clock counts from here.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID for the unrecognized-state session (also the envelope Subject).",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name from the session bead metadata, when set.",
+            "type": "string"
+          },
+          "state": {
+            "description": "The raw, unrecognized metadata state value the reconciler skipped.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "escalated"
+        ],
+        "type": "object"
+      },
       "SlingInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -8318,6 +8352,7 @@
             "session.stranded": "#/components/schemas/TypedEventStreamEnvelopeSessionStranded",
             "session.suspended": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
+            "session.unknown_state": "#/components/schemas/TypedEventStreamEnvelopeSessionUnknownState",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
@@ -8520,6 +8555,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionUnknownState"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated"
@@ -9419,6 +9457,7 @@
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
+                "session.unknown_state",
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
@@ -11895,6 +11934,57 @@
         "title": "TypedEventStreamEnvelope session.undrained",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionUnknownState": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionUnknownStatePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.unknown_state",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.unknown_state",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionUpdated": {
         "additionalProperties": false,
         "properties": {
@@ -12472,6 +12562,7 @@
             "session.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStranded",
             "session.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
+            "session.unknown_state": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUnknownState",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
@@ -12674,6 +12765,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUnknownState"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated"
@@ -13640,6 +13734,7 @@
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
                 "session.stranded",
+                "session.unknown_state",
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
@@ -16303,6 +16398,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.undrained",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionUnknownState": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionUnknownStatePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.unknown_state",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.unknown_state",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionUpdated": {

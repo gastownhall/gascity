@@ -2148,6 +2148,167 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 	return rec
 }
 
+// unknownStateEvents returns the captured events.SessionUnknownState events in
+// emission order.
+func (c *capturingRecorder) unknownStateEvents() []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == events.SessionUnknownState {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// newUnknownStateSession creates a session bead carrying the given unrecognized
+// state and returns the store plus bead ID. Reloading the bead per call models
+// how the reconciler re-projects each session from the store every tick, so the
+// durable throttle markers stamped by the diagnostic are read back next tick.
+func newUnknownStateSession(t *testing.T, name, state string) (beads.Store, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  name,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": name,
+			"state":        state,
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating session bead: %v", err)
+	}
+	return store, b.ID
+}
+
+// The unknown-state diagnostic must fire once on first sight, stay silent while
+// the same unrecognized state persists (no per-tick #2389 spam), and re-fire
+// exactly once with escalated=true after the bead has sat unrecognized past the
+// threshold — the durable markers making the throttle survive reconciler
+// restarts (#2085) and the first-seen clock queryable (#1497).
+func TestEmitSessionUnknownStateDiagnostic_ThrottlesAndEscalates(t *testing.T) {
+	if sample, ok := events.LookupPayload(events.SessionUnknownState); !ok {
+		t.Fatal("no payload registered for session.unknown_state")
+	} else if _, typed := sample.(api.SessionUnknownStatePayload); !typed {
+		t.Fatalf("registered session.unknown_state payload = %T, want api.SessionUnknownStatePayload", sample)
+	}
+
+	store, id := newUnknownStateSession(t, "worker-x", "quantum-limbo")
+	clk := &clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}
+	rec := &capturingRecorder{}
+	var stderr bytes.Buffer
+
+	call := func() {
+		fresh, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get session bead: %v", err)
+		}
+		emitSessionUnknownStateDiagnostic(store, &fresh, sessionpkg.InfoFromPersistedBead(fresh), rec, clk, &stderr)
+	}
+
+	call() // first sight
+	if got := rec.unknownStateEvents(); len(got) != 1 {
+		t.Fatalf("first-sight events = %d, want 1; events: %+v", len(got), rec.events)
+	}
+	first := rec.unknownStateEvents()[0]
+	if first.Subject != id || first.SessionID != id {
+		t.Fatalf("event subject/session = %q/%q, want %q", first.Subject, first.SessionID, id)
+	}
+	var payload api.SessionUnknownStatePayload
+	if err := json.Unmarshal(first.Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.State != "quantum-limbo" || payload.SessionName != "worker-x" || payload.Escalated {
+		t.Fatalf("payload = %+v, want state=quantum-limbo name=worker-x escalated=false", payload)
+	}
+	firstLogLines := strings.Count(stderr.String(), "unknown state")
+	if firstLogLines != 1 {
+		t.Fatalf("stderr unknown-state lines = %d after first sight, want 1: %q", firstLogLines, stderr.String())
+	}
+
+	call() // same state, before threshold: throttled
+	if got := rec.unknownStateEvents(); len(got) != 1 {
+		t.Fatalf("post-throttle events = %d, want 1 (no re-emit while state persists)", len(got))
+	}
+	if lines := strings.Count(stderr.String(), "unknown state"); lines != 1 {
+		t.Fatalf("stderr unknown-state lines = %d, want 1 (no per-tick spam)", lines)
+	}
+
+	clk.Advance(unknownStateEscalationAge + time.Minute)
+	call() // now past threshold: escalate once
+	esc := rec.unknownStateEvents()
+	if len(esc) != 2 {
+		t.Fatalf("post-threshold events = %d, want 2", len(esc))
+	}
+	if err := json.Unmarshal(esc[1].Payload, &payload); err != nil {
+		t.Fatalf("decoding escalation payload: %v", err)
+	}
+	if !payload.Escalated {
+		t.Fatalf("escalation payload escalated = false, want true")
+	}
+
+	clk.Advance(time.Hour)
+	call() // escalation is once-only
+	if got := rec.unknownStateEvents(); len(got) != 2 {
+		t.Fatalf("post-escalation events = %d, want 2 (escalation fires once)", len(got))
+	}
+}
+
+// A change to a *different* unrecognized state resets the first-seen clock and
+// re-emits (escalated=false), clearing any prior escalation guard.
+func TestEmitSessionUnknownStateDiagnostic_StateChangeReemits(t *testing.T) {
+	store, id := newUnknownStateSession(t, "worker-y", "state-a")
+	clk := &clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}
+	rec := &capturingRecorder{}
+	var stderr bytes.Buffer
+
+	call := func() {
+		fresh, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get session bead: %v", err)
+		}
+		emitSessionUnknownStateDiagnostic(store, &fresh, sessionpkg.InfoFromPersistedBead(fresh), rec, clk, &stderr)
+	}
+
+	call() // first sight of state-a
+	// Escalate state-a so the escalation guard is set.
+	clk.Advance(unknownStateEscalationAge + time.Minute)
+	call()
+	if got := rec.unknownStateEvents(); len(got) != 2 {
+		t.Fatalf("state-a events = %d, want 2 (first sight + escalation)", len(got))
+	}
+
+	// A different unrecognized state is a fresh transition: re-emit, not throttle.
+	if err := store.SetMetadata(id, "state", "state-b"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	call()
+	got := rec.unknownStateEvents()
+	if len(got) != 3 {
+		t.Fatalf("post-change events = %d, want 3", len(got))
+	}
+	var payload api.SessionUnknownStatePayload
+	if err := json.Unmarshal(got[2].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.State != "state-b" || payload.Escalated {
+		t.Fatalf("payload = %+v, want state=state-b escalated=false (fresh window)", payload)
+	}
+
+	// The escalation guard for the previous state must have been cleared.
+	fresh, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if v := strings.TrimSpace(fresh.Metadata[unknownStateEscalatedKey]); v != "" {
+		t.Fatalf("escalation marker = %q, want cleared after state change", v)
+	}
+	if fresh.Metadata[unknownStateValueKey] != "state-b" {
+		t.Fatalf("value marker = %q, want state-b", fresh.Metadata[unknownStateValueKey])
+	}
+}
+
 // TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic
 // covers issue #1424: when a pool-managed session is observed
 // asleep + not-alive AND still has open in-progress work assigned, the
