@@ -3879,7 +3879,12 @@ func emitSessionUnknownStateDiagnostic(
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, 3)
 	}
-	state := strings.TrimSpace(info.MetadataState)
+	// Report the raw, untrimmed state: classification (isKnownStateInfo) keys off
+	// the raw value, so a known value wrapped in whitespace like " active " is
+	// skipped as unrecognized and must surface verbatim, not trimmed to "active".
+	// This matches SessionUnknownStatePayload.State's documented "raw ... value"
+	// contract and the raw comparison the transition/value markers below use.
+	state := info.MetadataState
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	now := clk.Now().UTC()
 

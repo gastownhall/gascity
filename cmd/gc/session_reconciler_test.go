@@ -2309,6 +2309,56 @@ func TestEmitSessionUnknownStateDiagnostic_StateChangeReemits(t *testing.T) {
 	}
 }
 
+// A metadata state that is a known value wrapped in whitespace (e.g. " active ")
+// is classified as UNKNOWN because isKnownStateInfo keys off the raw, untrimmed
+// value. The diagnostic must then report that raw value verbatim — in the event
+// payload, the operator message, and the durable value marker — so operators see
+// the actual invalid metadata rather than a trimmed, known-looking "active" that
+// hides why the bead was skipped. Regression guard for
+// SessionUnknownStatePayload.State's documented "raw ... value" contract.
+func TestEmitSessionUnknownStateDiagnostic_ReportsRawWhitespaceState(t *testing.T) {
+	const rawState = " active "
+	if isKnownStateInfo(sessionpkg.Info{MetadataState: rawState}) {
+		t.Fatalf("precondition: %q must classify as unknown (raw, untrimmed)", rawState)
+	}
+
+	store, id := newUnknownStateSession(t, "worker-ws", rawState)
+	clk := &clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}
+	rec := &capturingRecorder{}
+	var stderr bytes.Buffer
+
+	fresh, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	emitSessionUnknownStateDiagnostic(store, &fresh, sessionpkg.InfoFromPersistedBead(fresh), rec, clk, &stderr)
+
+	got := rec.unknownStateEvents()
+	if len(got) != 1 {
+		t.Fatalf("first-sight events = %d, want 1", len(got))
+	}
+	var payload api.SessionUnknownStatePayload
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.State != rawState {
+		t.Fatalf("payload.State = %q, want raw %q (untrimmed)", payload.State, rawState)
+	}
+	if !strings.Contains(got[0].Message, rawState) {
+		t.Fatalf("event message %q, want it to contain the raw state %q", got[0].Message, rawState)
+	}
+
+	// The durable value marker must also store the raw value so the throttle
+	// compares like-for-like against info.MetadataState on subsequent ticks.
+	reloaded, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if marker := reloaded.Metadata[unknownStateValueKey]; marker != rawState {
+		t.Fatalf("value marker = %q, want raw %q", marker, rawState)
+	}
+}
+
 // After a session recovers to a known state, the reconciler clears the
 // unknown-state throttle markers so that a later recurrence of the SAME
 // unrecognized value re-emits instead of being silently suppressed as "same
