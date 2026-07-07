@@ -312,3 +312,26 @@ func TestConformance_QuarantineReactivation(t *testing.T) {
 		t.Errorf("continuity_eligible = %q, want true", b.Metadata["continuity_eligible"])
 	}
 }
+
+func TestCanonicalLifecycleState(t *testing.T) {
+	cases := []struct {
+		name string
+		in   State
+		want State
+	}{
+		{"empty legacy state normalizes to active", StateNone, StateActive},
+		{"awake alias normalizes to active", StateAwake, StateActive},
+		{"active is unchanged", StateActive, StateActive},
+		{"asleep is unchanged", StateAsleep, StateAsleep},
+		{"suspended is unchanged", StateSuspended, StateSuspended},
+		{"failed-create is unchanged", StateFailedCreate, StateFailedCreate},
+		{"drained is not remapped here", State("drained"), State("drained")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalLifecycleState(tc.in); got != tc.want {
+				t.Errorf("canonicalLifecycleState(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
