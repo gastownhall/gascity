@@ -1589,6 +1589,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			continue
 		}
+		// Back in a known state: drop any stale unknown-state throttle markers so a
+		// later recurrence of the same unrecognized value is signaled afresh rather
+		// than suppressed as "same state as last tick" (no-op when unmarked).
+		clearSessionUnknownStateMarkers(store, session, stderr)
 
 		// Orphan/suspended: bead exists but not in desired state.
 		// Handle BEFORE heal/stability to avoid false crash detection —
@@ -3932,6 +3936,42 @@ func emitSessionUnknownStateDiagnostic(
 	}
 	emit(true, firstSeen)
 	setMarker(unknownStateEscalatedKey, now.Format(time.RFC3339))
+}
+
+// clearSessionUnknownStateMarkers removes the unknown-state throttle markers
+// once a session is observed back in a known state. The markers are durable
+// (they survive reconciler restarts by design), so without clearing them on
+// recovery a later recurrence of the *same* unrecognized value would look like
+// "same state as the last tick" to emitSessionUnknownStateDiagnostic and be
+// silently suppressed — the recurrence would never re-signal. Clearing on the
+// known-state path means a recurrence is treated as a fresh first-sight. It is
+// a no-op (no in-memory change, no store write) when the session carries no
+// unknown-state markers, so the common known-state tick pays nothing.
+func clearSessionUnknownStateMarkers(store beads.Store, session *beads.Bead, stderr io.Writer) {
+	if session == nil || session.Metadata == nil {
+		return
+	}
+	markerKeys := [...]string{unknownStateFirstSeenKey, unknownStateValueKey, unknownStateEscalatedKey}
+	hasMarker := false
+	for _, key := range markerKeys {
+		if strings.TrimSpace(session.Metadata[key]) != "" {
+			hasMarker = true
+			break
+		}
+	}
+	if !hasMarker {
+		return
+	}
+	front := sessionFrontDoor(store)
+	for _, key := range markerKeys {
+		if strings.TrimSpace(session.Metadata[key]) == "" {
+			continue
+		}
+		session.Metadata[key] = ""
+		if err := front.SetMarker(session.ID, key, ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing unknown-state marker %s on %s: %v\n", key, session.ID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
 }
 
 // emitSessionStrandedDiagnostic records a session.stranded event when

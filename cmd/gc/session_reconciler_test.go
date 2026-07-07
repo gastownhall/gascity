@@ -2309,6 +2309,66 @@ func TestEmitSessionUnknownStateDiagnostic_StateChangeReemits(t *testing.T) {
 	}
 }
 
+// After a session recovers to a known state, the reconciler clears the
+// unknown-state throttle markers so that a later recurrence of the SAME
+// unrecognized value re-emits instead of being silently suppressed as "same
+// state as last tick". Without clearSessionUnknownStateMarkers the recurrence
+// stays silent because the durable first-seen/value markers still match.
+func TestClearSessionUnknownStateMarkers_RecurrenceReemitsAfterRecovery(t *testing.T) {
+	store, id := newUnknownStateSession(t, "worker-z", "quantum-limbo")
+	clk := &clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}
+	rec := &capturingRecorder{}
+	var stderr bytes.Buffer
+
+	emit := func() {
+		fresh, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		emitSessionUnknownStateDiagnostic(store, &fresh, sessionpkg.InfoFromPersistedBead(fresh), rec, clk, &stderr)
+	}
+
+	emit() // first sight of quantum-limbo
+	if got := rec.unknownStateEvents(); len(got) != 1 {
+		t.Fatalf("first-sight events = %d, want 1", len(got))
+	}
+
+	// The session recovers to a known state; the reconciler clears the markers.
+	if err := store.SetMetadata(id, "state", "active"); err != nil {
+		t.Fatalf("SetMetadata(active): %v", err)
+	}
+	fresh, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !isKnownStateInfo(sessionpkg.InfoFromPersistedBead(fresh)) {
+		t.Fatal("expected \"active\" to be a known state for this test")
+	}
+	clearSessionUnknownStateMarkers(store, &fresh, &stderr)
+
+	// The durable markers must be gone.
+	reloaded, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, key := range []string{unknownStateFirstSeenKey, unknownStateValueKey, unknownStateEscalatedKey} {
+		if v := strings.TrimSpace(reloaded.Metadata[key]); v != "" {
+			t.Fatalf("marker %s = %q, want cleared after recovery to a known state", key, v)
+		}
+	}
+
+	// The same unrecognized value recurs later. It must re-emit (fresh
+	// first-sight), not stay throttled behind the now-cleared markers.
+	if err := store.SetMetadata(id, "state", "quantum-limbo"); err != nil {
+		t.Fatalf("SetMetadata(recurrence): %v", err)
+	}
+	clk.Advance(time.Minute)
+	emit()
+	if got := rec.unknownStateEvents(); len(got) != 2 {
+		t.Fatalf("recurrence events = %d, want 2 (recurrence re-emits after marker clear)", len(got))
+	}
+}
+
 // TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic
 // covers issue #1424: when a pool-managed session is observed
 // asleep + not-alive AND still has open in-progress work assigned, the
