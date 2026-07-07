@@ -172,8 +172,9 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	case StateSuspended, StateDrained:
 		patch["state"] = string(StateAsleep)
 	}
-	switch sleepReason {
-	case "user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", string(StateDrained):
+	switch SleepReason(sleepReason) {
+	case SleepReasonUserHold, SleepReasonWaitHold, SleepReasonQuarantine,
+		SleepReasonContextChurn, SleepReasonRateLimit, SleepReasonDrained:
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -185,7 +186,7 @@ func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
 		"held_until": "",
 	}
-	if sleepReason == "user-hold" {
+	if SleepReason(sleepReason) == SleepReasonUserHold {
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -199,8 +200,8 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 		"wake_attempts":     "0",
 		"churn_count":       "0",
 	}
-	switch sleepReason {
-	case "quarantine", "context-churn", "rate_limit":
+	switch SleepReason(sleepReason) {
+	case SleepReasonQuarantine, SleepReasonContextChurn, SleepReasonRateLimit:
 		patch["sleep_reason"] = ""
 	}
 	return patch

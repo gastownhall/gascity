@@ -2,7 +2,6 @@ package session
 
 import (
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -129,29 +128,6 @@ func DecideSessionExit(f ExitFacts) ExitOutcome {
 	return ExitChurn
 }
 
-// IsDeliberateSleepReason reports whether a sleep_reason records an
-// intentional stop rather than a crash, so the death must not accrue churn.
-// "city-stop" mirrors the CLI's stop sleep reason.
-// "provider-terminal-error" is a classified, non-retryable provider failure
-// (set by markProviderTerminalError); it is suppressed here so a session
-// already parked terminal cannot also accrue a spurious wake failure, making
-// the invariant explicit rather than relying on last_woke_at being cleared in
-// the same metadata batch.
-// The reason list deliberately diverges from shouldResetContinuation's
-// near-identical list (this one has "failed-create" and lacks
-// "runtime-missing"): that one decides continuation reset on wake, this one
-// decides churn suppression — do not merge the lists.
-func IsDeliberateSleepReason(reason string) bool {
-	switch strings.TrimSpace(reason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
-		"city-stop", "user-hold", "wait-hold", "rate_limit", "failed-create",
-		"provider-terminal-error":
-		return true
-	default:
-		return false
-	}
-}
-
 func parseWakeStamp(raw string) (time.Time, bool) {
 	if raw == "" {
 		return time.Time{}, false
@@ -176,14 +152,14 @@ type ExitAccrual struct {
 // session until the given time with sleep reason "quarantine". The patch is
 // metadata-only; unlike QuarantinePatch it does not move the state machine.
 func WakeFailureAccrualPatch(priorAttempts, maxAttempts int, until time.Time) ExitAccrual {
-	return exitAccrual("wake_attempts", priorAttempts+1, maxAttempts, "quarantine", until)
+	return exitAccrual("wake_attempts", priorAttempts+1, maxAttempts, string(SleepReasonQuarantine), until)
 }
 
 // ChurnAccrualPatch builds the write for one more churn cycle on top of
 // priorCycles. Reaching maxCycles quarantines the session until the given
 // time with sleep reason "context-churn".
 func ChurnAccrualPatch(priorCycles, maxCycles int, until time.Time) ExitAccrual {
-	return exitAccrual("churn_count", priorCycles+1, maxCycles, "context-churn", until)
+	return exitAccrual("churn_count", priorCycles+1, maxCycles, string(SleepReasonContextChurn), until)
 }
 
 func exitAccrual(counterKey string, next, threshold int, sleepReason string, until time.Time) ExitAccrual {
@@ -223,7 +199,7 @@ func RateLimitQuarantinePatch(until time.Time) MetadataPatch {
 	return MetadataPatch{
 		"state":                     string(StateAsleep),
 		"quarantined_until":         until.UTC().Format(time.RFC3339),
-		"sleep_reason":              "rate_limit",
+		"sleep_reason":              string(SleepReasonRateLimit),
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",

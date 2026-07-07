@@ -360,25 +360,26 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 	if strings.TrimSpace(metadata[SessionCircuitStateMetadataKey]) == SessionCircuitStateOpen {
 		return LifecycleReasonCircuitOpen
 	}
-	if reason := strings.TrimSpace(metadata["sleep_reason"]); reason != "" {
-		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn" || reason == "rate_limit") &&
+	if raw := strings.TrimSpace(metadata["sleep_reason"]); raw != "" {
+		reason := SleepReason(raw)
+		staleTimedQuarantine := (reason == SleepReasonQuarantine || reason == SleepReasonContextChurn || reason == SleepReasonRateLimit) &&
 			strings.TrimSpace(metadata["quarantined_until"]) != "" &&
 			!view.HasBlocker(BlockerQuarantined)
-		staleTimedHold := reason == "user-hold" &&
+		staleTimedHold := reason == SleepReasonUserHold &&
 			strings.TrimSpace(metadata["held_until"]) != "" &&
 			!view.HasBlocker(BlockerHeld)
 		if !staleTimedQuarantine && !staleTimedHold {
-			return reason
+			return raw
 		}
 	}
 	if view.HasBlocker(BlockerQuarantined) {
-		return "quarantine"
+		return string(SleepReasonQuarantine)
 	}
 	if strings.TrimSpace(metadata["wait_hold"]) != "" {
-		return "wait-hold"
+		return string(SleepReasonWaitHold)
 	}
 	if view.HasBlocker(BlockerHeld) {
-		return "user-hold"
+		return string(SleepReasonUserHold)
 	}
 	return ""
 }
@@ -692,8 +693,15 @@ func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason s
 	if strings.TrimSpace(input.SessionKey) == "" && strings.TrimSpace(input.StartedConfigHash) == "" {
 		return false
 	}
-	switch strings.TrimSpace(sleepReason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit", "runtime-missing":
+	// This list deliberately diverges from IsDeliberateSleepReason's near-identical
+	// list (this one has "runtime-missing" and lacks "failed-create"): that one
+	// decides churn suppression, this one decides continuation reset on wake — do
+	// not merge the lists.
+	switch SleepReason(strings.TrimSpace(sleepReason)) {
+	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
+		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
+		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
+		SleepReasonRuntimeMissing:
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating

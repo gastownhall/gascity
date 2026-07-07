@@ -56,7 +56,7 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 		attachments = append(attachments, attached)
 	}
 
-	addByID(parent.Metadata["molecule_id"])
+	addByID(parent.Metadata[beadmeta.MoleculeIDMetadataKey])
 	addByID(parent.Metadata["workflow_id"])
 
 	if childQuerier != nil {
@@ -163,8 +163,8 @@ func clearAttachmentMetadata(store beads.Store, parent beads.Bead, attached bead
 			return err
 		}
 	}
-	if strings.TrimSpace(parent.Metadata["molecule_id"]) == attached.ID {
-		if err := store.SetMetadata(parent.ID, "molecule_id", ""); err != nil {
+	if strings.TrimSpace(parent.Metadata[beadmeta.MoleculeIDMetadataKey]) == attached.ID {
+		if err := store.SetMetadata(parent.ID, beadmeta.MoleculeIDMetadataKey, ""); err != nil {
 			return err
 		}
 	}
