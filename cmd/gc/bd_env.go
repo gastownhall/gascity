@@ -1543,6 +1543,19 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
 	}
+	// Carry the TLS requirement to the in-process native store. A hosted
+	// beads-gateway terminates client TLS and rejects plaintext ("TLS
+	// required"); the shell-out bd inherits BEADS_DOLT_SERVER_TLS from the
+	// ambient controller env, but the native store opens beadslib against this
+	// projected map, which CityRuntimeEnvMapForRuntimeDir builds fresh without
+	// the ambient value. There is no GC_DOLT_* equivalent for TLS (it is not a
+	// DoltConnectionTarget field), so mirror it from the map if already set,
+	// else from the ambient process env — the same signal bd reads.
+	if tls := strings.TrimSpace(env["BEADS_DOLT_SERVER_TLS"]); tls != "" {
+		env["BEADS_DOLT_SERVER_TLS"] = tls
+	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_TLS")); ambient != "" {
+		env["BEADS_DOLT_SERVER_TLS"] = ambient
+	}
 }
 
 // cityForStoreDir resolves ambient store contexts. GC_CITY intentionally wins

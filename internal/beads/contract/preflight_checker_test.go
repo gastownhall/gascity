@@ -249,6 +249,59 @@ func TestPreflightWarnsWhenDatabaseIdentityUnavailable(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
 }
 
+// TestPreflightConfirmsIdentityFromBDContextWhenDBProbeUnavailable covers hosted
+// beads-gateway endpoints: the direct project_id SQL probe (managedDoltOpenDatabase)
+// connects as root over plaintext and cannot authenticate the EIA-as-username +
+// TLS gateway, so it never confirms project_id. `bd context --json` DOES authenticate
+// (it runs the credential command) and reports the authoritative database project_id.
+// The identity check must accept that confirmation so the native store stays eligible
+// on hosted deployments instead of degrading to the shell BdStore.
+func TestPreflightConfirmsIdentityFromBDContextWhenDBProbeUnavailable(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "bd_prj_c069247fbac36e2b",
+		"project_id": "prj_c069247fbac36e2b"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server", ProjectID: "prj_c069247fbac36e2b"}, "")
+	// Direct DB probe fails to authenticate the hosted gateway (root/plaintext).
+	checker.DatabaseProjectID = func(string) (string, bool, error) {
+		return "", false, errors.New("dial hosted gateway: access denied")
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
+}
+
+// TestPreflightBlocksOnBDContextIdentityMismatch guards the same hosted path: when
+// the DB probe is unavailable but bd context reports a project_id that DISAGREES with
+// metadata, that is a genuine mismatch and must still block native activation.
+func TestPreflightBlocksOnBDContextIdentityMismatch(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "metadata-id"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server", ProjectID: "different-db-id"}, "")
+	checker.DatabaseProjectID = func(string) (string, bool, error) {
+		return "", false, errors.New("dial hosted gateway: access denied")
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckFail)
+}
+
 func TestPreflightUnreadableScopeReturnsError(t *testing.T) {
 	scope := "/city"
 	fs := fsys.NewFake()

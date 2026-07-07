@@ -16,6 +16,12 @@ type PreflightBDContext struct {
 	DoltMode      string
 	BDVersion     string
 	SchemaVersion int
+	// ProjectID is the authoritative database project_id as reported by
+	// `bd context`. Unlike the direct SQL probe, bd context authenticates via
+	// the configured credential command, so it can confirm identity against a
+	// hosted beads-gateway (EIA-as-username + TLS) where a root/plaintext probe
+	// cannot. Empty when bd context is unreachable or reports no project_id.
+	ProjectID string
 }
 
 // PreflightChecker evaluates whether a beads scope may use native storage.
@@ -46,7 +52,7 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		c.checkMetadataBackend(metadata),
 		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
 		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata),
+		c.checkIdentityMatch(scope, metadata, bdCtx),
 		c.checkVersionCompat(bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
@@ -189,7 +195,7 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	}
 }
 
-func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata) PreflightCheckResult {
+func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata, bdCtx PreflightBDContext) PreflightCheckResult {
 	details := PreflightDetails{MetadataProjectID: metadata.ProjectID}
 	if metadata.ProjectID == "" {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "metadata project_id is missing", details)
@@ -200,6 +206,18 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 	dbProjectID, ok, err := c.DatabaseProjectID(scope)
 	details.DBProjectID = strings.TrimSpace(dbProjectID)
 	if err != nil || !ok || details.DBProjectID == "" {
+		// The direct SQL probe (root/plaintext) cannot authenticate a hosted
+		// beads-gateway. Fall back to bd context's project_id, which is read
+		// through the authenticated credential-command path and is therefore an
+		// authoritative confirmation on hosted deployments. A genuine mismatch
+		// still blocks; only an unconfirmable-and-unavailable identity degrades.
+		if bdCtxProjectID := strings.TrimSpace(bdCtx.ProjectID); bdCtxProjectID != "" {
+			details.DBProjectID = bdCtxProjectID
+			if metadata.ProjectID != bdCtxProjectID {
+				return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "project_id mismatch", details)
+			}
+			return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "project_id matches (confirmed via bd context)", details)
+		}
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckWarn, "database project_id could not be confirmed", details)
 	}
 	if metadata.ProjectID != details.DBProjectID {

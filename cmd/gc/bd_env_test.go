@@ -5529,3 +5529,36 @@ func TestMirrorBeadsDoltEnvPropagatesCredentialCommand(t *testing.T) {
 		}
 	})
 }
+
+// TestMirrorBeadsDoltEnvPropagatesTLS covers the hosted beads-gateway path: the
+// gateway requires client TLS ("TLS required" otherwise), and the in-process
+// native store opens beadslib against the projected env map, which does not
+// carry the ambient BEADS_DOLT_SERVER_TLS. mirrorBeadsDoltEnv must propagate it
+// (from the map if set, else the ambient process env) so the native connection
+// negotiates TLS the same way the shell-out bd does.
+func TestMirrorBeadsDoltEnvPropagatesTLS(t *testing.T) {
+	t.Run("from ambient process env when map is unset", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example", "GC_DOLT_PORT": "3306"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_SERVER_TLS"]; got != "1" {
+			t.Fatalf("BEADS_DOLT_SERVER_TLS = %q, want %q (from ambient)", got, "1")
+		}
+	})
+	t.Run("map value wins over ambient", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_TLS", "0")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example", "BEADS_DOLT_SERVER_TLS": "1"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_SERVER_TLS"]; got != "1" {
+			t.Fatalf("BEADS_DOLT_SERVER_TLS = %q, want %q (map wins)", got, "1")
+		}
+	})
+	t.Run("absent when neither map nor ambient set", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_TLS", "")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example"}
+		mirrorBeadsDoltEnv(env)
+		if got, ok := env["BEADS_DOLT_SERVER_TLS"]; ok && got != "" {
+			t.Fatalf("BEADS_DOLT_SERVER_TLS = %q, want unset/empty", got)
+		}
+	})
+}
