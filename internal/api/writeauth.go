@@ -57,6 +57,12 @@ const (
 //   - an empty sub-resource (/v0/city/{name}/),
 //   - the /svc/ workspace-service pass-through, which cannot mutate gc config
 //     objects and applies its own publication rules.
+//
+// The /hook/ webhook receiver is deliberately NOT exempted (the H2 reversal): a
+// /hook/{name} POST dispatches order → sh -c authenticated by a verifier a pack
+// may author, so when write-auth is configured it stays gated on the operator's
+// signed grant. Signature verification (E4) is an ADDITIONAL gate for public
+// webhooks, never a replacement for this one. Do not add a /hook/ exemption here.
 func cityScopedObjectMutation(path string) (city string, ok bool) {
 	const prefix = "/v0/city/"
 	if !strings.HasPrefix(path, prefix) {

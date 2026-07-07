@@ -2381,6 +2381,9 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("validate webhooks: %w", err)
+	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1866,6 +1867,42 @@ func (cs *controllerState) ServiceRegistry() workspacesvc.Registry {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.services
+}
+
+// WebhookDispatcher implements api.WebhookDispatchProvider — the H1/E0.5 dispatch
+// seam the supervisor webhook receiver (E3/E6) fires verified+matched deliveries
+// through. It returns an adapter that dispatches a pre-resolved order through the
+// same launchResolvedDispatch → dispatchOne core the controller tick loop uses.
+//
+// The adapter builds a fresh, detached memoryOrderDispatcher per delivery from the
+// CURRENT cfg (read under the hot-reload lock) so a webhook dispatch reflects a
+// config reload without a rebuild hook and never races the reconciler's live tick
+// dispatcher (cr.od, which is single-goroutine-owned by the reconcile loop and may
+// be nil for a webhook-only city). The seam's Dispatch path consults no per-tick
+// dispatcher state (cooldown cache, open-work gate) — it validates required params,
+// writes the tracking bead, and launches dispatchOne — so a per-delivery instance
+// is byte-equivalent to a long-lived one, and the order's own timeout bounds the
+// async work.
+func (cs *controllerState) WebhookDispatcher() orderdispatch.Dispatcher {
+	return controllerWebhookDispatcher{cs: cs}
+}
+
+// controllerWebhookDispatcher adapts controllerState into orderdispatch.Dispatcher.
+type controllerWebhookDispatcher struct{ cs *controllerState }
+
+func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdispatch.DispatchRequest) (orderdispatch.DispatchResult, error) {
+	cs := d.cs
+	cs.mu.RLock()
+	cfg := cs.cfg
+	var rec events.Recorder = cs.eventProv
+	cs.mu.RUnlock()
+	if rec == nil {
+		// dispatchOne records OrderFired/Completed/Failed unconditionally; a
+		// discard recorder keeps it panic-free when the city has events disabled.
+		rec = events.Discard
+	}
+	md := newMemoryOrderDispatcher(nil, cs.cityPath, cfg, rec, os.Stderr)
+	return md.Dispatch(ctx, req)
 }
 
 // ExtMsgServices returns the external messaging services.

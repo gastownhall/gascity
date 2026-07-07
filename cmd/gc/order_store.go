@@ -146,7 +146,7 @@ func orderStoreTargetKey(target execStoreTarget) string {
 	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
 }
 
-func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
+func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order, vars map[string]string) ([]string, error) {
 	if err := validateOrderExecEnvOverrides(a); err != nil {
 		return nil, err
 	}
@@ -204,6 +204,13 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	for k, v := range a.Env {
 		env[k] = v
 	}
+	// Dispatch-time vars (webhook rule args / `gc order run --var`) overlay
+	// last so the args channel reaches an exec order's process. Reserved-key
+	// namespacing/guarding for these dynamic vars is deferred (see the design's
+	// R4); the static [order.env] guard above is unchanged.
+	for k, v := range vars {
+		env[k] = v
+	}
 	return mergeRuntimeEnv(nil, env), nil
 }
 
@@ -230,7 +237,7 @@ func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target exec
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
 		return orders.TriggerOptions{}, nil
 	}
-	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
+	env, err := orderExecEnvWithError(cityPath, cfg, target, a, nil)
 	if err != nil {
 		return orders.TriggerOptions{}, err
 	}

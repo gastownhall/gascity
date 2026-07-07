@@ -438,12 +438,26 @@ live in `internal/api/middleware.go` as `problemBody` values.
 
 ### 3.9 The carved-out non-typed paths
 
-Three surfaces inside `internal/api/` are deliberately outside the
+Four surfaces inside `internal/api/` are deliberately outside the
 typed-wire principle. Every other path is a typed Huma operation.
 
 - **`/svc/*`** — a raw pass-through to external workspace-service
   processes that own their own HTTP contracts. If `/svc/*` ever
   becomes typed, it gets its own migration.
+- **`/hook/*` (the webhook receiver, E3)** — a raw pass-through for
+  inbound provider webhooks (`/v0/city/{cityName}/hook/{name}`). It is
+  non-typed because the HMAC/ed25519 verifiers sign the exact raw body,
+  so the receiver must read the unparsed bytes rather than a
+  Huma-decoded struct. Unlike `/svc/*` it is **not** exempt from the
+  mux-level write-auth grant (`cityScopedObjectMutation` keeps `/hook/`
+  gated — the H2 reversal): signature verification is an additional gate
+  for public webhooks, never a replacement for the operator's grant. It
+  self-enforces the R2 perimeter (`webhookRequestAllowed`: private/tenant
+  hooks require loopback-or-`X-GC-Request`; read-only refuses dispatch;
+  unknown names 404) and R1 operator-owned verifier secrets before it
+  parses or dispatches anything. The typed operator sibling
+  `POST /v0/city/{cityName}/order/{name}/run` stays a normal Huma
+  operation (write-auth/CSRF/read-only apply).
 - **`/` (the embedded dashboard SPA)** — the compiled Vite/React
   bundle in `internal/api/dashboardspa`, served same-origin by the
   supervisor as the `/` catch-all. It serves static assets and the
@@ -464,8 +478,8 @@ typed-wire principle. Every other path is a typed Huma operation.
   already-typed `/v0/.../status` payload (a `json.RawMessage`, the
   same honest-opacity pattern as the provider raw frames in §3.6).
   A source guard (`TestSupervisorNonHumaSurfacesAreSanctioned`) pins
-  this exception set so a new untyped carve-out cannot be added
-  silently.
+  this exception set (now `/svc/*`, `/hook/*`, `/`, `/api/*`) so a new
+  untyped carve-out cannot be added silently.
 
 These are the only carved-out paths inside `internal/api/`. If a new
 surface needs to join them, it updates this section and the source

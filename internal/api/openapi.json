@@ -2309,6 +2309,12 @@
             "$ref": "#/components/schemas/UnboundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/WebhookReceivedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/WebhookRejectedPayload"
+          },
+          {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
           }
         ]
@@ -4865,6 +4871,40 @@
           "timeout_ms",
           "enabled",
           "capture_output"
+        ],
+        "type": "object"
+      },
+      "OrderRunInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "vars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Declared [order.params] as key/value dispatch args (parity with 'gc order run --var'). Namespaced into the exec env under GC_WEBHOOK_ARG_ before overlay (R4).",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "OrderRunOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "scoped_name": {
+            "description": "Rig-qualified name of the fired order.",
+            "type": "string"
+          },
+          "status": {
+            "description": "\"dispatched\" when the order fired.",
+            "type": "string"
+          },
+          "tracking_id": {
+            "description": "Tracking bead id for the dispatch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
         ],
         "type": "object"
       },
@@ -8260,6 +8300,8 @@
             "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
             "supervisor.started": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted",
+            "webhook.received": "#/components/schemas/TypedEventStreamEnvelopeWebhookReceived",
+            "webhook.rejected": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -8471,6 +8513,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWebhookReceived"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -9342,6 +9390,8 @@
                 "extmsg.inbound",
                 "extmsg.outbound",
                 "extmsg.outbound_channel_mismatch",
+                "webhook.received",
+                "webhook.rejected",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -12122,6 +12172,108 @@
         "title": "TypedEventStreamEnvelope supervisor.started",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWebhookReceived": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WebhookReceivedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "webhook.received",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope webhook.received",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWebhookRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WebhookRejectedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "webhook.rejected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope webhook.rejected",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -12246,6 +12398,8 @@
             "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
             "supervisor.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted",
+            "webhook.received": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookReceived",
+            "webhook.rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -12457,6 +12611,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookReceived"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -13391,6 +13551,8 @@
                 "extmsg.inbound",
                 "extmsg.outbound",
                 "extmsg.outbound_channel_mismatch",
+                "webhook.received",
+                "webhook.rejected",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -16388,6 +16550,116 @@
         "title": "TypedTaggedEventStreamEnvelope supervisor.started",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeWebhookReceived": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WebhookReceivedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "webhook.received",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope webhook.received",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWebhookRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WebhookRejectedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "webhook.rejected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope webhook.rejected",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -16457,6 +16729,114 @@
         "required": [
           "session_id",
           "count"
+        ],
+        "type": "object"
+      },
+      "WebhookReceivedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "body_size": {
+            "description": "Raw request body size in bytes (never the body itself).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "dedup_id": {
+            "description": "Provider delivery id used for dedup (or a body hash when the scheme carries none).",
+            "type": "string"
+          },
+          "deduped": {
+            "description": "True when this delivery was a duplicate and was NOT dispatched.",
+            "type": "boolean"
+          },
+          "dispatched": {
+            "description": "True when an order was launched for this delivery.",
+            "type": "boolean"
+          },
+          "event_type": {
+            "description": "Provider event type surfaced by the scheme (e.g. pull_request).",
+            "type": "string"
+          },
+          "matched": {
+            "description": "True when a [[webhook.rule]] matched the delivery.",
+            "type": "boolean"
+          },
+          "order": {
+            "description": "Target order name when a rule matched.",
+            "type": "string"
+          },
+          "rig": {
+            "description": "Target rig when the matched rule scoped one.",
+            "type": "string"
+          },
+          "rule_index": {
+            "description": "Matched rule index, or -1 when no rule matched.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "scheme": {
+            "description": "Verifier scheme (github-hmac-sha256, slack-v0, …).",
+            "type": "string"
+          },
+          "scoped_name": {
+            "description": "Rig-qualified name of the fired order.",
+            "type": "string"
+          },
+          "tracking_id": {
+            "description": "Tracking bead id for the dispatch, when fired.",
+            "type": "string"
+          },
+          "webhook": {
+            "description": "Configured webhook name that received the delivery.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "webhook",
+          "deduped",
+          "matched",
+          "dispatched",
+          "rule_index",
+          "body_size"
+        ],
+        "type": "object"
+      },
+      "WebhookRejectedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "body_size": {
+            "description": "Raw request body size in bytes, when the body was read.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "dedup_id": {
+            "description": "Provider delivery id, when known.",
+            "type": "string"
+          },
+          "event_type": {
+            "description": "Provider event type, when known at the rejection point.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Rejection reason enum (perimeter_denied, read_only, rate_limited, operator_fault, verify_failed, bad_payload, dispatch_refused, …).",
+            "type": "string"
+          },
+          "scheme": {
+            "description": "Verifier scheme, when the webhook resolved.",
+            "type": "string"
+          },
+          "status": {
+            "description": "HTTP status returned to the sender.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "webhook": {
+            "description": "Configured webhook name (empty only for unresolved routes, which are not evented).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "webhook",
+          "reason"
         ],
         "type": "object"
       },
@@ -24246,6 +24626,89 @@
           }
         },
         "summary": "Post v0 city by city name order by name enable"
+      }
+    },
+    "/v0/city/{cityName}/order/{name}/run": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-order-by-name-run",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Order name or scoped name of a trigger=\"webhook\" order.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Order name or scoped name of a trigger=\"webhook\" order.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderRunInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderRunOutputBody"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name order by name run"
       }
     },
     "/v0/city/{cityName}/orders": {

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/webhookverify"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -99,6 +100,39 @@ type Server struct {
 	// SlingRunnerFunc can be overridden in tests. When nil, uses a real
 	// shell runner. Set this to inject a fake runner for unit tests.
 	SlingRunnerFunc sling.SlingRunner
+
+	// webhookEvents overrides the E8 webhook.received / webhook.rejected sink.
+	// Nil (the default) forwards to the city event bus via cityEventWebhookSink;
+	// tests inject a fake to assert emitted events. See webhookEventSink.
+	webhookEvents WebhookEventSink
+
+	// webhookDedup is the E8 delivery-idempotency store, keyed (webhook,
+	// delivery-id). Shared across deliveries for the process lifetime of this
+	// per-city Server (the supervisor caches one Server per city).
+	webhookDedup *webhookDedupCache
+
+	// webhookLimiter is the E8 per-webhook token-bucket rate limiter.
+	webhookLimiter *webhookRateLimiter
+
+	// webhookVerifiers memoizes the built E4 verifier per webhook so a stateful
+	// verifier (the jwt-jwks JWKS cache) persists across deliveries instead of
+	// being rebuilt — and its JWKS refetched — on every request. Keyed by webhook
+	// name; a cheap config fingerprint guards each entry so a config hot-reload
+	// that changes the verify config rebuilds the verifier. Secret resolution
+	// stays per-request; only the verifier (the stateful part) is reused.
+	webhookVerifiersMu sync.Mutex
+	webhookVerifiers   map[string]cachedWebhookVerifier
+
+	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
+	// defaultMaxWebhookBodyBytes.
+	webhookMaxBody int64
+}
+
+// cachedWebhookVerifier is a memoized verifier plus the config fingerprint it
+// was built from; a fingerprint mismatch on the next delivery triggers a rebuild.
+type cachedWebhookVerifier struct {
+	verifier    webhookverify.Verifier
+	fingerprint string
 }
 
 type lookPathEntry struct {
@@ -173,12 +207,19 @@ func NewReadOnly(state State) *Server {
 func newServer(state State, readOnly bool) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		state:    state,
-		mux:      mux,
-		readOnly: readOnly,
-		idem:     newIdempotencyCache(30 * time.Minute),
+		state:          state,
+		mux:            mux,
+		readOnly:       readOnly,
+		idem:           newIdempotencyCache(30 * time.Minute),
+		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
+		webhookLimiter: newWebhookRateLimiter(),
 	}
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
+	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
+	// /svc/* it is a raw-body pass-through (HMAC/ed25519 sign the exact bytes),
+	// so it lives on the per-city mux outside the typed Huma control plane; its
+	// gates are the R2 perimeter + E4 signature verification, not Huma middleware.
+	mux.HandleFunc("/hook/", s.handleHookProxy)
 	return s
 }
 

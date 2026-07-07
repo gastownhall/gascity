@@ -1211,10 +1211,12 @@ jiter==0.14.0 \
     --hash=sha256:ff3a6465b3a0f54b1a430f45c3c0ba7d61ceb45cbc3e33f9e1a7f638d690baf3 \
     --hash=sha256:ffb2a08a406465bb076b7cc1df41d833106d3cf7905076cc73f0cb90078c7d10
     # via openai
-joserfc==1.6.5 \
-    --hash=sha256:1482a7db78fb4602e44ed89e51b599d052e091288c7c532c5b694e20149dec48 \
-    --hash=sha256:e9878a0f8243fe7b95e11fdda81374ca9f7a689e302751579d3dfdeec559675e
-    # via authlib
+joserfc==1.7.2 \
+    --hash=sha256:537ffb8888b2df039cb5b6d017d7cff6f09d521ce65d89cc9b8ab752b1cff947 \
+    --hash=sha256:ddd818c0ca9b4f17bbc2d72cb3966e6ded7502be089316c62c3cc64ae86132b5
+    # via
+    #   -r .github/requirements/mcp-agent-mail.in
+    #   authlib
 jsonref==1.1.0 \
     --hash=sha256:32fe8e1d85af0fdefbebce950af85590b22b60f9e95443176adbde4e1ecea552 \
     --hash=sha256:590dc7773df6c21cbf948b5dac07a72a251db28b0238ceecce0a2abfa8ec30a9

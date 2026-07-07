@@ -2449,6 +2449,9 @@ to the configured target (if any). Exec orders run their script directly
 write arbitrary stdout. Useful for testing orders or triggering them
 outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.
+Use --var key=value (repeatable) to pass args to the order: formula orders
+receive them as formula vars, exec orders as environment variables. A param
+declared required in [order.params] must be supplied or the run fails.
 
 ```
 gc order run <name> [flags]
@@ -2458,6 +2461,7 @@ gc order run <name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+| `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |
 
 ## gc order show
 

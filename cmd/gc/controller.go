@@ -948,6 +948,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := config.ValidateServices(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
+	if err := config.ValidateWebhooks(newCfg.Webhooks); err != nil {
+		return failWithWarnings(fmt.Errorf("validating webhooks: %w", err))
+	}
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}

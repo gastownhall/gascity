@@ -385,10 +385,11 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	}
 	allAA = orders.FilterEnabled(allAA)
 
-	// Filter out manual-trigger orders — they are never auto-dispatched.
+	// Filter out manual- and webhook-trigger orders — they are never
+	// auto-dispatched (webhook orders fire only via the supervisor receiver).
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Trigger != "manual" {
+		if a.Trigger != "manual" && a.Trigger != "webhook" {
 			auto = append(auto, a)
 		}
 	}
@@ -396,6 +397,17 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		return nil
 	}
 
+	return newMemoryOrderDispatcher(auto, cityPath, cfg, rec, stderr)
+}
+
+// newMemoryOrderDispatcher builds a memoryOrderDispatcher over a resolved order
+// set. aa is the tick loop's auto-dispatchable set; it may be nil for callers
+// that only fire pre-resolved orders through the orderdispatch.Dispatcher seam
+// (the webhook receiver), where the tick dispatch() path is never invoked.
+func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) *memoryOrderDispatcher {
+	if cfg == nil {
+		cfg = &config.City{}
+	}
 	// Extract events.Provider from recorder if available.
 	// FileRecorder implements Provider; Discard does not.
 	var ep events.Provider
@@ -405,7 +417,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
-		aa: auto,
+		aa: aa,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			return openStoreAtForCity(target.ScopeRoot, cityPath)
 		},
@@ -626,21 +638,23 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		// Create tracking bead synchronously BEFORE dispatch goroutine.
-		// This prevents the cooldown trigger from re-firing on the next tick.
-		trackingBead, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun(scoped, orders.RunOpts{})
+		// Create the tracking bead (which suppresses re-fire on the next tick)
+		// and launch the shared dispatch core. The webhook receiver fires the
+		// same launchResolvedDispatch → dispatchOne path through the exported
+		// seam, so a tick dispatch and a webhook dispatch run the identical core,
+		// not two implementations. inFlight (this tick's WaitGroup) is reserved
+		// before the launch and released via onDone; on a create failure nothing
+		// launched, so it is released immediately to balance the reservation.
+		//
+		// Auto-triggered orders carry no args channel: vars/execEnv are nil.
+		inFlight.Add(1)
+		trackingBead, err := m.launchResolvedDispatch(ctx, store, target, a, cityPath, nil, nil, inFlight.Done)
 		if err != nil {
+			inFlight.Done()
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
 			continue
 		}
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
-
-		// Fire with timeout; inflight tracks the spawned goroutine so
-		// drain can wait for tracking-bead outcome persistence before
-		// controller exit or config reload.
-		m.addInflight()
-		inFlight.Add(1)
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -655,14 +669,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, onDone func()) {
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, onDone func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+			m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
 		}()
 		return
 	}
@@ -675,8 +689,28 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID)
+		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
 	}()
+}
+
+// launchResolvedDispatch is the single fire path shared by the controller tick
+// loop and the webhook dispatch seam (memoryOrderDispatcher.Dispatch). It writes
+// the order-tracking bead that suppresses re-fire, registers the in-flight
+// goroutine so drain can await outcome persistence, and launches dispatchOne.
+// vars drive required-param validation and the formula ExpandVars channel;
+// execEnv is the exec-env overlay (nil ⇒ vars) that untrusted callers
+// pre-namespace for R4. onDone runs after the dispatch goroutine returns (the
+// tick loop passes its per-tick store barrier; the seam passes its store-close).
+// A caller tracking its own WaitGroup must register it before calling and
+// release it in onDone (and, on a returned error, itself — nothing launched).
+func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
+	trackingRun, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun(a.ScopedName(), orders.RunOpts{})
+	if err != nil {
+		return orders.OrderRun{}, err
+	}
+	m.addInflight()
+	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
+	return trackingRun, nil
 }
 
 // cancel signals all in-flight dispatchOne goroutines to terminate. Safe
@@ -1087,7 +1121,14 @@ func eventCursorLabels(scoped string, headSeq uint64) []string {
 // dispatchOne runs a single order dispatch in its own goroutine.
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+//
+// vars are the raw, param-named dispatch args: they drive required-param
+// validation and the formula ExpandVars channel. execEnv is the exec-env
+// overlay for exec orders (nil ⇒ fall back to vars). The webhook sink passes a
+// namespaced execEnv (GC_WEBHOOK_ARG_*) so an untrusted payload can never shadow
+// a controller-owned or static [order.env] key (R4); the tick loop and CLI pass
+// nil (raw overlay), preserving existing semantics.
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
@@ -1097,11 +1138,25 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		}
 	}()
 
+	scoped := a.ScopedName()
+
+	// Refuse to fire when a declared-required param is absent from the dispatch
+	// vars. The tracking bead was already created by the caller and is closed by
+	// the deferred close above.
+	if err := orders.ValidateRequiredParams(a, vars); err != nil {
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: err.Error(),
+		})
+		return
+	}
+
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	scoped := a.ScopedName()
 	m.rec.Record(events.Event{
 		Type:    events.OrderFired,
 		Actor:   "controller",
@@ -1115,9 +1170,15 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		// closeOrderTrackingBead defer) from the same store, so the bead writes
 		// stay byte-identical.
 		front := orders.NewStore(beads.OrdersStore{Store: store})
-		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID)
+		// The exec-env overlay is namespaced by an untrusted caller (webhook);
+		// nil means use the raw vars (tick/CLI), preserving prior behavior.
+		execOverlay := execEnv
+		if execOverlay == nil {
+			execOverlay = vars
+		}
+		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
 	} else {
-		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
+		m.dispatchWisp(childCtx, store, a, cityPath, trackingID, vars)
 	}
 }
 
@@ -1226,7 +1287,7 @@ func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
 }
 
 // dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	scoped := a.ScopedName()
 	outcome := orders.RunOutcomeExec
 	var headSeq uint64
@@ -1268,7 +1329,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		}
 	}
 
-	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
 	if err != nil {
@@ -1325,8 +1386,8 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string) (*formula.Recipe, error) {
-	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", nil)
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
 		return nil, err
 	}
@@ -1348,7 +1409,7 @@ func redactOrderEnvError(err error, env []string) string {
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
-func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	scoped := a.ScopedName()
 
 	if err := ctx.Err(); err != nil {
@@ -1386,7 +1447,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths)
+	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

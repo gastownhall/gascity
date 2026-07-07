@@ -229,6 +229,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/order/{name}", (*Server).humaHandleOrderGet)
 	cityPost(sm, "/order/{name}/enable", (*Server).humaHandleOrderEnable)
 	cityPost(sm, "/order/{name}/disable", (*Server).humaHandleOrderDisable)
+	// Typed operator path to fire a trigger="webhook" order directly with typed
+	// params. Inherits write-auth/CSRF/read-only from cityPost (write-auth IS the
+	// auth here — no signature). Reuses the E6 sink + E0.5 dispatcher seam.
+	cityPost(sm, "/order/{name}/run", (*Server).humaHandleOrderRun, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	})
 	cityGet(sm, "/orders/feed", (*Server).humaHandleOrdersFeed)
 
 	// Formulas.

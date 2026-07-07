@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -46,6 +47,12 @@ type runTailerManager struct {
 	deps  Deps
 	httpc *http.Client
 
+	// sessionsCache and formulaCache absorb the two per-request loopback reads so
+	// a burst of detail/summary GETs collapses onto one upstream fetch per key
+	// (single-flight + TTL). See enrichment_cache.go for the contract.
+	sessionsCache *singleFlightCache[string, cachedSessions]
+	formulaCache  *singleFlightCache[formulaCacheKey, cachedFormulaDetail]
+
 	mu      sync.Mutex
 	cities  map[string]*cityRunTailer
 	ctx     context.Context
@@ -55,9 +62,11 @@ type runTailerManager struct {
 
 func newRunTailerManager(deps Deps) *runTailerManager {
 	return &runTailerManager{
-		deps:   deps,
-		httpc:  &http.Client{Timeout: runSessionsFetchTimeout},
-		cities: make(map[string]*cityRunTailer),
+		deps:          deps,
+		httpc:         &http.Client{Timeout: runSessionsFetchTimeout},
+		cities:        make(map[string]*cityRunTailer),
+		sessionsCache: newSingleFlightCache[string, cachedSessions](),
+		formulaCache:  newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
 	}
 }
 
@@ -78,7 +87,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 	defer m.mu.Unlock()
 	t, ok := m.cities[name]
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{})}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo()}
 		m.cities[name] = t
 	}
 	if m.enabled && m.ctx != nil && !t.started {
@@ -101,6 +110,14 @@ type cityRunTailer struct {
 
 	started bool
 	readyCh chan struct{} // closed once the cold replay attempt completes
+
+	// snapshotCache caches the folded run snapshot (and the formula target
+	// derived from it) per fold generation so a same-generation repeat request
+	// reuses the fold instead of re-scanning the city's beads. detailMemo then
+	// caches the built+marshaled detail on top, so an unchanged fold costs ~zero
+	// CPU (no re-scan, no re-projection, no re-marshal). See rundetail_memo.go.
+	snapshotCache *runSnapshotCache
+	detailMemo    *runDetailMemo
 
 	mu      sync.RWMutex
 	summary runproj.RunSummary
@@ -323,12 +340,33 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 // snapshot_version). It matches the golden generator's snapshot_version.
 const runDetailSnapshotVersion = 1
 
+// detailBuildCount counts every run-detail build+marshal the tailer performs
+// (i.e. a detail-memo miss). It exists so a test can prove two requests at the
+// same fold generation build once. It carries no production behavior.
+var detailBuildCount atomic.Int64
+
+// snapshotFoldCount counts every run-snapshot fold the detail path performs
+// (i.e. a snapshot-cache miss). It exists so a test can prove repeated detail()
+// calls at the same fold generation fold the run exactly once — a same-generation
+// hit must not re-scan the city's beads. It carries no production behavior.
+var snapshotFoldCount atomic.Int64
+
 // detail projects one run into the run-detail DTO off the warm bead snapshot,
 // layering request-time session links from one loopback /v0 sessions read. It
 // waits briefly for the cold replay on a city's first request, like
 // enrichedSummary. The bool reports whether the cold replay had completed (a
 // not-found run during warming is reported as warming, not a hard 404).
-func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.FormulaRunDetail, bool, error) {
+//
+// Two caches keyed on the fold generation make a same-generation repeat cheap.
+// The snapshot cache (keyed by runID+lastSeq) folds the run's beads once per
+// generation and serves the fold + formula target to every later request, so a
+// repeat poll re-scans nothing. The detail memo (keyed by runID+lastSeq+
+// sessions-version+formula-version/failure) then caches the built+marshaled DTO,
+// so an unchanged fold with unchanged enrichments returns the cached bytes with
+// zero re-scan, zero re-projection, and zero re-marshal. A new bead event
+// (lastSeq++) invalidates both; a bumped enrichment version invalidates only the
+// detail memo (the fold is reused) → a rebuild off the cached snapshot.
+func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemoValue, bool, error) {
 	select {
 	case <-t.readyCh:
 	case <-ctx.Done():
@@ -341,7 +379,36 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 	ready := t.ready
 	t.mu.RUnlock()
 
-	sessions, sessionsAvailable := t.mgr.fetchSessions(ctx, t.name)
+	// Fold the run's snapshot ONCE per fold generation and cache it: the snapshot
+	// serves both the formula-target extraction (which formula to fetch) and the
+	// build, and a same-generation repeat request (the hot dashboard poll) reuses
+	// it with no re-scan. The old path scanned the city's beads on EVERY request —
+	// even a detail-memo hit re-ran SnapshotForRun before the memo lookup — so the
+	// single-scan win only spanned distinct requests, never repeat polls at the
+	// same generation. SnapshotForRun still returns an error only when the run root
+	// is absent, which stays uncached so a run that appears in a later fold folds
+	// then instead of pinning a not-found.
+	snapKey := runSnapshotCacheKey{runID: runID, lastSeq: lastSeq}
+	snapValue, err := t.snapshotCache.getOrBuild(snapKey, func() (runSnapshotCacheValue, error) {
+		snap, buildErr := runproj.SnapshotForRun(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq))
+		if buildErr != nil {
+			return runSnapshotCacheValue{}, buildErr
+		}
+		snapshotFoldCount.Add(1)
+		name, target, scopeKind, scopeRef, ok := runproj.FormulaTargetFromSnapshot(snap)
+		return runSnapshotCacheValue{snap: snap, name: name, target: target, scopeKind: scopeKind, scopeRef: scopeRef, targetOK: ok}, nil
+	})
+	if err != nil {
+		return runDetailMemoValue{}, ready, err
+	}
+
+	// Resolve the request-time sessions enrichment and its cache version. The
+	// version (0 when unavailable) is part of the memo key so a sessions refresh —
+	// or an availability flip — rebuilds.
+	sessions, sessionsVersion, sessionsAvailable := t.mgr.fetchSessionsVersioned(ctx, t.name)
+	if !sessionsAvailable {
+		sessions = nil
+	}
 
 	// Layer the supervisor's compiled formula detail at request time (like
 	// sessions) so a graph.v2 run with a name+target resolves to the authored
@@ -354,24 +421,41 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runproj.Formu
 	// into a generic upstream error.
 	var formulaDetail *runproj.FormulaOrderingDetail
 	formulaDetailFailure := runproj.FormulaDetailUpstreamError
-	if name, target, scopeKind, scopeRef, ok := runproj.RunFormulaTargetForRun(beadSlice, runID); ok {
-		if fetched, failure, fetchedOK := t.mgr.fetchFormulaDetail(ctx, t.name, name, target, scopeKind, scopeRef); fetchedOK {
+	var formulaVersion uint64
+	if snapValue.targetOK {
+		if fetched, failure, version, fetchedOK := t.mgr.fetchFormulaDetailVersioned(ctx, t.name, snapValue.name, snapValue.target, snapValue.scopeKind, snapValue.scopeRef); fetchedOK {
 			formulaDetail = fetched
+			formulaVersion = version
 		} else {
 			formulaDetailFailure = failure
+			formulaVersion = version
 		}
 	}
 
-	var (
-		d   runproj.FormulaRunDetail
-		err error
-	)
-	if sessionsAvailable {
-		d, err = runproj.BuildRunDetailWithSessionsAndFormula(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), sessions, formulaDetail, formulaDetailFailure)
-	} else {
-		d, err = runproj.BuildRunDetailWithSessionsAndFormula(beadSlice, runID, runDetailSnapshotVersion, int64(lastSeq), nil, formulaDetail, formulaDetailFailure)
+	// Everything that determines the output is now captured in the key. On a hit
+	// the memo returns the cached DTO+bytes with zero re-projection and zero
+	// re-marshal; on a miss it builds once (single-flighted across concurrent
+	// callers), marshals once, stores, and returns.
+	key := runDetailMemoKey{
+		runID:           runID,
+		lastSeq:         lastSeq,
+		sessionsVersion: sessionsVersion,
+		formulaVersion:  formulaVersion,
+		formulaFailure:  formulaDetailFailure,
 	}
-	return d, ready, err
+	value, err := t.detailMemo.getOrBuild(key, func() (runDetailMemoValue, error) {
+		d, buildErr := runproj.BuildRunDetailFromSnapshot(snapValue.snap, sessions, formulaDetail, formulaDetailFailure)
+		if buildErr != nil {
+			return runDetailMemoValue{}, buildErr
+		}
+		detailBuildCount.Add(1)
+		raw, marshalErr := json.Marshal(d)
+		if marshalErr != nil {
+			return runDetailMemoValue{}, marshalErr
+		}
+		return runDetailMemoValue{detail: d, bytes: raw}, nil
+	})
+	return value, ready, err
 }
 
 // enrichedSummary returns the warm bead-derived summary with request-time
@@ -398,11 +482,44 @@ func (t *cityRunTailer) enrichedSummary(ctx context.Context) runproj.RunSummary 
 	return enriched
 }
 
-// fetchSessions reads GET {base}/v0/city/{name}/sessions over loopback and
-// projects the items into the dashboard session shape (equivalent to the
-// frontend normalizeSessions). Any failure returns (nil, false) so health
-// degrades to unavailable rather than failing the load.
+// fetchSessions returns the projected dashboard sessions for a city, served from
+// the per-city sessions cache (TTL + single-flight). A cache hit within the TTL
+// does no upstream work; concurrent cold-miss callers collapse to one upstream
+// fetch; a failed refetch serves the last-good with available=true; a cold miss
+// whose fetch fails degrades to (nil, false) exactly as the uncached path did, so
+// the caller's honest partial/warming states are preserved. detail() and
+// enrichedSummary() consume this.
 func (m *runTailerManager) fetchSessions(ctx context.Context, name string) ([]runproj.DashboardSession, bool) {
+	items, _, ok := m.fetchSessionsVersioned(ctx, name)
+	return items, ok
+}
+
+// fetchSessionsVersioned is fetchSessions with the served value's cache version,
+// so the run-detail memo can key on it and rebuild when the sessions enrichment
+// refreshes (even to an equal value). The version is meaningful only when ok is
+// true. detail() consumes this; enrichedSummary() uses the version-less
+// fetchSessions.
+func (m *runTailerManager) fetchSessionsVersioned(ctx context.Context, name string) ([]runproj.DashboardSession, uint64, bool) {
+	got, version, ok := m.sessionsCache.getWithVersion(ctx, name, func(ctx context.Context) (cachedSessions, time.Duration, bool, bool) {
+		items, upstreamOK := m.fetchSessionsUpstream(ctx, name)
+		if !upstreamOK {
+			return cachedSessions{}, 0, false, false
+		}
+		// A successful sessions read is a positive last-good: serve it stale on a
+		// later failed refetch rather than blanking the health card.
+		return cachedSessions{items: items}, sessionsCacheTTL, true, true
+	})
+	if !ok {
+		return nil, 0, false
+	}
+	return got.items, version, true
+}
+
+// fetchSessionsUpstream reads GET {base}/v0/city/{name}/sessions over loopback
+// and projects the items into the dashboard session shape (equivalent to the
+// frontend normalizeSessions). Any failure returns (nil, false) so the cache
+// degrades to unavailable (or serves last-good) rather than failing the load.
+func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name string) ([]runproj.DashboardSession, bool) {
 	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
 	if base == "" {
 		return nil, false
@@ -442,19 +559,80 @@ type formulaNodeRef struct {
 	ID string `json:"id"`
 }
 
-// fetchFormulaDetail reads
+// fetchFormulaDetailVersioned returns a run's compiled formula detail, served
+// from the per-city formula cache keyed by (name, formula, target, scopeKind,
+// scopeRef). A success is cached for formulaCacheTTL; a definitive 404
+// (genuinely-missing formula) is cached as FormulaDetailNotFound for the shorter
+// formulaNotFoundTTL so a newly-added formula appears promptly; a transient
+// upstream error is NOT cached — it degrades like a cold miss so a real re-check
+// happens on the next GET. On success it returns (detail, "", version, true); on
+// a failure it returns (nil, reason, version, false), preserving the NotFound vs
+// UpstreamError distinction runproj renders as the operator diagnostic.
+//
+// The version is the served cache entry's monotonic generation, so the
+// run-detail memo rebuilds when the compiled formula refreshes (a re-compile, a
+// not-found→available flip, or a re-check). It is meaningful whenever a cache
+// entry was served — including a served negative (a cached not-found), since a
+// negative→available transition bumps it. A cold-miss degrade returns version 0.
+// detail() consumes this.
+func (m *runTailerManager) fetchFormulaDetailVersioned(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, uint64, bool) {
+	key := formulaCacheKey{name: name, formula: formula, target: target, scopeKind: scopeKind, scopeRef: scopeRef}
+	got, version, ok := m.formulaCache.getWithVersion(ctx, key, func(ctx context.Context) (cachedFormulaDetail, time.Duration, bool, bool) {
+		detail, failure, upstreamOK := m.fetchFormulaDetailUpstream(ctx, name, formula, target, scopeKind, scopeRef)
+		switch {
+		case upstreamOK:
+			// A compiled formula is a positive last-good: serve it stale on a later
+			// failed refetch.
+			return cachedFormulaDetail{detail: detail}, formulaCacheTTL, true, true
+		case failure == runproj.FormulaDetailNotFound:
+			// A definitive 404 is a real negative result: cache it briefly so a burst
+			// of GETs does not re-probe a known-missing formula, but re-check soon.
+			// It is NOT stale-serveable, so once formulaNotFoundTTL lapses an errored
+			// refetch degrades to upstream_error instead of pinning this stale
+			// not-found over a live upstream failure.
+			return cachedFormulaDetail{failure: runproj.FormulaDetailNotFound}, formulaNotFoundTTL, true, false
+		default:
+			// A transient upstream error is not cached; degrade like a cold miss.
+			return cachedFormulaDetail{}, 0, false, false
+		}
+	})
+	if !ok {
+		// Cold miss whose fetch failed with a non-404 error, or a canceled join
+		// with no last-good: the honest reason is upstream_error.
+		return nil, runproj.FormulaDetailUpstreamError, 0, false
+	}
+	if got.detail == nil {
+		// A cached not-found (or a cached-then-served negative): not available, and
+		// the failure reason travels with the cached value.
+		failure := got.failure
+		if failure == "" {
+			failure = runproj.FormulaDetailUpstreamError
+		}
+		return nil, failure, version, false
+	}
+	return got.detail, "", version, true
+}
+
+// fetchFormulaDetail preserves the pre-refactor 3-tuple call shape for tests
+// and older internal call sites while the versioned cache API remains the
+// implementation behind it.
+func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) { //nolint:unparam
+	detail, failure, _, ok := m.fetchFormulaDetailVersioned(ctx, name, formula, target, scopeKind, scopeRef)
+	return detail, failure, ok
+}
+
+// fetchFormulaDetailUpstream reads
 // GET {base}/v0/city/{name}/formulas/{formula}?target={target}&scope_kind={kind}&scope_ref={ref}
 // over loopback and projects the compiled formula's ordering-relevant preview
 // nodes and steps into runproj's FormulaOrderingDetail. The scope is required by
 // the endpoint and selects the formula search layer, so a rig-scoped run must
 // send its scope or the lookup resolves the wrong layer (or is rejected). On
 // success it returns (detail, "", true). On failure it returns (nil, reason,
-// false) so the detail falls back to the un-enriched projection: the reason is
-// FormulaDetailNotFound for a supervisor 404 (the compiled formula is genuinely
-// missing) and FormulaDetailUpstreamError for every other failure, preserving the
-// distinction runproj renders as the operator diagnostic. Mirrors fetchSessions;
-// the reason mapping ports the TS formulaDetailFetchFailure helper.
-func (m *runTailerManager) fetchFormulaDetail(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
+// false): the reason is FormulaDetailNotFound for a supervisor 404 (the compiled
+// formula is genuinely missing) and FormulaDetailUpstreamError for every other
+// failure. Mirrors fetchSessionsUpstream; the reason mapping ports the TS
+// formulaDetailFetchFailure helper.
+func (m *runTailerManager) fetchFormulaDetailUpstream(ctx context.Context, name, formula, target, scopeKind, scopeRef string) (*runproj.FormulaOrderingDetail, runproj.RunFormulaDetailFetchFailure, bool) {
 	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
 	if base == "" {
 		return nil, runproj.FormulaDetailUpstreamError, false
@@ -547,7 +725,7 @@ func (p *Plane) registerRunDetail() {
 			writeError(w, http.StatusNotFound, "unknown city")
 			return
 		}
-		detail, ready, err := t.detail(r.Context(), r.PathValue("runId"))
+		value, ready, err := t.detail(r.Context(), r.PathValue("runId"))
 		if err != nil {
 			var unsupported *runproj.UnsupportedRunError
 			if errors.As(err, &unsupported) {
@@ -573,7 +751,11 @@ func (p *Plane) registerRunDetail() {
 			writeError(w, http.StatusNotFound, "unknown run")
 			return
 		}
-		writeJSON(w, http.StatusOK, detail)
+		// Serve the memoized marshaled bytes verbatim — the memo already produced
+		// json.Marshal(detail), so writeJSONBytes skips a re-marshal while emitting
+		// byte-identical output to writeJSON (same headers, same trailing newline
+		// the JSON encoder appends).
+		writeJSONBytes(w, http.StatusOK, value.bytes)
 	})
 }
 

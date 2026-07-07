@@ -171,6 +171,12 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 	// mux: "/v0/city/{cityName}/svc/" as a prefix pattern only matches that
 	// subtree; everything else is a typed Huma operation at its real scoped path.
 	humaMux.HandleFunc("/v0/city/{cityName}/svc/", sm.serveCitySvcProxy)
+	// /hook/* webhook receiver — a fourth sanctioned non-Huma surface next to
+	// /svc/*. Same raw-body pass-through pattern (the HMAC/ed25519 verifiers need
+	// the exact bytes); the R2 perimeter + E4 verification gate it, and — unlike
+	// /svc/* — it is NOT exempt from the mux-level write-auth grant (see
+	// cityScopedObjectMutation; the deliberate H2 reversal).
+	humaMux.HandleFunc("/v0/city/{cityName}/hook/", sm.serveCityHookProxy)
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
@@ -190,6 +196,20 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 	// which per-city Server.mux handles via handleServiceProxy.
 	svcPath := strings.TrimPrefix(r.URL.Path, "/v0/city/"+cityName)
 	sm.serveCityRequest(w, r, cityName, svcPath)
+}
+
+// serveCityHookProxy forwards /v0/city/{cityName}/hook/... to the per-city
+// Server's mux at /hook/... (where handleHookProxy is registered). Like
+// serveCitySvcProxy it is a raw pass-through excluded from the typed Huma control
+// plane so the signature verifiers see the exact raw body.
+func (sm *SupervisorMux) serveCityHookProxy(w http.ResponseWriter, r *http.Request) {
+	cityName := r.PathValue("cityName")
+	if cityName == "" {
+		problemCityNameRequired.writeTo(w)
+		return
+	}
+	hookPath := strings.TrimPrefix(r.URL.Path, "/v0/city/"+cityName)
+	sm.serveCityRequest(w, r, cityName, hookPath)
 }
 
 // Handler returns an http.Handler with the standard middleware chain applied.

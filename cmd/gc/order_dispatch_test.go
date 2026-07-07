@@ -771,7 +771,7 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID, nil)
 	})
 
 	if calls != 0 {
@@ -795,7 +795,7 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 	mad.ep = eventLog
-	mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID, nil)
 
 	if calls != 1 {
 		t.Fatalf("exec calls after cursor read recovers = %d, want 1", calls)
@@ -956,7 +956,7 @@ func TestOrderDispatchEventWispLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
 
-	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID, nil)
 
 	all := trackingBeads(t, store, "order-run:release-watch")
 	if len(all) != 1 {
@@ -1011,7 +1011,7 @@ description = "Inspect convoy {{convoy_id}}"
 	}
 	mad := ad.(*memoryOrderDispatcher)
 
-	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID, nil)
 
 	all := trackingBeads(t, store, "order-run:convoy-patrol")
 	if len(all) != 1 {
@@ -1643,7 +1643,7 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID, nil)
 	})
 
 	// Check tracking bead has exec-failed label.
@@ -1700,7 +1700,7 @@ dolt.auto-start: false
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}, a, cityDir, tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}, a, cityDir, tracking.ID, nil)
 	})
 
 	all := trackingBeads(t, store, "order-run:pg-env")
@@ -1750,7 +1750,7 @@ func TestOrderDispatchExecFailureRedactsSecrets(t *testing.T) {
 	mad.stderr = &stderr
 
 	logs := captureCmdOrderLogs(t, func() {
-		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID, nil)
 	})
 
 	combined := logs + "\n" + stderr.String()
@@ -8683,7 +8683,7 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Name: "order-tracking-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
-	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err != nil {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
@@ -8717,7 +8717,7 @@ func TestOrderExecEnvScrubsAmbientDoltEnvForCityWithoutDoltTarget(t *testing.T) 
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Name: "jsonl-export", Trigger: "cooldown", Interval: "15m", Exec: "true"}
 
-	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err != nil {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
@@ -8769,7 +8769,7 @@ func TestOrderExecEnvAppliesOrderEnvOverrides(t *testing.T) {
 		},
 	}
 
-	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err != nil {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
@@ -8820,7 +8820,7 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 				},
 			}
 
-			_, err := orderExecEnvWithError(cityDir, nil, target, a)
+			_, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 			if err == nil {
 				t.Fatal("orderExecEnvWithError() succeeded; want reserved env key error")
 			}
@@ -8847,7 +8847,7 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		FormulaLayer: filepath.Join(packDir, "formulas"),
 	}
 
-	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err != nil {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
@@ -8880,7 +8880,7 @@ func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Trigger: "cooldown", Interval: "1m", Exec: "true"} // no Name
 
-	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err != nil {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
@@ -8908,7 +8908,7 @@ dolt.auto-start: false
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Name: "pg-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
-	_, err := orderExecEnvWithError(cityDir, nil, target, a)
+	_, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err == nil {
 		t.Fatal("orderExecEnvWithError() error = nil, want postgres projection error")
 	}
@@ -8936,7 +8936,7 @@ dolt.auto-start: false
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}
 	a := orders.Order{Name: "pg-city-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
-	env, err := orderExecEnvWithError(cityDir, nil, target, a)
+	env, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 	if err != nil {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}

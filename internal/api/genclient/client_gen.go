@@ -2095,6 +2095,24 @@ type OrderResponse struct {
 	Type       string  `json:"type"`
 }
 
+// OrderRunInputBody defines model for OrderRunInputBody.
+type OrderRunInputBody struct {
+	// Vars Declared [order.params] as key/value dispatch args (parity with 'gc order run --var'). Namespaced into the exec env under GC_WEBHOOK_ARG_ before overlay (R4).
+	Vars *map[string]string `json:"vars,omitempty"`
+}
+
+// OrderRunOutputBody defines model for OrderRunOutputBody.
+type OrderRunOutputBody struct {
+	// ScopedName Rig-qualified name of the fired order.
+	ScopedName *string `json:"scoped_name,omitempty"`
+
+	// Status "dispatched" when the order fired.
+	Status string `json:"status"`
+
+	// TrackingId Tracking bead id for the dispatch.
+	TrackingId *string `json:"tracking_id,omitempty"`
+}
+
 // OrdersFeedBody defines model for OrdersFeedBody.
 type OrdersFeedBody struct {
 	Items         *[]MonitorFeedItemResponse `json:"items"`
@@ -4471,6 +4489,36 @@ type TypedEventStreamEnvelopeSupervisorStarted struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWebhookReceived defines model for TypedEventStreamEnvelopeWebhookReceived.
+type TypedEventStreamEnvelopeWebhookReceived struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   WebhookReceivedPayload   `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWebhookRejected defines model for TypedEventStreamEnvelopeWebhookRejected.
+type TypedEventStreamEnvelopeWebhookRejected struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   WebhookRejectedPayload   `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
 type TypedEventStreamEnvelopeWorkerOperation struct {
 	Actor     string                      `json:"actor"`
@@ -5611,6 +5659,38 @@ type TypedTaggedEventStreamEnvelopeSupervisorStarted struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeWebhookReceived defines model for TypedTaggedEventStreamEnvelopeWebhookReceived.
+type TypedTaggedEventStreamEnvelopeWebhookReceived struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   WebhookReceivedPayload   `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWebhookRejected defines model for TypedTaggedEventStreamEnvelopeWebhookRejected.
+type TypedTaggedEventStreamEnvelopeWebhookRejected struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   WebhookRejectedPayload   `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
 type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 	Actor     string                      `json:"actor"`
@@ -5631,6 +5711,72 @@ type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 type UnboundEventPayload struct {
 	Count     int64  `json:"count"`
 	SessionId string `json:"session_id"`
+}
+
+// WebhookReceivedPayload defines model for WebhookReceivedPayload.
+type WebhookReceivedPayload struct {
+	// BodySize Raw request body size in bytes (never the body itself).
+	BodySize int64 `json:"body_size"`
+
+	// DedupId Provider delivery id used for dedup (or a body hash when the scheme carries none).
+	DedupId *string `json:"dedup_id,omitempty"`
+
+	// Deduped True when this delivery was a duplicate and was NOT dispatched.
+	Deduped bool `json:"deduped"`
+
+	// Dispatched True when an order was launched for this delivery.
+	Dispatched bool `json:"dispatched"`
+
+	// EventType Provider event type surfaced by the scheme (e.g. pull_request).
+	EventType *string `json:"event_type,omitempty"`
+
+	// Matched True when a [[webhook.rule]] matched the delivery.
+	Matched bool `json:"matched"`
+
+	// Order Target order name when a rule matched.
+	Order *string `json:"order,omitempty"`
+
+	// Rig Target rig when the matched rule scoped one.
+	Rig *string `json:"rig,omitempty"`
+
+	// RuleIndex Matched rule index, or -1 when no rule matched.
+	RuleIndex int64 `json:"rule_index"`
+
+	// Scheme Verifier scheme (github-hmac-sha256, slack-v0, …).
+	Scheme *string `json:"scheme,omitempty"`
+
+	// ScopedName Rig-qualified name of the fired order.
+	ScopedName *string `json:"scoped_name,omitempty"`
+
+	// TrackingId Tracking bead id for the dispatch, when fired.
+	TrackingId *string `json:"tracking_id,omitempty"`
+
+	// Webhook Configured webhook name that received the delivery.
+	Webhook string `json:"webhook"`
+}
+
+// WebhookRejectedPayload defines model for WebhookRejectedPayload.
+type WebhookRejectedPayload struct {
+	// BodySize Raw request body size in bytes, when the body was read.
+	BodySize *int64 `json:"body_size,omitempty"`
+
+	// DedupId Provider delivery id, when known.
+	DedupId *string `json:"dedup_id,omitempty"`
+
+	// EventType Provider event type, when known at the rejection point.
+	EventType *string `json:"event_type,omitempty"`
+
+	// Reason Rejection reason enum (perimeter_denied, read_only, rate_limited, operator_fault, verify_failed, bad_payload, dispatch_refused, …).
+	Reason string `json:"reason"`
+
+	// Scheme Verifier scheme, when the webhook resolved.
+	Scheme *string `json:"scheme,omitempty"`
+
+	// Status HTTP status returned to the sender.
+	Status *int64 `json:"status,omitempty"`
+
+	// Webhook Configured webhook name (empty only for unresolved routes, which are not evented).
+	Webhook string `json:"webhook"`
 }
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
@@ -6392,6 +6538,12 @@ type PostV0CityByCityNameOrderByNameEnableParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PostV0CityByCityNameOrderByNameRunParams defines parameters for PostV0CityByCityNameOrderByNameRun.
+type PostV0CityByCityNameOrderByNameRunParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameOrdersCheckParams defines parameters for GetV0CityByCityNameOrdersCheck.
 type GetV0CityByCityNameOrdersCheckParams struct {
 	// Fresh Bypass cached order-check responses and cached order history.
@@ -6850,6 +7002,9 @@ type SendMailJSONRequestBody = MailSendInputBody
 
 // ReplyMailJSONRequestBody defines body for ReplyMail for application/json ContentType.
 type ReplyMailJSONRequestBody = MailReplyInputBody
+
+// PostV0CityByCityNameOrderByNameRunJSONRequestBody defines body for PostV0CityByCityNameOrderByNameRun for application/json ContentType.
+type PostV0CityByCityNameOrderByNameRunJSONRequestBody = OrderRunInputBody
 
 // AddPackJSONRequestBody defines body for AddPack for application/json ContentType.
 type AddPackJSONRequestBody = PackAddInputBody
@@ -7851,6 +8006,58 @@ func (t *EventPayload) FromUnboundEventPayload(v UnboundEventPayload) error {
 
 // MergeUnboundEventPayload performs a merge with any union data inside the EventPayload, using the provided UnboundEventPayload
 func (t *EventPayload) MergeUnboundEventPayload(v UnboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWebhookReceivedPayload returns the union data inside the EventPayload as a WebhookReceivedPayload
+func (t EventPayload) AsWebhookReceivedPayload() (WebhookReceivedPayload, error) {
+	var body WebhookReceivedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWebhookReceivedPayload overwrites any union data inside the EventPayload as the provided WebhookReceivedPayload
+func (t *EventPayload) FromWebhookReceivedPayload(v WebhookReceivedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWebhookReceivedPayload performs a merge with any union data inside the EventPayload, using the provided WebhookReceivedPayload
+func (t *EventPayload) MergeWebhookReceivedPayload(v WebhookReceivedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWebhookRejectedPayload returns the union data inside the EventPayload as a WebhookRejectedPayload
+func (t EventPayload) AsWebhookRejectedPayload() (WebhookRejectedPayload, error) {
+	var body WebhookRejectedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWebhookRejectedPayload overwrites any union data inside the EventPayload as the provided WebhookRejectedPayload
+func (t *EventPayload) FromWebhookRejectedPayload(v WebhookRejectedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWebhookRejectedPayload performs a merge with any union data inside the EventPayload, using the provided WebhookRejectedPayload
+func (t *EventPayload) MergeWebhookRejectedPayload(v WebhookRejectedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9917,6 +10124,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorStarte
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWebhookReceived returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWebhookReceived
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWebhookReceived() (TypedEventStreamEnvelopeWebhookReceived, error) {
+	var body TypedEventStreamEnvelopeWebhookReceived
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWebhookReceived overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWebhookReceived
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWebhookReceived(v TypedEventStreamEnvelopeWebhookReceived) error {
+	v.Type = "webhook.received"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWebhookReceived performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWebhookReceived
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWebhookReceived(v TypedEventStreamEnvelopeWebhookReceived) error {
+	v.Type = "webhook.received"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWebhookRejected returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWebhookRejected
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWebhookRejected() (TypedEventStreamEnvelopeWebhookRejected, error) {
+	var body TypedEventStreamEnvelopeWebhookRejected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWebhookRejected overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWebhookRejected
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWebhookRejected(v TypedEventStreamEnvelopeWebhookRejected) error {
+	v.Type = "webhook.rejected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWebhookRejected performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWebhookRejected
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWebhookRejected(v TypedEventStreamEnvelopeWebhookRejected) error {
+	v.Type = "webhook.rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -10127,6 +10390,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSupervisorShutdownRequested()
 	case "supervisor.started":
 		return t.AsTypedEventStreamEnvelopeSupervisorStarted()
+	case "webhook.received":
+		return t.AsTypedEventStreamEnvelopeWebhookReceived()
+	case "webhook.rejected":
+		return t.AsTypedEventStreamEnvelopeWebhookRejected()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -12076,6 +12343,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupe
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWebhookReceived returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWebhookReceived
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWebhookReceived() (TypedTaggedEventStreamEnvelopeWebhookReceived, error) {
+	var body TypedTaggedEventStreamEnvelopeWebhookReceived
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWebhookReceived overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWebhookReceived
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWebhookReceived(v TypedTaggedEventStreamEnvelopeWebhookReceived) error {
+	v.Type = "webhook.received"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWebhookReceived performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWebhookReceived
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWebhookReceived(v TypedTaggedEventStreamEnvelopeWebhookReceived) error {
+	v.Type = "webhook.received"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWebhookRejected returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWebhookRejected
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWebhookRejected() (TypedTaggedEventStreamEnvelopeWebhookRejected, error) {
+	var body TypedTaggedEventStreamEnvelopeWebhookRejected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWebhookRejected overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWebhookRejected
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWebhookRejected(v TypedTaggedEventStreamEnvelopeWebhookRejected) error {
+	v.Type = "webhook.rejected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWebhookRejected performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWebhookRejected
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWebhookRejected(v TypedTaggedEventStreamEnvelopeWebhookRejected) error {
+	v.Type = "webhook.rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -12286,6 +12609,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested()
 	case "supervisor.started":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorStarted()
+	case "webhook.received":
+		return t.AsTypedTaggedEventStreamEnvelopeWebhookReceived()
+	case "webhook.rejected":
+		return t.AsTypedTaggedEventStreamEnvelopeWebhookRejected()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -12691,6 +13018,11 @@ type ClientInterface interface {
 
 	// PostV0CityByCityNameOrderByNameEnable request
 	PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameOrderByNameRunWithBody request with any body
+	PostV0CityByCityNameOrderByNameRunWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameOrderByNameRun(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrders request
 	GetV0CityByCityNameOrders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14284,6 +14616,30 @@ func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cit
 
 func (c *Client) PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameOrderByNameEnableRequest(c.Server, cityName, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameOrderByNameRunWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameOrderByNameRunRequestWithBody(c.Server, cityName, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameOrderByNameRun(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameOrderByNameRunRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -21088,6 +21444,73 @@ func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName str
 	return req, nil
 }
 
+// NewPostV0CityByCityNameOrderByNameRunRequest calls the generic PostV0CityByCityNameOrderByNameRun builder with application/json body
+func NewPostV0CityByCityNameOrderByNameRunRequest(server string, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameOrderByNameRunRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameOrderByNameRunRequestWithBody generates requests for PostV0CityByCityNameOrderByNameRun with any type of body
+func NewPostV0CityByCityNameOrderByNameRunRequestWithBody(server string, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/order/%s/run", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameOrdersRequest generates requests for GetV0CityByCityNameOrders
 func NewGetV0CityByCityNameOrdersRequest(server string, cityName string) (*http.Request, error) {
 	var err error
@@ -25453,6 +25876,11 @@ type ClientWithResponsesInterface interface {
 	// PostV0CityByCityNameOrderByNameEnableWithResponse request
 	PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error)
 
+	// PostV0CityByCityNameOrderByNameRunWithBodyWithResponse request with any body
+	PostV0CityByCityNameOrderByNameRunWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameRunResponse, error)
+
+	PostV0CityByCityNameOrderByNameRunWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameRunResponse, error)
+
 	// GetV0CityByCityNameOrdersWithResponse request
 	GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error)
 
@@ -27702,6 +28130,29 @@ func (r PostV0CityByCityNameOrderByNameEnableResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostV0CityByCityNameOrderByNameEnableResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameOrderByNameRunResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON202                       *OrderRunOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameOrderByNameRunResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameOrderByNameRunResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -30245,6 +30696,23 @@ func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameEnableWithResponse(
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameOrderByNameEnableResponse(rsp)
+}
+
+// PostV0CityByCityNameOrderByNameRunWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameOrderByNameRunResponse
+func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameRunWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameRunResponse, error) {
+	rsp, err := c.PostV0CityByCityNameOrderByNameRunWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameOrderByNameRunResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameRunWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameRunResponse, error) {
+	rsp, err := c.PostV0CityByCityNameOrderByNameRun(ctx, cityName, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameOrderByNameRunResponse(rsp)
 }
 
 // GetV0CityByCityNameOrdersWithResponse request returning *GetV0CityByCityNameOrdersResponse
@@ -33848,6 +34316,39 @@ func ParsePostV0CityByCityNameOrderByNameEnableResponse(rsp *http.Response) (*Po
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameOrderByNameRunResponse parses an HTTP response from a PostV0CityByCityNameOrderByNameRunWithResponse call
+func ParsePostV0CityByCityNameOrderByNameRunResponse(rsp *http.Response) (*PostV0CityByCityNameOrderByNameRunResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameOrderByNameRunResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest OrderRunOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
