@@ -814,14 +814,7 @@ func (h *Handler) deriveIterationCount(rootBeadID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	prefix := IdempotencyKeyPrefix(rootBeadID)
-	count := 0
-	for _, child := range children {
-		if strings.HasPrefix(child.IdempotencyKey, prefix) && child.Status == "closed" {
-			count++
-		}
-	}
-	return count, nil
+	return childStats(children, rootBeadID).ClosedCount, nil
 }
 
 // computeDurations computes iteration and cumulative durations.
@@ -839,14 +832,7 @@ func (h *Handler) computeDurations(rootBeadID, wispID string) (iterDur, cumDur t
 	if err != nil {
 		return iterDur, 0
 	}
-	prefix := IdempotencyKeyPrefix(rootBeadID)
-	for _, child := range children {
-		if strings.HasPrefix(child.IdempotencyKey, prefix) && child.Status == "closed" &&
-			!child.ClosedAt.IsZero() && !child.CreatedAt.IsZero() {
-			cumDur += child.ClosedAt.Sub(child.CreatedAt)
-		}
-	}
-	return iterDur, cumDur
+	return iterDur, childStats(children, rootBeadID).CumulativeDur
 }
 
 // emitEvent emits a convergence event through the EventEmitter.

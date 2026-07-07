@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -259,8 +258,10 @@ func (r *Reconciler) reconcileTerminatedNotClosed(beadID string, meta map[string
 		}
 	}
 
-	// Derive total iterations for the terminated event.
-	totalIterations, _ := r.deriveIterationFromChildrenViaStore(beadID)
+	// Derive iteration count and cumulative duration for the terminated event
+	// from a single child fetch (best-effort: zeros on error).
+	children, _ := r.Handler.Store.Children(beadID)
+	stats := childStats(children, beadID)
 
 	// Emit ConvergenceTerminated (recovery).
 	reason := meta[FieldTerminalReason]
@@ -272,15 +273,12 @@ func (r *Reconciler) reconcileTerminatedNotClosed(beadID string, meta map[string
 		actor = "recovery"
 	}
 
-	// Compute cumulative duration (best-effort).
-	cumDur := r.cumulativeDuration(beadID)
-
 	termPayload := TerminatedPayload{
 		TerminalReason:       reason,
-		TotalIterations:      totalIterations,
+		TotalIterations:      stats.ClosedCount,
 		FinalStatus:          "closed",
 		Actor:                actor,
-		CumulativeDurationMs: cumDur,
+		CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 	}
 	r.emitRecoveryEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 
@@ -314,28 +312,29 @@ func (r *Reconciler) reconcileWaitingManual(beadID string, meta map[string]strin
 		// event was lost in a crash.
 		iteration, _ := DecodeInt(meta[FieldIteration])
 		wispID := meta[FieldLastProcessedWisp]
-		cumDur := r.cumulativeDuration(beadID)
+		// One child fetch feeds both the cumulative duration (best-effort:
+		// zero on error) and the last_processed_wisp repair below.
+		children, childErr := r.Handler.Store.Children(beadID)
+		stats := childStats(children, beadID)
 		wmPayload := WaitingManualPayload{
 			Iteration:            iteration,
 			WispID:               wispID,
 			GateMode:             meta[FieldGateMode],
 			Reason:               waitingReason,
-			CumulativeDurationMs: cumDur,
+			CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 		}
 		r.emitRecoveryEvent(EventWaitingManual, EventIDWaitingManual(beadID, iteration), beadID, wmPayload)
 
 		// Repair last_processed_wisp if needed: find the highest-iteration
 		// closed wisp and ensure last_processed_wisp points to it.
-		children, err := r.Handler.Store.Children(beadID)
-		if err != nil {
+		if childErr != nil {
 			return ReconcileDetail{
 				BeadID: beadID, Action: "no_action",
-				Error: fmt.Errorf("listing children: %w", err),
+				Error: fmt.Errorf("listing children: %w", childErr),
 			}
 		}
-		highestWisp, _, found := highestClosedWisp(children, beadID)
-		if found && meta[FieldLastProcessedWisp] != highestWisp.ID {
-			if err := r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, highestWisp.ID); err != nil {
+		if stats.HighestClosedFound && meta[FieldLastProcessedWisp] != stats.HighestClosed.ID {
+			if err := r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, stats.HighestClosed.ID); err != nil {
 				return ReconcileDetail{
 					BeadID: beadID, Action: "repaired_state",
 					Error: fmt.Errorf("repairing last_processed_wisp: %w", err),
@@ -356,8 +355,7 @@ func (r *Reconciler) reconcileWaitingManual(beadID string, meta map[string]strin
 			Error: fmt.Errorf("listing children: %w", err),
 		}
 	}
-	_, _, found := highestClosedWisp(children, beadID)
-	if found {
+	if childStats(children, beadID).HighestClosedFound {
 		// There are closed wisps but no waiting_reason — set a default.
 		if err := r.Handler.Store.SetMetadata(beadID, FieldWaitingReason, WaitManual); err != nil {
 			return ReconcileDetail{
@@ -482,7 +480,7 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 		}
 	}
 
-	closedIter := deriveIterationFromChildren(children, beadID)
+	closedIter := childStats(children, beadID).ClosedCount
 	nextIter := closedIter + 1
 	nextKey := IdempotencyKey(beadID, nextIter)
 
@@ -557,15 +555,19 @@ func (r *Reconciler) completeTerminalTransition(beadID string, meta map[string]s
 		actor = "recovery"
 	}
 
-	totalIterations, _ := r.deriveIterationFromChildrenViaStore(beadID)
-	cumDur := r.cumulativeDuration(beadID)
+	// One child fetch feeds the iteration count, cumulative duration, and the
+	// last_processed_wisp repair below. The intervening writes only touch the
+	// parent bead's metadata/status, not its children, so the highest closed
+	// wisp is unchanged by the time we write it (best-effort: zeros on error).
+	children, _ := r.Handler.Store.Children(beadID)
+	stats := childStats(children, beadID)
 
 	termPayload := TerminatedPayload{
 		TerminalReason:       reason,
-		TotalIterations:      totalIterations,
+		TotalIterations:      stats.ClosedCount,
 		FinalStatus:          "closed",
 		Actor:                actor,
-		CumulativeDurationMs: cumDur,
+		CumulativeDurationMs: stats.CumulativeDur.Milliseconds(),
 	}
 	r.emitRecoveryEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 
@@ -589,11 +591,8 @@ func (r *Reconciler) completeTerminalTransition(beadID string, meta map[string]s
 
 	// Write last_processed_wisp if there is a highest closed wisp
 	// (write ordering: always last).
-	children, err := r.Handler.Store.Children(beadID)
-	if err == nil {
-		if hw, _, found := highestClosedWisp(children, beadID); found {
-			_ = r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, hw.ID)
-		}
+	if stats.HighestClosedFound {
+		_ = r.Handler.Store.SetMetadata(beadID, FieldLastProcessedWisp, stats.HighestClosed.ID)
 	}
 
 	return ReconcileDetail{BeadID: beadID, Action: "completed_terminal"}
@@ -609,74 +608,16 @@ func (r *Reconciler) backfillTerminalActor(beadID string, meta map[string]string
 }
 
 // deriveIterationFromChildren counts closed convergence wisps among the
-// children of beadID. This is the same logic as Handler.deriveIterationCount
-// but operates on a pre-fetched child list.
+// children of beadID. Thin accessor over childStats for the closed-wisp count.
 func deriveIterationFromChildren(children []BeadInfo, beadID string) int {
-	prefix := IdempotencyKeyPrefix(beadID)
-	count := 0
-	for _, child := range children {
-		if strings.HasPrefix(child.IdempotencyKey, prefix) && child.Status == "closed" {
-			count++
-		}
-	}
-	return count
+	return childStats(children, beadID).ClosedCount
 }
 
 // highestClosedWisp finds the closed convergence wisp with the highest
-// iteration number among the children of beadID.
+// iteration number among the children of beadID. Thin accessor over childStats.
 func highestClosedWisp(children []BeadInfo, beadID string) (BeadInfo, int, bool) {
-	prefix := IdempotencyKeyPrefix(beadID)
-	var best BeadInfo
-	bestIter := -1
-	found := false
-
-	for _, child := range children {
-		if !strings.HasPrefix(child.IdempotencyKey, prefix) {
-			continue
-		}
-		if child.Status != "closed" {
-			continue
-		}
-		iter, ok := ParseIterationFromKey(child.IdempotencyKey)
-		if !ok {
-			continue
-		}
-		if iter > bestIter {
-			best = child
-			bestIter = iter
-			found = true
-		}
-	}
-
-	return best, bestIter, found
-}
-
-// deriveIterationFromChildrenViaStore fetches children from the store
-// and delegates to deriveIterationFromChildren.
-func (r *Reconciler) deriveIterationFromChildrenViaStore(beadID string) (int, error) {
-	children, err := r.Handler.Store.Children(beadID)
-	if err != nil {
-		return 0, err
-	}
-	return deriveIterationFromChildren(children, beadID), nil
-}
-
-// cumulativeDuration computes the cumulative duration across all closed
-// convergence wisps (best-effort, returns 0 on error).
-func (r *Reconciler) cumulativeDuration(beadID string) int64 {
-	children, err := r.Handler.Store.Children(beadID)
-	if err != nil {
-		return 0
-	}
-	prefix := IdempotencyKeyPrefix(beadID)
-	var total int64
-	for _, child := range children {
-		if strings.HasPrefix(child.IdempotencyKey, prefix) && child.Status == "closed" &&
-			!child.ClosedAt.IsZero() && !child.CreatedAt.IsZero() {
-			total += child.ClosedAt.Sub(child.CreatedAt).Milliseconds()
-		}
-	}
-	return total
+	s := childStats(children, beadID)
+	return s.HighestClosed, s.HighestClosedIter, s.HighestClosedFound
 }
 
 // emitRecoveryEvent emits a convergence event with the recovery flag

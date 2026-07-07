@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -483,37 +482,14 @@ func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (Be
 		return BeadInfo{}, false, nil
 	}
 
-	var bestOpen BeadInfo
-	bestOpenIter := -1
-	var bestClosed BeadInfo
-	bestClosedIter := -1
-	prefix := IdempotencyKeyPrefix(beadID)
-	for _, child := range children {
-		if !strings.HasPrefix(child.IdempotencyKey, prefix) {
-			continue
-		}
-		iter, ok := ParseIterationFromKey(child.IdempotencyKey)
-		if !ok {
-			continue
-		}
-		switch child.Status {
-		case "open", "in_progress":
-			if iter > bestOpenIter {
-				bestOpen = child
-				bestOpenIter = iter
-			}
-		case "closed":
-			if iter > bestClosedIter {
-				bestClosed = child
-				bestClosedIter = iter
-			}
-		}
+	// Fall back to the highest-iteration open wisp, then the highest-iteration
+	// closed wisp, among the convergence children.
+	stats := childStats(children, beadID)
+	if stats.HighestOpenFound {
+		return stats.HighestOpen, true, nil
 	}
-	if bestOpenIter >= 0 {
-		return bestOpen, true, nil
-	}
-	if bestClosedIter >= 0 {
-		return bestClosed, true, nil
+	if stats.HighestClosedFound {
+		return stats.HighestClosed, true, nil
 	}
 	return BeadInfo{}, false, nil
 }
