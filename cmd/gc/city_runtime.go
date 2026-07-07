@@ -3392,11 +3392,11 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 	if trace == nil {
 		return
 	}
-	trace.recordOperation("lifecycle.shutdown.preserve_sessions", "", "", "", "retained", string(TraceOutcomeApplied), traceRecordPayload{
+	trace.RecordOperation(TraceSiteLifecycleShutdownPreserveSessions, TraceReasonRetained, TraceOutcomeApplied, "", "", "", 0, traceRecordPayload{
 		"city_path": cr.cityPath,
 		"city_name": cr.cityName,
 		"reason":    "supervisor_shutdown_preserve_mode",
-	}, "")
+	})
 	trace.end(TraceCompletionCompleted, traceRecordPayload{
 		"phase":     "shutdown",
 		"mode":      "preserve_sessions",

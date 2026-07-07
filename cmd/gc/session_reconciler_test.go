@@ -6803,14 +6803,64 @@ func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
 	if rec.OutcomeCode != TraceOutcomeApplied {
 		t.Fatalf("outcome = %q, want %q", rec.OutcomeCode, TraceOutcomeApplied)
 	}
-	if got := rec.Fields["raw_reason_code"]; got != "heal_cleared_stale_lease" {
-		t.Fatalf("raw_reason_code = %#v, want heal_cleared_stale_lease", got)
+	if rec.ReasonCode != TraceReasonHealClearedStaleLease {
+		t.Fatalf("reason = %q, want %q", rec.ReasonCode, TraceReasonHealClearedStaleLease)
 	}
 	if got := rec.Fields["state_before"]; got != "creating" {
 		t.Fatalf("state_before = %#v, want creating", got)
 	}
 	if got := rec.Fields["state_after"]; got != "asleep" {
 		t.Fatalf("state_after = %#v, want asleep", got)
+	}
+}
+
+// TestRecordDecisionKeepsBackfilledCodesTyped proves the S26 collapse: codes
+// that the deleted normalize allowlists used to silently rewrite to "unknown"
+// (dumping the real value into a raw_*_code field) now land directly in the
+// typed primary fields, with no raw_*_code shadow left behind.
+func TestRecordDecisionKeepsBackfilledCodesTyped(t *testing.T) {
+	trace := &sessionReconcilerTraceCycle{
+		tracer: &SessionReconcilerTracer{
+			detail: map[string]TraceSource{"repo/worker": TraceSourceManual},
+		},
+		dropReasons:       map[string]int{},
+		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
+		pendingDropped:    map[string]int{},
+		templatesTouched:  map[string]struct{}{},
+		detailedTemplates: map[string]struct{}{},
+		decisionCounts:    map[string]int{},
+		operationCounts:   map[string]int{},
+		mutationCounts:    map[string]int{},
+		reasonCounts:      map[string]int{},
+		outcomeCounts:     map[string]int{},
+	}
+
+	trace.RecordDecision(
+		TraceSiteReconcilerDrainAck,
+		TraceReasonConfigDriftAttached,
+		TraceOutcomeCancelReconcilerAck,
+		"repo/worker",
+		"worker-1",
+		nil,
+	)
+
+	if len(trace.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(trace.records))
+	}
+	rec := trace.records[0]
+	if rec.SiteCode != TraceSiteReconcilerDrainAck {
+		t.Fatalf("site = %q, want %q", rec.SiteCode, TraceSiteReconcilerDrainAck)
+	}
+	if rec.ReasonCode != TraceReasonConfigDriftAttached {
+		t.Fatalf("reason = %q, want %q", rec.ReasonCode, TraceReasonConfigDriftAttached)
+	}
+	if rec.OutcomeCode != TraceOutcomeCancelReconcilerAck {
+		t.Fatalf("outcome = %q, want %q", rec.OutcomeCode, TraceOutcomeCancelReconcilerAck)
+	}
+	for _, k := range []string{"raw_site_code", "raw_reason_code", "raw_outcome_code"} {
+		if _, ok := rec.Fields[k]; ok {
+			t.Fatalf("field %q present, want absent", k)
+		}
 	}
 }
 

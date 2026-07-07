@@ -539,11 +539,11 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			dt.remove(id)
 			if trace != nil {
-				trace.recordDecision("reconciler.drain.stale", normalizedSessionTemplateInfo(info, cfg), name, "stale_generation", "cancel", traceRecordPayload{
+				trace.RecordDecision(TraceSiteDrainStale, TraceReasonStaleGeneration, TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
 					"drain_reason":       ds.reason,
 					"drain_generation":   ds.generation,
 					"session_generation": gen,
-				}, nil, "")
+				})
 			}
 			continue
 		}
@@ -560,9 +560,9 @@ func advanceSessionDrainsWithSessionsTraced(
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
 			if trace != nil {
-				trace.recordDecision("reconciler.drain.complete", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "complete", traceRecordPayload{
+				trace.RecordDecision(TraceSiteDrainComplete, TraceReasonCode(ds.reason), TraceOutcomeComplete, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
 					"drain_started_at": ds.startedAt,
-				}, nil, "")
+				})
 			}
 			continue
 		}
@@ -572,7 +572,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			pendingDrainReasonCancelable(ds.reason) {
 			if cancelSessionDrainForPendingInfo(info, sp, dt) {
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel_pending", nil, nil, "")
+					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancelPending, normalizedSessionTemplateInfo(info, cfg), name, nil)
 				}
 				continue
 			}
@@ -584,7 +584,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			assignedWorkDrainReasonCancelable(ds.reason) {
 			if cancelSessionDrainForAssignedWorkInfo(info, sp, dt) {
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel_assigned_work", nil, nil, "")
+					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancelAssignedWork, normalizedSessionTemplateInfo(info, cfg), name, nil)
 				}
 				continue
 			}
@@ -603,7 +603,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				}
 				dt.remove(id)
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "cancel", nil, nil, "")
+					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
 				}
 				continue
 			}
@@ -638,7 +638,11 @@ func advanceSessionDrainsWithSessionsTraced(
 					outcome = "failed"
 					fields["error"] = err.Error()
 				}
-				trace.recordMutation("runtime_meta", normalizedSessionTemplateInfo(info, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
+				fields["template"] = normalizedSessionTemplateInfo(info, cfg)
+				fields["before"] = ""
+				fields["after"] = "1"
+				fields["field"] = "GC_DRAIN_ACK"
+				trace.RecordMutation(TraceSiteMutationRuntimeMeta, TraceReasonUnknown, TraceOutcomeCode(outcome), "provider_meta", name, "GC_DRAIN_ACK", fields)
 			}
 		}
 
@@ -656,9 +660,9 @@ func advanceSessionDrainsWithSessionsTraced(
 				// Other errors (transient stop failure): keep drain
 				// active for retry on next tick.
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "retry", traceRecordPayload{
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeRetry, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
 						"error": err.Error(),
-					}, nil, "")
+					})
 				}
 				continue
 			}
@@ -674,7 +678,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
 				if trace != nil {
-					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplateInfo(info, cfg), name, ds.reason, "complete", nil, nil, "")
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeComplete, normalizedSessionTemplateInfo(info, cfg), name, nil)
 				}
 			}
 			// If still running after stop, keep drain for next tick.

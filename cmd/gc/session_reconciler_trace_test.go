@@ -46,16 +46,6 @@ func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
 	}
 }
 
-func TestNormalizeTraceOutcomeCodeAcceptsDeferredActive(t *testing.T) {
-	got, raw := normalizeTraceOutcomeCode(string(TraceOutcomeDeferredActive))
-	if got != TraceOutcomeDeferredActive {
-		t.Fatalf("outcome = %q, want %q", got, TraceOutcomeDeferredActive)
-	}
-	if raw != "" {
-		t.Fatalf("raw outcome = %q, want empty", raw)
-	}
-}
-
 func TestConfigDriftTracePayloadIncludesDriftedFields(t *testing.T) {
 	payload := configDriftTracePayload("stored", "current", []string{"CopyFiles"}, traceRecordPayload{
 		"active_reason": "attached",

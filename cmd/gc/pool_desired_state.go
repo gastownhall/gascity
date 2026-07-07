@@ -229,10 +229,10 @@ func computePoolDesiredStates(
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 			if trace != nil {
-				trace.recordDecision(string(TraceSitePoolWakeKnownIdentity), template, "", "assigned_work", "scheduled", traceRecordPayload{
+				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 					"tier":      "wake-known-identity",
 					"work_bead": wb.ID,
-				}, nil, "")
+				})
 			}
 		}
 	}
@@ -273,12 +273,12 @@ func computePoolDesiredStates(
 			inFlight := inFlightNewRequests[template]
 			inFlightCount := minInt(len(inFlight), newCount)
 			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
-				trace.recordDecision(string(TraceSitePoolInFlightReuse), template, "", string(TraceReasonInFlightReuse), "accepted", traceRecordPayload{
+				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
 					"scale_check":   scaleCount,
 					"in_flight":     len(inFlight),
 					"reused":        inFlightCount,
 					"anonymous_new": newCount - inFlightCount,
-				}, nil, "")
+				})
 			}
 			for j := 0; j < inFlightCount; j++ {
 				req := inFlight[j]
@@ -459,7 +459,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		}
 		if site, reason, payload, rejected := usage.rejection(req, limits); rejected {
 			if trace != nil {
-				trace.recordDecision(site, template, "", reason, "rejected", payload, nil, "")
+				trace.RecordDecision(TraceSiteCode(site), TraceReasonCode(reason), TraceOutcomeRejected, template, "", payload)
 			}
 			continue
 		}
@@ -467,9 +467,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		// Accept.
 		accepted[template] = append(accepted[template], req)
 		if trace != nil {
-			trace.recordDecision("reconciler.pool.accept", template, "", "cap", "accepted", traceRecordPayload{
+			trace.RecordDecision(TraceSitePoolAccept, TraceReasonCap, TraceOutcomeAccepted, template, "", traceRecordPayload{
 				"tier": req.Tier,
-			}, nil, "")
+			})
 		}
 		usage.accept(req, limits)
 	}
@@ -496,11 +496,11 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 			}
 			accepted[template] = append(accepted[template], req)
 			if trace != nil {
-				trace.recordDecision("reconciler.pool.min_fill", template, "", "min_fill", "accepted", traceRecordPayload{
+				trace.RecordDecision(TraceSitePoolMinFill, TraceReasonMinFill, TraceOutcomeAccepted, template, "", traceRecordPayload{
 					"min":     minSess,
 					"current": usage.agentCount[template],
 					"tier":    "new",
-				}, nil, "")
+				})
 			}
 			usage.accept(req, limits)
 		}
@@ -706,7 +706,7 @@ func recordNewDemandCapTrace(
 			blockingWork = append(blockingWork, req.WorkBeadID)
 		}
 	}
-	trace.recordDecision(site, template, "", reason, "rejected", traceRecordPayload{
+	trace.RecordDecision(TraceSiteCode(site), TraceReasonCode(reason), TraceOutcomeRejected, template, "", traceRecordPayload{
 		"scale_check":          scaleCount,
 		"accepted_new":         newCount,
 		"blocked_new":          scaleCount - newCount,
@@ -715,7 +715,7 @@ func recordNewDemandCapTrace(
 		"blocking_sessions":    blockingSessions,
 		"blocking_work_beads":  blockingWork,
 		"active_capacity_kind": reason,
-	}, nil, "")
+	})
 }
 
 func newDemandBlockingScope(
