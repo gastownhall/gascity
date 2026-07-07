@@ -1895,9 +1895,16 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 	}
 }
 
-func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
+// cachedPackField resolves topoDir to an absolute cache key, looks up its
+// loaded pack result, and returns get(result). It holds the nil-cache guard,
+// absolute-path resolution, and cache-miss protocol once so each field
+// accessor is a one-line get closure. get must deep-copy any slice or map it
+// returns, preserving the copy-on-read contract the accessors rely on. The
+// zero value of T (nil for slices and maps) is returned on a miss.
+func cachedPackField[T any](cache *packLoadCache, topoDir string, get func(*packLoadResult) T) T {
+	var zero T
 	if cache == nil {
-		return nil
+		return zero
 	}
 	absDir, err := filepath.Abs(topoDir)
 	if err != nil {
@@ -1905,115 +1912,57 @@ func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredComman
 	}
 	result, ok := cache.results[absDir]
 	if !ok {
-		return nil
+		return zero
 	}
-	out := deepCopyCommands(result.commands)
-	return out
+	return get(result)
+}
+
+func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredCommand {
+		return deepCopyCommands(r.commands)
+	})
 }
 
 func cachedPackWarnings(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.warnings...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.warnings...)
+	})
 }
 
 func cachedPackLocalWarnings(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.localWarnings...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.localWarnings...)
+	})
 }
 
 func cachedPackLocalProviders(cache *packLoadCache, topoDir string) map[string]ProviderSpec {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyProviderSpecs(result.localProviders)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]ProviderSpec {
+		return deepCopyProviderSpecs(r.localProviders)
+	})
 }
 
 func cachedPackLocalUpstreams(cache *packLoadCache, topoDir string) map[string]UpstreamSpec {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyUpstreamSpecs(result.localUpstreams)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]UpstreamSpec {
+		return deepCopyUpstreamSpecs(r.localUpstreams)
+	})
 }
 
 func cachedPackLocalTopoDirs(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.localTopoDirs...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.localTopoDirs...)
+	})
 }
 
 func cachedPackLocalRequires(cache *packLoadCache, topoDir string) []PackRequirement {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]PackRequirement(nil), result.localRequires...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []PackRequirement {
+		return append([]PackRequirement(nil), r.localRequires...)
+	})
 }
 
 func cachedPackLocalGlobals(cache *packLoadCache, topoDir string) []ResolvedPackGlobal {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyResolvedPackGlobals(result.localGlobals)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []ResolvedPackGlobal {
+		return deepCopyResolvedPackGlobals(r.localGlobals)
+	})
 }
 
 func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir string) []NamedSession {
@@ -2032,19 +1981,9 @@ func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir stri
 }
 
 func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	out := deepCopyDoctors(result.doctors)
-	return out
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredDoctor {
+		return deepCopyDoctors(r.doctors)
+	})
 }
 
 // isOSFileSystem reports whether fs is the real operating-system
@@ -2061,18 +2000,9 @@ func isOSFileSystem(fs fsys.FS) bool {
 }
 
 func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCatalog {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopySkills(result.skills)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredSkillCatalog {
+		return deepCopySkills(r.skills)
+	})
 }
 
 func filterCommandsByPackDir(commands []DiscoveredCommand, packDir string) []DiscoveredCommand {

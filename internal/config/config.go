@@ -1541,67 +1541,63 @@ type SessionConfig struct {
 
 // SetupTimeoutDuration returns the setup timeout as a time.Duration.
 // Defaults to 10s if empty or unparseable.
-func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
-	if s.SetupTimeout == "" {
-		return 10 * time.Second
+// durationOr parses raw as a Go duration, returning def when raw is empty or
+// unparseable. Durations that parse cleanly — including zero and negative
+// values — pass through unchanged; accessors that clamp them layer their own
+// policy on top. This is the single owner of the parse-error fallback that the
+// duration accessors below share.
+func durationOr(raw string, def time.Duration) time.Duration {
+	if raw == "" {
+		return def
 	}
-	d, err := time.ParseDuration(s.SetupTimeout)
+	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return 10 * time.Second
+		return def
 	}
 	return d
+}
+
+// durationFloorOr parses raw like durationOr, then clamps the result: a
+// non-positive duration falls back to def, and a positive duration below floor
+// is raised to floor. Used for opt-in timeouts that must not spin below a
+// storm-protection minimum.
+func durationFloorOr(raw string, def, floor time.Duration) time.Duration {
+	d := durationOr(raw, def)
+	if d <= 0 {
+		return def
+	}
+	if d < floor {
+		return floor
+	}
+	return d
+}
+
+func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
+	return durationOr(s.SetupTimeout, 10*time.Second)
 }
 
 // NudgeReadyTimeoutDuration returns the nudge ready timeout as a time.Duration.
 // Defaults to 10s if empty or unparseable.
 func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
-	if s.NudgeReadyTimeout == "" {
-		return 10 * time.Second
-	}
-	d, err := time.ParseDuration(s.NudgeReadyTimeout)
-	if err != nil {
-		return 10 * time.Second
-	}
-	return d
+	return durationOr(s.NudgeReadyTimeout, 10*time.Second)
 }
 
 // NudgeRetryIntervalDuration returns the nudge retry interval as a time.Duration.
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
-	if s.NudgeRetryInterval == "" {
-		return 500 * time.Millisecond
-	}
-	d, err := time.ParseDuration(s.NudgeRetryInterval)
-	if err != nil {
-		return 500 * time.Millisecond
-	}
-	return d
+	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
 }
 
 // NudgeLockTimeoutDuration returns the nudge lock timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (s *SessionConfig) NudgeLockTimeoutDuration() time.Duration {
-	if s.NudgeLockTimeout == "" {
-		return 30 * time.Second
-	}
-	d, err := time.ParseDuration(s.NudgeLockTimeout)
-	if err != nil {
-		return 30 * time.Second
-	}
-	return d
+	return durationOr(s.NudgeLockTimeout, 30*time.Second)
 }
 
 // StartupTimeoutDuration returns the startup timeout as a time.Duration.
 // Defaults to 60s if empty or unparseable.
 func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
-	if s.StartupTimeout == "" {
-		return 60 * time.Second
-	}
-	d, err := time.ParseDuration(s.StartupTimeout)
-	if err != nil {
-		return 60 * time.Second
-	}
-	return d
+	return durationOr(s.StartupTimeout, 60*time.Second)
 }
 
 // ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or
@@ -1611,20 +1607,7 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 // by setting a duration above its agents' longest legitimate quiet period gets
 // the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
-	if s.ProgressStallTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(s.ProgressStallTimeout)
-	if err != nil {
-		return 0
-	}
-	if d <= 0 {
-		return 0
-	}
-	if d < ProgressStallTimeoutMinimum {
-		return ProgressStallTimeoutMinimum
-	}
-	return d
+	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
@@ -1661,27 +1644,13 @@ type ACPSessionConfig struct {
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
-	if a.HandshakeTimeout == "" {
-		return 30 * time.Second
-	}
-	d, err := time.ParseDuration(a.HandshakeTimeout)
-	if err != nil {
-		return 30 * time.Second
-	}
-	return d
+	return durationOr(a.HandshakeTimeout, 30*time.Second)
 }
 
 // NudgeBusyTimeoutDuration returns the nudge busy timeout as a time.Duration.
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
-	if a.NudgeBusyTimeout == "" {
-		return 60 * time.Second
-	}
-	d, err := time.ParseDuration(a.NudgeBusyTimeout)
-	if err != nil {
-		return 60 * time.Second
-	}
-	return d
+	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1828,14 +1797,7 @@ func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
 // ArchiveRetainAgeDuration parses ArchiveRetainAge. Empty or invalid values
 // return zero, which keeps all archives.
 func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
-	if strings.TrimSpace(c.ArchiveRetainAge) == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(c.ArchiveRetainAge)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(c.ArchiveRetainAge, 0)
 }
 
 const (
@@ -1975,14 +1937,7 @@ const DefaultDoltLockReleaseTimeout = time.Minute
 // through loadCityConfig already reject them via
 // ValidateNonNegativeDurations. Mirrors DoltStopTimeoutDuration's policy.
 func (d *DoltConfig) DoltLockReleaseTimeoutDuration() time.Duration {
-	if d.DoltLockReleaseTimeout == "" {
-		return DefaultDoltLockReleaseTimeout
-	}
-	dur, err := time.ParseDuration(d.DoltLockReleaseTimeout)
-	if err != nil {
-		return DefaultDoltLockReleaseTimeout
-	}
-	return dur
+	return durationOr(d.DoltLockReleaseTimeout, DefaultDoltLockReleaseTimeout)
 }
 
 // FormulasConfig is the legacy [formulas] table with no supported fields:
@@ -2062,14 +2017,7 @@ func normalizeLegacyOrderOverrideAliases(cfg *City) {
 // MaxTimeoutDuration parses MaxTimeout as a Go duration.
 // Returns 0 if unset or unparseable (meaning no cap).
 func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
-	if c.MaxTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(c.MaxTimeout)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(c.MaxTimeout, 0)
 }
 
 // DefaultAPIPort is the default TCP port for the API server.
@@ -2144,14 +2092,7 @@ type SessionSleepConfig struct {
 
 // IdleTimeoutDuration parses IdleTimeout, returning 0 if unset or invalid.
 func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
-	if c.IdleTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(c.IdleTimeout)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(c.IdleTimeout, 0)
 }
 
 // DefaultManualGracePeriod is the grace period for manual sessions when
@@ -2162,17 +2103,7 @@ const DefaultManualGracePeriod = 10 * time.Minute
 // GracePeriodDuration parses GracePeriod, returning DefaultManualGracePeriod
 // if unset, 0 if explicitly set to "0", or the parsed duration.
 func (c ChatSessionsConfig) GracePeriodDuration() time.Duration {
-	switch c.GracePeriod {
-	case "":
-		return DefaultManualGracePeriod
-	case "0", "0s":
-		return 0
-	}
-	d, err := time.ParseDuration(c.GracePeriod)
-	if err != nil {
-		return DefaultManualGracePeriod
-	}
-	return d
+	return durationOr(c.GracePeriod, DefaultManualGracePeriod)
 }
 
 // LocalDoctorCheck is a city-local doctor check declared inline in city.toml
@@ -2342,27 +2273,13 @@ type DoltMaintenance struct {
 // (weekly) when unset or unparseable. Invalid values should already have
 // surfaced as warnings from ValidateDurations at load time.
 func (d DoltMaintenance) IntervalOrDefault() time.Duration {
-	if d.Interval == "" {
-		return 168 * time.Hour
-	}
-	v, err := time.ParseDuration(d.Interval)
-	if err != nil {
-		return 168 * time.Hour
-	}
-	return v
+	return durationOr(d.Interval, 168*time.Hour)
 }
 
 // GCTimeoutOrDefault returns the parsed GCTimeout, falling back to 10m
 // when unset or unparseable.
 func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
-	if d.GCTimeout == "" {
-		return 10 * time.Minute
-	}
-	v, err := time.ParseDuration(d.GCTimeout)
-	if err != nil {
-		return 10 * time.Minute
-	}
-	return v
+	return durationOr(d.GCTimeout, 10*time.Minute)
 }
 
 // DaemonConfig holds controller daemon settings.
@@ -2561,14 +2478,7 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	if d.PatrolInterval == "" {
-		return 30 * time.Second
-	}
-	dur, err := time.ParseDuration(d.PatrolInterval)
-	if err != nil {
-		return 30 * time.Second
-	}
-	return dur
+	return durationOr(d.PatrolInterval, 30*time.Second)
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
@@ -2597,14 +2507,7 @@ func (d *DaemonConfig) MaxRestartsOrDefault() int {
 // RestartWindowDuration returns the restart window as a time.Duration.
 // Defaults to 1h if empty or unparseable.
 func (d *DaemonConfig) RestartWindowDuration() time.Duration {
-	if d.RestartWindow == "" {
-		return time.Hour
-	}
-	dur, err := time.ParseDuration(d.RestartWindow)
-	if err != nil {
-		return time.Hour
-	}
-	return dur
+	return durationOr(d.RestartWindow, time.Hour)
 }
 
 // SessionCircuitBreakerMaxRestartsOrDefault returns the named-session respawn
@@ -2619,28 +2522,13 @@ func (d *DaemonConfig) SessionCircuitBreakerMaxRestartsOrDefault() int {
 // SessionCircuitBreakerWindowDuration returns the named-session respawn
 // circuit-breaker rolling window. Empty reuses RestartWindowDuration.
 func (d *DaemonConfig) SessionCircuitBreakerWindowDuration() time.Duration {
-	if d.SessionCircuitBreakerWindow == "" {
-		return d.RestartWindowDuration()
-	}
-	dur, err := time.ParseDuration(d.SessionCircuitBreakerWindow)
-	if err != nil {
-		return d.RestartWindowDuration()
-	}
-	return dur
+	return durationOr(d.SessionCircuitBreakerWindow, d.RestartWindowDuration())
 }
 
 // SessionCircuitBreakerResetAfterDuration returns the named-session respawn
 // circuit-breaker cooldown. Empty or invalid values default to 2 * window.
 func (d *DaemonConfig) SessionCircuitBreakerResetAfterDuration() time.Duration {
-	window := d.SessionCircuitBreakerWindowDuration()
-	if d.SessionCircuitBreakerResetAfter == "" {
-		return 2 * window
-	}
-	dur, err := time.ParseDuration(d.SessionCircuitBreakerResetAfter)
-	if err != nil {
-		return 2 * window
-	}
-	return dur
+	return durationOr(d.SessionCircuitBreakerResetAfter, 2*d.SessionCircuitBreakerWindowDuration())
 }
 
 // NudgeDispatcherMode returns the nudge dispatcher mode, defaulting to
@@ -2658,14 +2546,7 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.
 // Defaults to 5s if empty or unparseable. Zero means immediate kill.
 func (d *DaemonConfig) ShutdownTimeoutDuration() time.Duration {
-	if d.ShutdownTimeout == "" {
-		return 5 * time.Second
-	}
-	dur, err := time.ParseDuration(d.ShutdownTimeout)
-	if err != nil {
-		return 5 * time.Second
-	}
-	return dur
+	return durationOr(d.ShutdownTimeout, 5*time.Second)
 }
 
 // DefaultDoltStopTimeout is the SIGTERM→SIGKILL grace for the managed dolt
@@ -2680,14 +2561,7 @@ const DefaultDoltStopTimeout = 30 * time.Second
 // must guarantee a flush window should treat zero as a misconfiguration
 // upstream rather than silently overriding it here.
 func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
-	if d.DoltStopTimeout == "" {
-		return DefaultDoltStopTimeout
-	}
-	dur, err := time.ParseDuration(d.DoltStopTimeout)
-	if err != nil {
-		return DefaultDoltStopTimeout
-	}
-	return dur
+	return durationOr(d.DoltStopTimeout, DefaultDoltStopTimeout)
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
@@ -2711,14 +2585,7 @@ const DefaultDoltStartAddressInUseRetryWindow = 30 * time.Second
 // as a misconfiguration upstream rather than silently overriding it here.
 // Mirrors DoltStopTimeoutDuration's policy.
 func (d *DaemonConfig) DoltStartAddressInUseRetryWindowDuration() time.Duration {
-	if d.DoltStartAddressInUseRetryWindow == "" {
-		return DefaultDoltStartAddressInUseRetryWindow
-	}
-	dur, err := time.ParseDuration(d.DoltStartAddressInUseRetryWindow)
-	if err != nil {
-		return DefaultDoltStartAddressInUseRetryWindow
-	}
-	return dur
+	return durationOr(d.DoltStartAddressInUseRetryWindow, DefaultDoltStartAddressInUseRetryWindow)
 }
 
 // DefaultProbeConcurrency is the default bd probe concurrency limit.
@@ -2755,14 +2622,7 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // DriftDrainTimeoutDuration returns the drift drain timeout as a time.Duration.
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
-	if d.DriftDrainTimeout == "" {
-		return 2 * time.Minute
-	}
-	dur, err := time.ParseDuration(d.DriftDrainTimeout)
-	if err != nil {
-		return 2 * time.Minute
-	}
-	return dur
+	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -2776,40 +2636,19 @@ const DefaultStartReadyTimeout = 5 * time.Minute
 // time.Duration. Defaults to DefaultStartReadyTimeout when empty or
 // unparseable.
 func (d *DaemonConfig) StartReadyTimeoutDuration() time.Duration {
-	if d.StartReadyTimeout == "" {
-		return DefaultStartReadyTimeout
-	}
-	dur, err := time.ParseDuration(d.StartReadyTimeout)
-	if err != nil {
-		return DefaultStartReadyTimeout
-	}
-	return dur
+	return durationOr(d.StartReadyTimeout, DefaultStartReadyTimeout)
 }
 
 // WispGCIntervalDuration returns the wisp GC interval as a time.Duration.
 // Returns 0 if empty or unparseable.
 func (d *DaemonConfig) WispGCIntervalDuration() time.Duration {
-	if d.WispGCInterval == "" {
-		return 0
-	}
-	dur, err := time.ParseDuration(d.WispGCInterval)
-	if err != nil {
-		return 0
-	}
-	return dur
+	return durationOr(d.WispGCInterval, 0)
 }
 
 // WispTTLDuration returns the wisp TTL as a time.Duration.
 // Returns 0 if empty or unparseable.
 func (d *DaemonConfig) WispTTLDuration() time.Duration {
-	if d.WispTTL == "" {
-		return 0
-	}
-	dur, err := time.ParseDuration(d.WispTTL)
-	if err != nil {
-		return 0
-	}
-	return dur
+	return durationOr(d.WispTTL, 0)
 }
 
 // WispGCEnabled reports whether wisp GC is configured. Both wisp_gc_interval
@@ -3429,27 +3268,13 @@ func (l agentLayout) String() string {
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
 // Returns 0 if empty or unparseable (disabled).
 func (a *Agent) IdleTimeoutDuration() time.Duration {
-	if a.IdleTimeout == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(a.IdleTimeout)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(a.IdleTimeout, 0)
 }
 
 // MaxSessionAgeDuration returns the maximum session age as a time.Duration.
 // Returns 0 if empty or unparseable (disabled: no preemptive restart).
 func (a *Agent) MaxSessionAgeDuration() time.Duration {
-	if a.MaxSessionAge == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(a.MaxSessionAge)
-	if err != nil {
-		return 0
-	}
-	return d
+	return durationOr(a.MaxSessionAge, 0)
 }
 
 // MaxSessionAgeJitterDuration returns the jitter bound for max session age
@@ -3924,14 +3749,7 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 // DrainTimeoutDuration returns the drain timeout as a time.Duration.
 // Defaults to 5m if empty or unparseable.
 func (a *Agent) DrainTimeoutDuration() time.Duration {
-	if a.DrainTimeout == "" {
-		return 5 * time.Minute
-	}
-	dur, err := time.ParseDuration(a.DrainTimeout)
-	if err != nil {
-		return 5 * time.Minute
-	}
-	return dur
+	return durationOr(a.DrainTimeout, 5*time.Minute)
 }
 
 // EffectivePoolDemandQuery returns the count-form pool-demand query the

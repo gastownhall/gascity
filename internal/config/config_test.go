@@ -8098,3 +8098,50 @@ func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
 		})
 	}
 }
+
+func TestDurationOr(t *testing.T) {
+	def := 30 * time.Second
+	cases := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"empty falls back to default", "", def},
+		{"unparseable falls back to default", "5minutes", def},
+		{"valid parses", "2m", 2 * time.Minute},
+		{"zero parses to zero, not default", "0", 0},
+		{"negative passes through unchanged", "-5s", -5 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := durationOr(tc.raw, def); got != tc.want {
+				t.Errorf("durationOr(%q, %v) = %v, want %v", tc.raw, def, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDurationFloorOr(t *testing.T) {
+	const floor = ProgressStallTimeoutMinimum
+	cases := []struct {
+		name string
+		raw  string
+		def  time.Duration
+		want time.Duration
+	}{
+		{"empty returns default", "", 0, 0},
+		{"unparseable returns default", "5minutes", 0, 0},
+		{"non-positive falls back to default", "-1m", 0, 0},
+		{"explicit zero falls back to default", "0", 0, 0},
+		{"positive below floor is raised to floor", "1m", 0, floor},
+		{"at floor stays", floor.String(), 0, floor},
+		{"above floor passes through", "10m", 0, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := durationFloorOr(tc.raw, tc.def, floor); got != tc.want {
+				t.Errorf("durationFloorOr(%q, %v, %v) = %v, want %v", tc.raw, tc.def, floor, got, tc.want)
+			}
+		})
+	}
+}
