@@ -5506,6 +5506,19 @@ func TestMirrorBeadsDoltEnvPropagatesCredentialCommand(t *testing.T) {
 			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (map GC_DOLT_CRED_CMD wins)", got, "/map/helper")
 		}
 	})
+	t.Run("map BEADS_DOLT_CREDENTIAL_COMMAND wins over ambient GC_DOLT_CRED_CMD", func(t *testing.T) {
+		// Locks the branch-2-over-branch-3 precedence: an explicit map
+		// BEADS_DOLT_CREDENTIAL_COMMAND must beat an ambient GC_DOLT_CRED_CMD.
+		// Without this a branches-2/3 reorder would silently flip precedence and
+		// still pass every other subtest.
+		t.Setenv("GC_DOLT_CRED_CMD", "/ambient/helper")
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		env := map[string]string{"GC_DOLT_HOST": "gw.beads.example", "BEADS_DOLT_CREDENTIAL_COMMAND": "/map/helper"}
+		mirrorBeadsDoltEnv(env)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/map/helper" {
+			t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (explicit map value wins over ambient GC_DOLT_CRED_CMD)", got, "/map/helper")
+		}
+	})
 	t.Run("absent when no credential command anywhere", func(t *testing.T) {
 		t.Setenv("GC_DOLT_CRED_CMD", "")
 		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
