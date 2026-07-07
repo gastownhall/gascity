@@ -86,6 +86,182 @@ func TestProcessRetryControlPass(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// processAttemptControl shared-loop tests (fake evaluator)
+// ---------------------------------------------------------------------------
+
+// setupAttemptControl builds a retry-shaped control bead with a single closed
+// attempt whose gc.attempt is attemptNum, suitable for driving
+// processAttemptControl with a scripted strategy.
+func setupAttemptControl(t *testing.T, store beads.Store, maxAttempts, attemptNum int) beads.Bead {
+	t.Helper()
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "control",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.control",
+			"gc.step_id":      "control",
+			"gc.max_attempts": strconv.Itoa(maxAttempts),
+		},
+	})
+	attempt := mustCreate(t, store, beads.Bead{
+		Title: "attempt",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     fmt.Sprintf("mol-test.control.attempt.%d", attemptNum),
+			"gc.attempt":      strconv.Itoa(attemptNum),
+		},
+	})
+	mustClose(t, store, attempt.ID)
+	mustDep(t, store, control.ID, attempt.ID, "blocks")
+	return mustGet(t, store, control.ID)
+}
+
+func TestProcessAttemptControlPassInvokesOnPass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := setupAttemptControl(t, store, 3, 1)
+
+	onPassCalled := false
+	strategy := controlAttemptStrategy{
+		kind:        "retry",
+		subjectNoun: "attempt",
+		missingNoun: "no attempt found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			return attemptEvaluation{disposition: attemptPass, logOutcome: "pass"}, nil
+		},
+		onPass: func(closeMetadata map[string]string, _ beads.Bead) {
+			onPassCalled = true
+			closeMetadata["fake.stamp"] = "yes"
+		},
+	}
+
+	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	if err != nil {
+		t.Fatalf("processAttemptControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+	if !onPassCalled {
+		t.Fatal("onPass was not invoked on the pass path")
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = %q/%q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+	if after.Metadata["fake.stamp"] != "yes" {
+		t.Fatalf("onPass metadata not persisted: %v", after.Metadata)
+	}
+}
+
+func TestProcessAttemptControlHardFailStampsTerminalMetadata(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := setupAttemptControl(t, store, 3, 1)
+
+	strategy := controlAttemptStrategy{
+		kind:        "retry",
+		subjectNoun: "attempt",
+		missingNoun: "no attempt found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			return attemptEvaluation{disposition: attemptHardFail, logOutcome: "hard", reason: "boom"}, nil
+		},
+	}
+
+	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	if err != nil {
+		t.Fatalf("processAttemptControl: %v", err)
+	}
+	if result.Action != "hard-fail" {
+		t.Fatalf("action = %q, want hard-fail", result.Action)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Metadata["gc.outcome"] != "fail" ||
+		after.Metadata["gc.failure_class"] != beadmeta.FailureClassHard ||
+		after.Metadata["gc.failure_reason"] != "boom" ||
+		after.Metadata["gc.final_disposition"] != beadmeta.DispositionHardFail {
+		t.Fatalf("terminal metadata = %v, want hard-fail shape", after.Metadata)
+	}
+}
+
+func TestProcessAttemptControlExhaustDelegatesToStrategy(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := setupAttemptControl(t, store, 2, 2) // attemptNum == maxAttempts
+
+	var gotReason, gotLog string
+	strategy := controlAttemptStrategy{
+		kind:        "retry",
+		subjectNoun: "attempt",
+		missingNoun: "no attempt found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			return attemptEvaluation{disposition: attemptContinue, logOutcome: "transient", reason: "drained"}, nil
+		},
+		exhaust: func(store beads.Store, beadID string, _ int, reason, attemptLog string) (ControlResult, error) {
+			gotReason, gotLog = reason, attemptLog
+			if err := updateMetadataAndClose(store, beadID, map[string]string{"gc.outcome": "fail"}); err != nil {
+				return ControlResult{}, err
+			}
+			return ControlResult{Processed: true, Action: "exhausted-sentinel"}, nil
+		},
+	}
+
+	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	if err != nil {
+		t.Fatalf("processAttemptControl: %v", err)
+	}
+	if result.Action != "exhausted-sentinel" {
+		t.Fatalf("action = %q, want exhausted-sentinel (strategy.exhaust must own the disposition)", result.Action)
+	}
+	if gotReason != "drained" {
+		t.Fatalf("exhaust reason = %q, want drained", gotReason)
+	}
+	if gotLog == "" {
+		t.Fatal("exhaust received empty attempt log")
+	}
+}
+
+func TestProcessAttemptControlMissingAttemptUsesStrategyNouns(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "control",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.max_attempts": "3",
+		},
+	})
+
+	strategy := controlAttemptStrategy{
+		kind:        "ralph",
+		subjectNoun: "iteration",
+		missingNoun: "no iteration found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			t.Fatal("evaluate must not run when no attempt exists")
+			return attemptEvaluation{}, nil
+		},
+	}
+
+	_, err := processAttemptControl(store, mustGet(t, store, control.ID), ProcessOptions{}, strategy)
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("err = %v, want ErrControlGraphMalformed", err)
+	}
+	if !strings.Contains(err.Error(), "no iteration found") {
+		t.Fatalf("err = %v, want strategy missingNoun 'no iteration found'", err)
+	}
+}
+
 func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T) {
 	t.Parallel()
 	base := beads.NewMemStore()
