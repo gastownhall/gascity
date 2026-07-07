@@ -1154,7 +1154,7 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 	}
 }
 
-func TestComputeWakeEvaluations_KeepWarmDoesNotPropagateDependencies(t *testing.T) {
+func TestEvaluateWakeReasons_KeepWarmForDetachedInteractive(t *testing.T) {
 	cfg := &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -1165,25 +1165,14 @@ func TestComputeWakeEvaluations_KeepWarmDoesNotPropagateDependencies(t *testing.
 		},
 	}
 	now := time.Now().UTC()
-	sessions := []beads.Bead{
-		makeBead("db-bead", map[string]string{
-			"template":     "db",
-			"session_name": "db",
-		}),
-		makeBead("api-bead", map[string]string{
-			"template":     "api",
-			"session_name": "api",
-			"detached_at":  now.Add(-30 * time.Second).Format(time.RFC3339),
-		}),
-	}
-	evals := computeWakeEvaluations(sessions, cfg, runtime.NewFake(), nil, nil, nil, &clock.Fake{Time: now})
-	dbEval := evals["db-bead"]
-	if containsWakeReason(dbEval.Reasons, WakeDependency) {
-		t.Fatalf("db reasons = %v, did not want WakeDependency from keep-warm wake", dbEval.Reasons)
-	}
-	apiEval := evals["api-bead"]
-	if !containsWakeReason(apiEval.Reasons, WakeKeepWarm) {
-		t.Fatalf("api reasons = %v, want WakeKeepWarm", apiEval.Reasons)
+	apiBead := makeBead("api-bead", map[string]string{
+		"template":     "api",
+		"session_name": "api",
+		"detached_at":  now.Add(-30 * time.Second).Format(time.RFC3339),
+	})
+	eval := evaluateWakeReasons(apiBead, cfg, runtime.NewFake(), nil, nil, nil, &clock.Fake{Time: now})
+	if !containsWakeReason(eval.Reasons, WakeKeepWarm) {
+		t.Fatalf("api reasons = %v, want WakeKeepWarm for a recently detached interactive session", eval.Reasons)
 	}
 }
 
@@ -1283,25 +1272,22 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 		t.Fatalf("Start: %v", err)
 	}
 
-	advanceSessionDrainsWithSessions(
+	advanceSessionDrainsWithSessionsTraced(
 		dt,
 		sp,
 		nil,
-		func(id string) *beads.Bead {
+		infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			if id == bead.ID {
 				return &bead
 			}
 			return nil
-		},
-		[]beads.Bead{bead},
+		}),
 		map[string]wakeEvaluation{
 			bead.ID: {Reasons: []WakeReason{WakeWork}},
 		},
 		&config.City{},
-		nil,
-		nil,
-		nil,
 		&clock.Fake{Time: now},
+		nil,
 	)
 
 	if got := dt.get(bead.ID); got != nil {

@@ -1785,6 +1785,131 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 	}
 }
 
+// TestSessionReason_MultiReasonColumnCharacterization pins the exact
+// comma-joined REASON cell that `gc session` emits today. It is a
+// byte-identical gate: the wake-helper cleanup (ga-6aaj6q) retires the legacy
+// drain/dependency wake path but must not change what the CLI displays, which
+// still runs through evaluateWakeReasons. If a literal ever drifts, this test
+// fails and forces a deliberate decision rather than a silent regression.
+func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
+	const agentName = "worker"
+	const sessionName = "reason-worker"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: agentName}},
+	}
+
+	newBead := func(state string, extra map[string]string) beads.Bead {
+		md := map[string]string{
+			"template":     agentName,
+			"session_name": sessionName,
+			"state":        state,
+		}
+		for k, v := range extra {
+			md[k] = v
+		}
+		return beads.Bead{ID: "gc-1", Status: "open", Metadata: md}
+	}
+	newInfo := func(state session.State) session.Info {
+		return session.Info{
+			ID:          "gc-1",
+			Template:    agentName,
+			State:       state,
+			SessionName: sessionName,
+		}
+	}
+	attachingProvider := func(attached bool) runtime.Provider {
+		return &attachmentCachingProvider{
+			Provider: runtime.NewFake(),
+			cache: buildAttachmentCache([]session.Info{newInfo(session.StateActive)}, func(session.Info) (bool, error) {
+				return attached, nil
+			}),
+		}
+	}
+
+	type matchMode int
+	const (
+		matchExact matchMode = iota
+		matchContains
+		matchSuffix
+	)
+
+	tests := []struct {
+		name        string
+		bead        beads.Bead
+		info        session.Info
+		provider    runtime.Provider
+		poolDesired map[string]int
+		readyWait   map[string]bool
+		mode        matchMode
+		want        string
+	}{
+		{
+			name:        "active pool session attached emits ordered multi-reason cell",
+			bead:        newBead("active", nil),
+			info:        newInfo(session.StateActive),
+			provider:    attachingProvider(true),
+			poolDesired: map[string]int{agentName: 1},
+			mode:        matchExact,
+			want:        "session,config,attached",
+		},
+		{
+			name:      "asleep session with ready wait shows wait reason",
+			bead:      newBead("asleep", nil),
+			info:      newInfo(session.StateAsleep),
+			provider:  runtime.NewFake(),
+			readyWait: map[string]bool{"gc-1": true},
+			mode:      matchContains,
+			want:      string(WakeWait),
+		},
+		{
+			name:        "pin_awake appends pin as the final reason",
+			bead:        newBead("active", map[string]string{"pin_awake": "true"}),
+			info:        newInfo(session.StateActive),
+			provider:    attachingProvider(false),
+			poolDesired: map[string]int{agentName: 1},
+			mode:        matchSuffix,
+			want:        "," + string(WakePin),
+		},
+		{
+			name:     "no reasons collapses to dash",
+			bead:     newBead("asleep", nil),
+			info:     newInfo(session.StateAsleep),
+			provider: runtime.NewFake(),
+			mode:     matchExact,
+			want:     "-",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := cloneSessionReasonMetadata(tt.bead.Metadata)
+			got := sessionReason(
+				tt.info,
+				map[string]beads.Bead{tt.bead.ID: tt.bead},
+				cfg,
+				tt.provider,
+				tt.poolDesired,
+				tt.readyWait,
+			)
+			switch tt.mode {
+			case matchExact:
+				if got != tt.want {
+					t.Fatalf("sessionReason = %q, want %q", got, tt.want)
+				}
+			case matchContains:
+				if !strings.Contains(got, tt.want) {
+					t.Fatalf("sessionReason = %q, want it to contain %q", got, tt.want)
+				}
+			case matchSuffix:
+				if !strings.HasSuffix(got, tt.want) {
+					t.Fatalf("sessionReason = %q, want it to end with %q", got, tt.want)
+				}
+			}
+			assertStringMapEqual(t, tt.bead.Metadata, before)
+		})
+	}
+}
+
 func TestAttachmentCachingProvider_DelegatesSleepCapability(t *testing.T) {
 	provider := &attachmentAwareProvider{
 		Fake:            runtime.NewFake(),

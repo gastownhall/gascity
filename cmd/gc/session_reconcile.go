@@ -47,19 +47,12 @@ const (
 	sessionProviderTerminalErrorAtKey       = "provider_terminal_error_at"
 )
 
-// Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
-// superseded by ComputeAwakeSet (compute_awake_set.go). The production
-// reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
-// awakeSetToWakeEvals for all wake/drain decisions. These functions are
-// only called by computeWakeEvaluations (used as a nil-guard fallback
-// in advanceSessionDrains, which never fires because the reconciler
-// always passes non-nil wakeEvals) and by legacy tests.
-//
-// DO NOT add new wake logic here — it will have NO EFFECT on production
-// behavior. All wake/sleep changes must go through ComputeAwakeSet.
-//
-// TODO: Remove these functions and migrate remaining tests to
-// ComputeAwakeSet. Tracked as tech debt.
+// wakeReasons and evaluateWakeReasons are the CLI `gc session` REASON-column
+// display helpers ONLY. They compute the multi-reason, comma-joined cell shown
+// to operators; their sole production caller is sessionReason in cmd_session.go.
+// Production wake/sleep decisions come exclusively from ComputeAwakeSet
+// (compute_awake_set.go) via awakeSetToWakeEvals — do NOT add wake logic here,
+// it has no effect on reconciler behavior.
 
 func wakeReasons(
 	session beads.Bead,
@@ -256,176 +249,6 @@ func sessionMetadataStateInfo(i sessionpkg.Info) string {
 	}
 }
 
-func computeWakeEvaluations(
-	sessions []beads.Bead,
-	cfg *config.City,
-	sp runtime.Provider,
-	poolDesired map[string]int,
-	workSet map[string]bool,
-	readyWaitSet map[string]bool,
-	clk clock.Clock,
-) map[string]wakeEvaluation {
-	evals := make(map[string]wakeEvaluation, len(sessions))
-	for _, session := range sessions {
-		evals[session.ID] = evaluateWakeReasons(session, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
-	}
-	applyDependencyWakeReasons(sessions, cfg, evals)
-	capWakeConfigByDemand(sessions, cfg, evals, poolDesired)
-	return evals
-}
-
-// capWakeConfigByDemand removes WakeConfig from excess sessions so that
-// at most poolDesired[template] sessions get WakeConfig per template.
-//
-// Priority: sessions that are already alive or have resume-tier reasons
-// (WakeSession, WakeAttached) keep their WakeConfig. Excess asleep
-// sessions lose it. Sessions in creating/awake state that don't have
-// assigned work count against the budget (they're "in-flight new"
-// sessions that haven't claimed yet).
-func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[string]wakeEvaluation, poolDesired map[string]int) {
-	// Group sessions by template and count how many already need to be awake.
-	type templateBudget struct {
-		desired int
-		active  int      // creating/awake — already consuming a slot
-		wakeIDs []string // sessions with WakeConfig that are asleep
-	}
-	budgets := make(map[string]*templateBudget)
-
-	for _, session := range sessions {
-		eval, ok := evals[session.ID]
-		if !ok {
-			continue
-		}
-		if !containsWakeReason(eval.Reasons, WakeConfig) {
-			continue
-		}
-		// Named sessions with mode=always are not pool-managed — skip capping.
-		if isNamedSessionBead(session) && namedSessionMode(session) == "always" {
-			continue
-		}
-		// Manual sessions (user-created via API/UI) bypass pool demand — they
-		// should stay alive until explicitly closed.
-		if isManualSessionBead(session) {
-			continue
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template == "" {
-			continue
-		}
-
-		b := budgets[template]
-		if b == nil {
-			b = &templateBudget{desired: poolDesired[template]}
-			budgets[template] = b
-		}
-
-		state := sessionMetadataState(session)
-		switch state {
-		case "active", "start-pending", "creating":
-			// Already running or starting — counts against desired.
-			b.active++
-		default:
-			// Asleep — candidate for wake, subject to budget.
-			b.wakeIDs = append(b.wakeIDs, session.ID)
-		}
-	}
-
-	// For each template, only allow enough asleep→wake transitions to
-	// fill the gap between active and desired.
-	for _, b := range budgets {
-		slotsAvailable := b.desired - b.active
-		if slotsAvailable < 0 {
-			slotsAvailable = 0
-		}
-		// Keep the first slotsAvailable asleep sessions, strip WakeConfig from the rest.
-		for i, id := range b.wakeIDs {
-			if i >= slotsAvailable {
-				eval := evals[id]
-				eval.Reasons = removeWakeReason(eval.Reasons, WakeConfig)
-				evals[id] = eval
-			}
-		}
-	}
-}
-
-func removeWakeReason(reasons []WakeReason, remove WakeReason) []WakeReason {
-	var result []WakeReason
-	for _, r := range reasons {
-		if r != remove {
-			result = append(result, r)
-		}
-	}
-	return result
-}
-
-func applyDependencyWakeReasons(sessions []beads.Bead, cfg *config.City, evals map[string]wakeEvaluation) {
-	if cfg == nil || len(evals) == 0 {
-		return
-	}
-	roots := make(map[string]bool)
-	for _, session := range sessions {
-		eval, ok := evals[session.ID]
-		if !ok || !hasDependencyWakeRoot(eval.Reasons) {
-			continue
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template != "" {
-			roots[template] = true
-		}
-	}
-	if len(roots) == 0 {
-		return
-	}
-	preferred := preferredDependencySessions(sessions, cfg)
-	visited := make(map[string]bool)
-	var visit func(template string)
-	visit = func(template string) {
-		if template == "" || visited[template] {
-			return
-		}
-		visited[template] = true
-		agent := findAgentByTemplate(cfg, template)
-		if agent == nil {
-			return
-		}
-		for _, dep := range agent.DependsOn {
-			if session, ok := preferred[dep]; ok {
-				eval := evals[session.ID]
-				if session.Metadata["held_until"] == "" && session.Metadata["quarantined_until"] == "" && !containsWakeReason(eval.Reasons, WakeDependency) {
-					eval.Reasons = append(eval.Reasons, WakeDependency)
-					evals[session.ID] = eval
-				}
-			}
-			visit(dep)
-		}
-	}
-	for template := range roots {
-		visit(template)
-	}
-}
-
-func preferredDependencySessions(sessions []beads.Bead, cfg *config.City) map[string]beads.Bead {
-	preferred := make(map[string]beads.Bead)
-	for _, session := range sessions {
-		if isDrainedSessionBead(session) {
-			continue
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template == "" {
-			continue
-		}
-		existing, ok := preferred[template]
-		if !ok || compareDependencyCandidate(session, existing) < 0 {
-			preferred[template] = session
-		}
-	}
-	return preferred
-}
-
-func compareDependencyCandidate(a, b beads.Bead) int {
-	return strings.Compare(a.Metadata["session_name"], b.Metadata["session_name"])
-}
-
 func containsWakeReason(reasons []WakeReason, want WakeReason) bool {
 	for _, reason := range reasons {
 		if reason == want {
@@ -433,17 +256,6 @@ func containsWakeReason(reasons []WakeReason, want WakeReason) bool {
 		}
 	}
 	return false
-}
-
-func hasDependencyWakeRoot(reasons []WakeReason) bool {
-	return containsWakeReason(reasons, WakeConfig) ||
-		containsWakeReason(reasons, WakeWork) ||
-		containsWakeReason(reasons, WakeWait) ||
-		containsWakeReason(reasons, WakeCreate) ||
-		containsWakeReason(reasons, WakeSession) ||
-		containsWakeReason(reasons, WakeAttached) ||
-		containsWakeReason(reasons, WakePending) ||
-		containsWakeReason(reasons, WakePin)
 }
 
 // computeWorkSet runs legacy controller-side work_query commands and returns

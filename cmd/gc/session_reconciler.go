@@ -623,9 +623,9 @@ func finalizeDrainAckStopPendingSessions(
 	finalized := 0
 	for i := range sessions {
 		session := &sessions[i]
-		// Boundary per-bead projection (same pattern as the advanceSessionDrains
-		// wrappers): this non-reconciler pass loads its own []beads.Bead, so it
-		// projects Info here and feeds the drain-ack helpers off it.
+		// Boundary per-bead projection (same pattern as the drain scan): this
+		// non-reconciler pass loads its own []beads.Bead, so it projects Info here
+		// and feeds the drain-ack helpers off it.
 		info := sessionpkg.InfoFromPersistedBead(*session)
 		if !isDrainAckStopPendingInfo(info) {
 			continue

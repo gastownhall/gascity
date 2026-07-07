@@ -10462,48 +10462,6 @@ func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing
 	}
 }
 
-// TODO(pool-consolidation): This test validates that poolDesired gates wake
-// decisions. Needs updating when pool_slot is removed — the slot-based gate
-// will be replaced with count-based ordering.
-func TestPoolDesiredLimitsWakeWork(t *testing.T) {
-	t.Skip("blocked on pool_slot removal")
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Agents: []config.Agent{
-			{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
-		},
-	}
-	// 3 sessions exist and are running, but demand (poolDesired) is only 1.
-	// Don't add to desiredState — we're testing poolDesired gating only.
-	var sessions []beads.Bead
-	for i := 1; i <= 3; i++ {
-		name := fmt.Sprintf("claude-%d", i)
-		s := env.createSessionBead(name, "claude")
-		env.setSessionMetadata(&s, map[string]string{
-			"state":     "awake",
-			"pool_slot": fmt.Sprintf("%d", i),
-		})
-		sessions = append(sessions, s)
-	}
-
-	// poolDesired=1: only 1 session should stay awake.
-	poolDesired := map[string]int{"claude": 1}
-	evalInput := make([]beads.Bead, len(sessions))
-	copy(evalInput, sessions)
-	evals := computeWakeEvaluations(evalInput, env.cfg, env.sp, poolDesired,
-		map[string]bool{"claude": true}, nil, env.clk)
-
-	wakeCount := 0
-	for _, eval := range evals {
-		if len(eval.Reasons) > 0 {
-			wakeCount++
-		}
-	}
-	if wakeCount != 1 {
-		t.Errorf("wakeCount = %d, want 1 (only slot 1 within poolDesired=1)", wakeCount)
-	}
-}
-
 // PR #209 -- skipped for now. Drained beads don't block capacity (all
 // selection paths skip them). Closing would break gc attach on drained
 // sessions. Tracked as a future cleanup task.
