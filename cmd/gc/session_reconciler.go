@@ -2541,7 +2541,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rebaseBatch)
 							if trace != nil {
-								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeCode(outcome), tp.TemplateName, name, traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, outcome, tp.TemplateName, name, traceRecordPayload{
 									"stored_hash":  storedHash,
 									"current_hash": currentHash,
 								})
@@ -2755,7 +2755,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rebaseBatch)
 							if trace != nil {
-								trace.RecordDecision(TraceSiteReconcilerLiveDrift, TraceReasonLiveDrift, TraceOutcomeCode(outcome), tp.TemplateName, name, traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerLiveDrift, TraceReasonLiveDrift, outcome, tp.TemplateName, name, traceRecordPayload{
 									"stored_hash":  storedLive,
 									"current_hash": currentLive,
 								})
@@ -2825,7 +2825,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rebaseBatch)
 							if trace != nil {
-								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeCode(outcome), tp.TemplateName, name, traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, outcome, tp.TemplateName, name, traceRecordPayload{
 									"stored_hash":  storedHash,
 									"current_hash": currentHash,
 								})
