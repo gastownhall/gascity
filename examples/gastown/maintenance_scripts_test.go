@@ -5570,6 +5570,20 @@ exit 0
 	if !strings.Contains(gcLogText, "expired:1") {
 		t.Fatalf("reaper summary did not report expired:1:\n%s", gcLogText)
 	}
+
+	// The bare close above is only safe because the Step 3 expired-nudge query
+	// restricts to unassigned beads; that COALESCE(i.assignee,'')='' filter is
+	// the invariant that keeps the bare close out of bd's cross-actor guard.
+	// Pin it against the emitted SQL so a future edit that drops the filter
+	// while keeping the bare close fails here instead of silently leaking an
+	// assigned expired nudge at the next BD_VERSION bump.
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt args log): %v", err)
+	}
+	if !strings.Contains(string(doltData), "COALESCE(i.assignee, '') = ''") {
+		t.Fatalf("expired-nudge query dropped the unassigned filter; bare close would become cross-actor:\n%s", doltData)
+	}
 }
 
 func TestReaperDoesNotTTLCloseNonNudgeBeadWithElapsedExpiresAt(t *testing.T) {
