@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -538,6 +539,70 @@ func TestValidateWebhooks_BearerAndCIDRAccepted(t *testing.T) {
 	}
 	if err := ValidateWebhooks([]Webhook{w}); err != nil {
 		t.Fatalf("valid bearer_env/allowed_cidrs rejected: %v", err)
+	}
+}
+
+// A bare IPv4-mapped IPv6 allowlist entry is unmapped to its IPv4 form so it
+// matches the unmapped request IP the source check compares against. Without the
+// unmap it would parse as an IPv6 /128 and fail-close (403) a legitimate IPv4
+// caller, diverging from the request-time normalization the parser promises to
+// share.
+func TestParseWebhookCIDRs_UnmapsBareIPv4Mapped(t *testing.T) {
+	prefixes, err := ParseWebhookCIDRs([]string{"::ffff:192.0.2.1"})
+	if err != nil {
+		t.Fatalf("ParseWebhookCIDRs(::ffff:192.0.2.1) error: %v", err)
+	}
+	if len(prefixes) != 1 {
+		t.Fatalf("got %d prefixes, want 1", len(prefixes))
+	}
+	p := prefixes[0]
+	if !p.Addr().Is4() {
+		t.Errorf("parsed prefix addr = %v, want unmapped IPv4 form", p.Addr())
+	}
+	// webhookRemoteIP unmaps 4-in-6 request IPs, so a request from 192.0.2.1 must
+	// fall inside the parsed mapped-form entry.
+	if req := netip.MustParseAddr("192.0.2.1"); !p.Contains(req) {
+		t.Errorf("prefix %v does not contain unmapped request IP %v", p, req)
+	}
+}
+
+// A CIDR-form IPv4-mapped IPv6 allowlist entry ("::ffff:192.0.2.0/120") is
+// normalized to its equivalent IPv4 prefix ("192.0.2.0/24"), matching the
+// unmapped request IP the source check compares against. Before the fix the
+// ParsePrefix branch appended the prefix without unmapping, so it stayed an IPv6
+// prefix that fail-closed (403) a legitimate IPv4 caller — the same divergence
+// the bare-address case above closes, but for CIDR notation.
+func TestParseWebhookCIDRs_UnmapsMappedCIDRPrefix(t *testing.T) {
+	prefixes, err := ParseWebhookCIDRs([]string{"::ffff:192.0.2.0/120"})
+	if err != nil {
+		t.Fatalf("ParseWebhookCIDRs(::ffff:192.0.2.0/120) error: %v", err)
+	}
+	if len(prefixes) != 1 {
+		t.Fatalf("got %d prefixes, want 1", len(prefixes))
+	}
+	p := prefixes[0]
+	if !p.Addr().Is4() {
+		t.Errorf("parsed prefix addr = %v, want unmapped IPv4 form", p.Addr())
+	}
+	if p.Bits() != 24 {
+		t.Errorf("parsed prefix bits = %d, want 24 (a /120 mapped prefix is a /24 IPv4 range)", p.Bits())
+	}
+	// A request from inside the range matches; one just outside it does not — proving
+	// the prefix width survived the conversion rather than collapsing to a host route.
+	if in := netip.MustParseAddr("192.0.2.200"); !p.Contains(in) {
+		t.Errorf("prefix %v does not contain in-range IPv4 %v", p, in)
+	}
+	if out := netip.MustParseAddr("192.0.3.1"); p.Contains(out) {
+		t.Errorf("prefix %v wrongly contains out-of-range IPv4 %v", p, out)
+	}
+}
+
+// A mapped-form prefix shorter than /96 spans beyond the IPv4-mapped range, so it
+// cannot represent an IPv4 allowlist entry and is rejected at parse (and thus at
+// config load) rather than silently never matching an unmapped IPv4 peer.
+func TestParseWebhookCIDRs_RejectsSub96MappedPrefix(t *testing.T) {
+	if _, err := ParseWebhookCIDRs([]string{"::ffff:0.0.0.0/64"}); err == nil {
+		t.Fatal("ParseWebhookCIDRs(::ffff:0.0.0.0/64) = nil error, want rejection of a sub-/96 mapped prefix")
 	}
 }
 

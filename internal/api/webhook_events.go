@@ -22,10 +22,13 @@ import "github.com/gastownhall/gascity/internal/events"
 //     disallowed caller cannot consume the shared per-hook delivery bucket that
 //     legitimate deliveries draw from; staying non-evented keeps that pre-limiter
 //     position from re-introducing the amplification.
-//   - operator_fault is the exception among the access-stage rejects: it fires only
-//     on an operator misconfiguration (an unset/empty bearer_env — a malformed
-//     allowed_cidrs is already rejected at config load), never on attacker-shaped
-//     input, so surfacing the broken hook as a 503 event is the intended diagnostic.
+//   - operator_fault as an EVENT fires only for the POST-limiter verifier fault
+//     (verifier unavailable / verify error): the limiter throttles that path, so
+//     its per-request 503 event is bounded and diagnostically useful. The
+//     PRE-limiter access gates (allowed_cidrs, bearer_env) can also raise a 503
+//     operator fault, but eventing those per request would re-introduce the flood
+//     amplifier, so they are non-evented and logged one-shot instead
+//     (rejectWebhookAccessOperatorFault); the 503 status is the caller-visible signal.
 //   - no-match is classified as webhook.received (an accepted, authentic 2xx
 //     delivery that no rule wanted), NOT as a rejection — so there is no
 //     no_match reason.

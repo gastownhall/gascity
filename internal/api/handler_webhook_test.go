@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -963,6 +965,49 @@ func TestWebhookAccessDenialsAreNonEventedAndSpareDeliveryBucket(t *testing.T) {
 			t.Fatalf("correct-bearer dispatch count = %d, want 1", disp.count())
 		}
 	})
+}
+
+// A misconfigured PUBLIC hook whose bearer_env names an UNSET operator var passes
+// config load (load validates the var name, not that it is set) but faults at the
+// pre-limiter bearer gate on every delivery. Because that gate runs BEFORE the
+// delivery limiter, eventing or logging the fault per request would be a CWE-400
+// amplifier — an unauthenticated flood could drive unbounded event-bus and log
+// writes. The fault must be non-evented and logged one-shot while still returning
+// a 503 per request.
+func TestWebhookAccessGateOperatorFaultFloodIsNonEventedAndLoggedOnce(t *testing.T) {
+	t.Setenv("GC_WEBHOOK_GITHUB_SECRET", "op-fault-flood-signing-secret-1")
+	// Deliberately leave GC_WEBHOOK_GH_BEARER unset so the bearer gate faults.
+	hook := githubWebhook("public")
+	hook.Verify.BearerEnv = "GC_WEBHOOK_GH_BEARER"
+	disp := firedDispatcher()
+	state := newWebhookState(t, hook, prReviewOrder(), disp)
+	h := newTestCityHandler(t, state)
+
+	// Capture logs to prove the diagnostic is one-shot, not once-per-request.
+	var logBuf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	sig := githubSignature([]byte("op-fault-flood-signing-secret-1"), []byte(prLabeledPayload))
+	const flood = 5
+	for i := 0; i < flood; i++ {
+		rec := postHook(t, h, state, "github", prLabeledPayload, "203.0.113.7:443", githubHeaders(sig, "of-"+strconv.Itoa(i)))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("operator-fault delivery %d = %d, want 503", i, rec.Code)
+		}
+	}
+	if disp.count() != 0 {
+		t.Fatalf("operator-fault deliveries must not dispatch, got %d", disp.count())
+	}
+	// CWE-400: the flood must NOT amplify into per-request webhook.rejected events.
+	if rejs := webhookRejectedEvents(t, state); len(rejs) != 0 {
+		t.Errorf("operator-fault flood emitted %d rejected events, want 0 (non-evented)", len(rejs))
+	}
+	// ...and the operator diagnostic is logged exactly once across the flood.
+	if got := strings.Count(logBuf.String(), "bearer_env"); got != 1 {
+		t.Errorf("operator-fault flood logged the fault %d times, want exactly 1 (one-shot); log:\n%s", got, logBuf.String())
+	}
 }
 
 // (E8-c) A pack cannot raise its own rate limit above the operator ceiling: a

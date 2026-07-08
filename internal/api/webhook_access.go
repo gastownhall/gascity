@@ -2,7 +2,7 @@ package api
 
 import (
 	"crypto/subtle"
-	"log"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -30,9 +30,10 @@ func (s *Server) webhookSourceAllowed(w http.ResponseWriter, r *http.Request, re
 	prefixes, err := config.ParseWebhookCIDRs(cidrs)
 	if err != nil {
 		// Load-time validation should reject a malformed allowlist; if one still
-		// reaches here, fail closed rather than silently skipping the control.
-		log.Printf("api: webhook %q allowed_cidrs invalid: %v", req.hook.Name, err)
-		s.rejectWebhookOperatorFault(w, req, 0)
+		// reaches here, fail closed rather than silently skipping the control. This
+		// runs before the limiter, so the fault is non-evented and logged one-shot
+		// (rejectWebhookAccessOperatorFault) to avoid a CWE-400 flood amplifier.
+		s.rejectWebhookAccessOperatorFault(w, req.hook.Name, fmt.Sprintf("allowed_cidrs invalid: %v", err))
 		return false
 	}
 	if ip, ok := webhookRemoteIP(r.RemoteAddr); ok {
@@ -85,8 +86,10 @@ func (s *Server) webhookBearerAllowed(w http.ResponseWriter, r *http.Request, re
 	}
 	expected, ok := os.LookupEnv(env)
 	if !ok || strings.TrimSpace(expected) == "" {
-		log.Printf("api: webhook %q bearer_env %q is unset or empty", req.hook.Name, env)
-		s.rejectWebhookOperatorFault(w, req, 0)
+		// Unset/empty bearer_env is an operator fault (503, fail closed). It runs
+		// before the limiter, so it is non-evented and logged one-shot
+		// (rejectWebhookAccessOperatorFault) to avoid a CWE-400 flood amplifier.
+		s.rejectWebhookAccessOperatorFault(w, req.hook.Name, fmt.Sprintf("bearer_env %q is unset or empty", env))
 		return false
 	}
 	provided := bearerToken(r.Header.Get("Authorization"))
@@ -94,8 +97,9 @@ func (s *Server) webhookBearerAllowed(w http.ResponseWriter, r *http.Request, re
 		// Missing/wrong bearer → 401, deliberately NON-evented. The caller fully
 		// controls the Authorization header, so this gate runs before the limiter (it
 		// must not consume a delivery token) and eventing it per request would amplify
-		// a flood. An unset/empty bearer_env above IS an operator fault (503) and is
-		// evented, because that is a misconfiguration signal, not attacker-shaped input.
+		// a flood. An unset/empty bearer_env above is an operator fault (503) that is
+		// likewise pre-limiter, so it too stays non-evented (one-shot logged) rather
+		// than amplifying a flood into per-request writes.
 		problemWebhookUnauthorized.writeTo(w)
 		return false
 	}

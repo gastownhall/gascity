@@ -53,9 +53,12 @@ type webhookRequest struct {
 // (parse + match → dedup → E6 sink). The pre-verification reject paths that an
 // unauthenticated caller fully controls (unknown name, perimeter, method,
 // source/bearer denial, rate-limit) are NON-evented so a flood cannot amplify
-// into per-request event/log writes; the verify/dispatch decisions past the
-// limiter — and operator-fault 503s — stay evented. The access gates sit BEFORE
-// the limiter so a disallowed caller cannot drain the shared delivery bucket.
+// into per-request event/log writes; so are the pre-limiter access-gate
+// operator-fault 503s (allowed_cidrs/bearer_env misconfig), which are logged
+// one-shot instead. The verify/dispatch decisions past the limiter — including the
+// verifier operator-fault 503 the limiter throttles — stay evented. The access
+// gates sit BEFORE the limiter so a disallowed caller cannot drain the shared
+// delivery bucket.
 func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	req, ok := s.resolveWebhookRequest(w, r)
 	if !ok {
@@ -216,13 +219,52 @@ func (s *Server) verifyWebhook(w http.ResponseWriter, r *http.Request, req webho
 }
 
 // rejectWebhookOperatorFault writes the shared 503 verifier-unavailable response
-// and emits the operator_fault rejection event.
+// and emits the operator_fault rejection event. It is the POST-limiter fault path
+// (verifier unavailable), so the delivery limiter already throttles a flood; the
+// per-request event is bounded and diagnostically useful. The pre-limiter access
+// gates use rejectWebhookAccessOperatorFault instead, which must not amplify.
 func (s *Server) rejectWebhookOperatorFault(w http.ResponseWriter, req webhookRequest, bodySize int) {
 	problemWebhookVerifierUnavailable.writeTo(w)
 	s.emitWebhookRejected(WebhookRejectedPayload{
 		Webhook: req.hook.Name, Scheme: req.scheme,
 		Reason: reasonOperatorFault, Status: http.StatusServiceUnavailable, BodySize: bodySize,
 	})
+}
+
+// rejectWebhookAccessOperatorFault writes the shared 503 operator-fault response
+// for a PRE-LIMITER access gate — a misconfigured allowed_cidrs, or an unset/empty
+// bearer_env on a hook that still passed config load. Unlike the post-limiter
+// verifier fault above, these gates run BEFORE the delivery limiter, so an
+// attacker flooding a misconfigured public hook could amplify the fault into
+// unbounded per-request event/log writes (CWE-400). This path is therefore
+// deliberately NON-EVENTED and its diagnostic log is one-shot per (hook, fault):
+// the 503 status — still returned per request, as cheap as the other pre-limiter
+// rejects — plus ingress metrics are the flood-proof operator signal, and the
+// latched log names the broken hook once. faultDetail identifies the specific
+// misconfiguration so a later, different fault reports again.
+func (s *Server) rejectWebhookAccessOperatorFault(w http.ResponseWriter, hookName, faultDetail string) {
+	problemWebhookVerifierUnavailable.writeTo(w)
+	if s.webhookAccessFaultFirstSeen(hookName, faultDetail) {
+		log.Printf("api: webhook %q %s", hookName, faultDetail)
+	}
+}
+
+// webhookAccessFaultFirstSeen reports whether the (hook, fault) pair has not been
+// reported yet, latching it so a flood reports the fault once instead of once per
+// request. The key derives from the webhook name and the operator-owned
+// misconfiguration, never attacker input, so the latch set stays bounded by config.
+func (s *Server) webhookAccessFaultFirstSeen(hookName, faultDetail string) bool {
+	key := hookName + "\x00" + faultDetail
+	s.webhookAccessFaultMu.Lock()
+	defer s.webhookAccessFaultMu.Unlock()
+	if s.webhookAccessFaultLogged == nil {
+		s.webhookAccessFaultLogged = make(map[string]struct{})
+	}
+	if _, seen := s.webhookAccessFaultLogged[key]; seen {
+		return false
+	}
+	s.webhookAccessFaultLogged[key] = struct{}{}
+	return true
 }
 
 // dispatchWebhook parses + matches the verified delivery, claims dedup, and

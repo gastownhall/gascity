@@ -111,8 +111,17 @@ type WebhookVerify struct {
 	SignatureHeader string `toml:"signature_header,omitempty"`
 	// EventHeader names the request header carrying the provider event type.
 	EventHeader string `toml:"event_header,omitempty"`
-	// DedupHeader names the request header carrying the delivery id used for
-	// at-least-once dedup.
+	// DedupHeader names the request header whose value is surfaced as the
+	// delivery id on webhook.received events for observability. It does NOT key
+	// at-least-once dedup for the signature-only schemes (github-hmac-sha256,
+	// hmac-sha256, slack-v0, discord-ed25519): those dedup on a hash of the
+	// signed body, because an unsigned or coarse header cannot safely key dedup —
+	// a captured valid delivery could be replayed under a fresh header id to
+	// re-fire the order. Only jwt-jwks keys dedup directly, on its signed
+	// per-delivery-unique "jti". As a consequence two deliveries with
+	// byte-identical signed bodies inside the dedup window collapse to one
+	// dispatch, so a source that must resend an identical payload has to carry a
+	// unique value inside the signed body.
 	DedupHeader string `toml:"dedup_header,omitempty"`
 	// TimestampHeader optionally names a request header carrying a signed
 	// timestamp for replay defense.
@@ -489,8 +498,13 @@ func validateWebhookAllowedCIDRs(name string, cidrs []string) error {
 
 // ParseWebhookCIDRs parses an allowed_cidrs list into prefixes, accepting either
 // CIDR notation ("192.30.252.0/22") or a bare address ("203.0.113.7", read as a
-// host route). It backs both load-time validation and the request-time source
-// check so the two can never diverge. An empty or malformed entry is an error.
+// host route). An IPv4-mapped IPv6 entry — bare ("::ffff:192.0.2.1") or CIDR-form
+// ("::ffff:192.0.2.0/120") — is unmapped to its IPv4 form ("192.0.2.1",
+// "192.0.2.0/24") so it matches the request IP the source check compares against
+// — webhookRemoteIP unmaps the same way — rather than sitting as an IPv6 prefix
+// that fail-closes (403) a legitimate IPv4 caller. It backs both load-time
+// validation and the request-time source check so the two can never diverge. An
+// empty or malformed entry is an error.
 func ParseWebhookCIDRs(cidrs []string) ([]netip.Prefix, error) {
 	if len(cidrs) == 0 {
 		return nil, nil
@@ -502,6 +516,18 @@ func ParseWebhookCIDRs(cidrs []string) ([]netip.Prefix, error) {
 			return nil, fmt.Errorf("verify.allowed_cidrs entry is empty")
 		}
 		if p, err := netip.ParsePrefix(trimmed); err == nil {
+			// Normalize an IPv4-mapped IPv6 CIDR to its equivalent IPv4 prefix so it
+			// matches the unmapped request peer webhookRemoteIP produces; left as an
+			// IPv6 range it would silently fail-close a legitimate IPv4 caller, the
+			// same divergence the bare-address Unmap below closes. A mapped prefix
+			// shorter than /96 spans beyond the mapped range and cannot be an IPv4
+			// allowlist entry, so reject it loudly instead of letting it never match.
+			if p.Addr().Is4In6() {
+				if p.Bits() < 96 {
+					return nil, fmt.Errorf("verify.allowed_cidrs %q: IPv4-mapped prefix shorter than /96 is not a valid IPv4 range; use IPv4 CIDR notation", c)
+				}
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+			}
 			out = append(out, p.Masked())
 			continue
 		}
@@ -509,6 +535,7 @@ func ParseWebhookCIDRs(cidrs []string) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("verify.allowed_cidrs %q is not a valid CIDR or IP", c)
 		}
+		addr = addr.Unmap()
 		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
 	}
 	return out, nil
