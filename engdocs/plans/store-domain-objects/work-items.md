@@ -45,7 +45,9 @@ Land O6. Promote to `session.Store` handle-taking methods: `GetWait(handle) -> W
 **WIRE:** typed Huma `/v0/waits` endpoint + DTO replacing `Client.ListBeads(label=gc:wait)`/`GetBead` in `cmd_wait.go`. **(critique correction):** make 404-on-new-route a `ShouldFallbackForRead`-eligible/capability-probed condition (rolling-deploy safety); keep the label read serving through a deprecation window; carry `AgeSeconds` in the typed `CachedRead` envelope; migrate the local `doWaitListFallback` leg onto the session front door in the same step.
 **Acceptance:** wait census → 0 in `cmd_wait.go`/`waits.go`; `/v0/waits` + fallback both typed; WI-1 & WI-2 wait residuals close.
 
-## WI-5 — Sessions / Reconciler core (large; already mid-flight) `[ ]`
+## WI-5 — Sessions / Reconciler core (large; already mid-flight) `[x]`
+<!-- COMPLETE: W0-W5 integrated (merge f2742d35e). Marker was stale. -->
+
 
 > WI-5 waves: W0 (fold O1+O2+O4) ✅ · W1 (ApplyPatchInfo cutover) ✅ · W2 (leaf reads) ✅ → W3 (mixed splits) → W4 (ordered-slice/snapshot) → W5 (lockstep drop + oracle-sibling deletion). Relocation-guard regression from WI-4 fixed (5fb00e5d3).
 Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not re-Get); status-close keeps a `Get`. Migrate the remaining ~37 `session_reconcile.go` decision helpers + the `session_wake.go` drain family + `session_lifecycle_parallel.go` async-start commit protocol onto `infoByID` (Info first grows the enumerable vocabulary those compares need). Retire the ordered `[]beads.Bead` working set (`session_reconciler.go:1411-1433`) onto `infoByID`; delete the `sessionBeadSnapshot` raw half + the ~20 single-site `InfoFromPersistedBead` wrappers + `infoLookupFromBeadLookup` shim. Every migrated read gets the `*_info_equiv_test.go` oracle treatment; the raw classifier oracle siblings are deleted last (unblocks Tier-3 unexport). **Do NOT attempt in one PR** — leaf-first waves.
