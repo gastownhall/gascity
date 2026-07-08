@@ -54,16 +54,30 @@ func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 // (ErrSessionNotFound / "loading session %q"); callers that need the HTTP error
 // contract bridge them at their boundary.
 func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, SessionPersistedResponse, error) {
-	front := c.manager.PersistedStore()
+	return sessionRecordViaManager(c.manager, id)
+}
+
+// sessionRecordViaManager is the canonical worker-boundary session read: it
+// composes the persisted read (session.Store.GetPersistedResponse) with the
+// read-path empty-type heal (RepairTypeBestEffort, a write only when the type is
+// empty) and the live runtime overlay (Manager.EnrichInfo). This is byte-identical
+// to the retired Manager.GetWithBead (loadSessionBead's heal + infoFromBead's
+// enrich) but returns the typed (Info, PersistedResponse) record instead of a raw
+// beads.Bead, so no bead crosses the boundary. It is the single source of truth
+// for every worker read that needs both the enriched Info and the persisted
+// metadata (catalog Get, factory construction, handle lifecycle/telemetry). Errors
+// surface in the session.Store form (ErrSessionNotFound / "loading session %q").
+func sessionRecordViaManager(m *sessionpkg.Manager, id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	front := m.PersistedStore()
 	info, pr, err := front.GetPersistedResponse(id)
 	if err != nil {
-		return SessionInfo{}, SessionPersistedResponse{}, err
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, err
 	}
 	if info.Type == "" {
 		front.RepairTypeBestEffort(id)
 		info.Type = sessionpkg.BeadType
 	}
-	return c.manager.EnrichInfo(info), pr, nil
+	return m.EnrichInfo(info), pr, nil
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template

@@ -166,6 +166,67 @@ func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) 
 	return f.Session(spec)
 }
 
+// SessionByHandle rebuilds a session-backed worker handle from a bead-id handle:
+// one session.Store.GetPersistedResponse fetch (the same single-fetch cost as
+// the retired Manager.GetWithBead) for the persisted Info + PersistedResponse,
+// the read-path empty-type heal, and the runtime overlay (EnrichInfo), then the
+// spec build off (Info, PersistedResponse). No raw beads.Bead crosses the
+// boundary.
+func (f *Factory) SessionByHandle(id string) (Handle, error) {
+	info, pr, err := sessionRecordViaManager(f.manager, id)
+	if err != nil {
+		return nil, err
+	}
+	return f.sessionFromRecord(info, pr)
+}
+
+// SessionByRecord builds a session-backed worker handle from an already-resolved
+// session record (Info + PersistedResponse), avoiding a redundant store.Get for
+// callers that just resolved it (e.g. via session.ResolveSessionRecordByExactID).
+// It applies the runtime overlay (EnrichInfo) to the persisted Info so the
+// resolved-runtime hook sees the same enriched Info the retired
+// SessionByLoadedBead path produced (which enriched via Manager.SessionInfoFromBead).
+//
+// This deliberately deviates from the work-items' SessionByInfo(info): the spec
+// build passes the FULL persisted metadata map (via PersistedResponse.Metadata)
+// into the SessionRuntimeResolver hook — the t3bridge fork boundary whose
+// signature must not change. A bare SessionByInfo could not reconstruct that map
+// and would force a hidden re-Get; PersistedResponse.Metadata is the documented
+// typed envelope for exactly this.
+func (f *Factory) SessionByRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
+	return f.sessionFromRecord(f.manager.EnrichInfo(info), pr)
+}
+
+func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
+	spec := SessionSpec{
+		ID:       info.ID,
+		Template: info.Template,
+		Title:    info.Title,
+		Alias:    info.Alias,
+		Command:  info.Command,
+		Provider: info.Provider,
+		WorkDir:  info.WorkDir,
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    info.ResumeFlag,
+			ResumeStyle:   info.ResumeStyle,
+			ResumeCommand: info.ResumeCommand,
+		},
+	}
+	sessionKind := strings.TrimSpace(pr.Metadata["real_world_app_session_kind"])
+	if profile := strings.TrimSpace(pr.Metadata["worker_profile"]); profile != "" {
+		spec.Profile = Profile(profile)
+	}
+	metadata := cloneStringMap(pr.Metadata)
+	if f.resolveSessionRuntime != nil {
+		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
+		if err != nil {
+			return nil, err
+		}
+		applyResolvedRuntimeToSessionSpec(&spec, resolved)
+	}
+	return f.Session(spec)
+}
+
 // HandleForTarget resolves a session target to a session-backed worker when
 // possible, falling back to a runtime-only handle for legacy live sessions.
 func (f *Factory) HandleForTarget(target string, processNames []string) (Handle, error) {
