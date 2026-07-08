@@ -785,44 +785,35 @@ func prepareStartCandidateForCity(
 				return err
 			}
 			candidate.session = &current
-			_, _, err = preWakeCommit(candidate.session, sessionFrontDoor(store), clk)
-			return err
+			if _, _, err := preWakeCommit(candidate.session, sessionFrontDoor(store), clk); err != nil {
+				return err
+			}
+			// Re-Get twin projection (WI-6 W5): this is a GENUINE store re-Get — the
+			// whole bead was reloaded (template_overrides can change out of band, e.g.
+			// bd update; TestPrepareStartCandidateReloadsOverridesBeforeWake), so the
+			// append-captured twin cannot be folded forward here, it must be re-projected.
+			// preWakeCommit already mirrored its PreWakePatch batch onto *current
+			// in-memory (session_wake.go), so projecting the post-preWakeCommit bead is
+			// byte-coherent with the raw reads the executor would make off
+			// candidate.session=&current. This is the single honest codec call left in this
+			// file (census 3->1); it dies in W6 when the re-Get returns Info directly.
+			// It shares preWakeCommit's error contract: a failed re-Get already returned
+			// above, so the twin is never projected from a stale/rejected bead.
+			candidate.info = sessionpkg.InfoFromPersistedBead(current)
+			return nil
 		}); err != nil {
 			return nil, err
-		}
-		// EARLY coherence refresh (WI-6 W5): the re-Get + preWakeCommit above replaced
-		// the append-captured session with fresh store state — reloaded template_overrides
-		// (TestPrepareStartCandidateReloadsOverridesBeforeWake), a minted instance_token /
-		// bumped generation, and a cleared sleep_reason. Refresh the typed twin in lockstep
-		// so buildPreparedStart's reads (parseSessionTemplateOverridesForLaunch,
-		// sessionTriggerBeadEnv, candidate.name() → GC_SESSION_NAME) and the pre-mint gates
-		// observe the fresh bead, exactly as the old raw reads off candidate.session=&current
-		// did. Front-door read on the budget-limited start-prep path (not the per-patch
-		// reconciler hot path); it dies in W6 when the raw twin is deleted and the re-Get
-		// returns Info directly.
-		if refreshed, refreshErr := sessionFrontDoor(store).Get(session.ID); refreshErr == nil {
-			candidate.info = refreshed
 		}
 	} else if _, _, err := preWakeCommit(session, sessionFrontDoor(store), clk); err != nil {
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	prepared, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
-	if err != nil {
-		return nil, err
-	}
-	// LATE coherence refresh (WI-6 W5): buildPreparedStart mutated session_key /
-	// started_config_hash on the bead (the stale-resume clears + the session_key mint)
-	// AFTER the EARLY refresh. Refresh the twin again so the post-prep reads
-	// (session_key at runPreparedStartCandidate; recordWakeFailure's session_key /
-	// started_config_hash on the failure path) match the raw bead byte-for-byte. Same
-	// budget-limited front-door read; dies in W6 with the raw twin.
-	if store != nil && prepared.candidate.session != nil && strings.TrimSpace(prepared.candidate.session.ID) != "" {
-		if refreshed, refreshErr := sessionFrontDoor(store).Get(prepared.candidate.session.ID); refreshErr == nil {
-			prepared.candidate.info = refreshed
-		}
-	}
-	return prepared, nil
+	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
+	// session_key / instance_token mints) onto candidate.info at their write sites, so
+	// the returned prepared.candidate.info stays coherent with the raw bead WITHOUT a
+	// second re-Get. The post-prep reads (session_key at runPreparedStartCandidate;
+	// recordWakeFailure's session_key/started_config_hash) read that folded twin.
+	return buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -947,7 +938,12 @@ func buildPreparedStartWithWorkDirResolver(
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
 			}
-			clearStaleResumeKeyMetadata(session, sessFront)
+			// Fold the stale-resume clear onto the typed twin (WI-6 W5): the same batch
+			// that was mirrored onto session.Metadata folds byte-coherently onto
+			// candidate.info (session_key / started_config_hash / continuation_reset_pending
+			// are all in Info.ApplyPatch's switch), so no re-Get is needed for the post-prep
+			// reads (session_key at runPreparedStartCandidate; recordWakeFailure).
+			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(session, sessFront))
 		}
 	}
 	if session.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
@@ -964,6 +960,9 @@ func buildPreparedStartWithWorkDirResolver(
 			session.Metadata = make(map[string]string)
 		}
 		session.Metadata["session_key"] = sessionKey
+		// Fold the mint onto the typed twin so the stale-key death detection at
+		// runPreparedStartCandidate (info.SessionKey != "") sees the minted key.
+		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"session_key": sessionKey})
 	}
 	// firstStart classification routes through the level-triggered converge core
 	// (deriveFirstStart). This call passes sessTranscriptUnknown, which reproduces
@@ -1058,6 +1057,11 @@ func buildPreparedStartWithWorkDirResolver(
 			return nil, err
 		}
 		session.Metadata["instance_token"] = instanceToken
+		// Fold the mint onto the typed twin so runningSessionMatchesPendingCreateInfo
+		// (info.InstanceToken) matches the raw bead. On the reconciler start-prep path
+		// preWakeCommit already minted the token, so this only fires for the
+		// recoverRunningPendingCreate / direct-call paths where it was empty.
+		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"instance_token": instanceToken})
 	}
 	beadAlias := strings.TrimSpace(session.Metadata["alias"])
 	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
@@ -1585,28 +1589,25 @@ func commitAsyncStartResultWithContext(
 // NOT a forbidden per-patch re-Get: it fires once per async start commit, on the
 // budget-limited start path, never once per reconciler metadata write.
 //
-// The gate read now goes through the session front door (sessFront.Get), which
-// rejects a mid-start bead that lost BOTH its type AND its gc:session label
-// (IsSessionBeadOrRepairable == false): such a bead takes the refresh-failed path
-// (lease released, retry next tick) instead of committing. That is a documented,
-// vanishingly-rare W5 delta from the raw store.Get, pinned by
-// TestRefreshAsyncStartRejectsNonSessionBead. The raw bead is still fetched for the
-// retained session pointer + the raw async twins this wave; candidate.session gains
-// the typed twin candidate.info = currentInfo so the commit reads project off it.
-// Both store reads target the same id in a per-session goroutine with no concurrent
-// writer, so currentInfo is the typed projection of current. The raw fetch + raw
-// twins die in W6 when the raw session pointer is deleted.
+// The read goes through the session front door via GetWithBead, a SINGLE store
+// fetch that yields the raw bead AND its Info projection from one snapshot. This
+// matters: the still-raw staleness gates (asyncStartPreparedCommandStale,
+// asyncStartSessionStillCurrent) and the commit-time decision reads (which project
+// off candidate.info downstream) MUST see the same state — two sequential Gets would
+// let a cross-process writer (bd CLI, API sleep/close) split the gate view from the
+// commit view. GetWithBead applies the front-door session gate: a mid-start bead that
+// lost BOTH its type AND its gc:session label (IsSessionBeadOrRepairable == false)
+// takes the refresh-failed path (lease released, retry next tick) instead of
+// committing — a documented, vanishingly-rare W5 delta from the raw store.Get, pinned
+// by TestRefreshAsyncStartRejectsNonSessionBead. candidate.session is refreshed to the
+// fetched bead (retained for the write helpers + raw twins this wave) and
+// candidate.info to the Info from the SAME fetch. The raw bead + raw twins die in W6.
 func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, bool, bool, bool) {
 	session := result.prepared.candidate.session
 	if store == nil || session == nil || strings.TrimSpace(session.ID) == "" {
 		return result, true, false, false
 	}
-	currentInfo, err := sessionFrontDoor(store).Get(session.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
-		return result, false, false, true
-	}
-	current, err := store.Get(session.ID)
+	current, currentInfo, err := sessionFrontDoor(store).GetWithBead(session.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
 		return result, false, false, true
@@ -2013,10 +2014,12 @@ func providerCommandBaseName(rp *config.ResolvedProvider) string {
 // whose stored session_key references a transcript that no longer exists. Mirrors
 // the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
 // Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
-// breaker / churn logic treats this as the same kind of recovery cycle.
-func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Store) {
+// breaker / churn logic treats this as the same kind of recovery cycle. Returns the
+// patch it applied (in-memory-mirrored onto session.Metadata) so the caller can fold
+// the same batch onto the typed twin — every key is in Info.ApplyPatch's switch.
+func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Store) map[string]string {
 	if session == nil {
-		return
+		return nil
 	}
 	patch := map[string]string{
 		"session_key":                "",
@@ -2032,6 +2035,7 @@ func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Stor
 	for k, v := range patch {
 		session.Metadata[k] = v
 	}
+	return patch
 }
 
 func commitStartResult(
@@ -2469,12 +2473,14 @@ func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string,
 }
 
 // runningSessionMatchesPendingCreateInfo is the session.Info sibling of
-// runningSessionMatchesPendingCreate for the reconciler forward pass. The
-// session-bead reads are the id (Info.ID), instance_token (Info.InstanceToken)
-// and generation (Info.Generation); the provider probes and session name are
-// shared verbatim, so it is byte-identical to the raw form (sessionInstanceToken
-// / sessionGeneration oracle rows). The raw form stays for the async-start
-// commit protocol, which threads a freshly re-Got *beads.Bead (§5).
+// runningSessionMatchesPendingCreate, now the form the start-execution decision
+// paths use (runPreparedStartCandidate, startPreparedStartCandidate,
+// commitAsyncStartResultWithContext). The session-bead reads are the id (Info.ID),
+// instance_token (Info.InstanceToken) and generation (Info.Generation); the provider
+// probes and session name are shared verbatim, so it is byte-identical to the raw
+// form (sessionInstanceToken / sessionGeneration oracle rows). The raw form's only
+// surviving caller this wave is stopStaleAsyncStartRuntime, which holds the raw
+// *beads.Bead; it retires with that pointer in W6.
 func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName string, sp runtime.Provider) bool {
 	if sp == nil {
 		return false

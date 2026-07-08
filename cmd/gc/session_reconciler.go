@@ -2399,11 +2399,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// without demand (#2345).
 				//
 				// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-				// is RETAINED. On the runtime-already-dead fall-through below this
-				// session can reach startCandidates this same tick, and the start
-				// executor reads last_woke_at (cleared by RestartRequestPatch) off the
-				// raw bead via wakeFairnessTime BEFORE it re-Gets the bead from the
-				// store — dropping the mirror would perturb the wake-fairness ordering.
+				// is RETAINED for the surviving whole-bead helpers that still take the
+				// raw pointer this wave (the write helpers). Wake fairness itself now
+				// reads the Info twin captured at the startCandidates append below
+				// (wakeFairnessTime → Info.LastWokeAt), and last_woke_at (cleared by
+				// RestartRequestPatch) is folded onto infoByID just above, so the captured
+				// twin carries the cleared value for the same-tick re-wake ordering. Both
+				// the raw mirror and its helpers die in W6.
 				restartFold := make(sessionpkg.MetadataPatch, len(batch))
 				for key, value := range batch {
 					if key == sessionpkg.ResetCommittedAtKey {
@@ -2972,12 +2974,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED. The max-age kill falls through to the wakeTargets
-					// append below and the same-tick re-wake can reach startCandidates,
-					// where the start executor reads last_woke_at (cleared by SleepPatch)
-					// off the raw bead via wakeFairnessTime before it re-Gets from the
-					// store; dropping the mirror would perturb ordering. It dies with the
-					// other start-coupled mirrors in WI-6.
+					// loop is RETAINED for the write helpers that still take the raw pointer
+					// this wave. Wake fairness now reads the Info twin captured at the
+					// wakeTargets/startCandidates append below (wakeFairnessTime →
+					// Info.LastWokeAt); the ApplyPatchInfo fold just below carries SleepPatch's
+					// cleared last_woke_at onto that captured twin for the same-tick re-wake
+					// ordering. The raw mirror and its helpers die in WI-6.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -3058,10 +3060,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED — same rationale as the max-age kill: the same-tick
-					// re-wake reads last_woke_at (cleared by SleepPatch) off the raw bead via
-					// wakeFairnessTime before the start executor re-Gets it. Dies with the
-					// other start-coupled mirrors in WI-6.
+					// loop is RETAINED for the write helpers — same rationale as the max-age
+					// kill. Wake fairness reads the Info twin captured at the append below
+					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
+					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
+					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in WI-6.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -4482,10 +4485,12 @@ func resetConfiguredNamedSessionForConfigDrift(
 		session.Metadata = make(map[string]string, len(batch))
 	}
 	// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror loop is
-	// RETAINED. The start-pending caller (the alive lane) falls through without a
-	// `continue`, so the repaired session can reach startCandidates this same tick,
-	// and the start executor reads last_woke_at (cleared by ConfigDriftResetPatch)
-	// off the raw bead via wakeFairnessTime before it re-Gets from the store.
+	// RETAINED for the write helpers. The start-pending caller (the alive lane) falls
+	// through without a `continue`, so the repaired session can reach startCandidates
+	// this same tick; wake fairness reads the Info twin captured at the append
+	// (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned batch
+	// (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured twin
+	// carries it. The raw mirror dies in WI-6.
 	for key, value := range batch {
 		session.Metadata[key] = value
 	}

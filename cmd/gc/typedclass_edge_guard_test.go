@@ -122,17 +122,23 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
 	"InfoFromPersistedBead(": {
-		"cmd/gc/adoption_barrier.go":                     1,
-		"cmd/gc/build_desired_state.go":                  4,
-		"cmd/gc/city_status_snapshot.go":                 1,
-		"cmd/gc/cmd_nudge.go":                            2,
-		"cmd/gc/cmd_prime.go":                            2,
-		"cmd/gc/cmd_session.go":                          2,
-		"cmd/gc/cmd_wait.go":                             1,
-		"cmd/gc/mcp_integration.go":                      1,
-		"cmd/gc/session_bead_snapshot.go":                3,
-		"cmd/gc/session_hash.go":                         1,
-		"cmd/gc/session_index.go":                        1,
+		"cmd/gc/adoption_barrier.go":      1,
+		"cmd/gc/build_desired_state.go":   4,
+		"cmd/gc/city_status_snapshot.go":  1,
+		"cmd/gc/cmd_nudge.go":             2,
+		"cmd/gc/cmd_prime.go":             2,
+		"cmd/gc/cmd_session.go":           2,
+		"cmd/gc/cmd_wait.go":              1,
+		"cmd/gc/mcp_integration.go":       1,
+		"cmd/gc/session_bead_snapshot.go": 3,
+		"cmd/gc/session_hash.go":          1,
+		"cmd/gc/session_index.go":         1,
+		// WI-6 W5: the sole surviving codec call here is the twin re-projection at
+		// prepareStartCandidateForCity's genuine store re-Get boundary — the whole bead
+		// is reloaded (out-of-band template_overrides changes), so it cannot be folded
+		// forward and must be re-projected. Every other start-execution read is a W1-style
+		// Info.ApplyPatch fold. Retires in W6 when the re-Get returns Info directly.
+		"cmd/gc/session_lifecycle_parallel.go":           1,
 		"cmd/gc/session_logs_resolve.go":                 3,
 		"cmd/gc/session_reconciler.go":                   3,
 		"cmd/gc/session_resolve.go":                      3,

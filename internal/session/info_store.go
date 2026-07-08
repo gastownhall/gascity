@@ -219,6 +219,23 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 	return InfoFromPersistedBead(b), PersistedResponseFromBead(b), nil
 }
 
+// GetWithBead returns the validated raw session bead alongside its typed Info
+// projection from a SINGLE store fetch. It shares Get's exact gate/error contract
+// (validatedBead: ErrSessionNotFound for a present-but-non-session bead, the wrapped
+// store not-found error for an absent id), so a caller that needs BOTH the raw bead
+// — a still-raw transitional classifier — and the Info reads one consistent snapshot,
+// with no inter-Get window where a cross-process writer could split the two views.
+// The raw bead escapes deliberately for those transitional consumers and retires
+// with them; new callers should prefer Get. This is the (Bead, Info) analogue of
+// GetPersistedResponse's (Info, PersistedResponse) single-fetch pairing.
+func (s *Store) GetWithBead(id string) (beads.Bead, Info, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return beads.Bead{}, Info{}, err
+	}
+	return b, InfoFromPersistedBead(b), nil
+}
+
 // validatedBead loads the session bead for id. A load failure (including an
 // absent id) is wrapped with `loading session %q` context; a loaded bead that is
 // not a session bead (or has an empty id) is rejected with ErrSessionNotFound. It
