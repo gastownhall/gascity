@@ -48,6 +48,25 @@ var ErrSessionNotFound = errors.New("session not found")
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
 var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 
+// ErrRuntimeUnavailable reports that a runtime-liveness query could not observe
+// the underlying runtime at all — the tmux server was unreachable, the process
+// table could not be scanned, etc. It is the runtime-side analog of a partial
+// bead-store read: an observation FAILURE, not the fact "no sessions exist". A
+// destructive reconciler arm (close-as-orphaned, heal-to-asleep, sweep) must
+// treat it as "I could not tell" and defer, exactly as it defers on a partial
+// store read (storeQueryPartial) — never as ground truth that every session is
+// gone. Providers wrap it (with errors.Is-visible provider-specific causes) so
+// callers can dispatch on it, and IsRuntimeQueryPartial centralizes the check.
+var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
+
+// IsRuntimeQueryPartial reports whether err indicates the runtime could not be
+// observed (ErrRuntimeUnavailable). It is the runtime-side mirror of the
+// store-partial predicate: a true result means a destructive arm keyed on an
+// empty/negative observation must defer rather than act on unverified absence.
+func IsRuntimeQueryPartial(err error) bool {
+	return err != nil && errors.Is(err, ErrRuntimeUnavailable)
+}
+
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
 // subprocess/acp/t3bridge). Composite/wrapping providers return it from their
