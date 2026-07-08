@@ -1147,6 +1147,56 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			}
 		})
 	}
+
+	// Async-start commit-protocol twins (WI-6 W5). Each reads TWO session views
+	// (prepared + current), so they don't fit the single-bead loop above. Prove the
+	// Info form is byte-identical to the raw-bead form across the fixture corpus.
+	//
+	// asyncStartPreparedCommandStale's prepared side is the resolved template command
+	// (tp.Command), shared by both forms; only the current side switches bead↔Info
+	// (Info.Command == metadata["command"]). The "closed" and "pool-managed-slot"
+	// (state=awake) / "pool-managed-flag-only" (state=active) fixtures exercise the
+	// Closed and awake/active branches the design calls out.
+	preparedWithCommand := func(cmd string) preparedStart {
+		return preparedStart{candidate: startCandidate{tp: TemplateParams{Command: cmd}}}
+	}
+	for currentShape, currentBead := range beadsByShape {
+		currentBead := currentBead
+		currentInfo := session.InfoFromPersistedBead(currentBead)
+		t.Run("asyncCommandStale/"+currentShape, func(t *testing.T) {
+			for _, cmd := range []string{"", "claude --resume", "codex exec", "  claude --resume  "} {
+				pr := preparedWithCommand(cmd)
+				if got, want := asyncStartPreparedCommandStaleInfo(pr, currentInfo), asyncStartPreparedCommandStale(pr, currentBead); got != want {
+					t.Errorf("cmd=%q info=%v bead=%v", cmd, got, want)
+				}
+			}
+		})
+	}
+
+	// The identity / still-current / cleanup-allowed twins take (prepared, current)
+	// as two session views. Assert equivalence across every ordered pair of fixture
+	// shapes, so the instance_token / generation identity fallback, the closed and
+	// awake/active short-circuits, and the pending-create-claim rollback branch are
+	// all covered on both the prepared and current sides.
+	for prepShape, prepBead := range beadsByShape {
+		prepBead := prepBead
+		prepInfo := session.InfoFromPersistedBead(prepBead)
+		for curShape, curBead := range beadsByShape {
+			curBead := curBead
+			curInfo := session.InfoFromPersistedBead(curBead)
+			t.Run("asyncPair/"+prepShape+"->"+curShape, func(t *testing.T) {
+				if got, want := asyncStartIdentityMatchesInfo(prepInfo, curInfo), asyncStartIdentityMatches(prepBead, curBead); got != want {
+					t.Errorf("asyncStartIdentityMatches: info=%v bead=%v", got, want)
+				}
+				if got, want := asyncStartSessionStillCurrentInfo(prepInfo, curInfo), asyncStartSessionStillCurrent(prepBead, curBead); got != want {
+					t.Errorf("asyncStartSessionStillCurrent: info=%v bead=%v", got, want)
+				}
+				if got, want := asyncStartStaleRuntimeCleanupAllowedInfo(prepInfo, curInfo), asyncStartStaleRuntimeCleanupAllowed(prepBead, curBead); got != want {
+					t.Errorf("asyncStartStaleRuntimeCleanupAllowed: info=%v bead=%v", got, want)
+				}
+			})
+		}
+	}
 }
 
 // The four tests below give the Info twins whose raw sibling (and its equivalence

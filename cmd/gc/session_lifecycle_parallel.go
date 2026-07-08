@@ -144,8 +144,16 @@ var interruptPerTargetTimeoutMargin = 2 * time.Second
 
 type startCandidate struct {
 	session *beads.Bead
-	tp      TemplateParams
-	order   int
+	// info is the typed session.Info twin of session, captured from the coherent
+	// post-fold infoByID snapshot at the append site (session_reconciler.go). It
+	// is the start-execution feed's typed read surface (WI-6 W5): the executor's
+	// decision reads project off info while the raw session pointer is retained
+	// this wave for the write helpers (it dies in W6). The two are kept coherent —
+	// refreshed in lockstep wherever session is re-Got (prepareStartCandidateForCity,
+	// refreshAsyncStartResult).
+	info  sessionpkg.Info
+	tp    TemplateParams
+	order int
 }
 
 func (c startCandidate) name() string {
@@ -1534,10 +1542,33 @@ func commitAsyncStartResultWithContext(
 	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 }
 
+// refreshAsyncStartResult re-reads the session bead just before commit so the async
+// commit protocol decides against the CURRENT persisted state, not the tick
+// snapshot the start goroutine was enqueued with (which can be stale by the time
+// the spawn completes). This is the SANCTIONED cross-goroutine freshness re-read —
+// NOT a forbidden per-patch re-Get: it fires once per async start commit, on the
+// budget-limited start path, never once per reconciler metadata write.
+//
+// The gate read now goes through the session front door (sessFront.Get), which
+// rejects a mid-start bead that lost BOTH its type AND its gc:session label
+// (IsSessionBeadOrRepairable == false): such a bead takes the refresh-failed path
+// (lease released, retry next tick) instead of committing. That is a documented,
+// vanishingly-rare W5 delta from the raw store.Get, pinned by
+// TestRefreshAsyncStartRejectsNonSessionBead. The raw bead is still fetched for the
+// retained session pointer + the raw async twins this wave; candidate.session gains
+// the typed twin candidate.info = currentInfo so the commit reads project off it.
+// Both store reads target the same id in a per-session goroutine with no concurrent
+// writer, so currentInfo is the typed projection of current. The raw fetch + raw
+// twins die in W6 when the raw session pointer is deleted.
 func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, bool, bool, bool) {
 	session := result.prepared.candidate.session
 	if store == nil || session == nil || strings.TrimSpace(session.ID) == "" {
 		return result, true, false, false
+	}
+	currentInfo, err := sessionFrontDoor(store).Get(session.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
+		return result, false, false, true
 	}
 	current, err := store.Get(session.ID)
 	if err != nil {
@@ -1553,12 +1584,26 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 		return result, false, asyncStartStaleRuntimeCleanupAllowed(*session, current), false
 	}
 	result.prepared.candidate.session = &current
+	result.prepared.candidate.info = currentInfo
 	return result, true, false, false
 }
 
 func asyncStartPreparedCommandStale(prepared preparedStart, current beads.Bead) bool {
 	preparedCommand := strings.TrimSpace(prepared.candidate.tp.Command)
 	currentCommand := strings.TrimSpace(current.Metadata["command"])
+	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
+}
+
+// asyncStartPreparedCommandStaleInfo is the session.Info sibling of
+// asyncStartPreparedCommandStale for the async-start commit protocol: it reads the
+// current session's resolved command off Info.Command (the raw "command" mirror,
+// TrimSpace-equivalent) instead of current.Metadata["command"]. The prepared side
+// is the resolved template command (tp.Command), unchanged. Byte-identical
+// (TestSessionClassifierInfoEquivalence pins Info.Command == metadata["command"]).
+// The raw form stays wired this wave; the twin is added for W6.
+func asyncStartPreparedCommandStaleInfo(prepared preparedStart, current sessionpkg.Info) bool {
+	preparedCommand := strings.TrimSpace(prepared.candidate.tp.Command)
+	currentCommand := strings.TrimSpace(current.Command)
 	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
 }
 
@@ -1632,6 +1677,31 @@ func asyncStartSessionStillCurrent(prepared, current beads.Bead) bool {
 	return confirmPendingStart(string(currentState))
 }
 
+// asyncStartSessionStillCurrentInfo is the session.Info sibling of
+// asyncStartSessionStillCurrent. It reads the closed flag off Info.Closed
+// (Status=="closed"), the identity off asyncStartIdentityMatchesInfo
+// (instance_token/generation), the raw state off Info.MetadataState (NOT the
+// normalized/closed-blanked Info.State — the reconciler classifiers key on the raw
+// value), and the pending-create claim off shouldRollbackPendingCreateInfo. Each
+// field is oracle-pinned byte-identical to the raw metadata read; the raw sibling
+// stays wired this wave and this twin is added for W6.
+func asyncStartSessionStillCurrentInfo(prepared, current sessionpkg.Info) bool {
+	if current.Closed {
+		return false
+	}
+	if !asyncStartIdentityMatchesInfo(prepared, current) {
+		return false
+	}
+	currentState := sessionpkg.State(strings.TrimSpace(current.MetadataState))
+	if currentState == sessionpkg.StateAwake || currentState == sessionpkg.StateActive {
+		return true
+	}
+	if shouldRollbackPendingCreateInfo(prepared) && !shouldRollbackPendingCreateInfo(current) {
+		return false
+	}
+	return confirmPendingStart(string(currentState))
+}
+
 func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
 		return true
@@ -1641,6 +1711,26 @@ func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	}
 	currentState := sessionpkg.State(strings.TrimSpace(current.Metadata["state"]))
 	if shouldRollbackPendingCreate(&prepared) && !shouldRollbackPendingCreate(&current) {
+		return currentState != sessionpkg.StateAwake && currentState != sessionpkg.StateActive
+	}
+	return !confirmPendingStart(string(currentState)) &&
+		currentState != sessionpkg.StateAwake &&
+		currentState != sessionpkg.StateActive
+}
+
+// asyncStartStaleRuntimeCleanupAllowedInfo is the session.Info sibling of
+// asyncStartStaleRuntimeCleanupAllowed, reading the same fields off Info as
+// asyncStartSessionStillCurrentInfo (Closed, identity, MetadataState, claim). The
+// raw sibling stays wired this wave; the twin is added + oracle-pinned for W6.
+func asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current sessionpkg.Info) bool {
+	if current.Closed {
+		return true
+	}
+	if !asyncStartIdentityMatchesInfo(prepared, current) {
+		return true
+	}
+	currentState := sessionpkg.State(strings.TrimSpace(current.MetadataState))
+	if shouldRollbackPendingCreateInfo(prepared) && !shouldRollbackPendingCreateInfo(current) {
 		return currentState != sessionpkg.StateAwake && currentState != sessionpkg.StateActive
 	}
 	return !confirmPendingStart(string(currentState)) &&
@@ -1666,6 +1756,30 @@ func asyncStartIdentityMatches(prepared, current beads.Bead) bool {
 	return strings.TrimSpace(current.Metadata["generation"]) == preparedGeneration
 }
 
+// asyncStartIdentityMatchesInfo is the session.Info sibling of
+// asyncStartIdentityMatches: instance_token is authoritative (Info.InstanceToken,
+// TrimSpace-equivalent to the raw read) with a generation fallback (Info.Generation)
+// when the prepared token is absent. Byte-identical to the raw form (the
+// sessionInstanceToken / sessionGeneration oracle rows pin the mirrors). The raw
+// sibling stays wired this wave; the twin is added for W6.
+func asyncStartIdentityMatchesInfo(prepared, current sessionpkg.Info) bool {
+	preparedToken := strings.TrimSpace(prepared.InstanceToken)
+	if preparedToken != "" {
+		return strings.TrimSpace(current.InstanceToken) == preparedToken
+	}
+	preparedGeneration := strings.TrimSpace(prepared.Generation)
+	if preparedGeneration == "" {
+		return true
+	}
+	return strings.TrimSpace(current.Generation) == preparedGeneration
+}
+
+// clonePreparedStartForAsync deep-copies the raw session bead so a concurrent
+// enqueue can mutate its own copy. item.candidate.info (a value type) is already
+// copied by value when item is passed by value here — its Labels/AliasHistory
+// slices share backing with the original, but nothing on the async start path
+// mutates them, so no deep copy of those is needed. The raw bead deep-copy below
+// stays until W6 deletes the raw session pointer.
 func clonePreparedStartForAsync(item preparedStart) preparedStart {
 	if item.candidate.session == nil {
 		return item

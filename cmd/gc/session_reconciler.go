@@ -36,8 +36,13 @@ const maxIdleSleepProbesPerTick = 3
 
 type wakeTarget struct {
 	session *beads.Bead
-	tp      TemplateParams
-	alive   bool
+	// info is the typed session.Info twin of session, captured from the coherent
+	// post-fold infoByID snapshot at the append site below. It carries the typed
+	// read surface forward to the wake evaluation + start-candidate stage (WI-6 W5);
+	// the raw session pointer is retained this wave (it dies in W6).
+	info  sessionpkg.Info
+	tp    TemplateParams
+	alive bool
 }
 
 // lifecycleTimerBlockerInfo reports the active lifecycle timer blocker (user hold /
@@ -3072,7 +3077,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Fall through to wakeReasons — it will re-wake immediately if config present
 		}
 
-		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})
+		// Capture-at-append: infoByID[session.ID] is the coherent typed twin of
+		// this tick's session. Every this-tick coupling write already folded onto
+		// it via ApplyPatchInfo BEFORE this append (the restart-handoff, max-age,
+		// idle-kill, and config-drift-reset mirrors all `continue` or fall THROUGH
+		// to here), so the frozen twin agrees with the raw bead's same-tick reads —
+		// notably the cleared last_woke_at that drives same-tick re-wake fairness
+		// (#2574-class). A NEW writer added between a coupling mirror and this
+		// append would NOT be reflected in this value-typed snapshot; keep any such
+		// writer's fold ahead of the append (or refresh the twin) if one is added.
+		wakeTargets = append(wakeTargets, wakeTarget{session: session, info: infoByID[session.ID], tp: tp, alive: alive})
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
 		"ordered_session_count":  len(orderedBeads),
@@ -3262,8 +3276,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.session, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
 			}
+			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
+			// infoByID BEFORE this append, so the captured twin is coherent with the
+			// raw bead for this tick (currently_processing_bead_id included). The raw
+			// session pointer is retained this wave; both are refreshed in lockstep
+			// wherever the start executor re-Gets the bead.
 			startCandidates = append(startCandidates, startCandidate{
 				session: target.session,
+				info:    infoByID[target.session.ID],
 				tp:      target.tp,
 				order:   len(startCandidates),
 			})
