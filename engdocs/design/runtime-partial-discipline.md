@@ -37,15 +37,23 @@ nil names slice, instead of the old empty *success* (`(nil, nil)`). This
 activates the `IsPartialListError` guards that already exist at every
 reconciler-facing site, with no new plumbing:
 
+Two sites had a genuine destructive-behavior change:
+
 - `cmd/gc/city_runtime.go:960` — pool `on_death` hooks. Previously a full tmux
   outage made every pool slot vanish from the empty listing at once, firing the
   user's `on_death` command for EVERY slot (a false death storm). The guard now
   skips the whole death check on a partial listing.
-- `cmd/gc/city_runtime.go:1899` — provider swap on config reload: keeps the old
-  config rather than stopping every "vanished" agent.
+- `cmd/gc/city_runtime.go:1899` — provider swap on config reload. Previously the
+  absorbed `(nil, nil)` let the swap proceed with zero visible sessions, silently
+  orphaning any still-alive session from tracking; the guard now keeps the old
+  config instead.
+
+The remaining site is diagnostics-only, not a safety change:
+
 - `cmd/gc/city_runtime.go:3466` / `:3478` — shutdown (and the force-shutdown
-  late-async-start re-list): stops only the sessions it can still see (none,
-  under a total outage) rather than treating the blip as "all gone".
+  late-async-start re-list). Its stop set was already empty under the old
+  absorbed-error path, so its stop behavior is unchanged; only the stderr
+  message changes (from silent to an explicit "partial listing" diagnostic).
 - Plus the pre-existing guards at `cmd/gc/adoption_barrier.go`,
   `cmd/gc/cmd_stop.go` (stopOrphans / doStop), `cmd/gc/controller.go`
   (runningSessionSet falls back to per-session last-known-good),
