@@ -20,11 +20,19 @@ import (
 // under I/O) yields an error so callers can refuse to start a name-reused
 // replacement that would race it for the same work.
 func KillByPID(pid int) error {
+	// Capture the target's start-time identity BEFORE signaling. During the
+	// post-SIGKILL reap wait the PID can be reaped and recycled to an unrelated
+	// process; without this, a recycled PID reads as "still alive" and we would
+	// wrongly report a target that is actually gone as not-confirmed-dead,
+	// spuriously refusing a legitimate Start. StartTime is empty on hosts
+	// without /proc (darwin) or when the record is unreadable, in which case
+	// runLive falls back to plain liveness — current behavior preserved.
+	startTime, _ := pidutil.StartTime(pid)
 	return killByPID(
 		pid,
 		syscall.Kill,
 		pidAlive,
-		pidutil.Alive,
+		func(p int) bool { return pidutil.AliveWithStartTime(p, startTime) },
 		runtime.ManagedProcessStopGrace,
 		runtime.ManagedProcessReapGrace,
 	)

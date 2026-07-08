@@ -48,6 +48,71 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 	}
 }
 
+func TestStartTimeStableForLivePID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("start-time reads /proc/<pid>/stat on linux")
+	}
+	first, err := StartTime(os.Getpid())
+	if err != nil {
+		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
+	}
+	if first == "" {
+		t.Fatalf("StartTime(%d) = empty, want a starttime token", os.Getpid())
+	}
+	second, err := StartTime(os.Getpid())
+	if err != nil {
+		t.Fatalf("StartTime(%d) second call: %v", os.Getpid(), err)
+	}
+	if first != second {
+		t.Fatalf("StartTime not stable across calls: %q vs %q", first, second)
+	}
+}
+
+func TestStartTimeRejectsInvalidPID(t *testing.T) {
+	if _, err := StartTime(0); err == nil {
+		t.Fatal("StartTime(0) = nil error, want error")
+	}
+}
+
+// TestAliveWithStartTimeDisambiguatesRecycledPID checks the three branches that
+// close the PID-reuse hole: a matching start time reports alive, a mismatched
+// one (the recycled-PID case) reports dead even though the PID is live, and an
+// empty start time falls back to plain liveness.
+func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("start-time identity uses /proc on linux")
+	}
+	self := os.Getpid()
+	st, err := StartTime(self)
+	if err != nil {
+		t.Fatalf("StartTime(%d): %v", self, err)
+	}
+
+	if !AliveWithStartTime(self, st) {
+		t.Fatalf("AliveWithStartTime(%d, matching) = false, want alive", self)
+	}
+	// A different start-time token models the PID having been reaped and reused
+	// by an unrelated process: the original target must read as dead.
+	if AliveWithStartTime(self, st+"0") {
+		t.Fatalf("AliveWithStartTime(%d, mismatched) = true, want dead (recycled)", self)
+	}
+	// Empty start time disables the identity check (darwin / uncaptured).
+	if !AliveWithStartTime(self, "") {
+		t.Fatalf("AliveWithStartTime(%d, empty) = false, want fallback to Alive", self)
+	}
+}
+
+func TestAliveWithStartTimeDeadPID(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("spawning test process: %v", err)
+	}
+	pid := cmd.ProcessState.Pid()
+	if AliveWithStartTime(pid, "12345") {
+		t.Fatalf("AliveWithStartTime(%d, ...) = true for exited process", pid)
+	}
+}
+
 func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("cmdline detection uses /proc on linux")
