@@ -2212,9 +2212,14 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
-		if _, err := markProviderTerminalError(session, sessFront, clk, reason); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, err) //nolint:errcheck
+		// Assign the write-returns-Info result back to the goroutine-local candidate
+		// (this runs on the async start goroutine; infoByID is the tick's map and may
+		// be out of scope by now — never touch it from here).
+		markInfo, markErr := markProviderTerminalError(result.prepared.candidate.info, sessFront, clk, reason)
+		if markErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 		}
+		result.prepared.candidate.info = markInfo
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error":  formatLifecycleError(result.err),
@@ -2228,17 +2233,19 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		return
 	}
 	if result.rateLimitScreen {
-		if _, err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
+		rlInfo, rlErr := recordRateLimitQuarantine(result.prepared.candidate.info, sessFront, clk)
+		if rlErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, rlErr) //nolint:errcheck
 			if trace != nil {
 				trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHoldDeferred, "", tp.TemplateName, name, 0, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
-					"cause": err.Error(),
+					"cause": rlErr.Error(),
 				})
 			}
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return
 		}
+		result.prepared.candidate.info = rlInfo
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHeld, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
@@ -2278,13 +2285,14 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// tp.DisplayName() is the exact identity the start counter records, so a
 	// quarantine triggered by repeated start failures joins the start series
 	// even for a namepool-themed pool instance whose bead predates agent_name.
-	// The refreshed candidate.info twin is coherent for the reads recordWakeFailure
-	// makes (WakeAttemptsMetadata / SessionKey / StartedConfigHash — the last two
-	// reflecting buildPreparedStart's stale-resume clears / session_key mint via the
+	// The candidate.info twin is coherent for the reads recordWakeFailure makes
+	// (WakeAttemptsMetadata / SessionKey / StartedConfigHash — the last two reflecting
+	// buildPreparedStart's stale-resume clears / session_key mint via the
 	// prepareStartCandidateForCity + refreshAsyncStartResult coherence refresh). The
 	// SetMarker of last_woke_at="" above is not one of those reads, so the twin need
-	// not carry it. recordWakeFailure still takes the raw *session for its writes.
-	recordWakeFailure(session, result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	// not carry it. Assign the write-returns-Info result back to the goroutine-local
+	// candidate (never infoByID — this is the async start goroutine).
+	result.prepared.candidate.info = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),

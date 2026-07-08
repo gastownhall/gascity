@@ -1614,11 +1614,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						template = info.Template
 					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, nil)
-					rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, info, cfg, providerAlive, dt, sessFront, clk, peek)
+					// info == infoByID[session.ID] here (pre-heal region; every reachable
+					// mutation continues), so the write-returns-Info result advances the
+					// snapshot identically (Step 6d write-returns-Info, group 1).
+					rlNext, rateLimitHit, rateLimitErr := checkRateLimitStability(info, cfg, providerAlive, dt, sessFront, clk, peek)
 					if rateLimitHit || rateLimitErr != nil {
-						// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
-						// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
-						infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatch)
+						infoByID[session.ID] = rlNext
 						continue
 					}
 					clearClaim := configuredNamedSessionBeadHasSpecInfo(info, cfg, cityName)
@@ -1653,7 +1654,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				preserveErr  error
 				rateLimitHit bool
 				rateLimitErr error
-				rlBatchNamed map[string]string
+				rlNextNamed  sessionpkg.Info
 			)
 			if preserveNamed {
 				// Feed the preserve template resolver from the live mid-tick
@@ -1671,7 +1672,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
 					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
-					rateLimitHit, rlBatchNamed, rateLimitErr = checkRateLimitStability(session, info, cfg, rateLimitAlive, dt, sessFront, clk, peek)
+					rlNextNamed, rateLimitHit, rateLimitErr = checkRateLimitStability(info, cfg, rateLimitAlive, dt, sessFront, clk, peek)
 				}
 			}
 			if rateLimitHit || rateLimitErr != nil {
@@ -1688,9 +1689,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						"provider_alive": providerAlive,
 					})
 				}
-				// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
-				// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
-				infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatchNamed)
+				// Advance the snapshot with the write-returns-Info result (Step 6d,
+				// group 1). info == infoByID[session.ID] here (pre-heal), so this is the
+				// same advance the former fold produced.
+				infoByID[session.ID] = rlNextNamed
 				continue
 			}
 			if isFailedCreateSessionInfo(info) {
@@ -2018,17 +2020,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		recordResetStallIfDue(infoByID[session.ID], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
-		// terminalErrBatch carries the markProviderTerminalError mirror (if it ran) out
-		// to the snapshot refresh below; nil when nothing was written.
-		var terminalErrBatch map[string]string
+		// markProviderTerminalError persists + folds its write onto the snapshot in one
+		// step (write-returns-Info); on a persist error or empty reason it returns the
+		// snapshot Info unchanged, so this assignment is a no-op exactly when the raw
+		// bead was left untouched.
 		if running && !alive {
 			if output, err := peek(rateLimitPeekLines); err == nil && output != "" {
 				if reason := runtime.ProviderTerminalErrorReason(output); reason != "" {
-					markBatch, markErr := markProviderTerminalError(session, sessFront, clk, reason)
+					markInfo, markErr := markProviderTerminalError(infoByID[session.ID], sessFront, clk, reason)
 					if markErr != nil {
 						fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 					}
-					terminalErrBatch = markBatch
+					infoByID[session.ID] = markInfo
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerTerminalProviderError, TraceReasonCode(reason), TraceOutcomeUnhealthy, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": session.ID,
@@ -2047,29 +2050,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 		}
-		// Refresh the snapshot after the zombie-capture block by folding the
-		// markProviderTerminalError batch onto it via write-returns-Info (Step 6d),
-		// instead of re-projecting the raw bead. markProviderTerminalError mirrors
-		// terminalErrBatch onto session.Metadata in lockstep and returns exactly that
-		// batch (nil when it wrote nothing — not a zombie, empty reason, or a persist
-		// error), so ApplyPatch(terminalErrBatch) reproduces the raw refresh: nil ⇒
-		// no-op. This is byte-identical because infoByID[session.ID] is coherent here
-		// — terminalErrBatch is the only session.Metadata mutation on the paths that
-		// reach this point. Only two path shapes arrive: the desired fast path (skips
-		// the `if !desired` block and mutates nothing but the drain tracker via
-		// recordResetStallIfDue, which takes the coherent Info snapshot), and the ONE
-		// non-continue arm of that block — the post-heal `case preserveNamed:` — whose
-		// body sets local tp/desired and records a trace only, and which was
-		// heal-folded just above (~1713). (Every drain/drain-ack/orphan-close arm of
-		// the switch `continue`s, so no drained bead reaches this fold.) The
-		// alive-gated read just below never sees a
-		// markProviderTerminalError mutation (that runs only under `running && !alive`,
-		// mutually exclusive with `alive`); the !alive rollback reads below run on the
-		// folded snapshot, and the further mutations between them sit on `continue`
-		// paths (attemptRollbackPendingCreate; checkRateLimitStability on hit), so
+		// The snapshot is already current after the zombie-capture block:
+		// markProviderTerminalError advanced infoByID[session.ID] in place via
+		// write-returns-Info (its only same-tick session write on the paths that reach
+		// here — a no-op when it wrote nothing). infoByID[session.ID] is coherent here:
+		// only two path shapes arrive — the desired fast path (mutates nothing but the
+		// drain tracker via recordResetStallIfDue, which takes the coherent Info
+		// snapshot), and the ONE non-continue arm of the `if !desired` block (the
+		// post-heal `case preserveNamed:`, which sets local tp/desired + a trace only
+		// and was heal-folded just above). The alive-gated read just below never sees a
+		// markProviderTerminalError write (it runs only under `running && !alive`,
+		// mutually exclusive with `alive`); the !alive rollback reads run on the current
+		// snapshot, and the further mutations between them sit on `continue` paths
+		// (attemptRollbackPendingCreate; checkRateLimitStability on hit), so
 		// infoPostZombie stays byte-identical throughout. Guarded by
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
-		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(terminalErrBatch)
 		infoPostZombie := infoByID[session.ID]
 		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && !runningSessionMatchesPendingCreateInfo(infoPostZombie, name, sp) {
 			// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
@@ -2090,11 +2085,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
 			if pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout) {
-				rateLimitHit, rlBatch, rateLimitErr := checkRateLimitStability(session, infoPostZombie, cfg, alive, dt, sessFront, clk, peek)
+				// infoPostZombie == infoByID[session.ID] here, so the write-returns-Info
+				// result advances the snapshot identically (Step 6d, group 1).
+				rlNext, rateLimitHit, rateLimitErr := checkRateLimitStability(infoPostZombie, cfg, alive, dt, sessFront, clk, peek)
 				if rateLimitHit || rateLimitErr != nil {
-					// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
-					// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
-					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatch)
+					infoByID[session.ID] = rlNext
 					continue
 				}
 				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
@@ -2438,11 +2433,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
-		rateLimitHit, rlBatchFwd, rateLimitErr := checkRateLimitStability(session, infoByID[session.ID], cfg, alive, dt, sessFront, clk, peek)
+		rlNextFwd, rateLimitHit, rateLimitErr := checkRateLimitStability(infoByID[session.ID], cfg, alive, dt, sessFront, clk, peek)
 		if rateLimitHit || rateLimitErr != nil {
-			// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
-			// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rlBatchFwd)
+			// Advance the snapshot with the write-returns-Info result (Step 6d, group 1).
+			infoByID[session.ID] = rlNextFwd
 			continue // rate-limit hold recorded before state healing resets continuity metadata
 		}
 
@@ -2491,8 +2485,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
 		// nil (no-op) when no stability event was recorded.
 		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stab, stabBatch := checkStability(session, infoByID[session.ID], cfg, alive, dt, sessFront, clk, nil); stab {
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(stabBatch)
+		if stabInfo, stab := checkStability(infoByID[session.ID], cfg, alive, dt, sessFront, clk, nil); stab {
+			infoByID[session.ID] = stabInfo
 			continue // rapid exit recorded, skip further processing
 		}
 
@@ -2503,8 +2497,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info)
 		// regardless of the bool — ExitProductiveDeath may clear churn_count.
 		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
-		churn, churnBatch := checkChurn(session, infoByID[session.ID], cfg, alive, dt, sessFront, clk)
-		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(churnBatch)
+		churnInfo, churn := checkChurn(infoByID[session.ID], cfg, alive, dt, sessFront, clk)
+		infoByID[session.ID] = churnInfo
 		if churn {
 			continue // churn recorded, skip further processing
 		}
@@ -2513,13 +2507,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
 		// nil (no-op) when nothing was cleared. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
 		if alive && stableLongEnoughInfo(infoByID[session.ID], clk) {
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearWakeFailures(session, infoByID[session.ID], sessFront))
+			infoByID[session.ID] = clearWakeFailures(infoByID[session.ID], sessFront)
 		}
 		// Clear churn counter for sessions that have been productive.
 		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
 		// nil (no-op) when churn_count was already absent/zero. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
 		if alive && productiveLongEnoughInfo(infoByID[session.ID], clk) {
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(clearChurn(session, infoByID[session.ID], sessFront))
+			infoByID[session.ID] = clearChurn(infoByID[session.ID], sessFront)
 		}
 		if alive && shouldRollbackPendingCreateInfo(infoByID[session.ID]) {
 			switch stateBeforeHeal {

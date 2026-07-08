@@ -469,25 +469,20 @@ func healExpiredTimers(session *beads.Bead, info sessionpkg.Info, sessFront *ses
 // is counted exactly once. Drain-aware: draining sessions died by request,
 // not by crash.
 //
-// Returns (true, batch) when a stability event was recorded, where batch is the
-// union of every patch mirrored onto session.Metadata on that path so the
-// forward-pass caller can fold it via ApplyPatch (front-door migration Step 6d,
-// STEP6-PREPASS-AUDIT group 2). Returns (false, nil) otherwise; ApplyPatch(nil)
-// is a no-op.
-//
-// Coherence precondition: info must equal the Info projection of *session at
-// call time — the Step-6d fold invariant the forward-pass caller maintains by
-// folding every prior in-iteration write onto the snapshot before this call.
-func checkStability(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string) {
-	if handled, rlBatch, err := checkRateLimitStability(session, info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
-		return true, rlBatch
+// Returns (info, true) when a stability event was recorded, where info is the
+// snapshot advanced by every write on that path (front-door migration Step 6d,
+// write-returns-Info, STEP6-PREPASS-AUDIT group 2). Returns (info, false)
+// otherwise with the input Info unchanged (no write occurred).
+func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (sessionpkg.Info, bool) {
+	if next, handled, err := checkRateLimitStability(info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
+		return next, true
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
-		return false, nil
+		return info, false
 	}
-	wfBatch := recordWakeFailure(session, info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
-	clearBatch := clearLastWokeAt(session, sessFront)
-	return true, mergeMetadataPatch(wfBatch, clearBatch)
+	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+	info = clearLastWokeAt(info, sessFront)
+	return info, true
 }
 
 // checkRateLimitStability runs the provider-screen lane of the
@@ -500,16 +495,12 @@ func checkStability(session *beads.Bead, info sessionpkg.Info, cfg *config.City,
 //   - otherwise a rate-limit screen → quarantine with a back-off and a
 //     distinct sleep_reason, so the session is retried rather than crashed.
 //
-// Returns (handled, err, batch): handled=true when either was recorded, err
-// when the write failed, and batch holding the mirrored patch on the hit path
-// so the forward-pass caller can fold it onto the typed snapshot via
-// ApplyPatch (front-door migration Step 6d, STEP6-PREPASS-AUDIT group 1).
-// batch is nil on every path that mirrors nothing (no-hit, nil session, or
-// persist error); ApplyPatch(nil) is a no-op.
-func checkRateLimitStability(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (bool, map[string]string, error) {
-	if session == nil {
-		return false, nil, nil
-	}
+// Returns (info, handled, err): handled=true when either was recorded, err when
+// the write failed, and info the snapshot advanced by the hit-path write
+// (front-door migration Step 6d, write-returns-Info, STEP6-PREPASS-AUDIT group 1).
+// On every path that writes nothing (no-hit or persist error) the input Info is
+// returned unchanged.
+func checkRateLimitStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (sessionpkg.Info, bool, error) {
 	facts := sessionExitFactsInfo(info, cfg, alive, dt, clk)
 	facts.ScreenAvailable = peek != nil
 	dec := sessionpkg.DecideSessionExit(facts)
@@ -517,11 +508,11 @@ func checkRateLimitStability(session *beads.Bead, info sessionpkg.Info, cfg *con
 		facts.Screen = sessionpkg.ScreenOther
 		if content, err := peek(rateLimitPeekLines); err == nil {
 			if reason := runtime.ProviderTerminalErrorReason(content); reason != "" {
-				termBatch, markErr := markProviderTerminalError(session, sessFront, clk, reason)
+				next, markErr := markProviderTerminalError(info, sessFront, clk, reason)
 				if markErr != nil {
-					return false, nil, markErr
+					return info, false, markErr
 				}
-				return true, termBatch, nil
+				return next, true, nil
 			}
 			if runtime.ContainsProviderRateLimitScreen(content) {
 				facts.Screen = sessionpkg.ScreenRateLimit
@@ -530,13 +521,13 @@ func checkRateLimitStability(session *beads.Bead, info sessionpkg.Info, cfg *con
 		dec = sessionpkg.DecideSessionExit(facts)
 	}
 	if dec != sessionpkg.ExitRateLimitQuarantine {
-		return false, nil, nil
+		return info, false, nil
 	}
-	rlBatch, err := recordRateLimitQuarantine(session, sessFront, clk)
+	next, err := recordRateLimitQuarantine(info, sessFront, clk)
 	if err != nil {
-		return false, nil, err
+		return info, false, err
 	}
-	return true, rlBatch, nil
+	return next, true, nil
 }
 
 // sessionExitFactsInfo gathers the cheap facts for the exit-classification
@@ -566,52 +557,45 @@ func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt
 }
 
 // clearLastWokeAt clears last_woke_at on the session bead and returns the
-// mirrored batch {"last_woke_at": ""} so the caller can fold it onto the typed
-// snapshot via ApplyPatch (front-door migration Step 6d).
-func clearLastWokeAt(session *beads.Bead, sessFront *sessionpkg.Store) map[string]string {
-	_ = sessFront.SetMarker(session.ID, "last_woke_at", "")
-	session.Metadata["last_woke_at"] = ""
-	return map[string]string{"last_woke_at": ""}
+// snapshot Info with that clear folded in (front-door migration Step 6d,
+// write-returns-Info). It emits a single SetMetadata op (SetMarker) so the store
+// write stays byte-identical to the raw single-key clear it replaces; the fold is
+// applied unconditionally, exactly as the former raw session.Metadata mirror was.
+func clearLastWokeAt(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
+	_ = sessFront.SetMarker(info.ID, "last_woke_at", "")
+	return info.ApplyPatch(map[string]string{"last_woke_at": ""})
 }
 
 // recordRateLimitQuarantine backs off a session that exited into a provider
 // rate-limit screen without treating the exit as a crash or resetting its
-// conversation metadata. Returns (batch, nil) on success so the caller can
-// fold the mirrored patch onto the typed snapshot via ApplyPatch (front-door
-// migration Step 6d); returns (nil, err) on persist failure.
-func recordRateLimitQuarantine(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock) (map[string]string, error) {
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
+// conversation metadata. Returns (folded Info, nil) on success so the caller
+// advances the typed snapshot with the quarantine write (front-door migration
+// Step 6d, write-returns-Info); returns (info unchanged, err) on persist failure
+// (ApplyPatchInfo leaves the snapshot pinned to the rejected write).
+func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, error) {
 	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
-	if err := sessFront.ApplyPatch(session.ID, batch); err != nil {
-		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
-		return nil, err
+	next, err := sessFront.ApplyPatchInfo(info, batch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
+		return info, err
 	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
-	return batch, nil
+	return next, nil
 }
 
 // markProviderTerminalError records the terminal-provider-error health/sleep
-// metadata on a zombie session bead. It returns the batch it mirrored onto
-// session.Metadata (so the reconciler can fold it onto the typed Info snapshot
-// via write-returns-Info, front-door migration Step 6d) and any persist error.
-// The returned batch is nil on every path that mirrors nothing — a nil/empty
-// argument, an empty reason, or a persist failure (the mirror below runs only
-// after a successful ApplyPatch) — so ApplyPatch(returnedBatch) is a no-op
-// exactly when the raw bead was left unchanged.
-func markProviderTerminalError(session *beads.Bead, sessFront *sessionpkg.Store, clk clock.Clock, reason string) (map[string]string, error) {
-	if session == nil || sessFront == nil {
-		return nil, nil
+// metadata on a zombie session bead. It returns the snapshot Info with that write
+// folded in (write-returns-Info, front-door migration Step 6d) and any persist
+// error. On every path that writes nothing — a nil front door, an empty reason,
+// or a persist failure — it returns the INPUT info unchanged, so an
+// error-ignoring caller stays consistent with the store exactly when the bead was
+// left untouched (ApplyPatchInfo guarantees the no-fold-on-error contract).
+func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, reason string) (sessionpkg.Info, error) {
+	if sessFront == nil {
+		return info, nil
 	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
-		return nil, nil
-	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
+		return info, nil
 	}
 	now := time.Now().UTC()
 	if clk != nil {
@@ -629,13 +613,7 @@ func markProviderTerminalError(session *beads.Bead, sessFront *sessionpkg.Store,
 		sessionProviderTerminalErrorMetadataKey: reason,
 		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
 	}
-	if err := sessFront.ApplyPatch(session.ID, batch); err != nil {
-		return nil, err
-	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
-	return batch, nil
+	return sessFront.ApplyPatchInfo(info, batch)
 }
 
 // sessionHasProviderTerminalErrorInfo reads the typed health/terminal-error
@@ -650,25 +628,22 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 }
 
 // recordWakeFailure increments wake_attempts and quarantines if threshold
-// exceeded. Returns the merged batch of everything mirrored onto
-// session.Metadata so the caller can fold it onto the typed snapshot via
-// ApplyPatch (front-door migration Step 6d). The batch includes:
+// exceeded. It returns the snapshot Info advanced by every write it made
+// (front-door migration Step 6d, write-returns-Info):
 //   - the ConversationResetPatch if session_key or started_config_hash was set
 //   - the WakeFailureAccrualPatch (quarantine or single-counter increment)
 //
-// Returns nil only when no keys were mirrored (a quarantined accrual whose
-// persist failed is excluded from the batch). agentIdentity is the
-// start-path-joinable agent label for gc.agent.quarantines.total.
-func recordWakeFailure(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) map[string]string {
+// A quarantined accrual whose persist failed leaves the snapshot un-advanced for
+// that write (ApplyPatchInfo folds only on success), so the returned Info matches
+// what the raw bead carries. agentIdentity is the start-path-joinable agent label
+// for gc.agent.quarantines.total.
+func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
 	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
 	// same clamped value the old strconv.Atoi(session.Metadata[...]) path did —
 	// byte-identical, mirroring how recordChurn treats info.ChurnCount.
 	attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
 
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
 	// Clear session_key and started_config_hash so the next start gets a
 	// fresh conversation. Clearing session_key triggers backfill of a new
 	// UUID; clearing started_config_hash ensures resolveSessionCommand
@@ -679,39 +654,32 @@ func recordWakeFailure(session *beads.Bead, info sessionpkg.Info, sessFront *ses
 	// cleared session_key for an unexpected death before recordWakeFailure
 	// runs. Clear started_config_hash whenever either field is set so the
 	// recovery remains correct in that call order and for any skewed state
-	// left behind by older builds.
-	var merged map[string]string
+	// left behind by older builds. The store write is best-effort (its error is
+	// intentionally ignored, as before) while the Info fold is unconditional.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
 		reset := sessionpkg.ConversationResetPatch(true)
-		_ = sessFront.ApplyPatch(session.ID, reset)
-		for k, v := range reset {
-			session.Metadata[k] = v
-		}
-		merged = mergeMetadataPatch(merged, reset)
+		_ = sessFront.ApplyPatch(info.ID, reset)
+		info = info.ApplyPatch(reset)
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if err := sessFront.ApplyPatch(session.ID, accrual.Patch); err == nil {
-			for k, v := range accrual.Patch {
-				session.Metadata[k] = v
-			}
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
-			merged = mergeMetadataPatch(merged, accrual.Patch)
+			info = next
 		}
 	} else {
 		next := accrual.Patch["wake_attempts"]
-		_ = sessFront.SetMarker(session.ID, "wake_attempts", next)
-		session.Metadata["wake_attempts"] = next
-		merged = mergeMetadataPatch(merged, map[string]string{"wake_attempts": next})
+		_ = sessFront.SetMarker(info.ID, "wake_attempts", next)
+		info = info.ApplyPatch(map[string]string{"wake_attempts": next})
 	}
-	return merged
+	return info
 }
 
-// clearWakeFailures resets crash counter and quarantine for a stable session.
-// Returns the mirrored batch on the persist path, nil when there is nothing to
-// clear (both fields already absent/zero). The caller folds the returned batch
-// onto the typed snapshot via ApplyPatch (nil is a no-op).
-func clearWakeFailures(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store) map[string]string {
+// clearWakeFailures resets crash counter and quarantine for a stable session. It
+// returns the snapshot Info advanced by the clear (write-returns-Info, front-door
+// migration Step 6d), or the input Info unchanged when there is nothing to clear
+// (both fields already absent/zero) or the persist failed.
+func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
 	batch := make(map[string]string, 2)
 	// WakeAttemptsMetadata (the raw string mirror), not the parsed WakeAttempts int:
 	// the != "0" distinction distinguishes an absent counter from a persisted "0".
@@ -722,18 +690,13 @@ func clearWakeFailures(session *beads.Bead, info sessionpkg.Info, sessFront *ses
 		batch["quarantined_until"] = ""
 	}
 	if len(batch) == 0 {
-		return nil
+		return info
 	}
-	if err := sessFront.ApplyPatch(session.ID, batch); err == nil {
-		if session.Metadata == nil {
-			session.Metadata = make(map[string]string)
-		}
-		for k, v := range batch {
-			session.Metadata[k] = v
-		}
-		return batch
+	next, err := sessFront.ApplyPatchInfo(info, batch)
+	if err != nil {
+		return info
 	}
-	return nil
+	return next
 }
 
 // checkChurn detects repeated non-productive wake→die cycles (context
@@ -741,27 +704,26 @@ func clearWakeFailures(session *beads.Bead, info sessionpkg.Info, sessFront *ses
 // crashes (< stabilityThreshold), this catches sessions that survive past
 // the stability threshold but die before being productive.
 //
-// Returns (churned, batch): churned=true if a churn event was recorded
-// (caller should skip further processing for this session), and batch is the
-// union of all patches mirrored onto session.Metadata on either exit path,
-// so the caller can fold it via ApplyPatch regardless of the bool return
-// (front-door migration Step 6d, STEP6-PREPASS-AUDIT group 5).
-// batch is nil when nothing was mirrored. ApplyPatch(nil) is a no-op.
-func checkChurn(session *beads.Bead, info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (bool, map[string]string) {
+// Returns (info, churned): churned=true if a churn event was recorded (caller
+// should skip further processing for this session), and info is the snapshot
+// advanced by every write on either exit path (front-door migration Step 6d,
+// write-returns-Info, STEP6-PREPASS-AUDIT group 5). The default (rapid-crash)
+// path writes nothing and returns the input Info unchanged.
+func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		churnBatch := recordChurn(session, info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
-		clearBatch := clearLastWokeAt(session, sessFront)
-		return true, mergeMetadataPatch(churnBatch, clearBatch)
+		info = clearLastWokeAt(info, sessFront)
+		return info, true
 	case sessionpkg.ExitProductiveDeath:
 		// Session was productive — clear any stale churn count so it
 		// doesn't carry over and cause premature quarantine next time.
-		return false, clearChurn(session, info, sessFront)
+		return clearChurn(info, sessFront), false
 	default:
 		// Rapid crashes belong to checkStability, which ran first.
-		return false, nil
+		return info, false
 	}
 }
 
@@ -773,9 +735,8 @@ func isDeliberateSleepReason(reason string) bool {
 // churn event to force a fresh conversation on next wake. When the counter
 // reaches defaultMaxChurnCycles, the session is quarantined.
 //
-// Returns the merged batch of everything mirrored onto session.Metadata so
-// the caller can fold it onto the typed snapshot via ApplyPatch (front-door
-// migration Step 6d). The batch includes:
+// It returns the snapshot Info advanced by every write it made (front-door
+// migration Step 6d, write-returns-Info):
 //   - the ConversationResetPatch (session_key/continuation_reset_pending) if
 //     session_key was set
 //   - the ChurnAccrualPatch (churn_count, and quarantined_until/sleep_reason
@@ -783,55 +744,44 @@ func isDeliberateSleepReason(reason string) bool {
 //   - {"churn_count": next} on the non-quarantine path
 //
 // agentIdentity is the start-path-joinable agent label for gc.agent.quarantines.total.
-func recordChurn(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) map[string]string {
+func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	count, _ := strconv.Atoi(info.ChurnCount)
-
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
 
 	// Always clear session_key on churn — context exhaustion means the
 	// conversation itself is the problem. A fresh conversation avoids
-	// re-hitting the same wall.
-	var merged map[string]string
+	// re-hitting the same wall. Best-effort store write (error ignored, as
+	// before) with an unconditional Info fold.
 	if info.SessionKey != "" {
 		reset := sessionpkg.ConversationResetPatch(false)
-		_ = sessFront.ApplyPatch(session.ID, reset)
-		for k, v := range reset {
-			session.Metadata[k] = v
-		}
-		merged = mergeMetadataPatch(merged, reset)
+		_ = sessFront.ApplyPatch(info.ID, reset)
+		info = info.ApplyPatch(reset)
 	}
 
 	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if err := sessFront.ApplyPatch(session.ID, accrual.Patch); err == nil {
-			for k, v := range accrual.Patch {
-				session.Metadata[k] = v
-			}
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
-			merged = mergeMetadataPatch(merged, accrual.Patch)
+			info = next
 		}
-		return merged
+		return info
 	}
 
 	next := accrual.Patch["churn_count"]
-	_ = sessFront.SetMarker(session.ID, "churn_count", next)
-	session.Metadata["churn_count"] = next
-	return mergeMetadataPatch(merged, map[string]string{"churn_count": next})
+	_ = sessFront.SetMarker(info.ID, "churn_count", next)
+	return info.ApplyPatch(map[string]string{"churn_count": next})
 }
 
-// clearChurn resets the churn counter for a productive session.
-// Returns the mirrored batch {"churn_count":"0"} when a clear is persisted, nil
-// when churn_count is already absent or zero (no-op). The caller folds the
-// returned batch onto the typed snapshot via ApplyPatch (nil is a no-op).
-func clearChurn(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store) map[string]string {
+// clearChurn resets the churn counter for a productive session. It returns the
+// snapshot Info with the {"churn_count":"0"} clear folded in (write-returns-Info),
+// or the input Info unchanged when churn_count is already absent or zero (no-op).
+// It emits a single SetMetadata op (SetMarker), byte-identical to the raw
+// single-key clear it replaces.
+func clearChurn(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
 	if info.ChurnCount == "" || info.ChurnCount == "0" {
-		return nil
+		return info
 	}
-	_ = sessFront.SetMarker(session.ID, "churn_count", "0")
-	session.Metadata["churn_count"] = "0"
-	return map[string]string{"churn_count": "0"}
+	_ = sessFront.SetMarker(info.ID, "churn_count", "0")
+	return info.ApplyPatch(map[string]string{"churn_count": "0"})
 }
 
 // productiveLongEnoughInfo returns true if the session has been alive past
