@@ -2032,6 +2032,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 					}
 					infoByID[session.ID] = markInfo
+					// WI-6 transitional mirror: this zombie write falls through (no
+					// continue) to same-tick RAW readers of *session — healState (via its
+					// internal raw pendingCreateLease*/LifecycleInputFromMetadata) and, at
+					// the awake scan, persistSleepPolicyMetadata + configWakeSuppressed
+					// (target.session is this bead). They read state/sleep_reason plus the
+					// pending-create lease keys off the raw bead; keep them in lockstep with
+					// the fold until those readers migrate off *session (deferred sleep +
+					// heal clusters). markInfo's raw-mirror fields carry the persisted values
+					// verbatim (a no-op re-set when markProviderTerminalError wrote nothing).
+					session.Metadata["state"] = markInfo.MetadataState
+					session.Metadata["sleep_reason"] = markInfo.SleepReason
+					session.Metadata["last_woke_at"] = markInfo.LastWokeAt
+					session.Metadata["pending_create_claim"] = markInfo.PendingCreateClaimMetadata
+					session.Metadata["pending_create_started_at"] = markInfo.PendingCreateStartedAt
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerTerminalProviderError, TraceReasonCode(reason), TraceOutcomeUnhealthy, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": session.ID,
@@ -2053,7 +2067,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[session.ID] in place via
 		// write-returns-Info (its only same-tick session write on the paths that reach
-		// here — a no-op when it wrote nothing). infoByID[session.ID] is coherent here:
+		// here — a no-op when it wrote nothing), and the transitional mirror above keeps
+		// the raw *session bead in lockstep for the deferred raw readers. infoByID[session.ID] is coherent here:
 		// only two path shapes arrive — the desired fast path (mutates nothing but the
 		// drain tracker via recordResetStallIfDue, which takes the coherent Info
 		// snapshot), and the ONE non-continue arm of the `if !desired` block (the
@@ -2482,9 +2497,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Stability check: detect rapid crash after state healing. Rate-limit
 		// detection intentionally ran above before healState.
-		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
-		// nil (no-op) when no stability event was recorded.
-		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
+		// checkStability returns the write-returns-Info result (Step 6d); the input
+		// Info unchanged when no stability event was recorded, so the assignment on the
+		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
 		if stabInfo, stab := checkStability(infoByID[session.ID], cfg, alive, dt, sessFront, clk, nil); stab {
 			infoByID[session.ID] = stabInfo
 			continue // rapid exit recorded, skip further processing
@@ -2494,9 +2509,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fires for sessions that survived past stabilityThreshold but
 		// died before churnProductivityThreshold — alive long enough to
 		// not be a rapid crash, but too short to be productive.
-		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info)
-		// regardless of the bool — ExitProductiveDeath may clear churn_count.
-		// Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
+		// Assign checkChurn's write-returns-Info result regardless of the bool —
+		// ExitProductiveDeath may clear churn_count (the default rapid-crash path
+		// returns the input Info unchanged). Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
 		churnInfo, churn := checkChurn(infoByID[session.ID], cfg, alive, dt, sessFront, clk)
 		infoByID[session.ID] = churnInfo
 		if churn {
@@ -2504,14 +2519,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Clear wake failures for sessions that have been stable long enough.
-		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
-		// nil (no-op) when nothing was cleared. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
+		// clearWakeFailures returns the write-returns-Info result (Step 6d); the input
+		// Info unchanged when nothing was cleared. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
 		if alive && stableLongEnoughInfo(infoByID[session.ID], clk) {
 			infoByID[session.ID] = clearWakeFailures(infoByID[session.ID], sessFront)
+			// WI-6 transitional mirror: clearWakeFailures clears quarantined_until, which
+			// pendingInteractionKeepsAwake reads off the RAW *session bead
+			// (LifecycleInputFromMetadata -> BlockerQuarantined) at the config-drift drain,
+			// max-age kill, and idle kill decisions later this same tick. A just-cleared
+			// still-future quarantine must not keep those pending-interaction deferrals
+			// engaged (fail-safe: a session with a live user interaction must still defer
+			// the kill/drain). Keep the raw bead in lockstep until pendingInteractionKeepsAwake
+			// migrates off *session.
+			session.Metadata["quarantined_until"] = infoByID[session.ID].QuarantinedUntil
 		}
 		// Clear churn counter for sessions that have been productive.
-		// Fold the returned batch onto the snapshot (Step 6d write-returns-Info);
-		// nil (no-op) when churn_count was already absent/zero. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
+		// clearChurn returns the write-returns-Info result (Step 6d); the input Info
+		// unchanged when churn_count was already absent/zero. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
 		if alive && productiveLongEnoughInfo(infoByID[session.ID], clk) {
 			infoByID[session.ID] = clearChurn(infoByID[session.ID], sessFront)
 		}
