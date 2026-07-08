@@ -23,9 +23,10 @@ Header documents the §5 exemption census.
 **Acceptance:** test passes on current tree (pins today's baseline); a synthetic
 added `InfoFromPersistedBead(` in an interior file makes it fail.
 
-## WI-1 — Nudges class `[ ]`  (smallest blast radius; pilot)
-Rework O8. Add `NudgeShadow.Open` (bead-authoritative) + `Store.StaleShadowsBefore(before, limit, liveExcludeIDs) -> []NudgeShadow` (carries the live-flock-queue exclusion + a count/dry-run twin, preserving the cross-phase shared close budget). Keep `Store.SweepStale`. Migrate `nudge_mail_sweep.go` sweep+count loops onto the typed reads; delete `nudge_beads.go` adapters + `FindBead`/`FindBeadIncludingTerminal`/`DecodeShadow`/`StaleCandidatesBefore` (zero non-test callers after rework). `Find`/`FindIncludingTerminal(nudgeID)` stay as this class's `Get(handle)` (handle = durable nudge ID). Preserve nil-receiver no-op + flock-transaction callability.
-**Residual (blocked on WI-4):** `blockedQueuedNudgeReason`, `nextWaitDeliveryAttempt` crack session-class wait beads → close when `WaitInfo` ships.
+## WI-1 — Nudges class `[x]`  (smallest blast radius; pilot)
+<!-- COMPLETE: body landed e0eec587f (merge fa1f95edc); wait-residual closed with WI-4 A2 (c08eb2505); closeout (guard un-exclusion + dead-alias deletion + this marker) dfe8a0878. Marker was stale. -->
+Rework O8. Add `NudgeShadow.Open` (bead-authoritative) + `Store.StaleShadowsBefore(before, limit, liveExcludeIDs) -> []NudgeShadow` (carries the live-flock-queue exclusion; the count/dry-run twin lives at the cmd/gc caller `countStaleNudgeMail` — the shared close budget spans two classes so it cannot live inside a single-class store method). Keep `Store.SweepStale`. Migrate `nudge_mail_sweep.go` sweep+count loops onto the typed reads; delete `FindBead`/`FindBeadIncludingTerminal`/`DecodeShadow`/`StaleCandidatesBefore` (zero non-test callers after rework). `nudge_beads.go` survives as needle-free wiring (store-open seam + flock-callable write adapters), un-excluded from the census guard in the closeout. `Find`/`FindIncludingTerminal(nudgeID)` stay as this class's `Get(handle)` (handle = durable nudge ID). Preserve nil-receiver no-op + flock-transaction callability.
+**Residual (closed in WI-4 A2, c08eb2505):** `blockedQueuedNudgeReason`/`nextWaitDeliveryAttempt` now read the session-class wait via the typed `session.Store` front door (`GetWait`, `WaitInfo`).
 **Acceptance:** nudges census → 0 for its needles (minus the documented session residual); typed reads pin `NudgeShadow` fields; byte-identical terminal writes.
 
 ## WI-2 — Messaging class `[x]`
