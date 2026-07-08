@@ -76,11 +76,10 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, sessFront *sess
 	if err != nil {
 		return sessionLogContext{}, false
 	}
-	b, err := store.Get(sessionID)
+	info, err := sessFront.Get(sessionID)
 	if err != nil {
 		return sessionLogContext{}, false
 	}
-	info := sessionpkg.InfoFromPersistedBead(b)
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
 		return sessionLogContext{}, false

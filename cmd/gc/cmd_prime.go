@@ -398,11 +398,10 @@ func primeHookSessionTemplate(cityPath string) string {
 	// A failed load yields nil cfg, which cliSessionStore treats as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionBead, err := sessStore.Get(sessionID)
+	info, err := sessionFrontDoor(sessStore).Get(sessionID)
 	if err != nil {
 		return ""
 	}
-	info := session.InfoFromPersistedBead(sessionBead)
 	if template := strings.TrimSpace(info.Template); template != "" {
 		return template
 	}

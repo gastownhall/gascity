@@ -1067,7 +1067,7 @@ func collectAllOpenSessionInfos(
 	stores := coordClassStoreCandidates(cfg, cityStore, rigStores, suspendedRigPaths, "city")
 
 	type storeResult struct {
-		beads []beads.Bead
+		infos []session.Info
 		err   error
 	}
 	results := make([]storeResult, len(stores))
@@ -1077,8 +1077,12 @@ func collectAllOpenSessionInfos(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sessions, err := session.ListAllSessionBeads(source.store, beads.ListQuery{})
-			results[idx] = storeResult{beads: sessions, err: err}
+			// Per-leg default direct union (session front door over the candidate's
+			// store, CachingStore-wrapped when available) — same tier as the prior
+			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
+			// still returned alongside the error, so the fold below preserves them.
+			infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
+			results[idx] = storeResult{infos: infos, err: err}
 		}()
 	}
 	wg.Wait()
@@ -1089,17 +1093,17 @@ func collectAllOpenSessionInfos(
 		if r.err != nil {
 			errs = append(errs, r.err)
 			if beads.IsPartialResult(r.err) {
-				for _, b := range r.beads {
-					if b.Status != "closed" {
-						allInfos = append(allInfos, session.InfoFromPersistedBead(b))
+				for _, info := range r.infos {
+					if !info.Closed {
+						allInfos = append(allInfos, info)
 					}
 				}
 			}
 			continue
 		}
-		for _, b := range r.beads {
-			if b.Status != "closed" {
-				allInfos = append(allInfos, session.InfoFromPersistedBead(b))
+		for _, info := range r.infos {
+			if !info.Closed {
+				allInfos = append(allInfos, info)
 			}
 		}
 	}

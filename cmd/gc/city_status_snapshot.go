@@ -363,13 +363,13 @@ func namedSessionStatusForCity(
 		return "lookup error: " + err.Error()
 	}
 
-	bead, err := sessStore.Get(id)
+	info, err := sessionFrontDoor(sessStore).Get(id)
 	if err != nil {
 		return "lookup error: " + err.Error()
 	}
-	// Read the raw state through the session.Info codec (verbatim MetadataState)
-	// rather than cracking bead.Metadata inline (class-store leak closure).
-	if state := strings.TrimSpace(session.InfoFromPersistedBead(bead).MetadataState); state != "" {
+	// Read the raw state (verbatim MetadataState) through the typed session
+	// front door rather than cracking bead.Metadata inline (class-store leak closure).
+	if state := strings.TrimSpace(info.MetadataState); state != "" {
 		return state
 	}
 	return "materialized"

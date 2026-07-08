@@ -384,12 +384,11 @@ func resolveSessionMCPProjection(
 	if err != nil {
 		return resolvedMCPProjection{}, err
 	}
-	bead, err := store.Get(id)
+	info, err := sessFront.Get(id)
 	if err != nil {
-		return resolvedMCPProjection{}, fmt.Errorf("loading session %q: %w", sessionID, err)
+		return resolvedMCPProjection{}, err
 	}
-	info := session.InfoFromPersistedBead(bead)
-	template := normalizedSessionTemplate(bead, cfg)
+	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = strings.TrimSpace(info.AgentName)
 	}

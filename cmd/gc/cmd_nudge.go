@@ -1131,11 +1131,11 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 		sessStore := cliSessionStore(store.Store, cfg, cityPath)
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
 		if err == nil {
-			b, getErr := sessStore.Get(sessionID)
+			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {
 				return nudgeTarget{}, getErr
 			}
-			return resolveNudgeTargetFromSessionInfo(cityPath, cfg, session.InfoFromPersistedBead(b)), nil
+			return resolveNudgeTargetFromSessionInfo(cityPath, cfg, info), nil
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return nudgeTarget{}, err
@@ -1458,17 +1458,16 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 	if store == nil {
 		return target
 	}
-	open, err := loadSessionBeads(store)
+	open, err := loadOpenSessionInfos(store)
 	if err != nil {
 		return target
 	}
-	for _, b := range open {
-		info := session.InfoFromPersistedBead(b)
+	for _, info := range open {
 		if info.SessionNameMetadata != target.sessionName {
 			continue
 		}
 		if target.sessionID == "" {
-			target.sessionID = b.ID
+			target.sessionID = info.ID
 		}
 		if target.continuationEpoch == "" {
 			target.continuationEpoch = info.ContinuationEpoch

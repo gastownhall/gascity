@@ -939,7 +939,7 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, sessFront *session
 		if !ok {
 			if wait.RegisteredEpoch != "" {
 				var found bool
-				sessionInfo, found, err = lookupSessionBeadByIDInfo(sessFront.Store().Store, sessionID)
+				sessionInfo, found, err = lookupSessionBeadByIDInfo(sessFront, sessionID)
 				if err != nil {
 					return nil, err
 				}
@@ -1022,33 +1022,23 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, sessFront *session
 	return readyWaitSet, nil
 }
 
-func lookupSessionBeadByID(store beads.Store, id string) (beads.Bead, bool, error) {
-	if store == nil || strings.TrimSpace(id) == "" {
-		return beads.Bead{}, false, nil
+// lookupSessionBeadByIDInfo is the wait-diagnostic fallback that reads a single
+// session bead by ID (when it is absent from the snapshot) through the typed
+// session front door. It preserves the pre-front-door (Info{}, false, nil)
+// not-found contract: a missing bead or a non-session bead is reported as
+// "not found, no error", and only a genuine store failure surfaces as an error.
+func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionpkg.Info, bool, error) {
+	if sessFront == nil || strings.TrimSpace(id) == "" {
+		return sessionpkg.Info{}, false, nil
 	}
-	bead, err := store.Get(id)
+	info, err := sessFront.Get(id)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return beads.Bead{}, false, nil
+		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return sessionpkg.Info{}, false, nil
 		}
-		return beads.Bead{}, false, err
+		return sessionpkg.Info{}, false, err
 	}
-	if !sessionpkg.IsSessionBeadOrRepairable(bead) {
-		return beads.Bead{}, false, nil
-	}
-	return bead, true, nil
-}
-
-// lookupSessionBeadByIDInfo is the session.Info projection of
-// lookupSessionBeadByID: the wait-diagnostic fallback that reads a single
-// session bead by ID when it is absent from the snapshot, returned through the
-// typed front door.
-func lookupSessionBeadByIDInfo(store beads.Store, id string) (sessionpkg.Info, bool, error) {
-	bead, ok, err := lookupSessionBeadByID(store, id)
-	if !ok || err != nil {
-		return sessionpkg.Info{}, ok, err
-	}
-	return sessionpkg.InfoFromPersistedBead(bead), true, nil
+	return info, true, nil
 }
 
 func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {

@@ -125,23 +125,33 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
 	"InfoFromPersistedBead(": {
-		"cmd/gc/adoption_barrier.go":           1,
-		"cmd/gc/build_desired_state.go":        4,
-		"cmd/gc/city_status_snapshot.go":       1,
-		"cmd/gc/cmd_nudge.go":                  2,
-		"cmd/gc/cmd_prime.go":                  2,
-		"cmd/gc/cmd_session.go":                2,
-		"cmd/gc/cmd_wait.go":                   1,
-		"cmd/gc/mcp_integration.go":            1,
-		"cmd/gc/session_bead_snapshot.go":      3,
+		// WI-6 W4: build_desired_state.go:2380/:2631 remain — the sweep's per-session
+		// projections whose feeder beads are not yet typed; they retire when those
+		// feeders take session.Info in a later wave.
+		"cmd/gc/build_desired_state.go": 2,
+		// WI-6 W4: cmd_prime.go keeps 1 — the bead is legitimately in hand for the
+		// provider-family gate (which reads builtin_ancestor, a key session.Info does
+		// not carry), so session_key is read via an honest codec call on that bead
+		// rather than by inlining the raw metadata key.
+		"cmd/gc/cmd_prime.go":   1,
+		"cmd/gc/cmd_session.go": 2,
+		// WI-6 W4: session_bead_snapshot.go keeps 3 (the raw-bead constructor's codec
+		// call plus two comment references) because the raw open half is still
+		// consumed by cmd_session.go's out-of-scope session-reason projection.
+		"cmd/gc/session_bead_snapshot.go": 3,
+		// WI-6 W4: session_hash.go keeps 1 — its sole caller is the session_beads.go
+		// rebaseline lane, which still holds a raw bead; the wrapper retires when that
+		// caller takes a session.Info.
 		"cmd/gc/session_hash.go":               1,
-		"cmd/gc/session_index.go":              1,
 		"cmd/gc/session_lifecycle_parallel.go": 3,
-		"cmd/gc/session_logs_resolve.go":       3,
-		"cmd/gc/session_reconciler.go":         3,
-		"cmd/gc/session_resolve.go":            3,
-		"cmd/gc/session_template_start.go":     1,
-		"cmd/gc/skill_visibility.go":           1,
+		// WI-6 W4: session_logs_resolve.go:122/:128 remain — the sibling set is fed to
+		// session.ResolveCodexTranscriptBySessionOrder, which takes []beads.Bead.
+		"cmd/gc/session_logs_resolve.go": 2,
+		"cmd/gc/session_reconciler.go":   3,
+		// WI-6 W4: session_template_start.go keeps 1 — the reopened bead is in hand for
+		// snapshot.add (the raw open half survives this wave), so its session_name is
+		// read via an honest codec call rather than by inlining the raw key.
+		"cmd/gc/session_template_start.go": 1,
 		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop
 		// is a genuine WI-7-era raw retire lane (bead already in hand from the raw
 		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and
@@ -154,14 +164,17 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"internal/worker/factory.go": 1,
 	},
 	"ListAllSessionBeads(": {
-		"cmd/gc/adoption_barrier.go":      2,
-		"cmd/gc/build_desired_state.go":   1,
-		"cmd/gc/cmd_mail.go":              2,
+		// WI-6 W4: the periphery ListAll consumers migrated onto session.Store.ListAll.
+		// Three raw callers remain, each honestly recorded:
+		//   - doctor_session_model.go: the diagnostic lane unions session AND work
+		//     beads and needs the raw beads; a front-door ListAll returns Info only.
+		//   - session_bead_snapshot.go / session_beads.go: loadSessionBeadSnapshot and
+		//     loadSessionBeads still feed the snapshot's raw open half and the
+		//     bead-shaped loaders that cmd_session.go's out-of-scope reason projection
+		//     consumes. They retire when that projection takes session.Info.
 		"cmd/gc/doctor_session_model.go":  1,
 		"cmd/gc/session_bead_snapshot.go": 1,
 		"cmd/gc/session_beads.go":         1,
-		"cmd/gc/session_name_lookup.go":   1,
-		"cmd/gc/session_resolve.go":       1,
 	},
 	"GetWithPersistedResponse(": {
 		"internal/worker/catalog.go": 1,

@@ -1033,11 +1033,12 @@ func listLiveSessionMailboxesCached(store beads.Store, cache *mailIdentitySessio
 	if err != nil {
 		return nil, err
 	}
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if info.Closed {
 			continue
 		}
-		if address := sessionMailboxAddress(b); address != "" {
+		if address := session.MailboxAddressFromInfo(info); address != "" {
 			recipients[address] = true
 		}
 	}
@@ -1055,7 +1056,7 @@ type resolvedMailTarget struct {
 // A nil cache disables memoization; the zero value memoizes on first use.
 type mailIdentitySessionCache struct {
 	mu      sync.Mutex
-	list    []beads.Bead
+	list    []session.Info
 	fetched bool
 }
 
@@ -1071,16 +1072,20 @@ func ambientMailTargetConfig() (string, *config.City) {
 	return cityPath, cfg
 }
 
-func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]beads.Bead, error) {
+// listMailIdentitySessions memoizes the open session Infos for identity
+// resolution. It preserves the pre-typed cache semantics exactly: the default
+// direct union with IncludeClosed implicit-false (loadOpenSessionInfos), with the
+// per-loop closed filter kept in the callers.
+func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]session.Info, error) {
 	if cache == nil {
-		return session.ListAllSessionBeads(store, beads.ListQuery{})
+		return loadOpenSessionInfos(store)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.fetched {
 		return cache.list, nil
 	}
-	list, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	list, err := loadOpenSessionInfos(store)
 	if err != nil {
 		return nil, err
 	}
@@ -1101,19 +1106,20 @@ func resolveLiveConfiguredNamedMailTargetCached(store beads.Store, identifier st
 
 	matches := make(map[string]resolvedMailTarget)
 	order := make([]string, 0, 2)
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if info.Closed {
 			continue
 		}
-		identity := strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata])
+		identity := namedSessionIdentityInfo(info)
 		if identity == "" || targetBasename(identity) != identifier {
 			continue
 		}
-		addresses := sessionMailboxAddresses(b)
+		addresses := session.MailboxAddressesFromInfo(info)
 		if len(addresses) == 0 {
 			continue
 		}
-		display := sessionMailboxAddress(b)
+		display := session.MailboxAddressFromInfo(info)
 		if display == "" {
 			display = addresses[0]
 		}
