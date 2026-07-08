@@ -220,6 +220,7 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 	patch["session_key"] = ""
 	applyFreshWakeConversationReset(patch)
 	patch["continuation_reset_pending"] = "true"
+	patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	return patch
 }
 
@@ -424,7 +425,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
 // reselect it, but explicit attach or work can.
-func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
+func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
 		"state_reason":              "",
@@ -436,6 +437,7 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
+		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	}
 	return patch
 }
@@ -448,6 +450,7 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
+		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	}
 	return patch
 }
@@ -491,6 +494,7 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 		"last_woke_at":               "",
 		"restart_requested":          "",
 		"continuation_reset_pending": "true",
+		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 		"pending_create_claim":       "",
 		"pending_create_started_at":  "",
 	}
