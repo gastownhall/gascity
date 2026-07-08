@@ -718,6 +718,17 @@ func retiredSessionFallbackRoute(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata["agent_name"])
 }
 
+// retiredSessionFallbackRouteInfo is the session.Info form of
+// retiredSessionFallbackRoute: template first, agent_name fallback, read off the
+// typed Info fields instead of the raw metadata map. Byte-identical to the raw
+// form for the stranded-repair caller (the reconciler loop carries no raw bead).
+func retiredSessionFallbackRouteInfo(info session.Info) string {
+	if route := strings.TrimSpace(info.Template); route != "" {
+		return route
+	}
+	return strings.TrimSpace(info.AgentName)
+}
+
 func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 	return compactSessionAssignmentIdentifiers(sessionAssignmentIdentifierRaw(sessionBead))
 }
@@ -904,15 +915,28 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) [
 	return stores
 }
 
+// unclaimResult reports the outcome of one unassign sweep over a retired
+// session bead's owned work: Released counts work beads whose assignee was
+// successfully cleared/reopened, Failed counts ReleaseWorkBead errors (already
+// logged per item to stderr). Void callers (named-session retirement, closed-
+// session release) ignore it; the stranded-repair path reads Failed to avoid
+// reporting a clean repair — or closing the session bead — when an unassign did
+// not land, so a stale-assignee item is not masked behind a "repaired" close.
+type unclaimResult struct {
+	Released int
+	Failed   int
+}
+
 func unclaimWorkAssignedToRetiredSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBead beads.Bead,
 	fallbackRoute string,
 	stderr io.Writer,
-) {
+) unclaimResult {
+	var res unclaimResult
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
-		return
+		return res
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -948,11 +972,15 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					// reopen, orphan-pool, and closed-session release paths.
 					if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+						res.Failed++
+						continue
 					}
+					res.Released++
 				}
 			}
 		}
 	}
+	return res
 }
 
 func reassignWorkAssignedToRetiredSessionBead(
@@ -1042,6 +1070,151 @@ func reassignWorkAssignedToRetiredSessionInfo(
 			}
 		}
 	}
+}
+
+// unclaimWorkAssignedToRetiredSessionInfo is the session.Info form of
+// unclaimWorkAssignedToRetiredSessionBead: the session-side identity read routes
+// through sessionAssignmentIdentifiersInfo (equivalence-proven), while the
+// work-store fan-out and per-bead release stay bead-shaped (ClassWork). It is
+// byte-identical to the raw form and returns the same unclaimResult; the raw
+// form survives for the whole-bead retirement and closed-session release paths.
+func unclaimWorkAssignedToRetiredSessionInfo(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	retiredSession session.Info,
+	fallbackRoute string,
+	stderr io.Writer,
+) unclaimResult {
+	var res unclaimResult
+	if store == nil || strings.TrimSpace(retiredSession.ID) == "" {
+		return res
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
+	seen := make(map[string]struct{})
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
+		for _, status := range []string{"open", "in_progress"} {
+			for _, assignee := range identifiers {
+				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
+				if err != nil {
+					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", retiredSession.ID, assignee, err) //nolint:errcheck
+					continue
+				}
+				for _, item := range work {
+					if session.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+					// The session owning this work is retired, so the work is fully
+					// detached: ReleaseWorkBead clears the assignee, resets in_progress
+					// to open, and stamps fallbackRoute run_target only when otherwise
+					// unrouted — identical to the raw retirement path.
+					if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
+						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, retiredSession.ID, err) //nolint:errcheck
+						res.Failed++
+						continue
+					}
+					res.Released++
+				}
+			}
+		}
+	}
+	return res
+}
+
+// strandedRepairConfirmGrace is the minimum age of the CURRENT stranding
+// episode's stranded_event_emitted_at marker (stamped by
+// emitSessionStrandedDiagnostic) before the reconciler will REPAIR — not merely
+// diagnose — a stranded pool worker. The marker tracks CONTINUOUS non-liveness:
+// clearStrandedEventMarker drops it on any alive observation, so the window
+// re-arms from zero each time the session recovers. A single not-alive
+// observation, or a worker that recovered and re-stranded, is never acted on
+// until the NEW episode persists across the window, so a transient
+// runtime-liveness glitch (or a recovered-then-cleanly-drained worker whose
+// bd close is mid-flight) cannot clear a live claim. Mirrors the
+// observe-before-act discipline of the idle-claim backstop (idleClaimNudgeGrace)
+// and the #3630 suspend-confirm window.
+const strandedRepairConfirmGrace = 2 * time.Minute
+
+// strandedRepairCloseReason is the close_reason stamped on a session bead
+// retired by the stranded-worker repair, distinguishing it from a clean drain
+// (drained) or an idle recycle in the forensic record.
+const strandedRepairCloseReason = "stranded-repair"
+
+// repairStrandedPoolWorkerBead closes the divergence loop that
+// emitSessionStrandedDiagnostic only reports: a pool session whose runtime
+// exited while it still held in_progress work as assignee, leaving that work
+// invisible to every actuator. It unassigns/reopens the stranded work (reusing
+// unclaimWorkAssignedToRetiredSessionInfo so the bead returns to the routed
+// queue with a run_target fallback) and closes the session bead so the slot
+// frees and the pool reclaims the work.
+//
+// Confirmed CONTINUOUS non-liveness is the contract: it only reaches here on a
+// pool session the reconciler already sees as not-alive (poolFreeable requires
+// !target.alive) with a non-degraded store read (!storeQueryPartial), and it
+// acts only once the CURRENT stranding episode's stranded_event_emitted_at
+// marker has aged past strandedRepairConfirmGrace. Because clearStrandedEventMarker
+// drops that marker on every alive observation, the marker cannot outlive the
+// episode that stamped it: a worker that stranded, was respawned on this same
+// session bead, and recovered starts a brand-new marker if it re-strands, so a
+// recovered-then-cleanly-drained worker (whose own bd close may be mid-flight
+// during the brief poolFreeable && hasAssignedWork window) can never be repaired
+// on a stale first-episode timestamp. An absent marker means no confirmed
+// stranding episode is in progress (the diagnostic early-returned — no recorder,
+// the work passed the detached-probe liveness filter, or the session recovered
+// and cleared it), so the repair defers.
+//
+// The unassign step must land before the close: unclaimWorkAssignedToRetiredSessionInfo
+// reports how many releases failed via unclaimResult. If any failed, the session
+// bead is left OPEN and false returned — closing it would retire the session
+// while work is still assigned to it (a stale-assignee item), masking the leak
+// behind a "repaired" close. A failed release is retried on the next tick (the
+// episode's marker is still aged and the session still not-alive), and the
+// self-healing next-tick sweep is the backstop.
+//
+// Returns true only when it BOTH cleared the stranded work AND closed the session
+// bead, so the caller mirrors MarkClosed onto the snapshot and prunes the
+// worktree exactly as the clean close path does.
+func repairStrandedPoolWorkerBead(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info session.Info,
+	fallbackRoute string,
+	clk clock.Clock,
+	stderr io.Writer,
+) bool {
+	if store == nil {
+		return false
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	since := strings.TrimSpace(info.StrandedEventEmittedAt)
+	if since == "" {
+		return false // no confirmed stranding episode in progress — defer
+	}
+	first := parseRFC3339OrZero(since)
+	now := clk.Now().UTC()
+	if first.IsZero() || now.Sub(first) < strandedRepairConfirmGrace {
+		return false // inside the confirmation window — defer the destructive clear
+	}
+	res := unclaimWorkAssignedToRetiredSessionInfo(store, rigStores, info, fallbackRoute, stderr)
+	if res.Failed > 0 {
+		// At least one unassign did not land. Do NOT close the session bead or
+		// report a repair: closing now would strand the still-assigned work
+		// against a retired session. Leave the bead open so the next tick
+		// re-attempts (episode marker still aged, session still not-alive).
+		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
+		return false
+	}
+	return closeBead(store, info.ID, strandedRepairCloseReason, now, stderr)
 }
 
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {

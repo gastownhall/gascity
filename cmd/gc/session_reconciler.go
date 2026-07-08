@@ -3104,6 +3104,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoByID[target.info.ID] = persistSleepPolicyMetadataInfo(info, sessFront, eval.Policy, eval.ConfigSuppressed)
 		info = infoByID[target.info.ID]
 
+		// Clear-on-recovery: a live tick ends any stranding episode. Drop the
+		// stranded confirmation marker so stranded_event_emitted_at tracks
+		// CONTINUOUS non-liveness, not a one-shot flag — a worker that stranded,
+		// was respawned on this same session bead, and recovered must age a FRESH
+		// marker before repairStrandedPoolWorkerBead may act, rather than
+		// inheriting the first episode's stale timestamp. See clearStrandedEventMarker.
+		if target.alive {
+			if fold := clearStrandedEventMarker(store, infoByID[target.info.ID], snapshot, stderr); fold != nil {
+				infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
+			}
+		}
+
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
 			if isFailedCreateSessionInfo(info) {
@@ -3306,6 +3318,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// keeps subsequent reconciler ticks quiet.
 			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, infoByID[target.info.ID], snapshot, target.tp.TemplateName, rec, clk, stderr); fold != nil {
 				infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
+			}
+			// Beyond diagnosis: once THIS stranding episode has been confirmed
+			// across the confirmation window (stranded_event_emitted_at aged past
+			// strandedRepairConfirmGrace) and the store read is non-degraded,
+			// REPAIR the leak — unassign/reopen the stranded work so the pool can
+			// reclaim it, then close the session bead to free the slot. The
+			// storeQueryPartial gate ensures a transient store miss can never clear
+			// a live claim. The confirmation window tracks CONTINUOUS non-liveness:
+			// clearStrandedEventMarker (invoked on every alive tick, above) drops
+			// the marker the instant the session is seen alive again, so a worker
+			// that stranded, was respawned on this same bead, and recovered must
+			// re-age a FRESH marker here — a recovered-then-drained worker cannot
+			// fire the repair on the first episode's stale timestamp. Reuses
+			// unclaimWorkAssignedToRetiredSessionBead, the same detach primitive
+			// named-session retirement uses.
+			if !storeQueryPartial &&
+				repairStrandedPoolWorkerBead(store, rigStores, infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {
+				infoByID[target.info.ID] = infoByID[target.info.ID].MarkClosed()
+				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
@@ -3726,6 +3757,55 @@ func emitSessionStrandedDiagnostic(
 	if err := sessionFrontDoor(store).SetMarker(info.ID, strandedEventEmittedKey, now.Format(time.RFC3339)); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: stamping stranded throttle marker on %s: %v\n", info.ID, err) //nolint:errcheck
 	}
+	return fold
+}
+
+// clearStrandedEventMarker drops the stranded_event_emitted_at marker whenever
+// the session is observed ALIVE again. This is the clear-on-recovery half of the
+// confirmation-window contract: strandedEventEmittedKey tracks CONTINUOUS
+// non-liveness, NOT a one-shot "ever stranded this generation" flag.
+//
+// Without it the marker is stamped once (emitSessionStrandedDiagnostic
+// early-returns while it is set) and only cleared by a full session-bead close,
+// so a pool worker that strands, is respawned on the SAME session bead
+// (shouldWake && !alive → normal pool re-wake), recovers, and runs clean past
+// strandedRepairConfirmGrace would inherit the stale first-episode timestamp. A
+// later brief poolFreeable && hasAssignedWork window (the documented pre-close
+// ownership race, session_reconciler.go ~3371-3374) would then let
+// repairStrandedPoolWorkerBead read that long-aged marker and fire IMMEDIATELY,
+// clearing a live claim on work the recovered worker finished cleanly.
+//
+// Clearing on any alive observation makes each distinct stranding episode age a
+// FRESH marker: emitSessionStrandedDiagnostic re-emits per episode (restoring
+// per-episode observability) and the repair must re-confirm non-liveness across
+// a new window before it acts. alive ⟹ runtime is up ⟹ not stranded, so the
+// clear is always safe here.
+//
+// Returns the metadata patch it applied so the reconciler folds it onto the
+// infoByID snapshot (write-returns-Info), or nil when there was nothing to clear
+// (or the durable clear failed). Mirrors emitSessionStrandedDiagnostic's
+// snapshot-fold discipline: the durable SetMarker clears the persisted row and
+// snapshot.ApplyOpenInfoPatch folds the empty-value patch onto a REUSED
+// snapshot's OpenForReconcile row, so a later reader sees the marker gone even
+// across a snapshot reuse. The raw bead pointer is gone (WI-6 R4), so the typed
+// Info + snapshot carrier replaces the old in-memory session.Metadata delete.
+func clearStrandedEventMarker(store beads.Store, info sessionpkg.Info, snapshot *sessionBeadSnapshot, stderr io.Writer) sessionpkg.MetadataPatch {
+	if store == nil {
+		return nil
+	}
+	if strings.TrimSpace(info.StrandedEventEmittedAt) == "" {
+		return nil // no marker this generation — nothing to clear
+	}
+	// Empty value clears the key (SetMarker empty-string-clear contract). Durable
+	// clear first: if it fails, leave the marker set everywhere (return nil)
+	// rather than clearing only the in-memory snapshot, so the repair window is
+	// never opened on a half-applied clear.
+	if err := sessionFrontDoor(store).SetMarker(info.ID, strandedEventEmittedKey, ""); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: clearing %s for %s: %v\n", strandedEventEmittedKey, info.SessionNameMetadata, err) //nolint:errcheck
+		return nil
+	}
+	fold := sessionpkg.MetadataPatch{strandedEventEmittedKey: ""}
+	snapshot.ApplyOpenInfoPatch(info.ID, fold)
 	return fold
 }
 
