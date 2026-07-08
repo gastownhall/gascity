@@ -1250,6 +1250,11 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 			}
 		}
 	}
+	// S19 Stage 3 shadow: record the legacy priming-marker clears this heal batch
+	// carries (no-op unless the shadow harness is enabled). The batch is applied
+	// by the caller under the session's lock; recording it here keeps the writer
+	// inventory colocated with the write.
+	recordLegacyCompareWrites(session.ID, "healStatePatchWithRollback", batch)
 	return emptyNil(batch)
 }
 

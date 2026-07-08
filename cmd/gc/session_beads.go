@@ -440,6 +440,10 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch[k] = v
 		}
 		if setMetaBatch(sessionFrontDoor(store), bead.ID, batch, stderr) == nil {
+			// S19 Stage 3 shadow: record the legacy priming-marker clears so the
+			// converge comparator can attribute this owned-key delta (no-op unless
+			// the shadow harness is enabled).
+			recordLegacyCompareWrites(bead.ID, "syncSessionBeads.reclaim", batch)
 			if bead.Metadata == nil {
 				bead.Metadata = make(map[string]string, len(batch))
 			}
@@ -1322,6 +1326,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			case finalizeErr != nil:
 				continue
 			default:
+				// S19 Stage 3 shadow: record the legacy canonical-identity stamp
+				// (built by desiredSessionIdentity above) now that the bead ID
+				// exists. No-op unless the shadow harness is enabled.
+				recordLegacyCompareWrites(newBead.ID, "syncSessionBeads.create", meta)
 				desiredNames[createdSessionName] = true
 				openIndex[createdSessionName] = newBead.ID
 				openBeads = append(openBeads, newBead)
