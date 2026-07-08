@@ -165,23 +165,45 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
+		workStoreRef := ""
+		if storeRefAware {
+			workStoreRef = assignedWorkStoreRefs[i]
+		}
 		if assignee == "" {
 			if wb.Status != "in_progress" {
 				continue
 			}
 		} else {
-			workStoreRef := ""
-			if storeRefAware {
-				workStoreRef = assignedWorkStoreRefs[i]
-			}
-			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
-				continue
-			}
+			// A named session's legitimate rig-routed / cross-store claim is
+			// preserved unconditionally: releasing it would mint a duplicate backup
+			// worker on the same bead (#3453). This guard is deliberately NOT
+			// bypassed by the escalation-handoff release below — a genuine
+			// route-away to a different agent already fails this guard's template
+			// check, so the two are consistent; keeping it first states that
+			// decision explicitly.
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveOpenSessionAssignmentExists(store, assignee) {
-				continue
+			// sr-wz8.3: openSessionOwnsWork / liveOpenSessionAssignmentExists
+			// PRESERVE a bead a live session legitimately owns (dead-session
+			// orphans fall through them naturally and get released). When the bead
+			// has been routed AWAY to a different agent than the owning session's
+			// own agent (an L1->L2 escalation handoff) AND that source session is
+			// not still mid-turn on the bead, the owning session is the stale
+			// source, not the legitimate owner — assigneeRoutedAwayFromOwnAgent
+			// detects that (store-ref-aware, liveness-gated, over all owners, biased
+			// to preserve) and lets the release proceed past these two live-owner
+			// guards. The live-releasable + detached-probe checks below still gate
+			// the actual write. Without this, an escalated bead stays pinned to the
+			// live source, starving the target pool of demand until the source
+			// session is closed.
+			if !assigneeRoutedAwayFromOwnAgent(cfg, cityPath, openSessionInfos, assignee, agentCfg.QualifiedName(), workStoreRef, wb.ID, storeRefAware) {
+				if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+					continue
+				}
+				if liveOpenSessionAssignmentExists(store, assignee) {
+					continue
+				}
 			}
 		}
 
@@ -211,6 +233,93 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+// assigneeRoutedAwayFromOwnAgent reports whether an assigned work bead has been
+// routed to a DIFFERENT agent than every live session that legitimately owns the
+// assignee — i.e. an escalation/handoff (sr-wz8.3: L1 slings the bead to
+// l2-<family> but it stays assigned to the live L1 session). Such an assignment
+// must be releasable even while the source session is open so the routed-to
+// target pool gains demand; otherwise the escalation deadlocks until the source
+// session is closed.
+//
+// Ownership resolution mirrors openSessionOwnsWork and is deliberately biased to
+// PRESERVE (return false) — an over-release steals work a session is actively
+// doing, which is worse than a missed wake:
+//   - It scans ALL matching sessions, not just the first: one identity string can
+//     be held by two live sessions (via alias_history, or the same identity across
+//     rig stores), so a first-match resolver could pick the wrong one.
+//   - It is store-ref-aware: a matching session in a different concrete store is
+//     not an owner of this bead (gastownhall/gascity#3621 / #1544). An unresolved
+//     store-ref is treated conservatively as reachable.
+//   - A cross-store-eligible (city-scoped) owner legitimately federates work in
+//     any store regardless of routed_to (vp-kvp) and is never a handoff.
+//   - It concludes route-away only when there is at least one store-scoped owner
+//     AND every such owner resolves to a DIFFERENT, non-cross-store agent than
+//     routedTarget. Any owner that IS the routed target, is cross-store eligible,
+//     or whose agent cannot be resolved, preserves the bead.
+//   - Liveness gate: an owner still mid-turn on THIS bead
+//     (currently_processing_bead_id == beadID) has not actually handed it off yet
+//     even though routed_to already points elsewhere, so it preserves the bead.
+func assigneeRoutedAwayFromOwnAgent(cfg *config.City, cityPath string, openSessionInfos []session.Info, assignee, routedTarget, workStoreRef, beadID string, storeRefAware bool) bool {
+	assignee = strings.TrimSpace(assignee)
+	routedTarget = strings.TrimSpace(routedTarget)
+	beadID = strings.TrimSpace(beadID)
+	if cfg == nil || assignee == "" || routedTarget == "" {
+		return false
+	}
+	ownerFound := false
+	for _, info := range openSessionInfos {
+		if info.Closed {
+			continue
+		}
+		matched := false
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+			if strings.TrimSpace(id) == assignee {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		// Resolve the owning session's own agent. If it cannot be resolved, do not
+		// risk a wrong release — treat the bead as legitimately owned.
+		ownerAgent := sessionAgentConfigInfo(cfg, info)
+		if ownerAgent == nil {
+			return false
+		}
+		// Store-ref scoping mirrors openSessionOwnsWork: a matching session owns
+		// THIS bead when its reachable store-ref is unresolved, cross-store
+		// eligible, or equal to the bead's store. A different concrete store means
+		// a different-store session — not an owner of this bead.
+		if storeRefAware {
+			ref := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+			if ref != unresolvedOpenSessionStoreRef && ref != crossStoreOpenSessionStoreRef && ref != workStoreRef {
+				continue
+			}
+		}
+		// Liveness gate (sr-wz8.3): a session still mid-turn on THIS bead has not
+		// actually handed it off — gc sling stamps routed_to without clearing the
+		// assignee or the source's currently_processing_bead_id, so right after a
+		// mid-turn sling the source still reads as processing the bead. Releasing
+		// now would let the target pool claim and start it while the source is
+		// still producing output, racing the source's (non-CAS) completion write.
+		// Checked AFTER store-ref scoping so the preserve binds to an owner
+		// actually reachable for this bead's store, not a same-ID bead elsewhere.
+		if beadID != "" && strings.TrimSpace(info.CurrentlyProcessingBeadID) == beadID {
+			return false
+		}
+		// A cross-store-eligible (city-scoped) owner legitimately federates work in
+		// any store regardless of routed_to (vp-kvp) — not an escalation handoff.
+		// An owner whose own agent IS the routed target is likewise legitimate.
+		// Either way, never release.
+		if agentIsCrossStoreEligible(ownerAgent) || ownerAgent.QualifiedName() == routedTarget {
+			return false
+		}
+		ownerFound = true
+	}
+	return ownerFound
 }
 
 func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
