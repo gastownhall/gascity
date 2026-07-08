@@ -358,7 +358,8 @@ describe('FormulaRunDetailPage', () => {
     // derivation would suppress here; the server flag must win and the ambient
     // event must still refresh — proving the flag, not a re-derived taxonomy,
     // gates suppression. P4 moved detail to the stream, so this ambient nudge now
-    // refreshes the DIFF; the terminal flag still gates whether it fires.
+    // refreshes the DIFF; the terminal flag still gates whether it fires. The
+    // Diff tab is the default-active tab, so the P5 tab gate is open here.
     currentDetail = {
       ...terminalDetail(),
       progress: { ...terminalDetail().progress, terminal: false },
@@ -370,6 +371,79 @@ describe('FormulaRunDetailPage', () => {
 
     cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
     await waitFor(() => expect(diffUrls()).toHaveLength(2));
+  });
+
+  it('fires NO diff POST from a nudge while the Diff tab is hidden (P5 tab gate)', async () => {
+    // The Diff tab is the default-active view, so switch to Session first to hide
+    // it. A nudge must then issue ZERO /diff POSTs — the git-exec chain no longer
+    // runs for a tab the operator can't see.
+    renderPage();
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    const cityStream = requireCityEventSource();
+    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+
+    openSessionTab();
+    const hiddenTabDiffCount = diffUrls().length;
+
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(diffUrls()).toHaveLength(hiddenTabDiffCount);
+  });
+
+  it('refreshes the diff once when the operator switches to the Diff tab (P5, not stale)', async () => {
+    // Switch away from the default Diff tab, let a nudge fire (no diff POST while
+    // hidden), then switch back — the Diff tab must refresh once on activation so
+    // it does not show stale changes the hidden-tab nudges skipped.
+    renderPage();
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    const cityStream = requireCityEventSource();
+    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+
+    openSessionTab();
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    await Promise.resolve();
+    expect(diffUrls()).toHaveLength(1);
+
+    currentDiff = {
+      ...diff,
+      changedFiles: [{ path: 'src/switched.ts', status: 'M', kind: 'code' }],
+      status: [' M src/switched.ts'],
+      patch: [
+        'diff --git a/src/switched.ts b/src/switched.ts',
+        'index 3a4e79a..b6c9d02 100644',
+        '--- a/src/switched.ts',
+        '+++ b/src/switched.ts',
+        '@@ -1 +1 @@',
+        '-stale',
+        '+fresh on tab activation',
+      ].join('\n'),
+    };
+    fireEvent.click(screen.getByRole('tab', { name: /diff/i }));
+
+    await screen.findByText('fresh on tab activation');
+    // Exactly one activation refresh (the hidden-tab nudge added none).
+    await waitFor(() => expect(diffUrls()).toHaveLength(2));
+  });
+
+  it('coalesces a burst of nudges into at most one diff POST per window (P5)', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    const cityStream = requireCityEventSource();
+    // Default Diff tab is visible, so the diff refresh gate is open.
+    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+
+    // A burst inside one coalesce window yields a single leading fire.
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    await waitFor(() => expect(diffUrls()).toHaveLength(2));
+
+    await Promise.resolve();
+    await Promise.resolve();
+    // No per-event storm: the burst added exactly one diff POST.
+    expect(diffUrls()).toHaveLength(2);
   });
 
   it('does not refresh from city events before the initial run detail identifies the run', async () => {
@@ -790,24 +864,43 @@ describe('FormulaRunDetailPage', () => {
   });
 });
 
-describe('runDetailNudgeRefresh (P4 stream-vs-nudge division)', () => {
-  it('refreshes only the diff when the detail stream is live', async () => {
+describe('runDetailNudgeRefresh (P4 stream-vs-nudge division, P5 diff tab gate)', () => {
+  it('refreshes only the diff when the detail stream is live and the Diff tab is visible', async () => {
     const refreshDetail = vi.fn(() => Promise.resolve());
     const refreshDiff = vi.fn(() => Promise.resolve());
-    await runDetailNudgeRefresh(true, refreshDetail, refreshDiff);
+    await runDetailNudgeRefresh(true, true, refreshDetail, refreshDiff);
     // The stream carries detail, so a nudge must NOT re-GET it (no double refetch).
     expect(refreshDetail).not.toHaveBeenCalled();
     expect(refreshDiff).toHaveBeenCalledTimes(1);
   });
 
-  it('refreshes BOTH detail and diff when the stream is unavailable (F2)', async () => {
+  it('refreshes BOTH detail and diff when the stream is unavailable and the Diff tab is visible (F2)', async () => {
     const refreshDetail = vi.fn(() => Promise.resolve());
     const refreshDiff = vi.fn(() => Promise.resolve());
     // No EventSource → the stream can't carry detail, so the nudge must keep the
     // detail auto-refresh alive (otherwise detail freezes after first paint).
-    await runDetailNudgeRefresh(false, refreshDetail, refreshDiff);
+    await runDetailNudgeRefresh(false, true, refreshDetail, refreshDiff);
     expect(refreshDetail).toHaveBeenCalledTimes(1);
     expect(refreshDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires NO diff refresh when the Diff tab is hidden but the stream is live (P5)', async () => {
+    const refreshDetail = vi.fn(() => Promise.resolve());
+    const refreshDiff = vi.fn(() => Promise.resolve());
+    await runDetailNudgeRefresh(true, false, refreshDetail, refreshDiff);
+    // Stream carries detail; Diff tab hidden → zero git-exec diff read.
+    expect(refreshDetail).not.toHaveBeenCalled();
+    expect(refreshDiff).not.toHaveBeenCalled();
+  });
+
+  it('still refreshes detail (not the diff) when the Diff tab is hidden and the stream is unavailable (P5)', async () => {
+    const refreshDetail = vi.fn(() => Promise.resolve());
+    const refreshDiff = vi.fn(() => Promise.resolve());
+    await runDetailNudgeRefresh(false, false, refreshDetail, refreshDiff);
+    // Detail still auto-refreshes without a stream; the hidden Diff tab skips its
+    // git-exec read.
+    expect(refreshDetail).toHaveBeenCalledTimes(1);
+    expect(refreshDiff).not.toHaveBeenCalled();
   });
 });
 

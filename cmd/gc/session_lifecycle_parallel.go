@@ -923,7 +923,12 @@ func buildPreparedStartWithWorkDirResolver(
 		}
 		session.Metadata["session_key"] = sessionKey
 	}
-	firstStart := session.Metadata["started_config_hash"] == ""
+	// firstStart classification routes through the level-triggered converge core
+	// (deriveFirstStart). This call passes sessTranscriptUnknown, which reproduces
+	// the legacy durable-only signal (started_config_hash == "") byte-for-byte;
+	// probing the transcript here to activate the #3849 crash-loop fix is the
+	// remaining wiring (see session_level_converge.go).
+	firstStart := deriveFirstStart(session.Metadata["started_config_hash"], sessTranscriptUnknown)
 	forceFresh := session.Metadata["wake_mode"] == "fresh"
 	// Fork-launch validation (fail loud, never silent fresh). A session carrying
 	// gc.brain_parent_sid is a warm arm that must fork off a pre-built brain;
@@ -1985,10 +1990,14 @@ func commitStartResultTraced(
 		clearPendingStartInFlightLease(session, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
-			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "failed", traceRecordPayload{
-				"wave":  wave,
-				"error": err.Error(),
-			}, "")
+			trace.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeFailed, "metadata_batch", session.ID, "started_config_hash", traceRecordPayload{
+				"wave":     wave,
+				"error":    err.Error(),
+				"template": tp.TemplateName,
+				"before":   "",
+				"after":    result.prepared.coreHash,
+				"field":    "started_config_hash",
+			})
 		}
 		// The runtime started, but we failed to persist metadata
 		// (including the state transition to active). Report failure so
@@ -2016,9 +2025,13 @@ func commitStartResultTraced(
 	})
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
-		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
-			"wave": wave,
-		}, "")
+		trace.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeSuccess, "metadata_batch", session.ID, "started_config_hash", traceRecordPayload{
+			"wave":     wave,
+			"template": tp.TemplateName,
+			"before":   "",
+			"after":    result.prepared.coreHash,
+			"field":    "started_config_hash",
+		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
 	return true
@@ -2039,10 +2052,10 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, err) //nolint:errcheck
 		}
 		if trace != nil {
-			trace.recordOperation("reconciler.start.terminal_provider_error", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error":  formatLifecycleError(result.err),
 				"reason": reason,
-			}, "")
+			})
 		}
 		if result.rollbackPending {
 			rollbackPendingCreate(session, sessFront, clk.Now().UTC(), stderr)
@@ -2054,18 +2067,18 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		if _, err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
 			if trace != nil {
-				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
+				trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHoldDeferred, "", tp.TemplateName, name, 0, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
 					"cause": err.Error(),
-				}, "")
+				})
 			}
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return
 		}
 		if trace != nil {
-			trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHeld, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
-			}, "")
+			})
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 		return
@@ -2085,9 +2098,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// Genuine wake-failure accounting happens on the non-rollback path
 		// below via recordWakeFailure.
 		if trace != nil {
-			trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
-			}, "")
+			})
 		}
 		rollbackPendingCreate(session, sessFront, clk.Now().UTC(), stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
@@ -2103,9 +2116,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// even for a namepool-themed pool instance whose bead predates agent_name.
 	recordWakeFailure(session, sessFront, clk, tp.DisplayName())
 	if trace != nil {
-		trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
-		}, "")
+		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 }
@@ -2129,9 +2142,9 @@ func recoverRunningPendingCreate(
 	prepared, err := buildPreparedStart(startCandidate{session: session, tp: tp}, cfg, store)
 	if err != nil {
 		if trace != nil {
-			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_rebuild_failed", "failed", traceRecordPayload{
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRebuildFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
 				"error": err.Error(),
-			}, nil, "")
+			})
 		}
 		return false, pendingCreateResidueFold(session)
 	}
@@ -2170,9 +2183,9 @@ func recoverRunningPendingCreate(
 	})
 	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		if trace != nil {
-			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
 				"error": err.Error(),
-			}, nil, "")
+			})
 		}
 		return false, pendingCreateResidueFold(session)
 	}
@@ -2191,7 +2204,7 @@ func recoverRunningPendingCreate(
 		metadata["instance_token"] = tok
 	}
 	if trace != nil {
-		trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_healed", "healed", nil, nil, "")
+		trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateHealed, TraceOutcomeHealed, tp.TemplateName, tp.SessionName, nil)
 	}
 	return true, metadata
 }
@@ -2512,9 +2525,9 @@ func executePlannedStartsTraced(
 							}
 							cb.LogOpenOnce(identity, stderr)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.circuit_open", candidate.tp.TemplateName, candidate.name(), "circuit_open", "skipped", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerCircuitOpen, TraceReasonCircuitOpen, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
 									"identity": identity,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2539,9 +2552,9 @@ func executePlannedStartsTraced(
 							}
 							cb.LogOpenOnce(identity, stderr)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.circuit_trip", candidate.tp.TemplateName, candidate.name(), "circuit_trip", "skipped", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerCircuitTrip, TraceReasonCircuitTrip, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
 									"identity": identity,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2581,10 +2594,10 @@ func executePlannedStartsTraced(
 			}
 			for _, result := range results {
 				if trace != nil {
-					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{
+					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, TraceOutcomeCode(result.outcome), "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
 						"rollback_pending": result.rollbackPending,
 						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
-					}, "")
+					})
 				}
 				if result.outcome == "start_enqueued" {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), result.outcome, result.started, result.finished, nil)

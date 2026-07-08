@@ -257,36 +257,8 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			if err != nil {
 				return ControlResult{}, err
 			}
-			if err := tracePhaseErr(opts, bead.ID, "propagate-metadata", func() error {
-				return snapshot.propagateScopeMemberMetadata(store, body.ID)
-			}); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
-			}
-			outputJSON, err := tracePhase(opts, bead.ID, "resolve-output", func() (string, error) {
-				return snapshot.resolveScopeOutputJSON(subject)
-			})
-			if err != nil {
-				return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
-			}
-			if outputJSON != "" {
-				if err := tracePhaseErr(opts, bead.ID, "write-output", func() error {
-					return store.SetMetadata(body.ID, beadmeta.OutputJSONMetadataKey, outputJSON)
-				}); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: propagating scope output: %w", body.ID, err)
-				}
-			}
-			bodyAfter, getErr := tracePhase(opts, bead.ID, "reload-body", func() (beads.Bead, error) {
-				return store.Get(body.ID)
-			})
-			if getErr != nil {
-				return ControlResult{}, fmt.Errorf("%s: reloading scope body: %w", body.ID, getErr)
-			}
-			if bodyAfter.Status != "closed" {
-				if err := tracePhaseErr(opts, bead.ID, "close-body", func() error {
-					return setOutcomeAndClose(store, body.ID, beadmeta.OutcomePass)
-				}); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
-				}
+			if err := closeScopeAsPassed(store, snapshot, subject, opts, bead.ID); err != nil {
+				return ControlResult{}, err
 			}
 			if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
 				return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
@@ -317,21 +289,9 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err != nil {
 			return ControlResult{}, err
 		}
-		skipped, err := tracePhase(opts, bead.ID, "skip-open-members", func() (int, error) {
-			return snapshot.skipOpenScopeMembers(store, bead.ID)
-		})
+		skipped, err := abortScope(store, snapshot, opts, bead.ID)
 		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: aborting scope: %w", bead.ID, err)
-		}
-		if err := tracePhaseErr(opts, bead.ID, "propagate-metadata", func() error {
-			return snapshot.propagateScopeMemberMetadata(store, body.ID)
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
-		}
-		if err := tracePhaseErr(opts, bead.ID, "close-body-fail", func() error {
-			return setOutcomeAndClose(store, body.ID, beadmeta.OutcomeFail)
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
+			return ControlResult{}, err
 		}
 		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
 			return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
@@ -353,39 +313,8 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err != nil {
 			return ControlResult{}, err
 		}
-		// Propagate non-gc metadata from scope members to the scope body.
-		// This enables compositional metadata bubbling: attempt → retry →
-		// scope → ralph → parent scope, etc.
-		if err := tracePhaseErr(opts, bead.ID, "propagate-metadata", func() error {
-			return snapshot.propagateScopeMemberMetadata(store, body.ID)
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
-		}
-		outputJSON, err := tracePhase(opts, bead.ID, "resolve-output", func() (string, error) {
-			return snapshot.resolveScopeOutputJSON(subject)
-		})
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
-		}
-		if outputJSON != "" {
-			if err := tracePhaseErr(opts, bead.ID, "write-output", func() error {
-				return store.SetMetadata(body.ID, beadmeta.OutputJSONMetadataKey, outputJSON)
-			}); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating scope output: %w", body.ID, err)
-			}
-		}
-		bodyAfter, getErr := tracePhase(opts, bead.ID, "reload-body", func() (beads.Bead, error) {
-			return store.Get(body.ID)
-		})
-		if getErr != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading scope body: %w", body.ID, getErr)
-		}
-		if bodyAfter.Status != "closed" {
-			if err := tracePhaseErr(opts, bead.ID, "close-body", func() error {
-				return setOutcomeAndClose(store, body.ID, beadmeta.OutcomePass)
-			}); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
-			}
+		if err := closeScopeAsPassed(store, snapshot, subject, opts, bead.ID); err != nil {
+			return ControlResult{}, err
 		}
 		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
 			return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
@@ -413,6 +342,82 @@ func loadScopeSnapshotForControl(store beads.Store, rootID, scopeRef string, bod
 	opts.tracef("scope-check bead=%s snapshot root=%s scope=%s all=%d members=%d body=%s subject=%s outcome=%s",
 		controlID, rootID, scopeRef, len(snapshot.all), len(snapshot.members), snapshot.body.ID, subject.ID, subject.Metadata[beadmeta.OutcomeMetadataKey])
 	return snapshot, nil
+}
+
+// closeScopeAsPassed runs the shared convergence sequence for a scope whose
+// members have all completed successfully: propagate non-gc.* member metadata
+// onto the scope body, resolve the scope's output_json from subject, then close
+// the body with outcome=pass (unless it is already closed). subject supplies the
+// output_json source and traceID identifies the bead driving the trace. The
+// caller owns closing its own control bead. This is the single implementation
+// shared by both processScopeCheck branches and reconcileTerminalScopedMember,
+// so every convergence observer closes a scope identically.
+func closeScopeAsPassed(store beads.Store, snapshot scopeSnapshot, subject beads.Bead, opts ProcessOptions, traceID string) error {
+	bodyID := snapshot.body.ID
+	// Propagate non-gc metadata from scope members to the scope body. This
+	// enables compositional metadata bubbling: attempt → retry → scope →
+	// ralph → parent scope, etc.
+	if err := tracePhaseErr(opts, traceID, "propagate-metadata", func() error {
+		return snapshot.propagateScopeMemberMetadata(store, bodyID)
+	}); err != nil {
+		return fmt.Errorf("%s: propagating scope metadata: %w", traceID, err)
+	}
+	outputJSON, err := tracePhase(opts, traceID, "resolve-output", func() (string, error) {
+		return snapshot.resolveScopeOutputJSON(subject)
+	})
+	if err != nil {
+		return fmt.Errorf("%s: resolving scope output: %w", traceID, err)
+	}
+	if outputJSON != "" {
+		if err := tracePhaseErr(opts, traceID, "write-output", func() error {
+			return store.SetMetadata(bodyID, beadmeta.OutputJSONMetadataKey, outputJSON)
+		}); err != nil {
+			return fmt.Errorf("%s: propagating scope output: %w", bodyID, err)
+		}
+	}
+	bodyAfter, err := tracePhase(opts, traceID, "reload-body", func() (beads.Bead, error) {
+		return store.Get(bodyID)
+	})
+	if err != nil {
+		return fmt.Errorf("%s: reloading scope body: %w", bodyID, err)
+	}
+	if bodyAfter.Status != "closed" {
+		if err := tracePhaseErr(opts, traceID, "close-body", func() error {
+			return setOutcomeAndClose(store, bodyID, beadmeta.OutcomePass)
+		}); err != nil {
+			return fmt.Errorf("%s: completing scope body: %w", bodyID, err)
+		}
+	}
+	return nil
+}
+
+// abortScope runs the shared convergence sequence for a scope whose subject
+// failed: skip any still-open members, propagate non-gc.* member metadata (e.g.
+// review.verdict) onto the scope body so diagnostics survive failure auto-close,
+// then close the body with outcome=fail. It returns the number of members
+// skipped. traceID identifies the bead driving the trace and is also the id
+// ignored when skipping open members. The caller owns closing its own control
+// bead. This is the single implementation shared by processScopeCheck and
+// reconcileTerminalScopedMember.
+func abortScope(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, traceID string) (int, error) {
+	bodyID := snapshot.body.ID
+	skipped, err := tracePhase(opts, traceID, "skip-open-members", func() (int, error) {
+		return snapshot.skipOpenScopeMembers(store, traceID)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("%s: aborting scope: %w", traceID, err)
+	}
+	if err := tracePhaseErr(opts, traceID, "propagate-metadata", func() error {
+		return snapshot.propagateScopeMemberMetadata(store, bodyID)
+	}); err != nil {
+		return 0, fmt.Errorf("%s: propagating scope metadata: %w", traceID, err)
+	}
+	if err := tracePhaseErr(opts, traceID, "close-body-fail", func() error {
+		return setOutcomeAndClose(store, bodyID, beadmeta.OutcomeFail)
+	}); err != nil {
+		return 0, fmt.Errorf("%s: completing scope body: %w", bodyID, err)
+	}
+	return skipped, nil
 }
 
 type scopeSnapshot struct {
@@ -1134,17 +1139,9 @@ func reconcileTerminalScopedMemberWithOptions(store beads.Store, bead beads.Bead
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", bead.ID, scopeRef, err)
 		}
-		skipped, err := snapshot.skipOpenScopeMembers(store, bead.ID)
+		skipped, err := abortScope(store, snapshot, opts, bead.ID)
 		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: aborting scope: %w", bead.ID, err)
-		}
-		// Propagate non-gc.* member metadata (e.g., review.verdict) onto the
-		// scope body before closing, so diagnostics survive failure auto-close.
-		if err := snapshot.propagateScopeMemberMetadata(store, body.ID); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, body.ID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
+			return ControlResult{}, err
 		}
 		return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
 	}
@@ -1168,20 +1165,8 @@ func reconcileTerminalScopedMemberWithOptions(store beads.Store, bead beads.Bead
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", bead.ID, scopeRef, err)
 	}
-	if err := snapshot.propagateScopeMemberMetadata(store, body.ID); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
-	}
-	outputJSON, err := snapshot.resolveScopeOutputJSON(bead)
-	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
-	}
-	if outputJSON != "" {
-		if err := store.SetMetadata(body.ID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating scope output: %w", body.ID, err)
-		}
-	}
-	if err := setOutcomeAndClose(store, body.ID, beadmeta.OutcomePass); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
+	if err := closeScopeAsPassed(store, snapshot, bead, opts, bead.ID); err != nil {
+		return ControlResult{}, err
 	}
 	return ControlResult{Processed: true, Action: "scope-pass"}, nil
 }

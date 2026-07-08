@@ -1454,17 +1454,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if rollbacksThisTick >= maxRollbacksPerTick {
 			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
 			if trace != nil {
-				trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback_deferred", traceRecordPayload{
+				trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode(action), TraceOutcomeRollbackDeferred, templateName, name, traceRecordPayload{
 					"rollbacks_this_tick":    rollbacksThisTick,
 					"max_rollbacks_per_tick": maxRollbacksPerTick,
-				}, nil, "")
+				})
 			}
 			return nil
 		}
 		rollbacksThisTick++
 		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
 		if trace != nil {
-			trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback", nil, nil, "")
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode(action), TraceOutcomeRollback, templateName, name, nil)
 		}
 		if clearClaim {
 			return rollbackPendingCreateClearingClaim(session, sessFront, clk.Now().UTC(), stderr)
@@ -1524,9 +1524,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", //nolint:errcheck // best-effort stderr
 				info.SessionNameMetadata, info.MetadataState)
 			if trace != nil {
-				trace.recordDecision("reconciler.session.unknown_state", info.Template, info.SessionNameMetadata, "unknown_state_skipped", "skipped", traceRecordPayload{
+				trace.RecordDecision(TraceSiteReconcilerUnknownState, TraceReasonUnknownStateSkipped, TraceOutcomeSkipped, info.Template, info.SessionNameMetadata, traceRecordPayload{
 					"state": info.MetadataState,
-				}, nil, "")
+				})
 			}
 			continue
 		}
@@ -1632,9 +1632,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if rateLimitErr != nil {
 						result = "hold_deferred"
 					}
-					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "rate_limit", result, traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonRateLimit, TraceOutcomeCode(result), template, name, traceRecordPayload{
 						"provider_alive": providerAlive,
-					}, nil, "")
+					})
 				}
 				// Fold the rate-limit batch onto the snapshot (Step 6d write-returns-Info).
 				// Pre-pass-masked (STEP6-PREPASS-AUDIT group 1).
@@ -1648,17 +1648,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				if pendingCreateSessionStillLeasedInfo(info, cfg, clk) {
 					if trace != nil {
-						trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
+						trace.RecordDecision(TraceSiteReconcilerPendingCreatePreserved, TraceReasonPendingCreate, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
 							"pending_create_claim": strings.TrimSpace(infoByID[session.ID].PendingCreateClaimMetadata),
 							"provider_alive":       providerAlive,
 							"state":                infoByID[session.ID].MetadataState,
-						}, nil, "")
+						})
 					}
 					continue
 				}
 				if !providerAlive {
 					if trace != nil {
-						trace.recordDecision("reconciler.session.close_failed_create", template, name, string(sessionpkg.StateFailedCreate), "closed", nil, nil, "")
+						trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeClosed, template, name, nil)
 					}
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
@@ -1742,13 +1742,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					desired = true
 				}
 				if trace != nil {
-					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "preserve", map[bool]string{
+					trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonPreserve, TraceOutcomeCode(map[bool]string{
 						true:  "kept_open",
 						false: "resolution_failed",
-					}[desired], traceRecordPayload{
+					}[desired]), template, name, traceRecordPayload{
 						"provider_alive": providerAlive,
 						"degraded":       preserveErr != nil,
-					}, nil, "")
+					})
 				}
 			case pendingCreateSessionStillLeasedInfo(infoPostHeal, cfg, clk):
 				template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
@@ -1756,11 +1756,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					template = infoPostHeal.Template
 				}
 				if trace != nil {
-					trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerPendingCreatePreserved, TraceReasonPendingCreate, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(infoByID[session.ID].PendingCreateClaimMetadata),
 						"provider_alive":       providerAlive,
 						"state":                infoByID[session.ID].MetadataState,
-					}, nil, "")
+					})
 				}
 				continue
 			default:
@@ -1781,10 +1781,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								if template == "" {
 									template = infoPostHeal.Template
 								}
-								trace.recordDecision("reconciler.session.drain_ack", template, name, "store_query_partial", "deferred", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonStoreQueryPartial, TraceOutcomeDeferred, template, name, traceRecordPayload{
 									"store_query_partial": true,
 									"provider_alive":      providerAlive,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -1804,7 +1804,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								fmt.Fprintf(stdout, "Canceled drain-acked session '%s' (assigned work)\n", name) //nolint:errcheck
 								if trace != nil {
-									trace.recordDecision("reconciler.drain.cancel", template, name, ackReason, "cancel_assigned_work", nil, nil, "")
+									trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ackReason), TraceOutcomeCancelAssignedWork, template, name, nil)
 								}
 								continue
 							}
@@ -1826,7 +1826,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								clearDrainTrackerForStopPending(session, dt)
 								queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 								if trace != nil {
-									trace.recordDecision("reconciler.session.drain_ack", template, name, "orphaned", "stop_pending", nil, nil, "")
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
 							}
 							continue
@@ -1874,11 +1874,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = infoPostHeal.Template
 							}
-							trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "kept_open", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeKeptOpen, template, name, traceRecordPayload{
 								"store_query_partial": storeQueryPartial,
 								"provider_alive":      providerAlive,
 								"live_assigned_work":  true,
-							}, nil, "")
+							})
 						}
 						fmt.Fprintf(stdout, "Skipping drain for '%s': live assigned work found\n", name) //nolint:errcheck
 						continue
@@ -1901,11 +1901,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								if template == "" {
 									template = infoPostHeal.Template
 								}
-								trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "deferred_confirm", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeDeferredConfirm, template, name, traceRecordPayload{
 									"confirm_ticks":    n,
 									"confirm_required": namedSuspendConfirmTicks,
 									"provider_alive":   providerAlive,
-								}, nil, "")
+								})
 							}
 							fmt.Fprintf(stdout, "Deferring drain for named session '%s': awaiting spec-absence confirmation (%d/%d) — transient enumeration-collapse guard (#3630)\n", name, n, namedSuspendConfirmTicks) //nolint:errcheck
 							continue
@@ -1917,10 +1917,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = infoPostHeal.Template
 							}
-							trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeDrain, template, name, traceRecordPayload{
 								"store_query_partial": storeQueryPartial,
 								"provider_alive":      providerAlive,
-							}, nil, "")
+							})
 						}
 						fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 					}
@@ -1935,7 +1935,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						template = infoPostHeal.Template
 					}
 					if trace != nil {
-						trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
+						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), TraceOutcomeClosed, template, name, nil)
 					}
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
@@ -1981,9 +1981,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					terminalErrBatch = markBatch
 					if trace != nil {
-						trace.recordDecision("reconciler.session.terminal_provider_error", tp.TemplateName, name, reason, "unhealthy", traceRecordPayload{
+						trace.RecordDecision(TraceSiteReconcilerTerminalProviderError, TraceReasonCode(reason), TraceOutcomeUnhealthy, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": session.ID,
-						}, nil, "")
+						})
 					}
 				}
 				if !runtime.ContainsProviderRateLimitScreen(output) {
@@ -2067,7 +2067,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if staleReconcilerDrainAck(*session, sp, name) {
 						_ = clearReconcilerDrainAckMetadata(sp, name)
 						if trace != nil {
-							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "stale_generation", "clear", nil, nil, "")
+							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonStaleGeneration, TraceOutcomeClear, tp.TemplateName, name, nil)
 						}
 						continue
 					}
@@ -2082,10 +2082,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if reconcilerOwnedAck && storeQueryPartial {
 						fmt.Fprintf(stdout, "Skipping reconciler drain-ack stop for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
 						if trace != nil {
-							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "store_query_partial", "deferred", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonStoreQueryPartial, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
 								"store_query_partial":  true,
 								"reconciler_owned_ack": true,
-							}, nil, "")
+							})
 						}
 						continue
 					}
@@ -2099,7 +2099,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							(cancelSessionDrainForAssignedWork(*session, sp, dt) || cancelRecoveredDrainForAssignedWork(*session, sp, name)) {
 							_ = dops.clearDrain(name)
 							if trace != nil {
-								trace.recordDecision("reconciler.drain.cancel", tp.TemplateName, name, ackReason, "cancel_assigned_work", nil, nil, "")
+								trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ackReason), TraceOutcomeCancelAssignedWork, tp.TemplateName, name, nil)
 							}
 							continue
 						}
@@ -2120,10 +2120,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_attachment_error", "cancel_reconciler_ack", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftAttachmentError, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
 									"drain_canceled": drainCancelled,
 									"error":          attachErr.Error(),
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2138,9 +2138,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_attached", "cancel_reconciler_ack", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftAttached, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
 									"drain_canceled": drainCancelled,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2150,9 +2150,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_recently_attached", "cancel_reconciler_ack", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftRecentlyAttached, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
 									"drain_canceled": drainCancelled,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2160,7 +2160,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if pendingInteractionKeepsAwake(*session, sp, name, clk) &&
 						(cancelReconcilerAckedDrain(*session, sp, dt) || cancelRecoveredReconcilerAckedDrain(*session, sp, name)) {
 						if trace != nil {
-							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "pending", "cancel_reconciler_ack", nil, nil, "")
+							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonPending, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
 						}
 						continue
 					}
@@ -2173,7 +2173,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							clearDrainTrackerForStopPending(session, dt)
 							queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "acknowledged", "stop_pending", nil, nil, "")
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}
 						}
 						continue
@@ -2243,10 +2243,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if isMinFloorIdleWorker(minFloor, openInPool) {
 								exempt = true
 								if trace != nil {
-									trace.recordDecision(string(TraceSiteReconcilerProgressStallExempt), tp.TemplateName, name, "min_floor_idle_worker", "exempt", traceRecordPayload{
+									trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonMinFloorIdleWorker, TraceOutcomeExempt, tp.TemplateName, name, traceRecordPayload{
 										"pool_min":  minFloor,
 										"pool_open": openInPool,
-									}, nil, "")
+									})
 								}
 							}
 						}
@@ -2475,7 +2475,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
 				if pendingCreateStartInFlight(*session, clk, startupTimeout) {
 					if trace != nil {
-						trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
 					}
 					continue
 				}
@@ -2541,10 +2541,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rebaseBatch)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(outcome), traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, outcome, tp.TemplateName, name, traceRecordPayload{
 									"stored_hash":  storedHash,
 									"current_hash": currentHash,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2586,18 +2586,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredAttached, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason":  "attached",
 									"drain_canceled": drainCancelled,
-								}), nil, "")
+								}))
 							}
 							continue
 						}
 						if recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredAttached, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason": "attached_recently",
-								}), nil, "")
+								}))
 							}
 							continue
 						}
@@ -2613,19 +2613,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							if active {
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"active_reason": activeReason,
-									}), nil, "")
+									}))
 								}
 								continue
 							}
 							if launchOnlyDrift {
-								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr)
+								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name,
+									tp, cityPath, cfg, store, storedHash, currentHash, storedProvision, storedLaunch,
+									driftedFields, rec, trace, stdout, stderr)
+								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
+								// On success it is the rebaseline patch; on the prepare/skew/relaunch
+								// failure paths it is the buildPreparedStart prepare residue
+								// — only started_config_hash and instance_token are folded, while
+								// session_key and continuation_reset_pending stay intentionally
+								// unthreaded (no same-tick Info reader) and self-heal on the next
+								// store reload. ApplyPatch(nil) is a no-op.
+								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 								if relaunched {
-									// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
-									// launchBatch is nil only when rebaselineLaunchDriftHashesWithBatch failed;
-									// ApplyPatch(nil) is a no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 9).
-									infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 									continue
 								}
 							}
@@ -2635,7 +2641,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// that refresh's retirement (STEP6-PREPASS-AUDIT group 10).
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRestartInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 							}
 							rec.Record(events.Event{
 								Type:      events.SessionDraining,
@@ -2658,9 +2664,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									drainCancelled = cancelSessionDrainForPending(*session, sp, dt)
 								}
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "pending", "deferred_pending", configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonPending, TraceOutcomeDeferredPending, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"drain_canceled": drainCancelled,
-									}), nil, "")
+									}))
 								}
 								continue
 							}
@@ -2683,20 +2689,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							if hasAssignedWork {
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"active_reason": "live_assigned_work",
-									}), nil, "")
+									}))
 								}
 								fmt.Fprintf(stdout, "Skipping config-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
 								continue
 							}
 							if launchOnlyDrift {
-								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name, agentCfg, tp, storedHash, currentHash, driftedFields, rec, trace, stdout, stderr)
+								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, session, name,
+									tp, cityPath, cfg, store, storedHash, currentHash, storedProvision, storedLaunch,
+									driftedFields, rec, trace, stdout, stderr)
+								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
+								// On success it is the rebaseline patch; on the prepare/skew/relaunch
+								// failure paths it is the buildPreparedStart prepare residue
+								// — only started_config_hash and instance_token are folded, while
+								// session_key and continuation_reset_pending stay intentionally
+								// unthreaded (no same-tick Info reader) and self-heal on the next
+								// store reload. ApplyPatch(nil) is a no-op.
+								infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 								if relaunched {
-									// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
-									// launchBatch is nil only when rebaselineLaunchDriftHashesWithBatch failed;
-									// ApplyPatch(nil) is a no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 9).
-									infoByID[session.ID] = infoByID[session.ID].ApplyPatch(launchBatch)
 									continue
 								}
 							}
@@ -2707,7 +2719,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if beginSessionDrain(*session, sp, dt, "config-drift", clk, ddt) {
 								fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDrain, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 								}
 								rec.Record(events.Event{
 									Type:      events.SessionDraining,
@@ -2755,10 +2767,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rebaseBatch)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.live_drift", tp.TemplateName, name, "live_drift", string(outcome), traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerLiveDrift, TraceReasonLiveDrift, outcome, tp.TemplateName, name, traceRecordPayload{
 									"stored_hash":  storedLive,
 									"current_hash": currentLive,
-								}, nil, "")
+								})
 							}
 						default:
 							fmt.Fprintf(stdout, "Live config changed for '%s', re-applying...\n", tp.DisplayName()) //nolint:errcheck
@@ -2825,10 +2837,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							infoByID[session.ID] = infoByID[session.ID].ApplyPatch(rebaseBatch)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(outcome), traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, outcome, tp.TemplateName, name, traceRecordPayload{
 									"stored_hash":  storedHash,
 									"current_hash": currentHash,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2839,7 +2851,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// (#2574). Pre-pass-masked (STEP6-PREPASS-AUDIT group 10).
 						infoByID[session.ID] = infoByID[session.ID].ApplyPatch(resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", clk.Now().UTC(), stderr))
 						if trace != nil {
-							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+							trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRepairInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 						}
 						continue
 					}
@@ -2895,12 +2907,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// by wake evaluation: bypass the max-age restart so SleepPatch
 				// does not rewrite the intended sleep state.
 				if trace != nil {
-					trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, nil, nil, "")
+					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, nil)
 				}
 			case sessionpkg.TimerActionStop:
 				fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
 				if trace != nil {
-					trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, nil, nil, "")
+					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, nil)
 				}
 				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -2976,7 +2988,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					payload = traceRecordPayload{"drain_canceled": drainCancelled}
 				}
 				if trace != nil {
-					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, payload, nil, "")
+					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, payload)
 				}
 				if dec.SkipWakePass {
 					continue
@@ -2984,7 +2996,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			case sessionpkg.TimerActionStop:
 				fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
 				if trace != nil {
-					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, nil, nil, "")
+					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, nil)
 				}
 				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -3144,9 +3156,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Session should be awake but isn't — wake it.
 			if isFailedCreateSessionInfo(info) {
 				if trace != nil {
-					trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "failed_create", traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeFailedCreate, target.tp.TemplateName, name, traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
-					}, nil, "")
+					})
 				}
 				continue
 			}
@@ -3155,10 +3167,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 				if trace != nil {
-					trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_in_flight", traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
 						"last_woke_at":         info.LastWokeAt,
-					}, nil, "")
+					})
 				}
 				continue
 			}
@@ -3175,9 +3187,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						cb.LogOpenOnce(identity, stderr)
 						if trace != nil {
-							trace.recordDecision("reconciler.session.circuit_open", target.tp.TemplateName, name, "circuit_open", "skipped", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerCircuitOpen, TraceReasonCircuitOpen, TraceOutcomeSkipped, target.tp.TemplateName, name, traceRecordPayload{
 								"identity": identity,
-							}, nil, "")
+							})
 						}
 						continue
 					}
@@ -3198,18 +3210,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						emitProviderHealthGateAlert(rec, stdout, p, epID, since, count)
 					})
 					if trace != nil {
-						trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "respawn_skipped", traceRecordPayload{
+						trace.RecordDecision(TraceSiteReconcilerProviderHealthGate, TraceReasonProviderRed, TraceOutcomeRespawnSkipped, target.tp.TemplateName, name, traceRecordPayload{
 							"provider": phProvider,
-						}, nil, "")
+						})
 					}
 					continue // skip startCandidates; wake budget is NOT consumed
 				}
 			}
 
 			if trace != nil {
-				trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_candidate", traceRecordPayload{
+				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, traceRecordPayload{
 					"should_wake": shouldWake,
-				}, nil, "")
+				})
 			}
 			if fold := recordCurrentBeadIDOnWake(target.session, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
@@ -3292,9 +3304,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if beginSessionDrainInfo(info, sp, dt, reason, clk, defaultDrainTimeout) {
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				if trace != nil {
-					trace.recordDecision("reconciler.session.drain", target.tp.TemplateName, name, reason, "drain", traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeDrain, target.tp.TemplateName, name, traceRecordPayload{
 						"sleep_intent": intent,
-					}, nil, "")
+					})
 				}
 			}
 		}
@@ -4251,13 +4263,13 @@ func traceHealClearedPendingCreateLease(
 	if name == "" {
 		name = session.Metadata["session_name"]
 	}
-	trace.recordDecision("reconciler.session.pending_create", template, name, "heal_cleared_stale_lease", string(TraceOutcomeApplied), traceRecordPayload{
+	trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonHealClearedStaleLease, TraceOutcomeApplied, template, name, traceRecordPayload{
 		"last_woke_at":              lastWokeAtBeforeHeal,
 		"pending_create_started_at": pendingCreateStartedAtBeforeHeal,
 		"provider_alive":            providerAlive,
 		"state_after":               session.Metadata["state"],
 		"state_before":              stateBeforeHeal,
-	}, nil, "")
+	})
 }
 
 func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {
@@ -4813,12 +4825,25 @@ func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.St
 // restart. It mirrors the live-drift→RunLive clause: act, and on success
 // rebaseline the Core/provision/launch baselines so the next tick sees no drift.
 //
+// The config handed to Relaunch is derived by buildPreparedStart — the SAME
+// derivation the fresh-start and pending-create-recovery paths use — so the
+// relaunched agent resumes its tracked conversation (resolveSessionCommand adds
+// --resume/--session-id), carries the runtime env (GC_SESSION_ID, instance
+// token, GC_PROVIDER, trigger-bead env), and does NOT re-send the full startup
+// prompt (the !firstStart prompt-strip + restart-nudge block). The drift
+// COMPARISON still uses the hash-form sessionCoreConfigForHash; only the
+// EXECUTED config and the rebaselined baselines come from buildPreparedStart.
+//
 // Returns (true, launchBatch) iff the agent was relaunched and hashes were
 // rebaselined (the caller folds launchBatch onto the typed snapshot and
-// `continue`s). Returns (false, nil) when the provider cannot relaunch or the
-// relaunch failed — the caller falls through to the existing full restart.
-// The batch is nil on the true return only when rebaselineLaunchDriftHashesWithBatch
-// failed (agent was relaunched; stale baseline self-corrects on a later tick).
+// `continue`s). Returns (false, fold) when the provider cannot relaunch,
+// buildPreparedStart minted a speculative resume key (a warm relaunch would
+// --resume a key naming a conversation that was never created), the
+// prepare/precondition/relaunch step failed, or the rebaseline failed — the
+// caller folds the prepare residue (buildPreparedStart mutates the raw bead:
+// instance_token mint, stale-resume-key clear) and falls through to the full
+// restart. The fold is nil only when no buildPreparedStart side effect ran (the
+// RelaunchProvider gate rejected the runtime before any preparation).
 //
 // The deferral guards (attached / named-active / pending-interaction / open
 // assigned work) are honored by the CALLER: this is invoked only after those
@@ -4831,9 +4856,12 @@ func relaunchAgentForLaunchDrift(
 	sessFront *sessionpkg.Store,
 	session *beads.Bead,
 	name string,
-	agentCfg runtime.Config,
 	tp TemplateParams,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
 	storedHash, currentHash string,
+	storedProvisionHash, storedLaunchHash string,
 	driftedFields []string,
 	rec events.Recorder,
 	trace *sessionReconcilerTraceCycle,
@@ -4842,35 +4870,104 @@ func relaunchAgentForLaunchDrift(
 	r, ok := sp.(runtime.RelaunchProvider)
 	if !ok {
 		// Conjoined runtimes (subprocess/acp/t3bridge) do not implement
-		// RelaunchProvider; fall through to the full restart.
+		// RelaunchProvider; fall through to the full restart. No side effects yet —
+		// no buildPreparedStart residue to fold.
 		return false, nil
 	}
-	if err := r.Relaunch(ctx, name, agentCfg); err != nil {
+	// Capture whether the bead already tracked a resumable conversation BEFORE
+	// buildPreparedStart runs. An empty session_key means any key the preparation
+	// mints below (line ~911, for a SessionIDFlag provider) is speculative: it
+	// names a conversation the relaunch has not created yet. Such a speculative key
+	// must never be executed as `--resume` and must never survive into the
+	// full-restart fallback, or a future start would --resume a phantom
+	// conversation. Both halves are enforced below: the minted-speculative-key guard
+	// before Relaunch prevents execution, and relaunchAbortResidueFold clears the key
+	// on every abort path.
+	hadResumeKeyBeforePrepare := strings.TrimSpace(session.Metadata["session_key"]) != ""
+	// Derive the executable config exactly as the fresh-start / pending-create
+	// recovery paths do. cityPath resolves session.Metadata["work_dir"] against
+	// the city; the nil work-dir resolver is correct because both call sites sit
+	// behind the no-open-assigned-work / not-active deferral guards. Deliberately
+	// buildPreparedStart*, NOT prepareStartCandidateForCity — the session is
+	// alive, not waking, so no preWakeCommit / named-template refresh.
+	prepared, err := buildPreparedStartWithWorkDirResolver(startCandidate{session: session, tp: tp}, cityPath, cfg, store, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: preparing relaunch config for %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
+	}
+	// Anti-skew gate: the launch-only-drift verdict was computed from the
+	// hash-form config; relaunch only if it still holds for the prepared config.
+	// A mismatch means a concurrent bead mutation or a derivation divergence
+	// between the hash-form and prepared configs — take the full restart rather
+	// than relaunch-then-rebaseline against an unverified baseline.
+	if prepared.coreHash != currentHash || prepared.provisionHash != storedProvisionHash || prepared.launchHash == storedLaunchHash {
+		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n", //nolint:errcheck
+			name, prepared.coreHash != currentHash, prepared.provisionHash != storedProvisionHash, prepared.launchHash == storedLaunchHash)
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
+	}
+	// A warm-box relaunch resumes a TRACKED conversation. When the bead carried no
+	// session_key before preparation but buildPreparedStart minted one — a
+	// SessionIDFlag provider with no prior key (session_lifecycle_parallel.go:911)
+	// — that key is speculative: started_config_hash is set, so firstStart is false
+	// and resolveSessionCommand built `--resume <minted-key>` for a conversation
+	// that was never created. Executing that relaunch resumes a phantom, and a
+	// provider that reports success would then rebaseline and persist the minted
+	// key, tying every future start to a conversation that does not exist. Fall back
+	// to the full restart, which starts fresh; relaunchAbortResidueFold clears the
+	// speculative key so resetConfiguredNamedSessionForConfigDrift's preserve-resume
+	// gate cannot carry it forward.
+	//
+	// Scope this to an ACTUAL mint (session_key populated only during preparation),
+	// not merely "no prior key": a provider that mints no key (nil resolver, no
+	// SessionIDFlag) built no `--resume`, so its bare warm relaunch carries no
+	// phantom and must still proceed. A merely-stale prior key is also unaffected —
+	// buildPreparedStart cleared it and zeroed started_config_hash before
+	// re-minting, so firstStart is true, the command is a fresh `--session-id`, and
+	// hadResumeKeyBeforePrepare is true, so this guard does not fire.
+	if mintedSpeculativeResumeKey := !hadResumeKeyBeforePrepare && strings.TrimSpace(session.Metadata["session_key"]) != ""; mintedSpeculativeResumeKey {
+		fmt.Fprintf(stderr, "session reconciler: launch-drift relaunch for %s minted a speculative resume key (no prior conversation); falling back to full restart\n", name) //nolint:errcheck
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
+	}
+	if err := r.Relaunch(ctx, name, prepared.cfg); err != nil {
 		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
 		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
 		// back to the full restart so the launch change is still applied.
 		if !errors.Is(err, runtime.ErrRelaunchUnsupported) {
 			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
 		}
-		return false, nil
+		return false, relaunchAbortResidueFold(session, sessFront, hadResumeKeyBeforePrepare)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
 	// Rebaseline the Core baseline (started_config_hash) and the partition
-	// sub-hashes so the next tick sees no Core drift. started_live_hash is
+	// sub-hashes so the next tick sees no Core drift. The hashes come from
+	// buildPreparedStart's PRE-rewrite fingerprints (prepared.coreHash etc.), NOT
+	// the executed prepared.cfg (which carries the --resume rewrite + runtime env,
+	// neither a fingerprint input), so the baseline matches what the next tick's
+	// sessionCoreConfigForHash comparison reproduces. started_live_hash is
 	// DELIBERATELY left untouched: a relaunch MAY re-run SessionLive via the
 	// shared orchestration tail (tmux and ssh do; k8s does not), so the live
 	// half is not reliably re-applied here. Leaving the live hash alone keeps
 	// this provider-independent — any concurrent live drift is re-applied
 	// idempotently by the live-drift clause on the next tick (a redundant
 	// SessionLive re-apply is harmless; a missed one self-heals).
-	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(session, sessFront, agentCfg)
+	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(session, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown)
 	if rebaseErr != nil {
 		// The agent is already relaunched; do not trigger a second restart. The
-		// stale Core baseline self-corrects on a later rebaseline tick.
+		// stale Core baseline self-corrects on a later rebaseline tick. Fold the
+		// prepare residue so the snapshot still matches the raw bead.
 		fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, rebaseErr) //nolint:errcheck
+		launchBatch = pendingCreateResidueFold(session)
+	} else if tok := session.Metadata["instance_token"]; tok != "" && launchBatch != nil {
+		// buildPreparedStart may mint instance_token onto the raw bead + store
+		// (SetMarker) — a residue outside the rebaseline patch. Carry it in the
+		// fold so the snapshot reflects it (mirrors pendingCreateResidueFold). Guard
+		// the write on launchBatch != nil: rebaselineLaunchDriftHashesWithBatch
+		// documents a (nil, nil) return when the session/front-door is nil, and a
+		// write to a nil map panics.
+		launchBatch["instance_token"] = tok
 	}
 	if trace != nil {
-		trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "relaunch", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+		trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRelaunch, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionUpdated,
@@ -4881,32 +4978,65 @@ func relaunchAgentForLaunchDrift(
 	return true, launchBatch
 }
 
+// relaunchAbortResidueFold is the buildPreparedStart residue fold for the paths
+// that abort the launch-only-drift relaunch (prepare error, anti-skew skew, or
+// relaunch failure) and fall back to the full restart. It exists to keep a
+// speculatively-minted resume key from surviving the fallback.
+//
+// When the bead carried no session_key before preparation,
+// buildPreparedStartWithWorkDirResolver minted one (persisting it to the raw
+// bead + store via SetMarker) so it could build the relaunch command. That key
+// names a conversation the aborted relaunch never created. Left in place,
+// resetConfiguredNamedSessionForConfigDrift would see a non-empty session_key
+// plus the stale started_config_hash and PRESERVE both, so the next start would
+// --resume a phantom conversation instead of doing the fresh restart the
+// fallback is meant to provide. Clear the speculative key exactly as
+// buildPreparedStart's own stale-resume guard does (session_key +
+// started_config_hash + continuation_reset_pending, raw bead + store), which the
+// pendingCreateResidueFold below then folds onto the caller's snapshot.
+//
+// When a real resume key predated preparation, leave it untouched so the
+// fallback resumes the prior conversation (the intended preserve-resume path).
+func relaunchAbortResidueFold(session *beads.Bead, sessFront *sessionpkg.Store, hadResumeKeyBeforePrepare bool) map[string]string {
+	if session != nil && !hadResumeKeyBeforePrepare && strings.TrimSpace(session.Metadata["session_key"]) != "" {
+		clearStaleResumeKeyMetadata(session, sessFront)
+	}
+	return pendingCreateResidueFold(session)
+}
+
 // rebaselineLaunchDriftHashesWithBatch moves a session's Core drift baseline to
-// agentCfg after a successful warm-box relaunch — started_config_hash + the
-// provision/launch sub-hashes + core_hash_breakdown — WITHOUT touching
-// started_live_hash/live_hash. The relaunch re-applied the launch half (the
-// agent now runs agentCfg); the provision half was unchanged by definition. The
-// live hash is left untouched because relaunch does not reliably re-apply the
-// live half (tmux/ssh re-run SessionLive via the shared orchestration tail; k8s
-// does not), so a concurrent SessionLive change is re-applied idempotently by
-// the live-drift clause on the next tick. Contrast sessionHashRebaselineMetadata,
-// which rebaselines every field (used when the config did not actually change).
+// the relaunched config after a successful warm-box relaunch —
+// started_config_hash + the provision/launch sub-hashes + core_hash_breakdown —
+// WITHOUT touching started_live_hash/live_hash. The relaunch re-applied the
+// launch half (the agent now runs the prepared config); the provision half was
+// unchanged by definition. The live hash is left untouched because relaunch does
+// not reliably re-apply the live half (tmux/ssh re-run SessionLive via the
+// shared orchestration tail; k8s does not), so a concurrent SessionLive change
+// is re-applied idempotently by the live-drift clause on the next tick. Contrast
+// sessionHashRebaselineMetadata, which rebaselines every field (used when the
+// config did not actually change).
+//
+// The hashes are passed in explicitly (from buildPreparedStart's pre-rewrite
+// fingerprints) rather than recomputed here: the executed config carries the
+// resolveSessionCommand --resume/--session-id rewrite and runtime env, which are
+// NOT fingerprint inputs, so the baseline must be the durable-config hashes the
+// next tick's sessionCoreConfigForHash comparison will reproduce.
 //
 // Returns the mirrored patch on success so the caller can fold it onto the typed
 // snapshot via ApplyPatch. Returns (nil, nil) when there is nothing to do (nil
 // session/front-door), (nil, err) on any failure.
-func rebaselineLaunchDriftHashesWithBatch(session *beads.Bead, sessFront *sessionpkg.Store, agentCfg runtime.Config) (map[string]string, error) {
+func rebaselineLaunchDriftHashesWithBatch(session *beads.Bead, sessFront *sessionpkg.Store, coreHash, provisionHash, launchHash string, breakdown runtime.BreakdownV1) (map[string]string, error) {
 	if session == nil || sessFront == nil {
 		return nil, nil
 	}
-	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	breakdownJSON, err := json.Marshal(breakdown)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling core_hash_breakdown: %w", err)
 	}
 	patch := map[string]string{
-		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
-		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
-		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"started_config_hash":    coreHash,
+		"started_provision_hash": provisionHash,
+		"started_launch_hash":    launchHash,
 		"core_hash_breakdown":    string(breakdownJSON),
 	}
 	if err := sessFront.ApplyPatch(session.ID, patch); err != nil {

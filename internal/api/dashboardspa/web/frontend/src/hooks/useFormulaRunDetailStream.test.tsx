@@ -78,7 +78,7 @@ describe('useFormulaRunDetailStream', () => {
     const { rerender } = renderHook(
       ({ id, enabled }: { id: string | undefined; enabled: boolean }) =>
         useFormulaRunDetailStream(id, enabled, undefined),
-      { initialProps: { id: 'wf-1', enabled: false } },
+      { initialProps: { id: 'wf-1' as string | undefined, enabled: false } },
     );
     expect(eventSources).toHaveLength(0);
     rerender({ id: undefined, enabled: true });
@@ -94,7 +94,10 @@ describe('useFormulaRunDetailStream', () => {
     act(() => eventSources[0]?.emit('detail', JSON.stringify(detail)));
 
     await waitFor(() => expect(onDetail).toHaveBeenCalledTimes(1));
-    expect(onDetail.mock.calls[0][0]).toMatchObject({ title: 'Pushed title', runId: 'wf-1' });
+    expect(onDetail).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Pushed title', runId: 'wf-1' }),
+      expect.any(String),
+    );
     // The cache is warmed so a remount paints instantly from the pushed frame.
     const cached = getCached(formulaRunDetailCacheKey('wf-1'));
     expect(cached).toMatchObject({ kind: 'loaded', detail: { title: 'Pushed title' } });

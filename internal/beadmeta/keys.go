@@ -241,6 +241,22 @@ const (
 	LegacyWorkDirMetadataKey = "work_dir"
 )
 
+// Dispatch metadata keys: a non-"gc."-prefixed family that sling writes onto
+// work and source beads to wire molecules together and record the merge
+// strategy. They predate the gc. namespace convention and their on-store
+// strings are load-bearing (the run-chain resolver in runid.go and the graph
+// dispatch readers key on them), so they are declared here — like the
+// directory keys above — to give the vocabulary one home without changing any
+// wire value. They are intentionally NOT in KnownMetadataKeys, whose drift
+// guard only covers the gc. namespace.
+const (
+	// MoleculeIDMetadataKey links a poured/wisp work bead to its molecule root.
+	MoleculeIDMetadataKey = "molecule_id"
+
+	// MergeStrategyMetadataKey records the merge strategy chosen for a slung bead.
+	MergeStrategyMetadataKey = "merge_strategy"
+)
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world

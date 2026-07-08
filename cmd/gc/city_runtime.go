@@ -2017,6 +2017,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
 	}
 
+	// Rebuild convergence scopes against the reloaded config so rigs added,
+	// removed, or rebound by this reload are honored live (#2403). New
+	// scopes repopulate their active index via the needsStartupReconcile
+	// path on the next tick.
+	cr.rebuildConvergenceHandler()
+
 	// Ensure drain tracker and provider-health gate are initialized when bead store becomes available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
 		cr.sessionDrains = newDrainTracker()
@@ -3392,11 +3398,11 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 	if trace == nil {
 		return
 	}
-	trace.recordOperation("lifecycle.shutdown.preserve_sessions", "", "", "", "retained", string(TraceOutcomeApplied), traceRecordPayload{
+	trace.RecordOperation(TraceSiteLifecycleShutdownPreserveSessions, TraceReasonRetained, TraceOutcomeApplied, "", "", "", 0, traceRecordPayload{
 		"city_path": cr.cityPath,
 		"city_name": cr.cityName,
 		"reason":    "supervisor_shutdown_preserve_mode",
-	}, "")
+	})
 	trace.end(TraceCompletionCompleted, traceRecordPayload{
 		"phase":     "shutdown",
 		"mode":      "preserve_sessions",

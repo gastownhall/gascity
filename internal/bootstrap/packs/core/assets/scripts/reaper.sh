@@ -699,6 +699,13 @@ SQL_CHANGE_ROWS_RESULT=0
 close_city_issue() {
     local issue_id="$1"
     local reason="$2"
+    # Pass a non-empty third arg to add --force. Required when reaping a bead
+    # still assigned to another actor (e.g. an in_progress bead owned by a live
+    # agent session) while the reaper runs as order:reaper: bd's close-authority
+    # guard (gastownhall/beads#3734) refuses a cross-actor close without --force.
+    # Reaps of unassigned beads must stay bare so the guard keeps protecting
+    # against overriding a concurrent re-claim.
+    local force="${3:-}"
 
     if [ ! -d "$CITY_BEADS_DIR" ]; then
         printf 'city bead store %s is unavailable' "$CITY_BEADS_DIR"
@@ -707,7 +714,11 @@ close_city_issue() {
 
     (
         cd "$CITY_ABS"
-        BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --reason "$reason"
+        if [ -n "$force" ]; then
+            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --force --reason "$reason"
+        else
+            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --reason "$reason"
+        fi
     )
 }
 
@@ -969,11 +980,21 @@ while IFS= read -r DB; do
         done <<< "$SQL_ROWS_RESULT"
     fi
 
+    # Expired nudge beads are closed bare (no --force) below, which is only safe
+    # when they are unassigned: bd's cross-actor close guard would otherwise
+    # reject the reaper's bare close and the expired nudge would leak. Nudge
+    # shadow beads are created unassigned, so the COALESCE(i.assignee,'')=''
+    # filter makes that invariant explicit rather than relying on producers to
+    # never assign one. An assigned expired nudge is skipped here, and the
+    # stale path below skips it too because that query excludes rows with a
+    # non-empty expires_at; that is acceptable because an assigned nudge would
+    # be a producer anomaly rather than expected TTL work.
     get_sql_rows "$DB" "expired nudge bead" "
         SELECT i.id
         FROM \`$DB\`.issues i
         INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
         WHERE i.status IN ('open', 'in_progress')
+        AND COALESCE(i.assignee, '') = ''
         AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
         AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
         AND COALESCE(
@@ -1016,7 +1037,8 @@ while IFS= read -r DB; do
     # Step 5: Auto-close stale issues (exclude P0/P1, epics, active deps).
     DB_ISSUES_CLOSED=0
     get_sql_rows "$DB" "stale issue" "
-        SELECT id FROM \`$DB\`.issues
+        SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
+        FROM \`$DB\`.issues
         WHERE status IN ('open', 'in_progress')
         AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
         AND priority > 1
@@ -1049,9 +1071,18 @@ while IFS= read -r DB; do
             SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
             TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
         else
-            while IFS= read -r issue_id; do
+            while IFS=, read -r issue_id close_mode; do
                 [ -z "$issue_id" ] && continue
-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" 2>&1); then
+                # close_mode comes from the query's per-row CASE: 'force' when the
+                # row carried a non-empty assignee at select time and 'bare'
+                # otherwise. A 'force' row is another actor's bead (the reaper runs
+                # as order:reaper), so it needs --force to pass bd's cross-actor
+                # close guard. A 'bare' row was open/unassigned; keeping its close
+                # bare lets the guard reject it if the row was concurrently
+                # re-claimed after the select, instead of clobbering the new claim.
+                STALE_FORCE=""
+                [ "$close_mode" = "force" ] && STALE_FORCE="force"
+                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" "$STALE_FORCE" 2>&1); then
                     DB_ISSUES_CLOSED=$((DB_ISSUES_CLOSED + 1))
                     TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
                     DB_MUTATIONS=$((DB_MUTATIONS + 1))

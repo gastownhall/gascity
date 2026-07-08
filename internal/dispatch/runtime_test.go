@@ -9624,3 +9624,178 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 		t.Fatalf("result = %+v, want processed", result)
 	}
 }
+
+// TestCloseScopeAsPassedSharedConvergence exercises the single scope-close
+// helper that both processScopeCheck branches and reconcileTerminalScopedMember
+// now share: propagate non-gc.* member metadata onto the body, write the
+// resolved output_json, and close the body pass unless it is already closed.
+func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		bodyStatus     string
+		wantCloseTrace bool
+	}{
+		{name: "open body closes pass", bodyStatus: "open", wantCloseTrace: true},
+		{name: "already closed body is not re-closed", bodyStatus: "closed", wantCloseTrace: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			})
+			body := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "body",
+				Type:   "task",
+				Status: tc.bodyStatus,
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": workflow.ID,
+					"gc.scope_ref":    "body",
+					"gc.step_ref":     "demo.body",
+				},
+			})
+			subject := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "member",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id": workflow.ID,
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "member",
+					"gc.outcome":      "pass",
+					"gc.output_json":  `{"verdict":"approved"}`,
+					"review.verdict":  "done",
+				},
+			})
+
+			snapshot, err := loadScopeSnapshotWithBody(store, workflow.ID, "body", body)
+			if err != nil {
+				t.Fatalf("loadScopeSnapshotWithBody: %v", err)
+			}
+			var trace bytes.Buffer
+			opts := ProcessOptions{Tracef: func(format string, args ...any) {
+				fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+			}}
+			if err := closeScopeAsPassed(store, snapshot, subject, opts, subject.ID); err != nil {
+				t.Fatalf("closeScopeAsPassed: %v", err)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" {
+				t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+			}
+			// Member metadata and output_json bubble onto the body regardless of
+			// whether the body was already closed.
+			if got := bodyAfter.Metadata["review.verdict"]; got != "done" {
+				t.Fatalf("body review.verdict = %q, want done", got)
+			}
+			if got := bodyAfter.Metadata["gc.output_json"]; got != `{"verdict":"approved"}` {
+				t.Fatalf("body gc.output_json = %q, want approved payload", got)
+			}
+			if tc.wantCloseTrace {
+				if got := bodyAfter.Metadata["gc.outcome"]; got != "pass" {
+					t.Fatalf("body outcome = %q, want pass", got)
+				}
+			}
+
+			traceText := trace.String()
+			for _, want := range []string{"phase=propagate-metadata", "phase=resolve-output", "phase=write-output", "phase=reload-body"} {
+				if !strings.Contains(traceText, want) {
+					t.Fatalf("trace missing %q:\n%s", want, traceText)
+				}
+			}
+			gotClose := strings.Contains(traceText, "phase=close-body ")
+			if gotClose != tc.wantCloseTrace {
+				t.Fatalf("close-body trace present=%v, want %v:\n%s", gotClose, tc.wantCloseTrace, traceText)
+			}
+		})
+	}
+}
+
+// TestAbortScopeSharedConvergence exercises the single scope-abort helper shared
+// by processScopeCheck and reconcileTerminalScopedMember: skip still-open
+// members, propagate closed-member metadata onto the body, and close the body
+// fail.
+func TestAbortScopeSharedConvergence(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "failed member",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+			"review.verdict":  "blocked",
+		},
+	})
+	openMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "open member",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	snapshot, err := loadScopeSnapshotWithBody(store, workflow.ID, "body", body)
+	if err != nil {
+		t.Fatalf("loadScopeSnapshotWithBody: %v", err)
+	}
+	var trace bytes.Buffer
+	opts := ProcessOptions{Tracef: func(format string, args ...any) {
+		fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+	}}
+	skipped, err := abortScope(store, snapshot, opts, failed.ID)
+	if err != nil {
+		t.Fatalf("abortScope: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	if got := bodyAfter.Metadata["review.verdict"]; got != "blocked" {
+		t.Fatalf("body review.verdict = %q, want blocked", got)
+	}
+	openAfter := mustGetBead(t, store, openMember.ID)
+	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("open member = status %q outcome %q, want closed/skipped", openAfter.Status, openAfter.Metadata["gc.outcome"])
+	}
+
+	traceText := trace.String()
+	for _, want := range []string{"phase=skip-open-members", "phase=propagate-metadata", "phase=close-body-fail"} {
+		if !strings.Contains(traceText, want) {
+			t.Fatalf("trace missing %q:\n%s", want, traceText)
+		}
+	}
+}

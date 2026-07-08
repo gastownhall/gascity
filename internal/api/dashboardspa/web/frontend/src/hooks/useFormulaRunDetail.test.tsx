@@ -46,6 +46,7 @@ function runDetail(overrides: Partial<FormulaRunDetail> = {}): FormulaRunDetail 
       snapshotVersion: 1,
       snapshotEventSeq: { kind: 'known', seq: 100 },
       snapshotPartial: false,
+      terminal: false,
       totalNodeCount: 0,
       visibleNodeCount: 0,
       edgeCount: 0,

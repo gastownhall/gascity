@@ -375,7 +375,7 @@ func evaluatePendingPools(
 				if err != nil {
 					outcome = "failed"
 				}
-				trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", outcome, traceRecordPayload{
+				trace.RecordOperation(TraceSiteScaleCheckExec, TraceReasonScaleCheck, TraceOutcomeCode(outcome), "", template, "", time.Since(started), traceRecordPayload{
 					"pool_dir":       dir,
 					"command":        sp.Check,
 					"desired":        d,
@@ -383,7 +383,7 @@ func evaluatePendingPools(
 					"duration_ms":    time.Since(started).Milliseconds(),
 					"agent_template": template,
 					"agent_index":    agentIndex,
-				}, "")
+				})
 			}
 		}(j, template, agentName, agentIndex, sp, pw.poolDir, newDemand)
 	}

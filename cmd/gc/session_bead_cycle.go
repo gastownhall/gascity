@@ -131,10 +131,10 @@ func cycleAliveSessionForFreshReassign(
 		fmt.Fprintf(stdout, "Cycled fresh-mode session '%s' for bead reassign: %s → %s\n", name, prevBeadID, newBeadID) //nolint:errcheck
 	}
 	if trace != nil {
-		trace.recordDecision("reconciler.session.bead_reassign_cycle", tp.TemplateName, name, "fresh_cycle", "restart", traceRecordPayload{
+		trace.RecordDecision(TraceSiteReconcilerBeadReassignCycle, TraceReasonFreshCycle, TraceOutcomeRestart, tp.TemplateName, name, traceRecordPayload{
 			"previous_bead_id": prevBeadID,
 			"new_bead_id":      newBeadID,
-		}, nil, "")
+		})
 	}
 	return true, fold
 }

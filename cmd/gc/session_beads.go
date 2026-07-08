@@ -1154,16 +1154,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				createState = string(session.StateStartPending)
 			}
 			instanceToken := session.NewInstanceToken()
-			meta := map[string]string{
-				"agent_name":         agentName,
-				"live_hash":          liveHash,
-				"session_origin":     origin,
-				"generation":         strconv.Itoa(session.DefaultGeneration),
-				"continuation_epoch": strconv.Itoa(session.DefaultContinuationEpoch),
-				"instance_token":     instanceToken,
-				"state":              createState,
-				"synced_at":          now.Format("2006-01-02T15:04:05Z07:00"),
-			}
+			meta := desiredSessionIdentity(sessionIdentityInputs{
+				AgentName:         agentName,
+				State:             createState,
+				Generation:        session.DefaultGeneration,
+				ContinuationEpoch: session.DefaultContinuationEpoch,
+				InstanceToken:     instanceToken,
+			})
+			meta["live_hash"] = liveHash
+			meta["session_origin"] = origin
+			meta["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
 			if !isPoolInstance {
 				meta["session_name"] = sn
 			}

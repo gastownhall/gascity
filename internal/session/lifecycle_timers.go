@@ -120,7 +120,7 @@ func DecideMaxSessionAge(f TimerFacts) TimerDecision {
 		Action:       TimerActionStop,
 		TraceReason:  "max_session_age",
 		TraceOutcome: "stop",
-		SleepReason:  "max-session-age",
+		SleepReason:  string(SleepReasonMaxSessionAge),
 	}
 }
 
@@ -149,7 +149,7 @@ func DecideIdleTimeout(f TimerFacts) TimerDecision {
 		Action:       TimerActionStop,
 		TraceReason:  "idle_timeout",
 		TraceOutcome: "stop",
-		SleepReason:  "idle-timeout",
+		SleepReason:  string(SleepReasonIdleTimeout),
 	}
 }
 

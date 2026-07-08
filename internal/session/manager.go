@@ -383,6 +383,23 @@ func normalizeInfoState(state State) State {
 	return state
 }
 
+// canonicalLifecycleState maps a bead's stored state metadata onto the State
+// the transition table understands, before the state machine is consulted. A
+// pre-metadata legacy bead carries an empty state (StateNone); treat it as
+// StateActive so transitions work during upgrade. StateAwake is the
+// reconciler's alias for StateActive; the table only knows StateActive, so
+// normalize it too, keeping already-awake beads accepting Suspend/Drain/
+// Archive/Quarantine/Close. Callers own their own closed-bead and terminal
+// pre-checks; this handles only the none/awake canonicalization shared by
+// Suspend, CloseDetailed, and checkTransition.
+func canonicalLifecycleState(rawState State) State {
+	switch rawState {
+	case StateNone, StateAwake:
+		return StateActive
+	}
+	return rawState
+}
+
 // ProviderResume describes a provider's session resume capabilities.
 // Populated from config.ResolvedProvider's resume fields.
 type ProviderResume struct {
@@ -1084,17 +1101,10 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
-		// Legacy bead normalization: pre-metadata cities may have empty
-		// state fields. Treat empty as StateActive so the state-machine
-		// transition works during upgrade. Matches what Close and
-		// checkTransition already do for the other lifecycle methods.
-		if current == StateNone {
-			current = StateActive
-		}
-		// StateAwake is the reconciler's alias for StateActive.
-		if current == StateAwake {
-			current = StateActive
-		}
+		// Normalize legacy/aliased states (empty and awake both mean active)
+		// after the failed-create pre-check above, preserving closed-guard-
+		// first ordering.
+		current = canonicalLifecycleState(current)
 		if _, err := Transition(current, CmdSuspend); err != nil {
 			return err
 		}
@@ -1162,17 +1172,11 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return nil // idempotent: already closed
 		}
 		// CmdClose is legal from any non-none state; this is effectively a
-		// documentation check that will catch future table changes. Treat
-		// empty metadata state as StateActive for bootstrap beads, and
-		// treat the reconciler's StateAwake alias as StateActive so
-		// already-awake beads can close cleanly.
-		current := State(b.Metadata["state"])
-		if current == StateNone {
-			current = StateActive
-		}
-		if current == StateAwake {
-			current = StateActive
-		}
+		// documentation check that will catch future table changes. The
+		// canonicalizer treats empty metadata state as StateActive for
+		// bootstrap beads and the reconciler's StateAwake alias as StateActive
+		// so already-awake beads can close cleanly.
+		current := canonicalLifecycleState(State(b.Metadata["state"]))
 		if _, err := Transition(current, CmdClose); err != nil {
 			return err
 		}
@@ -1375,19 +1379,7 @@ func (m *Manager) checkTransition(id string, cmd TransitionCommand, targetState 
 	if b.Status == "closed" {
 		return false, &IllegalTransitionError{From: StateClosed, Command: cmd}
 	}
-	current := State(b.Metadata["state"])
-	if current == StateNone {
-		// Legacy bead: pre-metadata cities may have empty state fields.
-		// Treat as active so transitions work during upgrade.
-		current = StateActive
-	}
-	// StateAwake is the reconciler's alias for StateActive. The state
-	// machine table only knows StateActive, so normalize before calling
-	// Transition to keep already-awake beads accepting Suspend/Drain/
-	// Archive/Quarantine.
-	if current == StateAwake {
-		current = StateActive
-	}
+	current := canonicalLifecycleState(State(b.Metadata["state"]))
 	if current == targetState {
 		return false, nil
 	}
@@ -1769,40 +1761,9 @@ func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templa
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		state := normalizeInfoState(State(b.Metadata["state"]))
-
-		// Filter by state.
-		if stateFilter != "" && stateFilter != "all" {
-			match := false
-			for _, s := range strings.Split(stateFilter, ",") {
-				switch {
-				case s == "closed" && b.Status == "closed":
-					match = true
-				case s == "open" && b.Status == "open":
-					match = true
-				case b.Status != "closed" && s == string(state):
-					// Only match metadata state for non-closed beads.
-					match = true
-				}
-				if match {
-					break
-				}
-			}
-			if !match {
-				continue
-			}
-		} else if stateFilter == "" {
-			// Default: exclude closed sessions.
-			if b.Status == "closed" {
-				continue
-			}
-		}
-
-		// Filter by template.
-		if templateFilter != "" && b.Metadata["template"] != templateFilter {
+		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
 			continue
 		}
-
 		result = append(result, m.infoFromBead(b))
 	}
 	return &ListResult{Sessions: result, Beads: all}

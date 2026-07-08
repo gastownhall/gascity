@@ -168,14 +168,15 @@ func runAdoptionBarrier(
 		}
 
 		// Build bead metadata. Config/live hashes are left empty —
-		// syncSessionBeads populates them from built agent objects.
-		meta := map[string]string{
-			"session_name":       sessionName,
-			"state":              "active",
-			"generation":         strconv.Itoa(sessionpkg.DefaultGeneration),
-			"continuation_epoch": strconv.Itoa(sessionpkg.DefaultContinuationEpoch),
-			"instance_token":     sessionpkg.NewInstanceToken(),
-		}
+		// syncSessionBeads populates them from built agent objects. agent_name
+		// and pool_slot are stamped below once pool-base resolution completes.
+		meta := desiredSessionIdentity(sessionIdentityInputs{
+			SessionName:       sessionName,
+			State:             "active",
+			Generation:        sessionpkg.DefaultGeneration,
+			ContinuationEpoch: sessionpkg.DefaultContinuationEpoch,
+			InstanceToken:     sessionpkg.NewInstanceToken(),
+		})
 
 		detail := adoptionDetail{SessionName: sessionName}
 

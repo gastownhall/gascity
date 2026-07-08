@@ -838,9 +838,13 @@ func TestBdWorkflow(t *testing.T) {
 		t.Fatalf("dep list does not contain root id %s:\n%s", rootID, depOut)
 	}
 
-	// 6. Close the root, then the step.
+	// 6. Close the root (unassigned), then the step. The step was assigned to
+	// polecat-1 above, and this test process drives bd as a different actor (it
+	// never sets BEADS_ACTOR), so closing it exercises bd's cross-actor
+	// close-authority guard (gastownhall/beads#3734) and must pass --force — the
+	// same override the SDK BdStore always applies.
 	requireBD(t, dir, "close", "--json", rootID)
-	requireBD(t, dir, "close", "--json", stepID)
+	requireBD(t, dir, "close", "--force", "--json", stepID)
 
 	// 7. Verify both are closed.
 	for _, id := range []string{rootID, stepID} {
