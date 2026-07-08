@@ -176,9 +176,12 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 // the build.
 //
 // The raw open []beads.Bead slice is left nil: an Info-fed snapshot has no
-// backing beads, so the raw-half readers (Open, FindByID, the FindSessionBead*
-// family) return empty on it. Callers that need those must build the snapshot
-// from beads via newSessionBeadSnapshot.
+// backing beads, so ONLY the bead-returning raw-half readers (Open, FindByID, the
+// FindSessionBead* family) return empty on it — callers that need a raw
+// beads.Bead must build the snapshot from beads via newSessionBeadSnapshot. The
+// typed surface (OpenInfos, FindInfoByID, FindInfoByTemplate,
+// FindInfoByNamedIdentity) is backed by openInfos and the index maps this
+// constructor populates, so it works correctly on an Info-built snapshot.
 func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
 	beadIDByAgentName := make(map[string]string)
 	beadIDByTemplateHint := make(map[string]string)
@@ -380,12 +383,14 @@ func (s *sessionBeadSnapshot) FindInfoByID(id string) (sessionpkg.Info, bool) {
 }
 
 // findInfoByIDLocked is the typed inner lookup; callers must hold at least
-// s.mu.RLock. open and openInfos are kept in lockstep order, so the matching
-// index into open yields the corresponding Info.
+// s.mu.RLock. It scans openInfos directly (not the raw open slice) so it works on
+// both bead-built and Info-built snapshots: newSessionBeadSnapshotFromInfos leaves
+// open nil but populates openInfos, and for a bead-built snapshot open/openInfos
+// are lockstep so the first match is identical either way.
 func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bool) {
-	for i, bead := range s.open {
-		if bead.ID == id {
-			return s.openInfos[i], true
+	for _, info := range s.openInfos {
+		if info.ID == id {
+			return info, true
 		}
 	}
 	return sessionpkg.Info{}, false
@@ -415,20 +420,22 @@ func (s *sessionBeadSnapshot) FindSessionBeadByNamedIdentity(identity string) (b
 }
 
 // FindInfoByNamedIdentity is the typed mirror of FindSessionBeadByNamedIdentity:
-// it returns the session.Info projection of the same bead that method would
-// resolve for identity. open and openInfos share an index, so the first
-// matching bead's Info is returned.
+// it returns the session.Info projection of the session whose configured named
+// identity matches. It scans openInfos directly (matching the trimmed
+// Info.ConfiguredNamedIdentity, which InfoFromPersistedBead carries verbatim) so
+// it works on both bead-built and Info-built snapshots; for a bead-built snapshot
+// open/openInfos are lockstep so the first match is identical to the raw form.
 func (s *sessionBeadSnapshot) FindInfoByNamedIdentity(identity string) (sessionpkg.Info, bool) {
 	if s == nil || strings.TrimSpace(identity) == "" {
 		return sessionpkg.Info{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for i, bead := range s.open {
-		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
+	for _, info := range s.openInfos {
+		if strings.TrimSpace(info.ConfiguredNamedIdentity) != identity {
 			continue
 		}
-		return s.openInfos[i], true
+		return info, true
 	}
 	return sessionpkg.Info{}, false
 }

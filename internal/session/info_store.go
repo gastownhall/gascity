@@ -230,6 +230,15 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 // bead"). Note the split: absence yields the wrapped store error, NOT
 // ErrSessionNotFound — that sentinel is reserved for a present non-session bead.
 func (s *Store) validatedBead(id string) (beads.Bead, error) {
+	// Nil-inner-store short-circuit, mirroring ListAll's listAllBeads guard
+	// (s == nil || s.store.Store == nil): a nil backing store cannot produce the
+	// bead, so treat it as absence — the wrapped store not-found error, matching
+	// the absent-id path below and NOT the ErrSessionNotFound sentinel (reserved
+	// for a present non-session bead). Without this a non-nil *Store wrapping a
+	// nil inner store would panic in s.store.Get.
+	if s == nil || s.store.Store == nil {
+		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
+	}
 	b, err := s.store.Get(id)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, err)

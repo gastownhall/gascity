@@ -386,7 +386,8 @@ func resolveSessionMCPProjection(
 	}
 	info, err := sessFront.Get(id)
 	if err != nil {
-		return resolvedMCPProjection{}, err
+		// Name the user-supplied identifier, not the resolved bead id.
+		return resolvedMCPProjection{}, fmt.Errorf("loading session %q: %w", sessionID, err)
 	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {

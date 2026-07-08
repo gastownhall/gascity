@@ -398,6 +398,9 @@ func primeHookSessionTemplate(cityPath string) string {
 	// A failed load yields nil cfg, which cliSessionStore treats as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	// The front-door Get rejects a present-but-non-session bead (ErrSessionNotFound)
+	// where the prior raw store.Get projected it; here that only tightens a
+	// crafted/stale id to the empty-return path below — not a regression.
 	info, err := sessionFrontDoor(sessStore).Get(sessionID)
 	if err != nil {
 		return ""

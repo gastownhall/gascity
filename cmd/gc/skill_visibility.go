@@ -64,7 +64,8 @@ func resolveVisibilityAgent(cityPath string, cfg *config.City, sessFront *sessio
 		}
 		info, err := sessFront.Get(id)
 		if err != nil {
-			return nil, err
+			// Name the user-supplied identifier, not the resolved bead id.
+			return nil, fmt.Errorf("loading session %q: %w", sessionID, err)
 		}
 		template := normalizedSessionTemplateInfo(info, cfg)
 		if template == "" {

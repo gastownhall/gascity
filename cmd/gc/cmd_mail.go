@@ -900,15 +900,11 @@ func isStorelessMailProvider() bool {
 	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
-// sessionMailboxAddress / sessionMailboxAddresses delegate to the session-class
-// front-door codec (internal/session) so the session-bead metadata vocabulary
-// (alias / alias_history / session_name) lives in one place. The per-session-id
-// resolution paths route through Store.MailboxAddress(es); these thin
-// wrappers remain for the list-scan sites that already hold a []beads.Bead.
-func sessionMailboxAddress(b beads.Bead) string {
-	return session.MailboxAddress(b)
-}
-
+// sessionMailboxAddresses delegates to the session-class front-door codec
+// (internal/session) so the session-bead metadata vocabulary (alias /
+// alias_history / session_name) lives in one place. Its sole remaining caller
+// holds a single bead already fetched by id; the list-scan sites now read
+// session.Info directly via session.MailboxAddress*FromInfo.
 func sessionMailboxAddresses(b beads.Bead) []string {
 	return session.MailboxAddresses(b)
 }

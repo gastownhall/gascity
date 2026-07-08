@@ -350,6 +350,42 @@ func TestSessionBeadSnapshotConstructorInfoEquivalence(t *testing.T) {
 	}
 }
 
+// TestSessionBeadSnapshotFromInfosTypedLookups pins the WI-6 W4 nit-1 fix: an
+// Info-built snapshot (raw open slice nil) must still answer the typed FindInfo*
+// lookups from openInfos + the index maps. Against the pre-fix code — where
+// findInfoByIDLocked / FindInfoByNamedIdentity scanned the nil open slice — every
+// assertion below returned (Info{}, false), silently stranding a future
+// Get-projection sweep built on this constructor.
+func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
+	seed := session.InfoFromPersistedBead(beads.Bead{
+		ID:     "ga-named-reviewer",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":                  "beads/reviewer",
+			"agent_name":                "beads/reviewer",
+			"configured_named_identity": "beads/reviewer",
+			"session_name":              "beads--reviewer",
+		},
+	})
+	snap := newSessionBeadSnapshotFromInfos([]session.Info{seed})
+
+	// Precondition: this is genuinely the nil-open (Info-built) shape the fix targets.
+	if snap.open != nil {
+		t.Fatalf("Info-built snapshot must leave open nil, got %d beads", len(snap.open))
+	}
+
+	if got, ok := snap.FindInfoByID("ga-named-reviewer"); !ok || got.ID != "ga-named-reviewer" {
+		t.Errorf("FindInfoByID = (%+v, %v), want the seeded info", got, ok)
+	}
+	if got, ok := snap.FindInfoByTemplate("beads/reviewer"); !ok || got.ID != "ga-named-reviewer" {
+		t.Errorf("FindInfoByTemplate = (%+v, %v), want the seeded info", got, ok)
+	}
+	if got, ok := snap.FindInfoByNamedIdentity("beads/reviewer"); !ok || got.ID != "ga-named-reviewer" {
+		t.Errorf("FindInfoByNamedIdentity = (%+v, %v), want the seeded info", got, ok)
+	}
+}
+
 func TestSessionBeadSnapshotIndexesCanonicalSingletonPoolManagedBead(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{
 		ID:     "refinery-session",
