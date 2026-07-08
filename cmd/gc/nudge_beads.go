@@ -13,16 +13,7 @@ const (
 	// mirrors this string privately (as labelNudge) for store routing; the two
 	// must stay in sync.
 	nudgeBeadLabel = "gc:nudge"
-	// nudgeLookupLimit bounds recovery lookups by the durable nudge ID label.
-	// Mirrors nudgequeue.NudgeLookupLimit so cmd/gc adapter tests can assert the
-	// bound the front door applies.
-	nudgeLookupLimit = nudgequeue.NudgeLookupLimit
 )
-
-// nudgeEnqueueRollbackCloseReason is the close_reason metadata value stamped on
-// a partially-created nudge bead when the enqueue transaction rolls back. It
-// mirrors nudgequeue.EnqueueRollbackCloseReason (the front door owns the write).
-const nudgeEnqueueRollbackCloseReason = nudgequeue.EnqueueRollbackCloseReason
 
 type nudgeReference = nudgequeue.Reference
 
@@ -53,13 +44,6 @@ func nudgeFrontDoor(store beads.NudgesStore) *nudgequeue.Store {
 
 func ensureQueuedNudgeBead(store beads.NudgesStore, item queuedNudge) (string, bool, error) {
 	return nudgeFrontDoor(store).Save(item)
-}
-
-// nudgeCanonicalCloseReason maps a terminalization state to the canonical
-// close_reason. Thin adapter over the front door's codec, retained for the
-// cmd/gc test that guards the >=20 char validator floor.
-func nudgeCanonicalCloseReason(stateCode string) string {
-	return nudgequeue.CanonicalCloseReason(stateCode)
 }
 
 func markQueuedNudgeTerminal(store beads.NudgesStore, item queuedNudge, state, reason, commitBoundary string, now time.Time) error {

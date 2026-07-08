@@ -93,7 +93,7 @@ type unusableCappedNudgeStore struct {
 }
 
 func (s unusableCappedNudgeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	items := make([]beads.Bead, nudgeLookupLimit+1)
+	items := make([]beads.Bead, nudgequeue.NudgeLookupLimit+1)
 	for i := range items {
 		items[i] = beads.Bead{
 			ID:     fmt.Sprintf("closed-nudge-%d", i),
@@ -3981,8 +3981,8 @@ func TestFindQueuedNudgeBead_UsesBoundedLookup(t *testing.T) {
 	if len(store.queries) != 1 {
 		t.Fatalf("List calls = %d, want 1", len(store.queries))
 	}
-	if got := store.queries[0].Limit; got != nudgeLookupLimit+1 {
-		t.Fatalf("List limit = %d, want %d", got, nudgeLookupLimit+1)
+	if got := store.queries[0].Limit; got != nudgequeue.NudgeLookupLimit+1 {
+		t.Fatalf("List limit = %d, want %d", got, nudgequeue.NudgeLookupLimit+1)
 	}
 	if got := store.queries[0].Sort; got != beads.SortCreatedDesc {
 		t.Fatalf("List sort = %q, want %q", got, beads.SortCreatedDesc)
@@ -3991,7 +3991,7 @@ func TestFindQueuedNudgeBead_UsesBoundedLookup(t *testing.T) {
 
 func TestFindQueuedNudgeBead_AllowsExactLookupLimit(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
-	for i := 0; i < nudgeLookupLimit; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit; i++ {
 		if _, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4012,7 +4012,7 @@ func TestFindQueuedNudgeBead_AllowsExactLookupLimit(t *testing.T) {
 func TestFindQueuedNudgeBead_ReturnsVisibleOpenBeadBeforeLookupLimit(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
 	var newest beads.Bead
-	for i := 0; i < nudgeLookupLimit+1; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
 		created, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4051,7 +4051,7 @@ func TestFindQueuedNudgeBead_ReportsLookupLimitWithoutUsableCandidate(t *testing
 
 func TestEnsureQueuedNudgeBead_DoesNotCreateWhenCappedPageHasOpenCandidate(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
-	for i := 0; i < nudgeLookupLimit+1; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
 		if _, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4075,15 +4075,15 @@ func TestEnsureQueuedNudgeBead_DoesNotCreateWhenCappedPageHasOpenCandidate(t *te
 	if err != nil {
 		t.Fatalf("list nudge beads: %v", err)
 	}
-	if len(items) != nudgeLookupLimit+1 {
-		t.Fatalf("nudge bead count = %d, want %d", len(items), nudgeLookupLimit+1)
+	if len(items) != nudgequeue.NudgeLookupLimit+1 {
+		t.Fatalf("nudge bead count = %d, want %d", len(items), nudgequeue.NudgeLookupLimit+1)
 	}
 }
 
 func TestFindAnyQueuedNudgeBead_ReturnsVisibleTerminalBeforeLookupLimit(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
 	var newestTerminal beads.Bead
-	for i := 0; i < nudgeLookupLimit+1; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
 		created, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4466,7 +4466,7 @@ func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
 //
 // This test pins the contract that the close_reason metadata flows
 // through every state markQueuedNudgeTerminal handles. The
-// nudgeCanonicalCloseReason helper guarantees the >=20 char floor.
+// nudgequeue.CanonicalCloseReason helper guarantees the >=20 char floor.
 func TestMarkQueuedNudgeTerminalStampsCloseReason(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -4509,7 +4509,7 @@ func TestMarkQueuedNudgeTerminalStampsCloseReason(t *testing.T) {
 			if bead.Status != "closed" {
 				t.Fatalf("bead.Status = %q, want closed", bead.Status)
 			}
-			want := nudgeCanonicalCloseReason(tc.state)
+			want := nudgequeue.CanonicalCloseReason(tc.state)
 			if got := bead.Metadata["close_reason"]; got != want {
 				t.Errorf("close_reason = %q, want %q", got, want)
 			}
@@ -4544,23 +4544,23 @@ func TestNudgeCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
 		"accepted_for_injection",
 	}
 	for _, s := range knownStates {
-		got := nudgeCanonicalCloseReason(s)
+		got := nudgequeue.CanonicalCloseReason(s)
 		if len(got) < 20 {
-			t.Errorf("nudgeCanonicalCloseReason(%q) = %q (%d chars), want >=20", s, got, len(got))
+			t.Errorf("nudgequeue.CanonicalCloseReason(%q) = %q (%d chars), want >=20", s, got, len(got))
 		}
 	}
 	// Unknown short code falls back to a >=20 char canonical phrase.
-	if got := nudgeCanonicalCloseReason("x"); len(got) < 20 {
+	if got := nudgequeue.CanonicalCloseReason("x"); len(got) < 20 {
 		t.Errorf("unknown-short-code fallback = %q (%d chars), want >=20", got, len(got))
 	}
 	// Empty input also yields a >=20 char fallback (avoids accidental
 	// short close_reason if a caller passes "").
-	if got := strings.TrimSpace(nudgeCanonicalCloseReason("")); len(got) < 20 {
+	if got := strings.TrimSpace(nudgequeue.CanonicalCloseReason("")); len(got) < 20 {
 		t.Errorf("trimmed empty-code fallback = %q (%d chars), want >=20", got, len(got))
 	}
 	// Codes already >=20 characters pass through unchanged.
 	const long = "a-very-long-state-code-already-sufficient"
-	if got := nudgeCanonicalCloseReason(long); got != long {
+	if got := nudgequeue.CanonicalCloseReason(long); got != long {
 		t.Errorf("long-code passthrough = %q, want %q", got, long)
 	}
 }
@@ -4610,13 +4610,13 @@ func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
 	if shadow.Open {
 		t.Fatalf("shadow open = true, want closed (rollback should have closed via store.Close)")
 	}
-	if shadow.CloseReason != nudgeEnqueueRollbackCloseReason {
-		t.Errorf("close_reason = %q, want %q", shadow.CloseReason, nudgeEnqueueRollbackCloseReason)
+	if shadow.CloseReason != nudgequeue.EnqueueRollbackCloseReason {
+		t.Errorf("close_reason = %q, want %q", shadow.CloseReason, nudgequeue.EnqueueRollbackCloseReason)
 	}
 	// Belt-and-braces: the canonical reason itself meets the validator
 	// floor. If someone shortens it without thinking, this guard fires.
-	if got := nudgeEnqueueRollbackCloseReason; len(got) < 20 {
-		t.Errorf("nudgeEnqueueRollbackCloseReason = %q (%d chars), want >=20 to satisfy validation.on-close=error", got, len(got))
+	if got := nudgequeue.EnqueueRollbackCloseReason; len(got) < 20 {
+		t.Errorf("nudgequeue.EnqueueRollbackCloseReason = %q (%d chars), want >=20 to satisfy validation.on-close=error", got, len(got))
 	}
 }
 
