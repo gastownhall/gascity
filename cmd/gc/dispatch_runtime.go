@@ -309,8 +309,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if !ok {
 		return fmt.Errorf("agent %q not found in config", agentName)
 	}
-	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
-	workEnv, err := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	scopes, err := workflowServeScopes(cityPath, cfg, &agentCfg)
 	if err != nil {
 		return fmt.Errorf("building work query env: %w", err)
 	}
@@ -322,12 +321,23 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
-	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
+	workflowTracef("serve start agent=%s city=%s stores=%s", agentCfg.QualifiedName(), cityPath, workflowServeScopePaths(scopes))
 	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+		_, err := drainWorkflowServeScopes(agentCfg, cityPath, scopes, workQuery, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	return runWorkflowServeFollowScopes(agentCfg, cityPath, scopes, workQuery, stderr)
+}
+
+func workflowServeScopePaths(scopes []workflowServeScope) string {
+	if len(scopes) == 0 {
+		return ""
+	}
+	paths := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		paths = append(paths, scope.storePath)
+	}
+	return strings.Join(paths, ",")
 }
 
 func requireWorkflowServeFollowSessionEnv() error {
@@ -422,6 +432,96 @@ type workflowServeDrainResult struct {
 	pendingAny   bool
 }
 
+type workflowServeScope struct {
+	storePath string
+	workEnv   map[string]string
+}
+
+func workflowServeScopes(cityPath string, cfg *config.City, agentCfg *config.Agent) ([]workflowServeScope, error) {
+	if agentCfg == nil {
+		return nil, nil
+	}
+	workDir := agentCommandDir(cityPath, agentCfg, cfg.Rigs)
+	workEnv, err := controllerWorkQueryEnv(cityPath, cfg, agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	scopes := []workflowServeScope{{
+		storePath: workDir,
+		workEnv:   workEnv,
+	}}
+	if !workflowServeShouldSweepRigStores(cityPath, cfg, agentCfg) {
+		return scopes, nil
+	}
+	seen := map[string]struct{}{}
+	for _, scope := range scopes {
+		if key := normalizePathForCompare(scope.storePath); key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		rigName := strings.TrimSpace(rig.Name)
+		rigRoot := strings.TrimSpace(rig.Path)
+		if rigName == "" || rigRoot == "" {
+			continue
+		}
+		if key := normalizePathForCompare(rigRoot); key != "" {
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		rigScopedAgent := *agentCfg
+		rigScopedAgent.Dir = rigName
+		env, err := controllerWorkQueryEnv(cityPath, cfg, &rigScopedAgent)
+		if err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, workflowServeScope{
+			storePath: rigRoot,
+			workEnv:   env,
+		})
+	}
+	return scopes, nil
+}
+
+func workflowServeShouldSweepRigStores(cityPath string, cfg *config.City, agentCfg *config.Agent) bool {
+	if cfg == nil || agentCfg == nil || !isWorkflowServeControlDispatcherAgent(*agentCfg) {
+		return false
+	}
+	return configuredRigName(cityPath, agentCfg, cfg.Rigs) == ""
+}
+
+func drainWorkflowServeScopes(agentCfg config.Agent, cityPath string, scopes []workflowServeScope, workQuery string, stderr io.Writer) (workflowServeDrainResult, error) {
+	if len(scopes) == 0 {
+		return workflowServeDrainResult{}, nil
+	}
+	if len(scopes) == 1 {
+		return drainWorkflowServeWork(agentCfg, cityPath, scopes[0].storePath, workQuery, scopes[0].workEnv, stderr)
+	}
+	combined := workflowServeDrainResult{}
+	for {
+		processedThisSweep := false
+		pendingThisSweep := false
+		for _, scope := range scopes {
+			drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, scope.storePath, workQuery, scope.workEnv, stderr)
+			if err != nil {
+				combined.processedAny = combined.processedAny || drainResult.processedAny
+				combined.pendingAny = combined.pendingAny || drainResult.pendingAny
+				return combined, err
+			}
+			combined.processedAny = combined.processedAny || drainResult.processedAny
+			combined.pendingAny = combined.pendingAny || drainResult.pendingAny
+			processedThisSweep = processedThisSweep || drainResult.processedAny
+			pendingThisSweep = pendingThisSweep || drainResult.pendingAny
+		}
+		if !processedThisSweep {
+			combined.pendingAny = combined.pendingAny || pendingThisSweep
+			return combined, nil
+		}
+	}
+}
+
 // drainWorkflowServeWork runs the control-dispatcher drain loop to completion
 // for a single invocation. Returns whether it advanced a control bead and
 // whether the queue still contains only pending work so the --follow caller
@@ -500,6 +600,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 }
 
 func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
+	return runWorkflowServeFollowScopes(agentCfg, cityPath, []workflowServeScope{{storePath: storePath, workEnv: workEnv}}, workQuery, stderr)
+}
+
+func runWorkflowServeFollowScopes(agentCfg config.Agent, cityPath string, scopes []workflowServeScope, workQuery string, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -524,7 +628,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
+		drainResult, err := drainWorkflowServeScopes(agentCfg, cityPath, scopes, workQuery, stderr)
 		if err != nil {
 			// A transient work-query/store failure — most commonly the
 			// work-query timeout (hookWorkQueryTimeout) when the bead store is

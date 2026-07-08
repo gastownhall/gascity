@@ -4030,6 +4030,111 @@ name = "myrig"
 	}
 }
 
+func TestRunWorkflowServeCityControlDispatcherSweepsRigStores(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "flow-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "gas-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "flow-city"
+` + testControlDispatcherAgentTOML("")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", fmt.Sprintf("[[rig]]\nname = \"flow-city\"\npath = %q\n", rigDir))
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	callsByDir := map[string]int{}
+	var sawCityStore bool
+	var sawRigStore bool
+	var rigEnv map[string]string
+	workflowServeList = func(_ string, dir string, env map[string]string) ([]hookBead, error) {
+		key := canonicalTestPath(dir)
+		callsByDir[key]++
+		switch key {
+		case canonicalTestPath(cityDir):
+			sawCityStore = true
+		case canonicalTestPath(rigDir):
+			sawRigStore = true
+			rigEnv = maps.Clone(env)
+			if callsByDir[key] == 1 {
+				return []hookBead{{
+					ID: "fc-s4g0",
+					Metadata: map[string]string{
+						"gc.kind":      "workflow-finalize",
+						"gc.routed_to": "control-dispatcher",
+					},
+				}}, nil
+			}
+		}
+		return nil, nil
+	}
+
+	var gotCityPath, gotStorePath, gotBeadID string
+	controlDispatcherServe = func(cityPath, storePath, beadID string, _ io.Writer, _ io.Writer) error {
+		gotCityPath = cityPath
+		gotStorePath = storePath
+		gotBeadID = beadID
+		return nil
+	}
+
+	if err := runWorkflowServe("control-dispatcher", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+	if !sawCityStore {
+		t.Fatal("city control-dispatcher did not scan the city store")
+	}
+	if !sawRigStore {
+		t.Fatal("city control-dispatcher did not scan the rig store")
+	}
+	if canonicalTestPath(gotCityPath) != canonicalTestPath(cityDir) {
+		t.Fatalf("control cityPath = %q, want %q", gotCityPath, cityDir)
+	}
+	if canonicalTestPath(gotStorePath) != canonicalTestPath(rigDir) {
+		t.Fatalf("control storePath = %q, want rig root %q", gotStorePath, rigDir)
+	}
+	if gotBeadID != "fc-s4g0" {
+		t.Fatalf("control beadID = %q, want fc-s4g0", gotBeadID)
+	}
+	if rigEnv == nil {
+		t.Fatal("missing rig work-query env")
+	}
+	if got := rigEnv["GC_STORE_ROOT"]; canonicalTestPath(got) != canonicalTestPath(rigDir) {
+		t.Fatalf("rig GC_STORE_ROOT = %q, want %q", got, rigDir)
+	}
+	if got := rigEnv["GC_STORE_SCOPE"]; got != "rig" {
+		t.Fatalf("rig GC_STORE_SCOPE = %q, want rig", got)
+	}
+}
+
 func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
