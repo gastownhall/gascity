@@ -1001,21 +1001,38 @@ func (t *Tmux) HasSession(name string) (bool, error) {
 	return true, nil
 }
 
-// ListSessions returns all session names.
-func (t *Tmux) ListSessions() ([]string, error) {
+// listSessionNames returns all session names, propagating ErrNoServer so
+// callers that must distinguish an unreachable server from a genuinely empty
+// session list can do so. [Tmux.ListSessions] absorbs ErrNoServer into an
+// empty result for its tmux-internal callers; the reconciler-facing
+// [Provider.ListRunning] uses this variant to surface a total outage as a
+// [runtime.PartialListError] instead of "no sessions".
+func (t *Tmux) listSessionNames() ([]string, error) {
 	out, err := t.run("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// ListSessions returns all session names. An unreachable tmux server is
+// absorbed into an empty result (no server = no sessions) for tmux-internal
+// callers (FindSessionByWorkDir, CleanupOrphanedSessions) that treat "server
+// down" and "no sessions" identically. Reconciler-facing liveness listing goes
+// through [Provider.ListRunning], which instead reports the outage as a
+// [runtime.PartialListError].
+func (t *Tmux) ListSessions() ([]string, error) {
+	names, err := t.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
 			return nil, nil // No server = no sessions
 		}
 		return nil, err
 	}
-
-	if out == "" {
-		return nil, nil
-	}
-
-	return strings.Split(out, "\n"), nil
+	return names, nil
 }
 
 // SessionSet provides O(1) session existence checks by caching session names.

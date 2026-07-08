@@ -592,9 +592,22 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 }
 
 // ListRunning returns all tmux session names matching the given prefix.
+//
+// A totally unreachable tmux server (ErrNoServer) is reported as a
+// [runtime.PartialListError] with a nil names slice rather than an empty
+// success: a single-tmux outage is a failed observation, not proof that zero
+// sessions exist. This activates the reconciler-facing IsPartialListError
+// guards (pool on_death, provider swap, shutdown listing, orphan cleanup) so a
+// brief server blip defers destructive action instead of tearing down healthy
+// sessions. It mirrors the multi-backend degraded-but-usable signal that
+// [runtime.MergeBackendListResults] produces for composite providers, and is
+// the ListRunning-side analog of the StateCache liveness fix in #4082.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	all, err := p.tm.ListSessions()
+	all, err := p.tm.listSessionNames()
 	if err != nil {
+		if errors.Is(err, ErrNoServer) {
+			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
+		}
 		return nil, err
 	}
 	var matched []string
