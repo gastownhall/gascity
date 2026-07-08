@@ -42,6 +42,39 @@ func TestConvergeShadowReconcilerWiringLive(t *testing.T) {
 	}
 }
 
+// TestConvergeShadowReconcilerEarlyContinueSkipped proves a pre-probe
+// early-continue path (here a bead with an unrecognized state, which the
+// forward-compat unknown-state branch skips BEFORE any runtime probe) is removed
+// from the shadow denominator with a typed skipEarlyContinue instead of being
+// counted as an evaluated clean comparison. Durable facts are captured at loop
+// entry, so without the markSkip wiring this session would reach finish with no
+// runtime probe and inflate sessions_evaluated (hardening 2).
+func TestConvergeShadowReconcilerEarlyContinueSkipped(t *testing.T) {
+	t.Setenv("GC_CONVERGE_SHADOW", "1")
+	prev := convergeShadowMetrics
+	convergeShadowMetrics = newConvergeShadowCounters()
+	t.Cleanup(func() { convergeShadowMetrics = prev })
+
+	env := newReconcilerTestEnv()
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	// An unrecognized state drives the forward-compat unknown-state early-continue.
+	env.setSessionMetadata(&session, map[string]string{"state": "archived"})
+
+	env.reconcile([]beads.Bead{session})
+
+	snap := convergeShadowMetrics.snapshot()
+	if snap.SessionsSkipped[skipEarlyContinue] == 0 {
+		t.Fatalf("early-continue tick was not skipped: skips=%v evaluated=%d", snap.SessionsSkipped, snap.SessionsEvaluated)
+	}
+	if snap.SessionsEvaluated != 0 {
+		t.Fatalf("unknown-state tick inflated the denominator: evaluated=%d", snap.SessionsEvaluated)
+	}
+	if snap.SessionsSkipped[skipCaptureLoss] != 0 {
+		t.Fatalf("skipped tick double-counted as capture_loss: %d", snap.SessionsSkipped[skipCaptureLoss])
+	}
+}
+
 // TestConvergeShadowReconcilerDisabledInert proves the reconciler is inert when
 // the harness is off: the global recorder is never attached and the denominator
 // does not move.

@@ -24,7 +24,7 @@ type convergeFixture struct {
 	// wantSurviving is the number of divergences that must survive replay (i.e.
 	// count against the acceptance bar) for this fixture. The clean corpus is all
 	// zeros; the canary flips one to non-zero via a broken derivation.
-	wantSurviving int
+	wantSurviving int64
 }
 
 var fixtureNow = time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
@@ -115,9 +115,9 @@ func convergeCleanCorpus() []convergeFixture {
 			runtimeCap: shadowRuntimeCapture{probeSite: "desired", probeTarget: canonName, runtimePresent: convergeTriTrue, processAlive: convergeTriTrue},
 			start:      map[string]string{sessionpkg.CanonicalInstanceNameMetadata: canonName},
 			end: map[string]string{
-				sessionpkg.CanonicalInstanceNameMetadata:  canonName,
-				sessionpkg.PrimingAttemptedAtMetadataKey:  "2026-07-08T12:00:00Z",
-				sessionpkg.PromptHashMetadataKey:          "hash-v1",
+				sessionpkg.CanonicalInstanceNameMetadata: canonName,
+				sessionpkg.PrimingAttemptedAtMetadataKey: "2026-07-08T12:00:00Z",
+				sessionpkg.PromptHashMetadataKey:         "hash-v1",
 			},
 			pred: convergePredictedValues{
 				primingAttemptedAt: "2026-07-08T12:00:00Z",
@@ -192,7 +192,7 @@ func convergeCleanCorpus() []convergeFixture {
 
 // runFixture evaluates one fixture through a fresh tick collector with the
 // harness force-enabled, and returns the resulting counter snapshot.
-func runFixture(t *testing.T, f convergeFixture, deriveOverride func(durableFacts, runtimeFacts) []sessConvergeAction) convergeCounterSnapshot {
+func runFixture(t *testing.T, f convergeFixture) convergeCounterSnapshot {
 	t.Helper()
 	t.Setenv("GC_CONVERGE_SHADOW", "1")
 	counters := newConvergeShadowCounters()
@@ -218,9 +218,9 @@ func runFixture(t *testing.T, f convergeFixture, deriveOverride func(durableFact
 func TestConvergeShadowCleanCorpus(t *testing.T) {
 	for _, f := range convergeCleanCorpus() {
 		t.Run(f.name, func(t *testing.T) {
-			snap := runFixture(t, f, nil)
-			if got := snap.survivingDivergences(); got != 0 {
-				t.Errorf("%s: surviving divergences = %d, want 0 (classes: %v)", f.name, got, snap.DivergenceTotal)
+			snap := runFixture(t, f)
+			if got := snap.survivingDivergences(); got != f.wantSurviving {
+				t.Errorf("%s: surviving divergences = %d, want %d (classes: %v)", f.name, got, f.wantSurviving, snap.DivergenceTotal)
 			}
 			if snap.SessionsEvaluated == 0 && snap.Incomparable == 0 {
 				t.Errorf("%s: nothing evaluated — flatlined denominator is a harness failure, not a pass", f.name)
@@ -260,7 +260,7 @@ func TestConvergeShadowSeededMutationCanary(t *testing.T) {
 			recorded:   []legacyCompareWrite{{key: sessionpkg.CanonicalInstanceNameMetadata, value: "dir/agent-1", writer: "syncSessionBeads"}},
 			realCity:   false, // fixture/execution semantics -> full oracle
 		}
-		snap := runFixture(t, f, nil)
+		snap := runFixture(t, f)
 		if snap.survivingDivergences() == 0 {
 			t.Fatalf("canary did not trip: comparator is dead (divergences: %v)", snap.DivergenceTotal)
 		}
@@ -355,6 +355,79 @@ func TestConvergeUnpredictedDeltaWhenRecorded(t *testing.T) {
 	}
 }
 
+// TestConvergeShadowRecordedWriteMustMaterialize asserts the real-city
+// shadowNoExecution oracle does NOT trust a recorder entry blindly: a recorded
+// legacy write only explains an owned key when its value actually landed in the
+// realized tick-end snapshot. A recorded write that vanished (end absent) or was
+// overwritten (end holds a different value) is a foreign_write divergence, not a
+// swallowed clean. This is the false-negative the harness exists to catch before
+// the 3d flip records canonical writes inside the tick.
+func TestConvergeShadowRecordedWriteMustMaterialize(t *testing.T) {
+	const worker = "dir/worker-1"
+	rec := []legacyCompareWrite{{key: sessionpkg.CanonicalInstanceNameMetadata, value: worker, writer: "syncSessionBeads"}}
+
+	t.Run("recorded_but_end_absent_diverges", func(t *testing.T) {
+		dv := evaluateStateDiffOracle("s", convergeCanonicalOwnedKeys,
+			map[string]string{}, // start: absent
+			map[string]string{}, // end: STILL absent — the recorded write never materialized
+			nil,
+			convergePredictedValues{},
+			rec,  // recorder claims legacy wrote canonical=worker this tick
+			true, // real-city shadow / no-execution mode
+		)
+		if len(dv) != 1 || dv[0].class != divergenceForeignWrite {
+			t.Fatalf("expected one foreign_write for a recorded-but-unmaterialized write, got %v", dv)
+		}
+		if dv[0].actual != "" || dv[0].predicted != worker {
+			t.Fatalf("expected predicted=%q actual=\"\", got predicted=%q actual=%q", worker, dv[0].predicted, dv[0].actual)
+		}
+	})
+
+	t.Run("recorded_but_end_overwritten_diverges", func(t *testing.T) {
+		dv := evaluateStateDiffOracle("s", convergeCanonicalOwnedKeys,
+			map[string]string{},
+			map[string]string{sessionpkg.CanonicalInstanceNameMetadata: "dir/other-9"}, // overwritten
+			nil,
+			convergePredictedValues{},
+			rec,
+			true,
+		)
+		if len(dv) != 1 || dv[0].class != divergenceForeignWrite {
+			t.Fatalf("expected one foreign_write for a recorded-then-overwritten write, got %v", dv)
+		}
+	})
+
+	t.Run("recorded_and_materialized_is_clean", func(t *testing.T) {
+		dv := evaluateStateDiffOracle("s", convergeCanonicalOwnedKeys,
+			map[string]string{},
+			map[string]string{sessionpkg.CanonicalInstanceNameMetadata: worker}, // materialized
+			[]sessConvergeAction{actionStampCanonicalIdentity},
+			convergePredictedValues{canonicalInstanceName: worker},
+			rec,
+			true,
+		)
+		if len(dv) != 0 {
+			t.Fatalf("a recorded write that materialized to the predicted value must be clean, got %v", dv)
+		}
+	})
+
+	t.Run("materialized_but_prediction_value_mismatch_diverges", func(t *testing.T) {
+		// Recorder + end agree on worker, but the derivation predicted a different
+		// canonical value: C4 value parity must flag the derived-vs-realized breach.
+		dv := evaluateStateDiffOracle("s", convergeCanonicalOwnedKeys,
+			map[string]string{},
+			map[string]string{sessionpkg.CanonicalInstanceNameMetadata: worker},
+			[]sessConvergeAction{actionStampCanonicalIdentity},
+			convergePredictedValues{canonicalInstanceName: "dir/wrong-2"}, // derived predicts wrong value
+			rec,
+			true,
+		)
+		if len(dv) != 1 || dv[0].class != divergenceValueMismatch {
+			t.Fatalf("expected one value_mismatch for a wrong derived prediction, got %v", dv)
+		}
+	})
+}
+
 // TestConvergeIdentitySkewSuppressed asserts a probe-target mismatch is
 // classified identity-skew (positive evidence) and never a hard divergence.
 func TestConvergeIdentitySkewSuppressed(t *testing.T) {
@@ -411,5 +484,38 @@ func TestApplyDerivedToOwnedKeysIdempotent(t *testing.T) {
 		if end[k] != v {
 			t.Errorf("key %q: got %q want %q", k, end[k], v)
 		}
+	}
+}
+
+// TestConvergeShadowMarkSkipLeavesDenominatorOnce proves a session captured at
+// loop entry and then skipped (a pre-probe early-continue tick) leaves the
+// denominator with exactly ONE typed skip: the skip reason increments, the tick
+// never counts as evaluated, and finish does NOT double-count it as capture_loss.
+// The last part is the regression guard — markSkip must forget the session in the
+// ordered set too, not just the eval map.
+func TestConvergeShadowMarkSkipLeavesDenominatorOnce(t *testing.T) {
+	t.Setenv("GC_CONVERGE_SHADOW", "1")
+	counters := newConvergeShadowCounters()
+	tick := newConvergeShadowTick("observer-test", 1, fixtureNow, true, counters)
+	if tick == nil {
+		t.Fatal("newConvergeShadowTick returned nil with harness enabled")
+	}
+	const sid = "sess-1"
+	// Capture durable facts at loop entry (as the reconciler does), then skip the
+	// tick before any runtime probe.
+	tick.captureDurable(sid, "tok", "dir/agent-1", durableFacts{now: fixtureNow}, map[string]string{}, convergePredictedValues{})
+	tick.markSkip(sid, skipEarlyContinue)
+	// finish must not resurrect the skipped session as capture-loss.
+	tick.finish(map[string]map[string]string{sid: {}})
+
+	snap := counters.snapshot()
+	if snap.SessionsSkipped[skipEarlyContinue] != 1 {
+		t.Fatalf("skipEarlyContinue = %d, want 1", snap.SessionsSkipped[skipEarlyContinue])
+	}
+	if snap.SessionsSkipped[skipCaptureLoss] != 0 {
+		t.Fatalf("skipCaptureLoss = %d, want 0 (skipped tick was double-counted)", snap.SessionsSkipped[skipCaptureLoss])
+	}
+	if snap.SessionsEvaluated != 0 {
+		t.Fatalf("SessionsEvaluated = %d, want 0 (a skipped tick is never evaluated)", snap.SessionsEvaluated)
 	}
 }

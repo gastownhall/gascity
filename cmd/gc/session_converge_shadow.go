@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -74,8 +75,10 @@ var convergeComparedKeySet = func() map[string]bool {
 }()
 
 // convergeShadowEnabled is the process-wide, fail-closed latch for the shadow
-// harness. It is read from GC_CONVERGE_SHADOW once and cached. An unset,
-// empty, unparseable, or false value is hard OFF (legacy-only, byte-identical).
+// harness. It is EVALUATED PER CALL — every invocation re-reads
+// GC_CONVERGE_SHADOW; the value is not latched or cached (tests toggle it via
+// t.Setenv, so do NOT wrap it in sync.OnceValue). An unset, empty, unparseable,
+// or false value is hard OFF (legacy-only, byte-identical).
 //
 // This is the OBSERVER kill-switch (the 138K/day wisp-flood precedent says the
 // observer needs one too). It is deliberately NOT the 3e per-city durable
@@ -107,9 +110,14 @@ const (
 	// divergenceUnpredictedDelta: an owned-key delta the derivation did not
 	// predict but which a legacy recorder entry explains (derivation gap).
 	divergenceUnpredictedDelta convergeDivergenceClass = "unpredicted_delta"
-	// divergenceForeignWrite: an owned-key delta with neither a recorder entry
-	// nor a derived prediction — some other writer (gc prime CLI, wake path,
-	// another observer). Must be zero for a soak to count.
+	// divergenceForeignWrite: an owned-key delta that no legacy recorder entry
+	// explains — either no compared-key write was recorded for it, or a recorded
+	// write did not materialize into the realized end snapshot. The start/end
+	// snapshots are built from this process's in-memory bead objects, so this
+	// detects only IN-PROCESS writers (the wake path, another in-process observer);
+	// a truly out-of-process writer (e.g. the separate `gc prime` CLI process)
+	// mutates the store, not these objects, and is not observable here. Must be
+	// zero for a soak to count.
 	divergenceForeignWrite convergeDivergenceClass = "foreign_write"
 	// divergenceFixpointNonEmpty: re-running deriveConvergeActions on END-of-tick
 	// facts returned a non-empty list (a derivation gap or a mid-tick mutation).
@@ -141,8 +149,12 @@ const (
 	// skipEarlyContinue: the legacy loop took an early-continue path (drain-ack,
 	// unknown-state) before the compared region, so there is nothing to compare.
 	skipEarlyContinue convergeSkipReason = "early_continue"
-	// skipShadowDisabled: the harness was not enabled for this session-tick.
-	skipShadowDisabled convergeSkipReason = "shadow_disabled"
+	// skipRecorderContended: a concurrent city tick already owned the process-global
+	// recorder for this window (the supervisor reconciles each city on its own
+	// goroutine), so this tick could not record its own legacy writes. Its sessions
+	// are skipped rather than scored against a recorder it does not own — an honest
+	// denominator instead of a false-divergence flood.
+	skipRecorderContended convergeSkipReason = "recorder_contended"
 )
 
 // convergeShadowCounters holds the in-process, monotonic Stage-3 metrics. These
@@ -156,8 +168,8 @@ type convergeShadowCounters struct {
 	incomparable      int64
 	recordsDropped    int64
 
-	compareTotal    map[string]int64                 // by derived action type
-	derived         map[string]int64                 // deriveConvergeActions emissions
+	compareTotal    map[string]int64                  // by derived action type
+	derived         map[string]int64                  // deriveConvergeActions emissions
 	divergenceTotal map[convergeDivergenceClass]int64 // by class
 }
 
@@ -287,9 +299,10 @@ func (c *convergeShadowCounters) snapshot() convergeCounterSnapshot {
 	return cp
 }
 
-// divergenceCount returns the total divergences that survived replay (i.e. the
-// classes that count against the acceptance bar). world_moved and boundary are
-// suppressed-but-counted classes and are excluded.
+// survivingDivergences returns the total divergences that survived replay (i.e.
+// the classes that count against the acceptance bar). world_moved, boundary, and
+// identity_skew are suppressed / positive-evidence classes: they are counted, but
+// excluded here because they do not fail the soak.
 func (s convergeCounterSnapshot) survivingDivergences() int64 {
 	var total int64
 	for class, n := range s.DivergenceTotal {
@@ -301,6 +314,24 @@ func (s convergeCounterSnapshot) survivingDivergences() int64 {
 		}
 	}
 	return total
+}
+
+// operatorSummary renders a single bounded, operator-facing line describing the
+// shadow soak signal: the proven denominator (evaluated sessions), the typed
+// skips that keep it honest, the count of incomparable ticks, the
+// surviving-divergence count that gates a soak, and dropped records. It is the
+// read path (Q3: no new event type — a behind-latch line on the reconciler's
+// existing stderr operator channel) that lets a live GC_CONVERGE_SHADOW soak be
+// observed end to end rather than incrementing counters nothing can read.
+func (s convergeCounterSnapshot) operatorSummary() string {
+	var skipped int64
+	for _, n := range s.SessionsSkipped {
+		skipped += n
+	}
+	return fmt.Sprintf(
+		"converge-shadow soak: evaluated=%d skipped=%d incomparable=%d surviving_divergences=%d dropped=%d",
+		s.SessionsEvaluated, skipped, s.Incomparable, s.survivingDivergences(), s.RecordsDropped,
+	)
 }
 
 // --- tri-state runtime facts (3a) ---------------------------------------------
@@ -425,6 +456,15 @@ func (r *legacyWriteRecorder) forSession(sessionID string) []legacyCompareWrite 
 // convergeGlobalRecorder is the process-global recorder the wired legacy write
 // sites feed. It is attached (non-nil) only while a shadow tick is in flight and
 // the harness is enabled; otherwise the write-site wrappers see nil and bail.
+//
+// The supervisor reconciles each city on its own goroutine, so multiple enabled
+// ticks can overlap in wall-clock. This is a single-owner slot guarded by an
+// ownership token (compare-and-swap): only the tick that installs the recorder
+// owns it, and only that tick may clear it (newConvergeShadowTick attaches via
+// CAS(nil,rec); convergeShadowTick.detach clears via CAS(rec,nil)). A concurrent
+// tick that loses the install CAS is a no-owner — it records nothing of its own
+// and skips its sessions at finish — so one city's tick can neither overwrite,
+// prematurely clear, nor misattribute another city's compared-key writes.
 var convergeGlobalRecorder atomic.Pointer[legacyWriteRecorder]
 
 // recordLegacyCompareWrites is THE recording wrapper every legacy write site of a
@@ -560,15 +600,22 @@ func evaluateStateDiffOracle(
 		actualChange := end[k] != start[k]
 
 		if shadowNoExecution {
-			// Foreign write: realized owned-key delta with no legacy recorder entry.
-			if actualChange && !recordedKeys[k] {
+			// Real-city shadow: the derived heal is NOT executed, so predicted-but-
+			// unrealized writes are EXPECTED and not flagged. A recorded legacy write
+			// only "explains" an owned key when it actually MATERIALIZED (realized end
+			// value == recorded value); otherwise it never landed (ApplyPatch failed)
+			// or was overwritten, so the realized state is NOT recorder-explained and
+			// must not be swallowed as clean — the false-negative this harness most
+			// needs to avoid. C4 value parity additionally flags a derived stamp whose
+			// value disagrees with the realized end (== recorded value here, so it
+			// compares against both). Pulled forward from Stage 5.
+			switch {
+			case recordedKeys[k] && end[k] != recordedValue[k]:
+				out = append(out, ownedKeyDivergence{sessionID, k, divergenceForeignWrite, recordedValue[k], end[k]})
+			case recordedKeys[k] && predictedChange && predEnd[k] != end[k]:
+				out = append(out, ownedKeyDivergence{sessionID, k, divergenceValueMismatch, predEnd[k], end[k]})
+			case !recordedKeys[k] && actualChange:
 				out = append(out, ownedKeyDivergence{sessionID, k, divergenceForeignWrite, "", end[k]})
-				continue
-			}
-			// C4 value parity: a derived stamp whose value disagrees with the value
-			// legacy actually wrote this tick. Pulled forward from Stage 5.
-			if predictedChange && recordedKeys[k] && predEnd[k] != recordedValue[k] {
-				out = append(out, ownedKeyDivergence{sessionID, k, divergenceValueMismatch, predEnd[k], recordedValue[k]})
 			}
 			continue
 		}
@@ -631,7 +678,7 @@ type replayInput struct {
 	runtime runtimeFacts
 	// legacyValues are the values the legacy path actually READ at decision time
 	// (used for deterministic replay). Empty when the legacy path did not read.
-	legacyValues durableFacts
+	legacyValues  durableFacts
 	legacyRuntime runtimeFacts
 	// legacyReplayable is true when legacyValues/legacyRuntime were captured, so
 	// a deterministic replay can run.
@@ -805,6 +852,13 @@ type convergeShadowTick struct {
 	counters  *convergeShadowCounters
 	evals     map[string]*shadowSessionEval
 	orderedID []string
+	// owned reports whether this tick won the ownership CAS for the process-global
+	// recorder. A tick that did not (a concurrent city tick owns it this window)
+	// records nothing and skips its sessions at finish.
+	owned bool
+	// detached guards detach() so it runs exactly once even though both finish and
+	// the reconciler's safety-net defer call it.
+	detached bool
 }
 
 // newConvergeShadowTick returns a live collector when the harness is enabled and
@@ -824,8 +878,27 @@ func newConvergeShadowTick(observerID string, tickSeq int64, tickNow time.Time, 
 		counters:   counters,
 		evals:      map[string]*shadowSessionEval{},
 	}
-	convergeGlobalRecorder.Store(rec)
+	// Ownership token: install the recorder only if no concurrent city tick already
+	// holds the slot. The loser stays a no-owner (owned=false) and its write sites
+	// will observe the winner's recorder but under this tick's globally-unique
+	// session ids, so they can never cross into the winner's own read-back.
+	t.owned = convergeGlobalRecorder.CompareAndSwap(nil, rec)
 	return t
+}
+
+// detach releases this tick's claim on the process-global recorder. It is
+// idempotent (finish and the reconciler's safety-net defer both call it) and
+// clears the slot only when this tick owns it, via CAS(rec,nil) — so a concurrent
+// owner's live recorder is never torn out from under it. A no-owner tick has
+// nothing to release.
+func (t *convergeShadowTick) detach() {
+	if t == nil || t.detached {
+		return
+	}
+	t.detached = true
+	if t.owned {
+		convergeGlobalRecorder.CompareAndSwap(t.recorder, nil)
+	}
 }
 
 // captureDurable records the durable facts + tick-start compared-key snapshot for
@@ -871,15 +944,28 @@ func (t *convergeShadowTick) captureRuntime(sessionID, probeSite, probeTarget st
 }
 
 // markSkip records a typed skip reason for a session-tick that cannot be
-// compared, keeping the denominator honest.
-func (t *convergeShadowTick) markSkip(sessionID string, r convergeSkipReason) {
+// compared, keeping the denominator honest. It drops the session from BOTH the
+// eval map and the ordered set so finish never re-counts a skipped tick as
+// capture-loss — a skipped session leaves the denominator exactly once.
+func (t *convergeShadowTick) markSkip(sessionID string, r convergeSkipReason) { //nolint:unparam // typed skip-and-remove primitive over the full skip vocabulary; only skipEarlyContinue needs mid-loop removal today
 	if t == nil {
 		return
 	}
 	if t.counters != nil {
 		t.counters.incSkipped(r)
 	}
+	if _, ok := t.evals[sessionID]; !ok {
+		// Never captured (skipped before captureDurable): count once, nothing to drop.
+		return
+	}
 	delete(t.evals, sessionID)
+	kept := t.orderedID[:0]
+	for _, id := range t.orderedID {
+		if id != sessionID {
+			kept = append(kept, id)
+		}
+	}
+	t.orderedID = kept
 }
 
 // finish evaluates every captured session against its tick-end snapshot (read
@@ -890,7 +976,19 @@ func (t *convergeShadowTick) finish(endSnaps map[string]map[string]string) {
 	if t == nil {
 		return
 	}
-	defer convergeGlobalRecorder.Store(nil)
+	defer t.detach()
+
+	// A concurrent city tick owns the process-global recorder this window, so this
+	// tick recorded none of its own legacy writes. Scoring against a recorder it
+	// does not own would flag every owned-key delta as a phantom foreign_write, so
+	// every captured session is a typed recorder_contended skip instead — the
+	// denominator stays honest and no false divergence is manufactured.
+	if !t.owned {
+		for range t.orderedID {
+			t.counters.incSkipped(skipRecorderContended)
+		}
+		return
+	}
 
 	ownedKeys := convergeCanonicalOwnedKeys
 	if !t.realCity {
@@ -908,80 +1006,99 @@ func (t *convergeShadowTick) finish(endSnaps map[string]map[string]string) {
 			t.counters.incSkipped(skipCaptureLoss)
 			continue
 		}
-		// A present-only runtime capture (alive unknown) cannot be compared for
-		// live-gated actions: mark NOT-COMPARABLE unless it did not probe at all.
-		rf := e.runtimeCap.runtimeFacts()
-		if e.runtimeCap.runtimePresent == convergeTriTrue && !e.runtimeCap.fullyProbed() {
-			t.counters.incIncomparable()
-			t.counters.incSkipped(skipNotComparable)
-			continue
-		}
+		t.evaluateCaptured(e, end, ownedKeys)
+	}
 
-		t.counters.incEvaluated()
+	t.tallyDroppedRecords()
+}
 
-		actions := deriveConvergeActions(e.durable, rf)
-		for _, a := range actions {
-			t.counters.incDerived(actionName(a))
-		}
+// evaluateCaptured runs the owned-key oracle, the fixpoint invariant (fixtures
+// only), and the replay comparator for one fully captured session against its
+// tick-end snapshot, updating the counters. A present-only runtime capture (alive
+// unknown) is NOT-COMPARABLE for live-gated actions and leaves the denominator
+// instead of being scored.
+func (t *convergeShadowTick) evaluateCaptured(e *shadowSessionEval, end map[string]string, ownedKeys []string) {
+	rf := e.runtimeCap.runtimeFacts()
+	if e.runtimeCap.runtimePresent == convergeTriTrue && !e.runtimeCap.fullyProbed() {
+		t.counters.incIncomparable()
+		t.counters.incSkipped(skipNotComparable)
+		return
+	}
 
-		// Oracle: attribute owned-key deltas. On real cities the derived heal is
-		// not executed, so shadowNoExecution suppresses the flip-stage
-		// end==apply(derived,start) assertion and keeps only foreign-write +
-		// C4 value-parity (no unrealized-prediction flood).
-		shadowNoExecution := t.realCity
-		recorded := t.recorder.forSession(id)
-		for _, dv := range evaluateStateDiffOracle(id, ownedKeys, e.startSnap, end, actions, e.pred, recorded, shadowNoExecution) {
-			t.counters.incDivergence(dv.class)
-		}
+	t.counters.incEvaluated()
 
-		// Fixpoint (fixtures only): re-derive on END-of-tick facts must be empty.
-		// This is a flip-stage invariant — in real-city shadow the derived heal is
-		// unexecuted, so the record stays absent and a canonical re-derive would be
-		// expected-non-empty; running it there would be a permanent false positive.
-		if !t.realCity {
-			endDurable := e.durable
-			endDurable.canonicalIdentity = strings.TrimSpace(end[sessionpkg.CanonicalInstanceNameMetadata])
-			endDurable.primedAt = end[sessionpkg.PrimedAtMetadataKey]
-			if v := strings.TrimSpace(end[sessionpkg.PrimingAttemptedAtMetadataKey]); v != "" {
-				if ts, err := time.Parse(time.RFC3339, v); err == nil {
-					endDurable.primingAttemptedAt = ts.UTC()
-				}
-			}
-			endDurable.primedPromptHash = end[sessionpkg.PromptHashMetadataKey]
-			if fp := deriveConvergeActions(endDurable, rf); len(fp) > 0 {
-				for range fp {
-					t.counters.incDivergence(divergenceFixpointNonEmpty)
-				}
-			}
-		}
+	actions := deriveConvergeActions(e.durable, rf)
+	for _, a := range actions {
+		t.counters.incDerived(actionName(a))
+	}
 
-		// Replay comparator: action-set agreement under suppression/replay.
-		verdict := compareReplay(replayInput{
-			sessionID:         id,
-			instanceToken:     e.instanceToken,
-			durable:           e.durable,
-			runtime:           rf,
-			legacyReplayable:  false,
-			suppression:       e.suppression,
-			primingExcluded:   t.realCity,
-			factsProbeTarget:  e.factsTarget,
-			legacyProbeTarget: e.legacyTarget,
-		})
-		for _, a := range verdict.comparedActions {
-			t.counters.incCompare(actionName(a))
-		}
-		for _, class := range verdict.divergences {
-			t.counters.incDivergence(class)
-		}
-		for _, class := range verdict.suppressed {
-			t.counters.incDivergence(class)
+	// Oracle: attribute owned-key deltas. On real cities the derived heal is not
+	// executed, so shadowNoExecution (== realCity) suppresses the flip-stage
+	// end==apply(derived,start) assertion and keeps only foreign-write + C4
+	// value-parity (no unrealized-prediction flood).
+	recorded := t.recorder.forSession(e.sessionID)
+	for _, dv := range evaluateStateDiffOracle(e.sessionID, ownedKeys, e.startSnap, end, actions, e.pred, recorded, t.realCity) {
+		t.counters.incDivergence(dv.class)
+	}
+
+	// Fixpoint (fixtures only): re-derive on END-of-tick facts must be empty. In
+	// real-city shadow the derived heal is unexecuted, so a canonical re-derive
+	// would be expected-non-empty; running it there would be a permanent false
+	// positive.
+	if !t.realCity {
+		residual := fixpointResidual(e.durable, end, rf)
+		for i := 0; i < residual; i++ {
+			t.counters.incDivergence(divergenceFixpointNonEmpty)
 		}
 	}
 
-	if t.recorder != nil && t.recorder.dropped > 0 {
-		for i := int64(0); i < t.recorder.dropped; i++ {
-			t.counters.incRecordsDropped()
+	// Replay comparator: action-set agreement under suppression/replay.
+	verdict := compareReplay(replayInput{
+		sessionID:         e.sessionID,
+		instanceToken:     e.instanceToken,
+		durable:           e.durable,
+		runtime:           rf,
+		legacyReplayable:  false,
+		suppression:       e.suppression,
+		primingExcluded:   t.realCity,
+		factsProbeTarget:  e.factsTarget,
+		legacyProbeTarget: e.legacyTarget,
+	})
+	for _, a := range verdict.comparedActions {
+		t.counters.incCompare(actionName(a))
+	}
+	for _, class := range verdict.divergences {
+		t.counters.incDivergence(class)
+	}
+	for _, class := range verdict.suppressed {
+		t.counters.incDivergence(class)
+	}
+}
+
+// fixpointResidual re-derives the converge actions on the END-of-tick durable
+// facts. A non-empty result is a flip-stage invariant breach (a derivation gap or
+// a mid-tick mutation); the residual action count is returned so each is counted.
+func fixpointResidual(durable durableFacts, end map[string]string, rf runtimeFacts) int {
+	endDurable := durable
+	endDurable.canonicalIdentity = strings.TrimSpace(end[sessionpkg.CanonicalInstanceNameMetadata])
+	endDurable.primedAt = end[sessionpkg.PrimedAtMetadataKey]
+	if v := strings.TrimSpace(end[sessionpkg.PrimingAttemptedAtMetadataKey]); v != "" {
+		if ts, err := time.Parse(time.RFC3339, v); err == nil {
+			endDurable.primingAttemptedAt = ts.UTC()
 		}
+	}
+	endDurable.primedPromptHash = end[sessionpkg.PromptHashMetadataKey]
+	return len(deriveConvergeActions(endDurable, rf))
+}
+
+// tallyDroppedRecords folds the recorder's dropped-write count (compared-key
+// writes seen before a bead ID existed) into the counters.
+func (t *convergeShadowTick) tallyDroppedRecords() {
+	if t.recorder == nil {
+		return
+	}
+	for i := int64(0); i < t.recorder.dropped; i++ {
+		t.counters.incRecordsDropped()
 	}
 }
 
