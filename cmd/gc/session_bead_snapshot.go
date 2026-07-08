@@ -162,27 +162,85 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 }
 
 // newSessionBeadSnapshotFromInfos builds a snapshot from a typed session.Info
-// feed instead of raw beads. It populates ONLY openInfos — the non-closed
-// entries (filtered by info.Closed) in the caller's order. The raw
-// open []beads.Bead slice and the agent/template index maps are left nil
-// because this constructor backs resolvePreservedConfiguredNamedSessionTemplate's
-// feed, whose sole reachable snapshot read is OpenInfos(); the beadNames
-// pre-seed short-circuits FindSessionNameByTemplate, so the index maps are never
-// consulted on that path. Do NOT call Open(), the raw Find* methods, or the
-// Find*ByTemplate index lookups on a snapshot built this way — they return
-// empty. This is the front-door replacement for newSessionBeadSnapshot(ordered)
-// at the reconciler's mid-tick preserve call: feeding the live infoByID rather
-// than the raw working set keeps membership tracking mid-tick closes once the
-// raw Status lockstep is dropped.
+// feed instead of raw beads. It is the full front-door constructor: it
+// populates openInfos AND the four agent/template index maps, reading typed
+// Info fields through the equivalence-proven classifier twins
+// (sessionBeadAgentNameInfo, isPoolManagedSessionInfo,
+// stampedPoolQualifiedIdentityInfo, isCanonicalPoolManagedSessionInfoForTemplate)
+// in place of the raw metadata reads newSessionBeadSnapshot uses. The index
+// precedence — canonical configured_named beads win the agent/template index,
+// pool-managed beads skip the template-hint index, and common_name provides the
+// last-resort hint — is identical to the raw constructor and pinned by
+// TestSessionBeadSnapshotConstructorInfoEquivalence across the fixture corpus so
+// an index-precedence divergence (which strands named sessions invisibly) fails
+// the build.
+//
+// The raw open []beads.Bead slice is left nil: an Info-fed snapshot has no
+// backing beads, so the raw-half readers (Open, FindByID, the FindSessionBead*
+// family) return empty on it. Callers that need those must build the snapshot
+// from beads via newSessionBeadSnapshot.
 func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
+	beadIDByAgentName := make(map[string]string)
+	beadIDByTemplateHint := make(map[string]string)
+	sessionNameByAgentName := make(map[string]string)
+	sessionNameByTemplateHint := make(map[string]string)
+
 	openInfos := make([]sessionpkg.Info, 0, len(infos))
+
 	for _, in := range infos {
 		if in.Closed {
 			continue
 		}
 		openInfos = append(openInfos, in)
+
+		sn := in.SessionNameMetadata
+		if sn == "" {
+			continue
+		}
+		isCanonicalNamed := strings.TrimSpace(in.ConfiguredNamedIdentity) != ""
+		if agentName := sessionBeadAgentNameInfo(in); agentName != "" {
+			if isPoolManagedSessionInfo(in) && agentName == in.Template {
+				if stamped := stampedPoolQualifiedIdentityInfo(in); stamped != "" {
+					agentName = stamped
+				} else if !isCanonicalPoolManagedSessionInfoForTemplate(in, agentName) {
+					agentName = ""
+				}
+			}
+			if agentName == "" {
+				continue
+			}
+			// Canonical named session beads always win the index so
+			// resolveSessionName returns the correct session_name even
+			// when leaked pool-style beads exist for the same template.
+			if _, exists := sessionNameByAgentName[agentName]; !exists || isCanonicalNamed {
+				beadIDByAgentName[agentName] = in.ID
+				sessionNameByAgentName[agentName] = sn
+			}
+		}
+		if isPoolManagedSessionInfo(in) {
+			continue
+		}
+		if template := in.Template; template != "" {
+			if _, exists := sessionNameByTemplateHint[template]; !exists || isCanonicalNamed {
+				beadIDByTemplateHint[template] = in.ID
+				sessionNameByTemplateHint[template] = sn
+			}
+		}
+		if commonName := in.CommonName; commonName != "" {
+			if _, exists := sessionNameByTemplateHint[commonName]; !exists {
+				beadIDByTemplateHint[commonName] = in.ID
+				sessionNameByTemplateHint[commonName] = sn
+			}
+		}
 	}
-	return &sessionBeadSnapshot{openInfos: openInfos}
+
+	return &sessionBeadSnapshot{
+		openInfos:                 openInfos,
+		beadIDByAgentName:         beadIDByAgentName,
+		beadIDByTemplateHint:      beadIDByTemplateHint,
+		sessionNameByAgentName:    sessionNameByAgentName,
+		sessionNameByTemplateHint: sessionNameByTemplateHint,
+	}
 }
 
 // replaceOpenLocked replaces the snapshot's open set and rebuilt lookup maps
