@@ -1589,13 +1589,13 @@ func commitAsyncStartResultWithContext(
 // NOT a forbidden per-patch re-Get: it fires once per async start commit, on the
 // budget-limited start path, never once per reconciler metadata write.
 //
-// The read goes through the session front door via GetWithBead, a SINGLE store
+// The read goes through the session front door via GetBeadWithInfo, a SINGLE store
 // fetch that yields the raw bead AND its Info projection from one snapshot. This
 // matters: the still-raw staleness gates (asyncStartPreparedCommandStale,
 // asyncStartSessionStillCurrent) and the commit-time decision reads (which project
 // off candidate.info downstream) MUST see the same state — two sequential Gets would
 // let a cross-process writer (bd CLI, API sleep/close) split the gate view from the
-// commit view. GetWithBead applies the front-door session gate: a mid-start bead that
+// commit view. GetBeadWithInfo applies the front-door session gate: a mid-start bead that
 // lost BOTH its type AND its gc:session label (IsSessionBeadOrRepairable == false)
 // takes the refresh-failed path (lease released, retry next tick) instead of
 // committing — a documented, vanishingly-rare W5 delta from the raw store.Get, pinned
@@ -1607,7 +1607,7 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 	if store == nil || session == nil || strings.TrimSpace(session.ID) == "" {
 		return result, true, false, false
 	}
-	current, currentInfo, err := sessionFrontDoor(store).GetWithBead(session.ID)
+	current, currentInfo, err := sessionFrontDoor(store).GetBeadWithInfo(session.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
 		return result, false, false, true

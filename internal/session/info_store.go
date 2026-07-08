@@ -219,7 +219,7 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 	return InfoFromPersistedBead(b), PersistedResponseFromBead(b), nil
 }
 
-// GetWithBead returns the validated raw session bead alongside its typed Info
+// GetBeadWithInfo returns the validated raw session bead alongside its typed Info
 // projection from a SINGLE store fetch. It shares Get's exact gate/error contract
 // (validatedBead: ErrSessionNotFound for a present-but-non-session bead, the wrapped
 // store not-found error for an absent id), so a caller that needs BOTH the raw bead
@@ -227,8 +227,10 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 // with no inter-Get window where a cross-process writer could split the two views.
 // The raw bead escapes deliberately for those transitional consumers and retires
 // with them; new callers should prefer Get. This is the (Bead, Info) analogue of
-// GetPersistedResponse's (Info, PersistedResponse) single-fetch pairing.
-func (s *Store) GetWithBead(id string) (beads.Bead, Info, error) {
+// GetPersistedResponse's (Info, PersistedResponse) single-fetch pairing. Named for
+// its (beads.Bead, Info, error) return order — deliberately distinct from the
+// W3-retiring Manager.GetWithBead (which returns (Info, beads.Bead, error)).
+func (s *Store) GetBeadWithInfo(id string) (beads.Bead, Info, error) {
 	b, err := s.validatedBead(id)
 	if err != nil {
 		return beads.Bead{}, Info{}, err
