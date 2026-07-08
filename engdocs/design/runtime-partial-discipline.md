@@ -23,11 +23,32 @@ exist", so a brief blip drove the reconciler to drain/close healthy pool slots.
   (wrapping the original cause) instead of an empty *success*. `refresh()`
   therefore preserves the cache's last-known-good until the existing `staleTTL`
   cliff, so a brief outage no longer collapses `IsRunning` to false. This is the
-  highest-leverage single point: the reconciler's liveness reads all flow
-  through `StateCache.IsRunning`, so protecting the observation source shields
-  every downstream destructive arm at once, bounded by `staleTTL` (30s default).
-  The wrapped error still satisfies `isNoServerError`, so the ~20 existing
-  `ErrNoServer` absorbers are unaffected.
+  highest-leverage single point on the **liveness** path: the reconciler's
+  `IsRunning` / `ObserveLiveness` reads all flow through `StateCache`, so
+  protecting the observation source shields that whole path at once, bounded by
+  `staleTTL` (30s default). The wrapped error still satisfies `isNoServerError`,
+  so the ~20 existing `ErrNoServer` absorbers are unaffected.
+
+### Still exposed: the `ListRunning` sites
+
+The `FetchState` fix shields the `StateCache.IsRunning` liveness path, but NOT
+`Provider.ListRunning` (via `Tmux.ListSessions`), which still returns
+`(nil, nil)` on `ErrNoServer` — an empty *success*, not a partial signal. Three
+reconciler-facing sites call `ListRunning` destructively on that empty result:
+
+- `cmd/gc/city_runtime.go:960` — pool `on_death` hooks. On a full tmux outage
+  every pool slot vanishes from the empty listing at once, so the tick fires the
+  user's `on_death` command for EVERY pool slot: a false death storm.
+- `cmd/gc/city_runtime.go:1899` — provider swap on config reload.
+- `cmd/gc/city_runtime.go:3466` / `:3478` — shutdown (and the force-shutdown
+  late-async-start re-list) session listing.
+
+All four `IsPartialListError` guards at those call sites already exist (verified
+in-tree), but none fires today because `ListRunning` returns a nil error on
+`ErrNoServer`. The clean completion path is doc-only from here: emit the
+EXISTING `PartialListError` from `Provider.ListRunning` / `Tmux.ListSessions` on
+`ErrNoServer` (arm 6 below), which activates all four guards with no new
+plumbing — the `on_death` storm is arm 4.
 
 ### Bounded behavior change (maintainer, please confirm)
 
