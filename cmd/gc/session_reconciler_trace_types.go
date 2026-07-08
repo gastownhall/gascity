@@ -295,9 +295,7 @@ type TraceEvaluationStatus string
 const (
 	TraceEvaluationEligible          TraceEvaluationStatus = "eligible"
 	TraceEvaluationDependencyBlocked TraceEvaluationStatus = "dependency_blocked"
-	TraceEvaluationCapRejected       TraceEvaluationStatus = "cap_rejected"
 	TraceEvaluationStorePartial      TraceEvaluationStatus = "store_partial"
-	TraceEvaluationMissingTemplate   TraceEvaluationStatus = "missing_template"
 	TraceEvaluationSkipped           TraceEvaluationStatus = "skipped"
 )
 
@@ -331,28 +329,6 @@ const (
 	TraceArmSourceManual TraceArmSource = "manual"
 	TraceArmSourceAuto   TraceArmSource = "auto"
 )
-
-type TraceTextBlob struct {
-	Value         string `json:"value"`
-	OriginalBytes int    `json:"original_bytes"`
-	StoredBytes   int    `json:"stored_bytes"`
-	Truncated     bool   `json:"truncated"`
-}
-
-func NewTraceTextBlob(value string, maxBytes int) TraceTextBlob {
-	b := []byte(value)
-	blob := TraceTextBlob{
-		Value:         value,
-		OriginalBytes: len(b),
-		StoredBytes:   len(b),
-	}
-	if maxBytes > 0 && len(b) > maxBytes {
-		blob.Value = string(b[:maxBytes])
-		blob.StoredBytes = maxBytes
-		blob.Truncated = true
-	}
-	return blob
-}
 
 type SessionReconcilerTraceRecord struct {
 	TraceSchemaVersion    int                     `json:"trace_schema_version"`

@@ -320,9 +320,56 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 	if len(fresh) == 0 {
 		return
 	}
+	sessionChanged := containsSessionEvent(fresh)
 	if proj.Apply(fresh) {
 		st.marks = t.build(proj, st.marks, nil)
 	}
+	if sessionChanged {
+		// Session lifecycle events don't change the bead fold (proj.Apply ignores
+		// them), so build() — and its subscriber notify — may not have fired. But
+		// they DO change the live session links the detail projection layers on, so
+		// eagerly refresh the sessions enrichment and wake the detail-stream
+		// subscribers: an idle run's session-link flip then pushes without waiting
+		// for the next bead event or the sessions TTL. Rare session events that land
+		// only in the rotation catch-up path recover on the next poll / the TTL.
+		t.refreshSessionEnrichment()
+	}
+}
+
+// sessionEventPrefix is the common prefix of every session lifecycle event
+// (session.updated / .woke / .stopped / .crashed / …).
+const sessionEventPrefix = "session."
+
+// containsSessionEvent reports whether any freshly-folded event is a session
+// lifecycle event. Such events do not change the bead fold, so build() ignores
+// them, but they change the live session enrichment the detail projection layers
+// on — the reason foldNext refreshes sessions and wakes the detail stream.
+func containsSessionEvent(fresh []events.Event) bool {
+	for i := range fresh {
+		if strings.HasPrefix(fresh[i].Type, sessionEventPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshSessionEnrichment eagerly expires the per-city sessions cache and wakes
+// the detail-stream subscribers so a session-link change on an otherwise-idle
+// run pushes a fresh frame promptly. Each subscriber rebuilds via detail(),
+// which refetches the now-expired sessions (single-flight collapses concurrent
+// rebuilds to one loopback read); the per-connection byte-dedupe drops the frame
+// when the run's own links did not move — e.g. the event was for an unrelated
+// session in the same city. It is naturally rate-limited to at most once per
+// tail poll (runTailPollInterval).
+//
+// The invalidate can be masked by a sessions compute that elected BEFORE it: that
+// in-flight compute's deferred publish resets the TTL and bumps the version with a
+// value that may predate this session change, so a subscriber joining it can push
+// one transiently-stale frame. This matches the cache's eventual-consistency
+// contract and self-heals on the next session/bead event or the reset TTL.
+func (t *cityRunTailer) refreshSessionEnrichment() {
+	t.mgr.sessionsCache.invalidate(t.name)
+	t.notifySubscribers()
 }
 
 // eventsAfter keeps only events past the projector's cursor, dropping the
