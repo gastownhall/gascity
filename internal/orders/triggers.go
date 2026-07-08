@@ -113,6 +113,33 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 	}
 }
 
+// resolveOrderLocation returns the single explicit location in which an
+// order's cron fields are evaluated: the order's tz (authored in the order
+// file, or the city-wide [workspace] timezone stamped onto the order at scan
+// time), falling back to `now`'s location when no tz is configured. For the
+// live dispatcher `now` is time.Now(), so the fallback is the process-local
+// zone — the pre-fix live-match semantics — while callers that fabricate
+// times in an explicit location (tests, replay) stay deterministic
+// regardless of the host zone. A bad tz is a hard error — order validation
+// rejects it at load; this guard keeps an unvalidated Order from silently
+// evaluating in the wrong zone.
+func resolveOrderLocation(a Order, now time.Time) (*time.Location, error) {
+	if a.TZ == "" {
+		return now.Location(), nil
+	}
+	loc, err := time.LoadLocation(a.TZ)
+	if err != nil {
+		return nil, fmt.Errorf("order %q: invalid tz %q: %w", a.ScopedName(), a.TZ, err)
+	}
+	return loc, nil
+}
+
+// wallMinuteLayout renders a wall-clock reading to minute granularity.
+// Two instants with the same rendering occupy the same wall-clock slot —
+// including the DST fall-back hour, where two distinct instants share one
+// wall-clock reading and must count as a single cron slot.
+const wallMinuteLayout = "2006-01-02 15:04"
+
 // checkCron uses minute-granularity matching against the schedule, WITH
 // catch-up. A scheduled occurrence fires if either (a) the current minute
 // matches, or (b) a scheduled minute elapsed since the last run without the
@@ -122,6 +149,22 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 // "0 */4 * * *" order miss every boundary (gastown td-4kziysy) because the
 // controller's eval cadence rarely coincides with a once-per-4h minute.
 // Schedule format: "minute hour day-of-month month day-of-week" (5 fields).
+//
+// All cron-field evaluation happens in ONE explicit location (see
+// resolveOrderLocation). Callers and the last-run store may hand us times in
+// different locations — the doltlite store always returns UTC-located times
+// (parseTimeString) while `now` carries the process zone — so both are
+// normalized here before any field is read. Without this, the catch-up scan
+// evaluated cron fields against the store's UTC wall clock and fired
+// zone-anchored orders at the UTC reading, then again at the real local slot.
+//
+// DST policy (in the resolved location):
+//   - Fall-back: the repeated hour yields two instants with the same
+//     wall-clock reading; an order fires at most once per wall-clock slot
+//     (dedupe by wall-clock date+HH:MM against lastRun).
+//   - Spring-forward: schedule minutes inside the nonexistent hour cannot
+//     match a real instant; the catch-up scan detects the gap and fires the
+//     order once at the first real minute after the jump.
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	fields := strings.Fields(a.Schedule)
 	if len(fields) != 5 {
@@ -130,6 +173,12 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 
 	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 
+	loc, err := resolveOrderLocation(a, now)
+	if err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad tz: %v", err)}
+	}
+	now = now.In(loc)
+
 	matchesAt := func(t time.Time) bool {
 		return cronFieldMatches(minute, t.Minute()) &&
 			cronFieldMatches(hour, t.Hour()) &&
@@ -137,15 +186,21 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 			cronFieldMatches(month, int(t.Month())) &&
 			cronFieldMatches(dow, int(t.Weekday()))
 	}
+	sameWallMinute := func(x, y time.Time) bool {
+		return x.Format(wallMinuteLayout) == y.Format(wallMinuteLayout)
+	}
 
 	last, err := lastRunFn(a.ScopedName())
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("error querying last run: %v", err)}
 	}
+	last = last.In(loc) // same instant, evaluator's wall clock (IsZero is instant-based, unaffected)
 
-	// (a) Current minute matches — fire unless already run this minute.
+	// (a) Current minute matches — fire unless already run this wall-clock
+	// slot (wall-minute equality also covers the DST fall-back repeat, where
+	// two instants an hour apart share one wall-clock reading).
 	if matchesAt(now) {
-		if !last.IsZero() && last.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
+		if !last.IsZero() && sameWallMinute(last, now) {
 			return TriggerResult{Due: false, Reason: "cron: already run this minute", LastRun: last}
 		}
 		return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
@@ -163,14 +218,43 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 		if floor := now.Add(-maxCatchupLookback).Truncate(time.Minute); start.Before(floor) {
 			start = floor
 		}
+		prev := start.Add(-time.Minute)
 		for t := start; !t.After(now); t = t.Add(time.Minute) {
-			if matchesAt(t) {
+			// Spring-forward: one absolute minute stepped over a wall-clock
+			// gap (e.g. 01:59 → 03:00). Schedule minutes inside the gap can
+			// never match a real instant, so evaluate the skipped wall-clock
+			// readings and fire at this first real minute after the jump.
+			_, prevOff := prev.Zone()
+			_, tOff := t.Zone()
+			if tOff > prevOff && matchesInWallGap(matchesAt, prev, t) {
+				return TriggerResult{Due: true, Reason: "cron: caught up occurrence skipped by DST spring-forward", LastRun: last}
+			}
+			if matchesAt(t) && !sameWallMinute(last, t) {
 				return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
 			}
+			prev = t
 		}
 	}
 
 	return TriggerResult{Due: false, Reason: "cron: schedule not matched", LastRun: last}
+}
+
+// matchesInWallGap reports whether any wall-clock minute strictly between
+// prev's and t's wall-clock readings matches the schedule. Such readings do
+// not exist as instants in the location (a DST spring-forward skipped them),
+// so they are enumerated as naive calendar readings in a fixed-offset
+// container; cron fields are pure wall-clock components, so matching them
+// against naive readings is exact.
+func matchesInWallGap(matchesAt func(time.Time) bool, prev, t time.Time) bool {
+	naive := func(x time.Time) time.Time {
+		return time.Date(x.Year(), x.Month(), x.Day(), x.Hour(), x.Minute(), 0, 0, time.UTC)
+	}
+	for w, end := naive(prev).Add(time.Minute), naive(t); w.Before(end); w = w.Add(time.Minute) {
+		if matchesAt(w) {
+			return true
+		}
+	}
+	return false
 }
 
 // cronFieldMatches checks if a single cron field matches a value.
