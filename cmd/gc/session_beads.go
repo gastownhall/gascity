@@ -818,6 +818,68 @@ func reassignWorkAssignedToRetiredSessionBead(
 	}
 }
 
+// strandedRepairConfirmGrace is the minimum age of the first stranded
+// observation (the stranded_event_emitted_at marker stamped by
+// emitSessionStrandedDiagnostic) before the reconciler will REPAIR — not merely
+// diagnose — a stranded pool worker. A single not-alive observation is never
+// acted on: the leak must persist across the window so a transient
+// runtime-liveness glitch cannot clear a live claim. Mirrors the
+// observe-before-act discipline of the idle-claim backstop (idleClaimNudgeGrace)
+// and the #3630 suspend-confirm window.
+const strandedRepairConfirmGrace = 2 * time.Minute
+
+// strandedRepairCloseReason is the close_reason stamped on a session bead
+// retired by the stranded-worker repair, distinguishing it from a clean drain
+// (drained) or an idle recycle in the forensic record.
+const strandedRepairCloseReason = "stranded-repair"
+
+// repairStrandedPoolWorkerBead closes the divergence loop that
+// emitSessionStrandedDiagnostic only reports: a pool session whose runtime
+// exited while it still held in_progress work as assignee, leaving that work
+// invisible to every actuator. It unassigns/reopens the stranded work (reusing
+// unclaimWorkAssignedToRetiredSessionBead so the bead returns to the routed
+// queue with a run_target fallback) and closes the session bead so the slot
+// frees and the pool reclaims the work.
+//
+// Confirmed non-liveness is the caller's contract: it only reaches here on a
+// pool session the reconciler already sees as not-alive (poolFreeable requires
+// !target.alive) with a non-degraded store read (!storeQueryPartial). To avoid
+// acting on a single transient not-alive observation, the destructive clear runs
+// only once the stranded condition has persisted past strandedRepairConfirmGrace
+// since the diagnostic first stamped stranded_event_emitted_at. An absent marker
+// means the leak has not been confirmed-stranded this session-bead generation
+// (the diagnostic early-returned — no recorder, or the work passed the
+// detached-probe liveness filter), so the repair defers.
+//
+// Returns true when it closed the session bead, so the caller mirrors MarkClosed
+// onto the snapshot and prunes the worktree exactly as the clean close path does.
+func repairStrandedPoolWorkerBead(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session *beads.Bead,
+	fallbackRoute string,
+	clk clock.Clock,
+	stderr io.Writer,
+) bool {
+	if store == nil || session == nil {
+		return false
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	since := strings.TrimSpace(session.Metadata[strandedEventEmittedKey])
+	if since == "" {
+		return false // not yet confirmed stranded this generation — defer
+	}
+	first := parseRFC3339OrZero(since)
+	now := clk.Now().UTC()
+	if first.IsZero() || now.Sub(first) < strandedRepairConfirmGrace {
+		return false // inside the confirmation window — defer the destructive clear
+	}
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, *session, fallbackRoute, stderr)
+	return closeBead(store, session.ID, strandedRepairCloseReason, now, stderr)
+}
+
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(oldSessionID) == "" || strings.TrimSpace(newSessionID) == "" {
 		return

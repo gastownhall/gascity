@@ -3399,6 +3399,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, target.session, target.tp.TemplateName, rec, clk, stderr); fold != nil {
 				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
 			}
+			// Beyond diagnosis: once the stranded condition has been confirmed
+			// across the confirmation window (stranded_event_emitted_at aged past
+			// strandedRepairConfirmGrace) and the store read is non-degraded,
+			// REPAIR the leak — unassign/reopen the stranded work so the pool can
+			// reclaim it, then close the session bead to free the slot. The
+			// storeQueryPartial gate ensures a transient store miss can never clear
+			// a live claim; the confirmation window guards against a transient
+			// not-alive observation. Reuses unclaimWorkAssignedToRetiredSessionBead,
+			// the same detach primitive named-session retirement uses.
+			if !storeQueryPartial &&
+				repairStrandedPoolWorkerBead(store, rigStores, target.session, retiredSessionFallbackRoute(*target.session), clk, stderr) {
+				infoByID[target.session.ID] = infoByID[target.session.ID].MarkClosed()
+				pruneAgentHomeWorktreeIfSafe(*target.session, cityPath, cfg, stderr)
+			}
 		}
 		if poolFreeable && !hasAssignedWork {
 			// Close directly rather than via closeSessionBeadIfUnassigned.

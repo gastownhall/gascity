@@ -2169,6 +2169,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		for _, r := range released {
 			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
+		// Turn the otherwise-silent reopen into an observable signal. The reopen
+		// (clear dead assignee, reset in_progress→open) already ran above and is
+		// gated on confirmed non-liveness; emit the event BEFORE the snapshot
+		// filter so the dead assignee and route can still be read off the beads.
+		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, time.Now())
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
 	}
 	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound

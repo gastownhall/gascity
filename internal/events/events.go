@@ -31,18 +31,27 @@ const (
 	// an idempotent no-op rather than fanning out a second concurrent claim.
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
-	BeadClaimRejected  = "bead.claim_rejected"
-	MailSent           = "mail.sent"
-	MailRead           = "mail.read"
-	MailArchived       = "mail.archived"
-	MailMarkedRead     = "mail.marked_read"
-	MailMarkedUnread   = "mail.marked_unread"
-	MailReplied        = "mail.replied"
-	MailDeleted        = "mail.deleted"
-	SessionDraining    = "session.draining"
-	SessionUndrained   = "session.undrained"
-	SessionQuarantined = "session.quarantined"
-	SessionIdleKilled  = "session.idle_killed"
+	BeadClaimRejected = "bead.claim_rejected"
+	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
+	// bead whose assignee resolves to no open session bead — the owning session
+	// closed/retired while the bead stayed assigned, leaving it open+routed but
+	// invisible to every claim probe (pool tier and demand require --unassigned;
+	// the hook requires an empty assignee). releaseOrphanedPoolAssignments clears
+	// the dead assignee so the pool can reclaim it; this event turns that
+	// otherwise-silent repair into an observable signal (mirrors the
+	// bead.claim_rejected shape).
+	BeadDeadAssigneeReopened = "bead.dead_assignee_reopened"
+	MailSent                 = "mail.sent"
+	MailRead                 = "mail.read"
+	MailArchived             = "mail.archived"
+	MailMarkedRead           = "mail.marked_read"
+	MailMarkedUnread         = "mail.marked_unread"
+	MailReplied              = "mail.replied"
+	MailDeleted              = "mail.deleted"
+	SessionDraining          = "session.draining"
+	SessionUndrained         = "session.undrained"
+	SessionQuarantined       = "session.quarantined"
+	SessionIdleKilled        = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -221,6 +230,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
+	BeadDeadAssigneeReopened,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
