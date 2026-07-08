@@ -511,17 +511,25 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
-func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) {
+// killExistingOrphans terminates any untracked runtime whose session ID and
+// city match the session about to start, then confirms each is dead. It returns
+// a non-nil error only when an orphan could not be confirmed dead, so callers
+// gating a Start can refuse rather than race a survivor for the same work. A
+// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
+// the roots the scan did surface are still killed, and matching the started
+// replacement is impossible because it does not exist yet.
+func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := m.sp.(runtime.ProcessTableScanner)
 	if !ok || sessionID == "" {
-		return
+		return nil
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s: %v", sessionID, err)
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	var termErrs []error
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -531,8 +539,13 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) {
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
+			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
 		}
 	}
+	if len(termErrs) > 0 {
+		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+	}
+	return nil
 }
 
 func (m *Manager) now() time.Time {
@@ -815,8 +828,15 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
-		// Start the runtime session.
-		m.killExistingOrphans(ctx, b.ID)
+		// Start the runtime session. Refuse to start if a prior escaped process
+		// for this session could not be confirmed dead: a survivor would race
+		// the replacement for the same work bead (duplicate bd close).
+		if orphanErr := m.killExistingOrphans(ctx, b.ID); orphanErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr), rbErr)
+			}
+			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {

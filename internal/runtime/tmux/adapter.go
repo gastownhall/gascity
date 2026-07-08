@@ -324,9 +324,13 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 	found, scanErr := proctable.ScanBySessionID(id)
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
-		for i := range found {
-			found[i].IsTracked = true
-		}
+		// Fail CLOSED: without the live-session list we cannot prove which
+		// scanned roots are gc-tracked. Marking them all tracked (the previous
+		// behavior) told killExistingOrphans to skip every one, so an escaped
+		// old process for this exact session survived alongside its
+		// replacement. Leave IsTracked=false instead: the caller then targets
+		// the same-session, same-city roots the /proc scan surfaced, and only
+		// starts once they are confirmed dead.
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 

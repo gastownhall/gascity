@@ -405,7 +405,13 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 	}
 }
 
-func TestCreateContinuesWhenOrphanCleanupFails(t *testing.T) {
+// TestCreateRefusesStartWhenOrphanNotConfirmedDead pins the fail-closed
+// contract: when an untracked same-session orphan cannot be confirmed dead
+// (TerminateRuntime errors — e.g. it survived SIGKILL), Create must refuse to
+// start a replacement rather than race the survivor for the same work bead. A
+// concurrent scan error is logged and treated as fail-closed, so the orphan the
+// scan did surface is still targeted. No Start is attempted.
+func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{
 		Fake:         runtime.NewFake(),
@@ -418,16 +424,23 @@ func TestCreateContinuesWhenOrphanCleanupFails(t *testing.T) {
 	}
 	mgr := NewManager(store, sp)
 
-	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+	_, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err == nil {
+		t.Fatal("Create succeeded despite an orphan that could not be confirmed dead")
 	}
-	if !sp.IsRunning(info.SessionName) {
-		t.Fatalf("runtime session %q was not started after cleanup errors", info.SessionName)
+	if !strings.Contains(err.Error(), "orphan cleanup") {
+		t.Fatalf("Create error = %v, want pre-start orphan cleanup refusal", err)
 	}
-	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
-	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
-		t.Fatalf("events = %v, want %v", sp.events, want)
+	for _, e := range sp.events {
+		if strings.HasPrefix(e, "start:") {
+			t.Fatalf("Start was attempted despite unconfirmed orphan; events = %v", sp.events)
+		}
+	}
+	want := []string{"find:", "terminate:"}
+	for i, prefix := range want {
+		if i >= len(sp.events) || !strings.HasPrefix(sp.events[i], prefix) {
+			t.Fatalf("events = %v, want prefixes %v", sp.events, want)
+		}
 	}
 }
 
@@ -466,9 +479,12 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 					continue
 				}
 				starts++
-				prev := previousNonBlankLine(lines, i)
-				if !strings.Contains(prev, "m.killExistingOrphans(ctx, "+tt.idExpr+")") {
-					t.Errorf("%s:%d Start is not immediately preceded by orphan cleanup using %s; previous line: %q", tt.file, i+1, tt.idExpr, prev)
+				// The cleanup call may sit a few lines above the Start when its
+				// result gates the Start (manager.go wraps it in an
+				// `if orphanErr := …; orphanErr != nil` refusal), so scan a
+				// short preceding window rather than only the immediate line.
+				if !orphanCleanupPrecedes(lines, i, tt.idExpr) {
+					t.Errorf("%s:%d Start is not preceded by orphan cleanup using %s", tt.file, i+1, tt.idExpr)
 				}
 			}
 			if starts == 0 {
@@ -478,13 +494,25 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 	}
 }
 
-func previousNonBlankLine(lines []string, before int) string {
-	for i := before - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return strings.TrimSpace(lines[i])
+// orphanCleanupPrecedes reports whether m.killExistingOrphans(ctx, idExpr)
+// appears within the short window of non-blank lines preceding the Start at
+// index before. The window keeps the "every Start is guarded by orphan
+// cleanup" invariant while tolerating the gate wrapper that consumes the
+// cleanup's error.
+func orphanCleanupPrecedes(lines []string, before int, idExpr string) bool {
+	needle := "m.killExistingOrphans(ctx, " + idExpr + ")"
+	const window = 10
+	seen := 0
+	for i := before - 1; i >= 0 && seen < window; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		seen++
+		if strings.Contains(lines[i], needle) {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 func TestUpdateTemplateOverridesRejectsRunningSessionUnderLock(t *testing.T) {
