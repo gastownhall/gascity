@@ -1346,7 +1346,7 @@ func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
 		"sleep_intent": "",
 	}
 	if sessFront != nil {
-		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == "wait-hold" {
+		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
 			batch["sleep_reason"] = ""
 		}
 	}

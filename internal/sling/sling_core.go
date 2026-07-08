@@ -126,6 +126,17 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 			result.DryRun = opts.DryRun
 			result.BeadID = opts.BeadOrFormula
 			result.Method = "bead"
+			// Honor --nudge even when the route is already in place. The bead is
+			// routed to the target, but a warm pool slot may have missed its
+			// wake (its startup nudge was swallowed, or work was routed after it
+			// went idle). Re-slinging with --nudge must still deliver a wake;
+			// otherwise the idempotent short-circuit silently drops it and the
+			// slot sits idle on work it never began. The claim path is
+			// idempotent/CAS-safe, so a redundant nudge is harmless. Suppressed
+			// for dry-run, which must not mutate or signal anything.
+			if opts.Nudge && !opts.DryRun {
+				result.NudgeAgent = &a
+			}
 			return result, nil
 		}
 		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)

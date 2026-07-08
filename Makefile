@@ -713,9 +713,9 @@ dashboard-build:
 dashboard-dev:
 	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend dev
 
-## dashboard-check: typecheck + build the SPA, then go test the embedded handler + BFF
+## dashboard-check: typecheck (src + test files) + build the SPA, then go test the embedded handler + BFF
 dashboard-check: dashboard-build
-	cd internal/api/dashboardspa/web && npm run typecheck
+	cd internal/api/dashboardspa/web && npm run typecheck && npm run --workspace gas-city-dashboard-frontend typecheck:test
 	$(TEST_ENV) go test ./internal/api/dashboardspa/... ./internal/api/dashboardbff/...
 
 ## dashboard-smoke: serve the built SPA bundle via Vite preview and verify it responds

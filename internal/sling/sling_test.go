@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
@@ -3112,6 +3113,76 @@ func TestDoSlingNudgeSignal(t *testing.T) {
 	}
 	if result.NudgeAgent == nil {
 		t.Error("expected NudgeAgent to be set")
+	}
+}
+
+func TestDoSlingIdempotentHonorsNudge(t *testing.T) {
+	// A warm pool slot may miss its wake, so re-slinging an already-routed bead
+	// with --nudge must still surface a nudge signal even though the route is
+	// idempotent (nothing to re-route). Without this the wake is silently lost.
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	// Seed a bead already routed to the target so the pre-flight check reports
+	// idempotent. NoConvoy avoids the convoy-recovery branch, which would fall
+	// through to a full (non-idempotent) finalize.
+	routed := beads.Bead{
+		ID:     "BL-1",
+		Title:  "BL-1",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: a.QualifiedName(),
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{routed}, nil)
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+
+	result, err := DoSling(SlingOpts{
+		Target: a, BeadOrFormula: "BL-1", Nudge: true, NoConvoy: true,
+	}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if !result.Idempotent {
+		t.Fatalf("expected idempotent route, got %+v", result)
+	}
+	if result.NudgeAgent == nil {
+		t.Error("expected NudgeAgent to be set on an idempotent sling with Nudge")
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("idempotent sling must not re-route, got %d runner calls", len(runner.calls))
+	}
+}
+
+func TestDoSlingIdempotentDryRunSuppressesNudge(t *testing.T) {
+	// Dry-run must never signal a nudge even with --nudge on an idempotent route.
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	routed := beads.Bead{
+		ID:     "BL-1",
+		Title:  "BL-1",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: a.QualifiedName(),
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{routed}, nil)
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+
+	result, err := DoSling(SlingOpts{
+		Target: a, BeadOrFormula: "BL-1", Nudge: true, NoConvoy: true, DryRun: true,
+	}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.NudgeAgent != nil {
+		t.Error("dry-run idempotent sling must not set NudgeAgent")
 	}
 }
 

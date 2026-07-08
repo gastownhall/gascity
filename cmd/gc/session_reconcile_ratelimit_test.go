@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/clock"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestCheckStability_RateLimitScreen_DoesNotCountAsCrash pins the desired
@@ -379,8 +380,8 @@ func TestCheckStability_TerminalErrorScreen_MarksTerminalNotCrash(t *testing.T) 
 	if got := session.Metadata["state"]; got != "asleep" {
 		t.Errorf("state = %q, want asleep", got)
 	}
-	if got := session.Metadata["sleep_reason"]; got != sleepReasonProviderTerminalError {
-		t.Errorf("sleep_reason = %q, want %q", got, sleepReasonProviderTerminalError)
+	if got := session.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonProviderTerminalError) {
+		t.Errorf("sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonProviderTerminalError))
 	}
 	if got := session.Metadata[sessionProviderTerminalErrorMetadataKey]; got != "model_not_found" {
 		t.Errorf("%s = %q, want model_not_found", sessionProviderTerminalErrorMetadataKey, got)

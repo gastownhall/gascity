@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
 // mockFetcher implements StateFetcher for testing.
@@ -306,6 +308,55 @@ func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
 	}
 	if calls := f.getCalls(); calls != 1 {
 		t.Fatalf("fetch calls = %d, want 1 across repeated ObserveLiveness calls", calls)
+	}
+}
+
+// FetchState must report an unreachable tmux server as an observation FAILURE
+// (runtime.ErrRuntimeUnavailable), not as an empty success. The empty-success
+// form let refresh() overwrite last-known-good and instantly report every
+// session not-running, draining healthy pool slots on a brief tmux blip. The
+// wrapped error must still satisfy isNoServerError so downstream absorbers keep
+// working.
+func TestTmuxFetcher_NoServerMapsToRuntimeUnavailable(t *testing.T) {
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: &fakeExecutor{err: ErrNoServer}}}
+
+	snap, err := f.FetchState(context.Background())
+	if err == nil {
+		t.Fatalf("FetchState() err = nil (snapshot %+v), want an error for an unreachable server", snap)
+	}
+	if !errors.Is(err, gcruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("FetchState() err = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+	if !isNoServerError(err) {
+		t.Fatalf("FetchState() err = %v must still satisfy isNoServerError so downstream ErrNoServer absorbers work", err)
+	}
+}
+
+// End to end at the cache: after a good prime, an ErrNoServer refresh must
+// preserve last-known-good (within staleTTL) instead of collapsing to empty.
+func TestStateCache_NoServerRefreshPreservesLastKnownGood(t *testing.T) {
+	fe := &fakeExecutor{
+		// FetchState issues exactly one executor call (list-panes); the
+		// process-table half reads /proc directly, not through exec. First
+		// call primes one live pane, every later call reports no server.
+		outs: []string{"agent-1\t0\tclaude\t123"},
+		errs: []error{nil, ErrNoServer, ErrNoServer, ErrNoServer},
+	}
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}, time.Nanosecond)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 running after prime")
+	}
+	// TTL is a nanosecond, so the next read forces a refresh that hits
+	// ErrNoServer. Last-known-good must survive it (staleTTL default 30s).
+	if !cache.IsRunning("agent-1") {
+		t.Error("expected agent-1 still running after an ErrNoServer refresh (last-known-good); a brief tmux outage must not report sessions as gone")
+	}
+	cache.mu.RLock()
+	lastErr := cache.lastError
+	cache.mu.RUnlock()
+	if !errors.Is(lastErr, gcruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("cache.lastError = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", lastErr)
 	}
 }
 

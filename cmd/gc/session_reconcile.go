@@ -39,13 +39,6 @@ type wakeEvaluation struct {
 	HasAssignedWork  bool
 }
 
-const sleepReasonRuntimeMissing = "runtime-missing"
-
-// sleepReasonProviderTerminalError parks a session that hit a terminal
-// (non-retryable) provider error. markProviderTerminalError writes it; the
-// pool-slot freeable allowlist reads it to reap the dead bead + its worktree.
-const sleepReasonProviderTerminalError = "provider-terminal-error"
-
 const (
 	sessionHealthStateMetadataKey           = "session_health"
 	sessionHealthReasonMetadataKey          = "session_health_reason"
@@ -788,7 +781,7 @@ func markProviderTerminalError(session *beads.Bead, sessFront *sessionpkg.Store,
 	}
 	batch := map[string]string{
 		"state":                                 string(sessionpkg.StateAsleep),
-		"sleep_reason":                          sleepReasonProviderTerminalError,
+		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
 		"last_woke_at":                          "",
 		"pending_create_claim":                  "",
 		"pending_create_started_at":             "",
@@ -1170,7 +1163,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 			batch["state"] = string(sessionpkg.StateAsleep)
 		}
 		if strings.TrimSpace(meta["sleep_reason"]) == "" {
-			batch["sleep_reason"] = "drained"
+			batch["sleep_reason"] = string(sessionpkg.SleepReasonDrained)
 		}
 		return emptyNil(batch)
 	}
@@ -1230,12 +1223,12 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	if meta["state"] != target {
 		batch["state"] = target
 		if target == string(sessionpkg.StateAsleep) && (view.ResetContinuation || stalePendingCreateRollback) && strings.TrimSpace(meta["sleep_reason"]) == "" {
-			batch["sleep_reason"] = sleepReasonRuntimeMissing
+			batch["sleep_reason"] = string(sessionpkg.SleepReasonRuntimeMissing)
 		}
 	}
 	if target == string(sessionpkg.StateAsleep) {
 		if strings.TrimSpace(meta["sleep_reason"]) == "" && strings.TrimSpace(meta["state"]) == "failed-create" {
-			batch["sleep_reason"] = "failed-create"
+			batch["sleep_reason"] = string(sessionpkg.SleepReasonFailedCreate)
 		}
 		if view.ResetContinuation || stalePendingCreateRollback {
 			if !isNamedSessionBead(session) || namedSessionMode(session) != "always" {

@@ -2,11 +2,8 @@ package session
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
-	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -21,129 +18,26 @@ import (
 // Info. Callers that need live runtime state (Attached, runtime-downgraded
 // State, detected transport) must go through Manager, not this function.
 func InfoFromPersistedBead(b beads.Bead) Info {
-	sessName := b.Metadata["session_name"]
-	if sessName == "" {
-		sessName = sessionNameFor(b.ID)
-	}
-	closed := b.Status == "closed"
-
-	state := normalizeInfoState(State(b.Metadata["state"]))
-	if closed {
-		state = "" // closed beads have no runtime state
-	}
-
+	// Bead-level prologue: fields that are not metadata-derived. These MUST be
+	// set before the codec table runs — the session_name setter reads info.ID
+	// for its sessionNameFor fallback, and the state setter reads info.Closed to
+	// blank State on closed beads (invariant I6).
 	info := Info{
-		ID:            b.ID,
-		Type:          b.Type,
-		Template:      b.Metadata["template"],
-		State:         state,
-		Closed:        closed,
-		Title:         b.Title,
-		Alias:         b.Metadata["alias"],
-		AgentName:     b.Metadata["agent_name"],
-		Provider:      b.Metadata["provider"],
-		Transport:     transportFromMetadata(b),
-		Command:       b.Metadata["command"],
-		WorkDir:       b.Metadata["work_dir"],
-		SessionName:   sessName,
-		SessionKey:    b.Metadata["session_key"],
-		ResumeFlag:    b.Metadata["resume_flag"],
-		ResumeStyle:   b.Metadata["resume_style"],
-		ResumeCommand: b.Metadata["resume_command"],
-		CreatedAt:     b.CreatedAt,
-
-		ContinuationEpoch: b.Metadata["continuation_epoch"],
-		SleepReason:       b.Metadata["sleep_reason"],
-
-		// identity / pool / named-session cluster
-		ConfiguredNamedIdentity: b.Metadata[NamedSessionIdentityMetadata],
-		ConfiguredNamedSession:  strings.TrimSpace(b.Metadata[NamedSessionMetadataKey]) == "true",
-		ConfiguredNamedMode:     b.Metadata[NamedSessionModeMetadata],
-		CommonName:              b.Metadata["common_name"],
-		PoolSlot:                b.Metadata["pool_slot"],
-		PoolManaged:             strings.TrimSpace(b.Metadata["pool_managed"]) == "true",
-		SessionOrigin:           b.Metadata["session_origin"],
-		DependencyOnly:          strings.TrimSpace(b.Metadata["dependency_only"]) == "true",
-		DependencyOnlyMetadata:  b.Metadata["dependency_only"],
-		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
-		ManualSessionMetadata:   b.Metadata["manual_session"],
-		Labels:                  b.Labels,
-		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
-		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
-
-		// health / provider-terminal-error cluster. The key literals mirror the
-		// cmd/gc session_reconcile constants (session_health, session_drainable,
-		// …); the classifier-equivalence test guards against drift.
-		ProviderTerminalError: b.Metadata["provider_terminal_error"],
-		HealthState:           b.Metadata["session_health"],
-		HealthReason:          b.Metadata["session_health_reason"],
-		Drainable:             strings.TrimSpace(b.Metadata["session_drainable"]) == "true",
-
-		// trigger / brain-parent cluster (canonical gc.* keys via beadmeta).
-		TriggerBeadID:       b.Metadata[beadmeta.TriggerBeadIDMetadataKey],
-		TriggerBeadStoreRef: b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey],
-		BrainParentSID:      b.Metadata[beadmeta.BrainParentSIDMetadataKey],
-		Pack:                b.Metadata[beadmeta.PackMetadataKey],
-
-		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
-		// kept verbatim so the reconciler classifiers read the same value the
-		// bead carried (Info.State above is the normalized, closed-blanked form).
-		MetadataState:              b.Metadata["state"],
-		SessionNameMetadata:        b.Metadata["session_name"],
-		PendingCreateClaim:         strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true",
-		PendingCreateClaimMetadata: b.Metadata["pending_create_claim"],
-		PendingCreateStartedAt:     b.Metadata["pending_create_started_at"],
-		QuarantinedUntil:           b.Metadata["quarantined_until"],
-		AliasHistory:               AliasHistory(b.Metadata),
-		ContinuityEligible:         b.Metadata["continuity_eligible"],
-		TransportMetadata:          b.Metadata["transport"],
-		LastWokeAt:                 b.Metadata["last_woke_at"],
-		StateReason:                b.Metadata["state_reason"],
-		CreationCompleteAt:         b.Metadata["creation_complete_at"],
-		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],
-		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
-		Generation:                 b.Metadata["generation"],
-		StartedConfigHash:          b.Metadata["started_config_hash"],
-		PinAwake:                   b.Metadata["pin_awake"],
-
-		// reconciler decision-read cluster (front-door Phase 5). Raw mirrors of
-		// the keys the reconciler decision paths still crack inline. The key
-		// literals mirror the cmd/gc reconciler constants (config_drift_deferred_*,
-		// attached_config_drift_deferred_*, stranded_event_emitted_at, …); the
-		// classifier-equivalence oracle feeds those constants and so guards these
-		// literals against drift. CurrentBeadIDKey is a session-package constant.
-		HeldUntil:                      b.Metadata["held_until"],
-		WaitHold:                       b.Metadata["wait_hold"],
-		ChurnCount:                     b.Metadata["churn_count"],
-		WakeMode:                       b.Metadata["wake_mode"],
-		SleepIntent:                    b.Metadata["sleep_intent"],
-		InstanceToken:                  b.Metadata["instance_token"],
-		DetachedAt:                     b.Metadata["detached_at"],
-		CurrentlyProcessingBeadID:      b.Metadata[CurrentBeadIDKey],
-		CoreHashBreakdown:              b.Metadata["core_hash_breakdown"],
-		StartedProvisionHash:           b.Metadata["started_provision_hash"],
-		StartedLaunchHash:              b.Metadata["started_launch_hash"],
-		StartedLiveHash:                b.Metadata["started_live_hash"],
-		ConfigDriftDeferredAt:          b.Metadata["config_drift_deferred_at"],
-		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
-		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
-		AttachedConfigDriftDeferredKey: b.Metadata["attached_config_drift_deferred_key"],
-		StrandedEventEmittedAt:         b.Metadata["stranded_event_emitted_at"],
-		SessionNameExplicit:            b.Metadata["session_name_explicit"],
-		WakeRequest:                    b.Metadata["wake_request"],
-		RestartRequested:               b.Metadata["restart_requested"],
-		SessionIDFlag:                  b.Metadata["session_id_flag"],
-		TemplateOverrides:              b.Metadata["template_overrides"],
-		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
-		ProviderKind:                   b.Metadata["provider_kind"],
+		ID:        b.ID,
+		Type:      b.Type,
+		Title:     b.Title,
+		Labels:    b.Labels,
+		CreatedAt: b.CreatedAt,
+		Closed:    b.Status == "closed",
 	}
-	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
-		info.WakeAttempts = n
-	}
-	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
-		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
-			info.LastNudgeDeliveredAt = parsed
-		}
+	// Project every metadata-derived field through the shared codec table. An
+	// absent key reads as "" (Go map default), matching the old struct literal's
+	// zero-valued reads; each setter is total over "". Starting from a fresh
+	// zero-valued Info, the table's ApplyPatch-form setters reproduce the old
+	// projection exactly (invariant I1, gated by the parity oracle tests).
+	for i := range infoKeyCodec {
+		spec := &infoKeyCodec[i]
+		spec.set(&info, b.Metadata[spec.key])
 	}
 	return info
 }

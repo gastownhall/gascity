@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -231,7 +232,22 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
 		if isNoServerError(err) {
-			return runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}}, nil // No server = no sessions
+			// An unreachable tmux server is an observation FAILURE, not the
+			// fact "no sessions exist". Returning an empty *success* here let
+			// refresh() overwrite the cache's last-known-good and instantly
+			// report every session as not-running, so a brief server blip (a
+			// supervisor restart, a transient socket stall) drove the
+			// reconciler to drain/close healthy pool slots. Surface it as
+			// runtime.ErrRuntimeUnavailable instead: refresh() then preserves
+			// last-known-good until the existing staleTTL cliff, bounding the
+			// trust window. Genuine session ends evict from the cache via
+			// Stop()/EvictSession, so they are not masked by this preservation
+			// (the only residual is an externally-killed LAST session, whose
+			// cleanup is delayed by at most staleTTL — the intended trade).
+			// isNoServerError still matches the wrapped error (it contains the
+			// original "no server running" cause), so downstream absorbers are
+			// unaffected.
+			return runtimeStateSnapshot{}, fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return runtimeStateSnapshot{}, err
 	}
