@@ -105,7 +105,11 @@ func TestParseSessionTemplateOverridesForLaunch_ParseSeam(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseSessionTemplateOverridesForLaunch(tt.session)
+			var info sessionpkg.Info
+			if tt.session != nil {
+				info = sessionpkg.InfoFromPersistedBead(*tt.session)
+			}
+			got := parseSessionTemplateOverridesForLaunch(info)
 			if tt.wantNone {
 				if len(got) != 0 {
 					t.Fatalf("parseSessionTemplateOverridesForLaunch() = %v, want no overrides", got)
@@ -156,6 +160,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 		}
 		return startCandidate{
 			session: &session,
+			info:    sessionpkg.InfoFromPersistedBead(session),
 			tp: TemplateParams{
 				TemplateName:     "worker",
 				SessionName:      "worker",

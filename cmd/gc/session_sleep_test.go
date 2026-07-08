@@ -1185,6 +1185,12 @@ func TestSelectIdleProbeTargets_RotatesAcrossTicks(t *testing.T) {
 					"session_name": id,
 				},
 			},
+			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
+				ID: id,
+				Metadata: map[string]string{
+					"session_name": id,
+				},
+			}),
 			alive: true,
 		}
 	}
@@ -1237,6 +1243,13 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 				"sleep_intent": "wait-hold",
 			},
 		},
+		info: sessionpkg.InfoFromPersistedBead(beads.Bead{
+			ID: "wait-hold",
+			Metadata: map[string]string{
+				"session_name": "worker",
+				"sleep_intent": "wait-hold",
+			},
+		}),
 		alive: true,
 	}}
 	wakeEvals := map[string]wakeEvaluation{

@@ -36,8 +36,13 @@ const maxIdleSleepProbesPerTick = 3
 
 type wakeTarget struct {
 	session *beads.Bead
-	tp      TemplateParams
-	alive   bool
+	// info is the typed session.Info twin of session, captured from the coherent
+	// post-fold infoByID snapshot at the append site below. It carries the typed
+	// read surface forward to the wake evaluation + start-candidate stage (WI-6 W5);
+	// the raw session pointer is retained this wave (it dies in W6).
+	info  sessionpkg.Info
+	tp    TemplateParams
+	alive bool
 }
 
 // lifecycleTimerBlockerInfo reports the active lifecycle timer blocker (user hold /
@@ -2394,11 +2399,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// without demand (#2345).
 				//
 				// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-				// is RETAINED. On the runtime-already-dead fall-through below this
-				// session can reach startCandidates this same tick, and the start
-				// executor reads last_woke_at (cleared by RestartRequestPatch) off the
-				// raw bead via wakeFairnessTime BEFORE it re-Gets the bead from the
-				// store — dropping the mirror would perturb the wake-fairness ordering.
+				// is RETAINED for the surviving whole-bead helpers that still take the
+				// raw pointer this wave (the write helpers). Wake fairness itself now
+				// reads the Info twin captured at the startCandidates append below
+				// (wakeFairnessTime → Info.LastWokeAt), and last_woke_at (cleared by
+				// RestartRequestPatch) is folded onto infoByID just above, so the captured
+				// twin carries the cleared value for the same-tick re-wake ordering. Both
+				// the raw mirror and its helpers die in W6.
 				restartFold := make(sessionpkg.MetadataPatch, len(batch))
 				for key, value := range batch {
 					if key == sessionpkg.ResetCommittedAtKey {
@@ -2535,7 +2542,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// keys (session_key/continuation_reset_pending) stay unthreaded — neither has
 			// a same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(session, tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(session, infoByID[session.ID], tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
@@ -2967,12 +2974,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED. The max-age kill falls through to the wakeTargets
-					// append below and the same-tick re-wake can reach startCandidates,
-					// where the start executor reads last_woke_at (cleared by SleepPatch)
-					// off the raw bead via wakeFairnessTime before it re-Gets from the
-					// store; dropping the mirror would perturb ordering. It dies with the
-					// other start-coupled mirrors in WI-6.
+					// loop is RETAINED for the write helpers that still take the raw pointer
+					// this wave. Wake fairness now reads the Info twin captured at the
+					// wakeTargets/startCandidates append below (wakeFairnessTime →
+					// Info.LastWokeAt); the ApplyPatchInfo fold just below carries SleepPatch's
+					// cleared last_woke_at onto that captured twin for the same-tick re-wake
+					// ordering. The raw mirror and its helpers die in WI-6.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -3053,10 +3060,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED — same rationale as the max-age kill: the same-tick
-					// re-wake reads last_woke_at (cleared by SleepPatch) off the raw bead via
-					// wakeFairnessTime before the start executor re-Gets it. Dies with the
-					// other start-coupled mirrors in WI-6.
+					// loop is RETAINED for the write helpers — same rationale as the max-age
+					// kill. Wake fairness reads the Info twin captured at the append below
+					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
+					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
+					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in WI-6.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -3072,7 +3080,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Fall through to wakeReasons — it will re-wake immediately if config present
 		}
 
-		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})
+		// Capture-at-append: infoByID[session.ID] is the coherent typed twin of
+		// this tick's session. Every this-tick coupling write already folded onto
+		// it via ApplyPatchInfo BEFORE this append (the restart-handoff, max-age,
+		// idle-kill, and config-drift-reset mirrors all `continue` or fall THROUGH
+		// to here), so the frozen twin agrees with the raw bead's same-tick reads —
+		// notably the cleared last_woke_at that drives same-tick re-wake fairness
+		// (#2574-class). A NEW writer added between a coupling mirror and this
+		// append would NOT be reflected in this value-typed snapshot; keep any such
+		// writer's fold ahead of the append (or refresh the twin) if one is added.
+		wakeTargets = append(wakeTargets, wakeTarget{session: session, info: infoByID[session.ID], tp: tp, alive: alive})
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
 		"ordered_session_count":  len(orderedBeads),
@@ -3262,8 +3279,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.session, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
 			}
+			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
+			// infoByID BEFORE this append, so the captured twin is coherent with the
+			// raw bead for this tick (currently_processing_bead_id included). The raw
+			// session pointer is retained this wave; both are refreshed in lockstep
+			// wherever the start executor re-Gets the bead.
 			startCandidates = append(startCandidates, startCandidate{
 				session: target.session,
+				info:    infoByID[target.session.ID],
 				tp:      target.tp,
 				order:   len(startCandidates),
 			})
@@ -4462,10 +4485,12 @@ func resetConfiguredNamedSessionForConfigDrift(
 		session.Metadata = make(map[string]string, len(batch))
 	}
 	// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror loop is
-	// RETAINED. The start-pending caller (the alive lane) falls through without a
-	// `continue`, so the repaired session can reach startCandidates this same tick,
-	// and the start executor reads last_woke_at (cleared by ConfigDriftResetPatch)
-	// off the raw bead via wakeFairnessTime before it re-Gets from the store.
+	// RETAINED for the write helpers. The start-pending caller (the alive lane) falls
+	// through without a `continue`, so the repaired session can reach startCandidates
+	// this same tick; wake fairness reads the Info twin captured at the append
+	// (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned batch
+	// (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured twin
+	// carries it. The raw mirror dies in WI-6.
 	for key, value := range batch {
 		session.Metadata[key] = value
 	}

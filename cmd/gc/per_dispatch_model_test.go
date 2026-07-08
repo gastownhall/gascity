@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -87,6 +88,7 @@ func newOptionSessionCandidate(t *testing.T, store beads.Store, workOptions, ses
 
 	return startCandidate{
 		session: &session,
+		info:    sessionpkg.InfoFromPersistedBead(session),
 		tp: TemplateParams{
 			TemplateName:     "worker",
 			SessionName:      sessionName,

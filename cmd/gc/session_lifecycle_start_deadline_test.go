@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // ctxIgnoringStartProvider blocks inside Start until either startDelay
@@ -51,6 +52,12 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsDeadlineExceeded(t
 					"template":     "worker",
 				},
 			},
+			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
+				Metadata: map[string]string{
+					"session_name": "deadline-witness",
+					"template":     "worker",
+				},
+			}),
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "deadline-witness",
@@ -121,6 +128,14 @@ func TestExecutePreparedStartWave_ResumeSessionKeyStaleCheckAfterInTimeStartStay
 					"template":     "worker",
 				},
 			},
+			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
+				ID: "gc-resume",
+				Metadata: map[string]string{
+					"session_name": "resume-deadline-witness",
+					"session_key":  "resume-key",
+					"template":     "worker",
+				},
+			}),
 			tp: TemplateParams{
 				Command:      "claude --resume resume-key",
 				SessionName:  "resume-deadline-witness",
@@ -181,6 +196,12 @@ func TestExecutePreparedStartWave_CanceledContextReportsCanceled(t *testing.T) {
 					"template":     "worker",
 				},
 			},
+			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
+				Metadata: map[string]string{
+					"session_name": "cancel-witness",
+					"template":     "worker",
+				},
+			}),
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "cancel-witness",
@@ -232,6 +253,12 @@ func TestExecutePreparedStartWave_InitializingAfterDeadlineBacksOffSilently(t *t
 					"template":     "worker",
 				},
 			},
+			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
+				Metadata: map[string]string{
+					"session_name": "initializing-witness",
+					"template":     "worker",
+				},
+			}),
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "initializing-witness",

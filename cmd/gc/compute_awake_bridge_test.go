@@ -240,7 +240,7 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 		nil,
 		nil,
 		nil,
-		[]wakeTarget{{session: &sessionBead, alive: true}},
+		[]wakeTarget{{session: &sessionBead, info: session.InfoFromPersistedBead(sessionBead), alive: true}},
 		sp,
 		now,
 	)

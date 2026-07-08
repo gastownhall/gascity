@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -203,6 +204,10 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 	}
 
 	candidate.session = &session
+	// Refresh the typed twin after swapping in the post-fix bead so buildPreparedStart
+	// decodes the cleaned-up template_overrides off candidate.info (production keeps this
+	// coherent via prepareStartCandidateForCity's front-door refresh).
+	candidate.info = sessionpkg.InfoFromPersistedBead(session)
 	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)

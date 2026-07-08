@@ -127,18 +127,21 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
 	"InfoFromPersistedBead(": {
-		"cmd/gc/adoption_barrier.go":           1,
-		"cmd/gc/build_desired_state.go":        4,
-		"cmd/gc/city_status_snapshot.go":       1,
-		"cmd/gc/cmd_nudge.go":                  2,
-		"cmd/gc/cmd_prime.go":                  2,
-		"cmd/gc/cmd_session.go":                2,
-		"cmd/gc/cmd_wait.go":                   1,
-		"cmd/gc/mcp_integration.go":            1,
-		"cmd/gc/session_bead_snapshot.go":      3,
-		"cmd/gc/session_hash.go":               1,
-		"cmd/gc/session_index.go":              1,
-		"cmd/gc/session_lifecycle_parallel.go": 3,
+		"cmd/gc/adoption_barrier.go":      1,
+		"cmd/gc/build_desired_state.go":   4,
+		"cmd/gc/city_status_snapshot.go":  1,
+		"cmd/gc/cmd_nudge.go":             2,
+		"cmd/gc/cmd_prime.go":             2,
+		"cmd/gc/cmd_session.go":           2,
+		"cmd/gc/cmd_wait.go":              1,
+		"cmd/gc/mcp_integration.go":       1,
+		"cmd/gc/session_bead_snapshot.go": 3,
+		"cmd/gc/session_hash.go":          1,
+		"cmd/gc/session_index.go":         1,
+		// WI-6 W5: start-execution reads folded onto candidate.info via ApplyPatch;
+		// the one remaining hit is the honest in-lock re-projection at the genuine
+		// whole-bead re-Get boundary in prepareStartCandidateForCity (cannot be folded).
+		"cmd/gc/session_lifecycle_parallel.go": 1,
 		"cmd/gc/session_logs_resolve.go":       3,
 		"cmd/gc/session_reconciler.go":         3,
 		"cmd/gc/session_resolve.go":            3,
