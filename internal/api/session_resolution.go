@@ -562,12 +562,21 @@ func lookupFact(err error) session.TargetLookupFact {
 }
 
 // liveSessionMatchIsConfigOrphan reports whether a live-resolved bead is a
-// named-session bead whose configured identity is absent from current
-// config. Lookup failures fail open: the match stands (any error → false, the
-// same outcome the old raw store.Get + non-named-bead branches produced). The
-// read routes through the session front door and the session.Info twins
-// (IsNamedSessionInfo / NamedSessionIdentityInfo), so no raw bead is cracked
-// here — the Info projections mirror the bead accessors exactly.
+// named-session bead whose configured identity is absent from current config.
+// Lookup failures fail open: the match stands (any error → false). The read
+// routes through the session front door and the session.Info twins
+// (IsNamedSessionInfo / NamedSessionIdentityInfo), so no raw bead is cracked here
+// — the Info projections mirror the bead accessors exactly.
+//
+// Byte-identical to the old raw store.Get for every real input: absent id →
+// false; present non-session bead → false; present session bead (named or not) →
+// the same verdict via the mirrored projections. ONE design-prescribed direction
+// change, and only under double corruption: a bead carrying
+// configured_named_session="true" that has lost BOTH its session type AND its
+// gc:session label was previously classified an orphan (match rejected); it now
+// fails the front door's IsSessionBeadOrRepairable check → ErrSessionNotFound →
+// false (the match stands). A named bead that is merely type-lost stays
+// repairable and reaches the identity check unchanged.
 func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bool {
 	cfg := s.state.Config()
 	if cfg == nil {

@@ -357,6 +357,70 @@ func TestCompletionSessionsSortedCreatedDesc(t *testing.T) {
 	}
 }
 
+// TestLoadSessionsForCompletion_ReturnsNewestFirst is the END-TO-END wiring pin
+// for the created-desc order: it drives loadSessionsForCompletion itself, not just
+// the comparator. Beads are seeded oldest-first (the unsorted snapshot loader's
+// store-native order is insertion order), so the lister MUST flip them to
+// newest-first. Removing the sortSessionsCreatedDesc call at the completion.go
+// call site regresses this to store order and fails here — the comparator unit
+// test alone would stay green.
+func TestLoadSessionsForCompletion_ReturnsNewestFirst(t *testing.T) {
+	cityPath := t.TempDir()
+	writeCompletionCity(t, cityPath, `[workspace]
+name = "sessions-city"
+
+[session]
+provider = "fake"
+
+[beads]
+provider = "file"
+`)
+	isolateCompletionContext(t, cityPath)
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
+	}
+	mkSession := func(name string) beads.Bead {
+		created, cerr := store.Create(beads.Bead{
+			Title:  name,
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":        name,
+				"session_name": "sessions-city--" + name,
+				"state":        "asleep",
+				"template":     "codex",
+			},
+		})
+		if cerr != nil {
+			t.Fatalf("store.Create(%q): %v", name, cerr)
+		}
+		return created
+	}
+	// Insertion order == store-native order == created-asc. Create older first.
+	older := mkSession("older")
+	newer := mkSession("newer")
+
+	got := loadSessionsForCompletion()
+
+	posOlder, posNewer := -1, -1
+	for i, sinfo := range got {
+		switch sinfo.ID {
+		case older.ID:
+			posOlder = i
+		case newer.ID:
+			posNewer = i
+		}
+	}
+	if posOlder < 0 || posNewer < 0 {
+		t.Fatalf("expected both sessions in completion list, got %+v", got)
+	}
+	if posNewer > posOlder {
+		t.Errorf("completion order not newest-first: newer %q at %d after older %q at %d (%+v)",
+			newer.ID, posNewer, older.ID, posOlder, got)
+	}
+}
+
 func TestLoadSessionsForCompletion_SwallowsProviderConstructionError(t *testing.T) {
 	cityPath := t.TempDir()
 	writeCompletionCity(t, cityPath, `[workspace]

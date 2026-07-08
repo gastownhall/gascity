@@ -496,16 +496,23 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b, err := store.Get(id)
+	// Validate through the session front door (mirrors handleSessionPatch): the
+	// codec stays confined inside Store.Get, and nothing downstream reads the raw
+	// bead — rename operates by id. Present-but-non-session → the existing "not a
+	// session" 400; absent → beads.ErrNotFound → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
+			return
+		}
 		writeStoreError(w, err)
 		return
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
-		return
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
