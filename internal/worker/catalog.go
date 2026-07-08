@@ -2,9 +2,11 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -54,16 +56,53 @@ func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 // (ErrSessionNotFound / "loading session %q"); callers that need the HTTP error
 // contract bridge them at their boundary.
 func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, SessionPersistedResponse, error) {
-	front := c.manager.PersistedStore()
+	return sessionRecordViaManager(c.manager, id)
+}
+
+// sessionRecordViaManager is the canonical worker-boundary session read: it
+// composes the persisted read (session.Store.GetPersistedResponse) with the
+// read-path empty-type heal (RepairTypeBestEffort, a write only when the type is
+// empty) and the live runtime overlay (Manager.EnrichInfo). This is byte-identical
+// to the retired Manager.GetWithBead (loadSessionBead's heal + infoFromBead's
+// enrich) but returns the typed (Info, PersistedResponse) record instead of a raw
+// beads.Bead, so no bead crosses the boundary. It is the single source of truth
+// for every worker read that needs both the enriched Info and the persisted
+// metadata (catalog Get, factory construction, handle lifecycle/telemetry).
+//
+// The error is bridged back to the retired GetWithBead contract
+// (bridgeSessionRecordError): loadSessionBead rejected a present-but-non-session
+// bead with ErrNotSession (which the API factory-lane mappers map to 400),
+// whereas Store.GetPersistedResponse rejects it with ErrSessionNotFound (unmapped
+// → 500). Absence keeps the beads.ErrNotFound chain (→ 404) unchanged. This
+// mirrors the GET-lane bridge at internal/api/session_get_read.go exactly.
+func sessionRecordViaManager(m *sessionpkg.Manager, id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	front := m.PersistedStore()
 	info, pr, err := front.GetPersistedResponse(id)
 	if err != nil {
-		return SessionInfo{}, SessionPersistedResponse{}, err
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, bridgeSessionRecordError(id, err)
 	}
 	if info.Type == "" {
 		front.RepairTypeBestEffort(id)
 		info.Type = sessionpkg.BeadType
 	}
-	return c.manager.EnrichInfo(info), pr, nil
+	return m.EnrichInfo(info), pr, nil
+}
+
+// bridgeSessionRecordError maps a session.Store persisted-read error back to the
+// error contract the API session-manager mappers (writeSessionManagerError /
+// humaSessionManagerError) and cmd/gc nudge fall-through expected from the retired
+// Manager.GetWithBead, preserving the status codes. A present-but-non-session bead
+// swaps ErrSessionNotFound for ErrNotSession (→ 400); every other error (including
+// the beads.ErrNotFound-chained absence that yields 404) passes through unchanged.
+// It is the worker-lane twin of internal/api.bridgeSessionGetError.
+func bridgeSessionRecordError(id string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sessionpkg.ErrSessionNotFound) && !errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("%w: %s", sessionpkg.ErrNotSession, id)
+	}
+	return err
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template

@@ -1744,28 +1744,15 @@ func pruneStateAllowed(state State, metadata map[string]string, allowed map[Stat
 	return ok
 }
 
-// Get returns info about a single session.
+// Get returns info about a single session. It loads the session bead (allowing
+// closed sessions), applies the read-path empty-type heal, and enriches the
+// persisted projection with the live runtime overlay (infoFromBead).
 func (m *Manager) Get(id string) (Info, error) {
-	info, _, err := m.GetWithBead(id)
-	return info, err
-}
-
-// GetWithBead returns session info and the underlying bead in a single
-// store fetch, for callers that need both views (e.g. spec build plus
-// metadata lookup) without a redundant store.Get.
-func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
 	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
-		return Info{}, beads.Bead{}, err
+		return Info{}, err
 	}
-	return m.infoFromBead(b), b, nil
-}
-
-// SessionInfoFromBead converts an already-loaded session bead to Info,
-// applying the same enrichment as Get. Callers that have just resolved
-// the bead can use this to avoid a second store.Get.
-func (m *Manager) SessionInfoFromBead(b beads.Bead) Info {
-	return m.infoFromBead(b)
+	return m.infoFromBead(b), nil
 }
 
 // ObserveRuntimeForInfo reports live provider state for a session whose Info

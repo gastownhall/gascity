@@ -81,7 +81,9 @@ var typedClassCodecNeedles = []codecNeedle{
 	{"sessions", "PersistedResponseFromBead(", "session.Store.GetPersistedResponse (internal/session/persisted_response.go)"},
 	{"sessions", "ListFullFromBeads(", "session.Store.ListAll + Manager.ListFromInfos (internal/session)"},
 	{"sessions", "GetWithPersistedResponse(", "session.Store.GetPersistedResponse + Manager.EnrichInfo (internal/session)"},
-	{"sessions", "GetWithBead(", "session.Store.GetPersistedResponse / worker.Factory.SessionByHandle (internal/session, internal/worker; retires in WI-6 W3)"},
+	{"sessions", "GetWithBead(", "session.Store.GetPersistedResponse / worker.Factory.SessionByHandle (internal/session, internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
+	{"sessions", "SessionByLoadedBead(", "worker.Factory.SessionByRecord (internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
+	{"sessions", "ResolveSessionBeadByExactID(", "session.ResolveSessionRecordByExactID (internal/session; worker-boundary use retired in WI-6 W3, the reconciler existence-probe use remains until its periphery wave)"},
 	{"sessions", "PollerKeyFromBead(", "session.Store poller-key accessor (internal/session/poller_key.go)"},
 	{"orders", "RunFromTrackingBead(", "orders.Store.Get/RecentRuns (internal/orders)"},
 	{"orders", "MaxSeqFromLabels(", "orders.Store.Cursor (internal/orders)"},
@@ -150,9 +152,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// surfaces in WI-7.
 		"internal/api/session_resolution.go": 1,
 	},
-	"SessionInfoFromBead(": {
-		"internal/worker/factory.go": 1,
-	},
 	"ListAllSessionBeads(": {
 		"cmd/gc/adoption_barrier.go":      2,
 		"cmd/gc/build_desired_state.go":   1,
@@ -166,11 +165,14 @@ var typedClassCodecCensus = map[string]map[string]int{
 	"GetWithPersistedResponse(": {
 		"internal/worker/catalog.go": 1,
 	},
-	"GetWithBead(": {
-		"internal/worker/factory.go":              1,
-		"internal/worker/handle_lifecycle.go":     1,
-		"internal/worker/invocation_telemetry.go": 1,
-		"internal/worker/operation_events.go":     1,
+	"ResolveSessionBeadByExactID(": {
+		// The worker-boundary resolve+construct site (cmd/gc/worker_handle.go)
+		// moved to ResolveSessionRecordByExactID + SessionByRecord in WI-6 W3.
+		// This remaining hit is session_reconciler.go's attached-config-drift
+		// EXISTENCE probe, which discards the bead and only reads the error; it
+		// retires with the reconciler periphery wave. Recorded honestly rather
+		// than force-zeroed.
+		"cmd/gc/session_reconciler.go": 1,
 	},
 	"PollerKeyFromBead(": {
 		"cmd/gc/cmd_wait.go": 1,
