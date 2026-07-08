@@ -444,6 +444,207 @@ func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 	}
 }
 
+// acpOrphanScanProvider augments orphanScanProvider with ACP route bookkeeping
+// so a resume that reserves an ACP route before the pre-start orphan gate can
+// be observed unwinding that reservation when the gate refuses. RouteACP and
+// Unroute record into the same events slice as the scan/start calls.
+type acpOrphanScanProvider struct {
+	*orphanScanProvider
+}
+
+func (p *acpOrphanScanProvider) RouteACP(name string) { p.events = append(p.events, "route:"+name) }
+func (p *acpOrphanScanProvider) Unroute(name string)  { p.events = append(p.events, "unroute:"+name) }
+
+// seedSuspendedResumeTarget creates a session backed by a clean orphan scanner
+// and suspends it, so a subsequent Manager.Start/StartRuntimeOnly takes the
+// resume path (stopped runtime, non-empty resume command) and reaches the
+// pre-start orphan gate. It clears the recorded events after suspend so callers
+// observe only the resume attempt, and returns the provider ready to be armed
+// with an orphan.
+func seedSuspendedResumeTarget(t *testing.T) (*Manager, *orphanScanProvider, Info) {
+	t.Helper()
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.events = nil
+	return mgr, sp, info
+}
+
+func hasEventPrefix(events []string, prefix string) bool {
+	for _, e := range events {
+		if strings.HasPrefix(e, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// armUnconfirmedOrphan makes killExistingOrphans surface a same-session
+// untracked orphan whose termination fails, i.e. one that cannot be confirmed
+// dead. This is the fixture shape TestCreateRefusesStartWhenOrphanNotConfirmedDead
+// uses for the Create path.
+func armUnconfirmedOrphan(sp *orphanScanProvider) {
+	sp.results = []runtime.LiveRuntime{{PID: 1234, IsTracked: false}}
+	sp.terminateErr = errors.New("terminate failed")
+}
+
+// armConfirmedDeadOrphan makes killExistingOrphans surface a same-session
+// untracked orphan that terminates cleanly (confirmed dead), so the gate lets
+// the Start proceed.
+func armConfirmedDeadOrphan(sp *orphanScanProvider) {
+	sp.results = []runtime.LiveRuntime{{PID: 1234, IsTracked: false}}
+	sp.terminateErr = nil
+}
+
+// TestStartRefusesResumeWhenOrphanNotConfirmedDead drives the real
+// Manager.Start -> ensureRunning path (chat.go ~388) with the same
+// not-confirmed-dead orphan fixture the Create behavioral test uses, and pins
+// the runtime behavior of the fix: Start returns a pre-start orphan cleanup
+// error and no replacement runtime is started (sp.Start is never called). A
+// regression that swallowed the gate error (e.g. `if orphanErr != nil { /*
+// no-op */ }`) would pass errcheck and the structural scan but fail here.
+func TestStartRefusesResumeWhenOrphanNotConfirmedDead(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	armUnconfirmedOrphan(sp)
+
+	err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err == nil {
+		t.Fatal("Start succeeded despite an orphan that could not be confirmed dead")
+	}
+	if !strings.Contains(err.Error(), "orphan cleanup") {
+		t.Fatalf("Start error = %v, want pre-start orphan cleanup refusal", err)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted despite unconfirmed orphan; events = %v", sp.events)
+	}
+	want := []string{"find:", "terminate:"}
+	for i, prefix := range want {
+		if i >= len(sp.events) || !strings.HasPrefix(sp.events[i], prefix) {
+			t.Fatalf("events = %v, want prefixes %v", sp.events, want)
+		}
+	}
+}
+
+// TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead is the
+// StartRuntimeOnly (reconciler respawn bridge, chat.go ~508) counterpart of
+// TestStartRefusesResumeWhenOrphanNotConfirmedDead.
+func TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	armUnconfirmedOrphan(sp)
+
+	err := mgr.StartRuntimeOnly(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err == nil {
+		t.Fatal("StartRuntimeOnly succeeded despite an orphan that could not be confirmed dead")
+	}
+	if !strings.Contains(err.Error(), "orphan cleanup") {
+		t.Fatalf("StartRuntimeOnly error = %v, want pre-start orphan cleanup refusal", err)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted despite unconfirmed orphan; events = %v", sp.events)
+	}
+	want := []string{"find:", "terminate:"}
+	for i, prefix := range want {
+		if i >= len(sp.events) || !strings.HasPrefix(sp.events[i], prefix) {
+			t.Fatalf("events = %v, want prefixes %v", sp.events, want)
+		}
+	}
+}
+
+// TestStartProceedsWhenOrphanConfirmedDead is the positive counterpart: when
+// the same-session orphan IS confirmed dead, Manager.Start proceeds and starts
+// the replacement runtime. It proves the gate does not over-refuse.
+func TestStartProceedsWhenOrphanConfirmedDead(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	armConfirmedDeadOrphan(sp)
+
+	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q not running after resume", info.SessionName)
+	}
+}
+
+// TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead is the StartRuntimeOnly
+// positive counterpart.
+func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	armConfirmedDeadOrphan(sp)
+
+	if err := mgr.StartRuntimeOnly(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("StartRuntimeOnly: %v", err)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q not running after respawn", info.SessionName)
+	}
+}
+
+// TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead pins the route-unwinding
+// half of the fix: when the resume path reserved an ACP route before the
+// pre-start orphan gate, a refusal must call unroute() so the reservation is
+// released rather than leaked. It seeds an ACP-transport session bead directly
+// (mirroring the legacy-ACP fixtures elsewhere in this file) so ensureRunning
+// reserves a route via RouteACP, then arms a not-confirmed-dead orphan and
+// asserts Unroute fires and no runtime Start is attempted.
+func TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &acpOrphanScanProvider{orphanScanProvider: &orphanScanProvider{Fake: runtime.NewFake()}}
+	armUnconfirmedOrphan(sp.orphanScanProvider)
+	mgr := NewManager(store, sp)
+
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"state":     string(StateSuspended),
+			"provider":  "claude",
+			"transport": "acp",
+			"work_dir":  "/tmp",
+			"command":   "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create bead: %v", err)
+	}
+	sessName := sessionNameFor(b.ID)
+	if err := store.SetMetadata(b.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+	sp.events = nil
+
+	err = mgr.Start(context.Background(), b.ID, "claude", runtime.Config{WorkDir: "/tmp"})
+	if err == nil {
+		t.Fatal("Start succeeded despite an orphan that could not be confirmed dead")
+	}
+	if !strings.Contains(err.Error(), "orphan cleanup") {
+		t.Fatalf("Start error = %v, want pre-start orphan cleanup refusal", err)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted despite unconfirmed orphan; events = %v", sp.events)
+	}
+	if !hasEventPrefix(sp.events, "route:") {
+		t.Fatalf("expected an ACP route reservation before the gate; events = %v", sp.events)
+	}
+	if !hasEventPrefix(sp.events, "unroute:") {
+		t.Fatalf("ACP route reservation was not unwound on refusal; events = %v", sp.events)
+	}
+}
+
 func TestCreateWithProviderWithoutProcessScannerStillStarts(t *testing.T) {
 	store := beads.NewMemStore()
 	fake := runtime.NewFake()
