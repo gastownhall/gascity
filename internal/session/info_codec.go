@@ -101,6 +101,14 @@ var infoKeyCodec = []infoKeySpec{
 		i.ManualSession = strings.TrimSpace(v) == "true"
 		i.ManualSessionMetadata = v
 	}},
+
+	// Canonical-identity record mirrors (verbatim). The typed record is derived
+	// on demand via Info.CanonicalIdentity(); these keep the raw values so the
+	// fold copies them per-key. S19 Stage 2 is WRITE-ONLY: stamped at
+	// create/adoption but read by no decision path yet.
+	{CanonicalInstanceNameMetadata, func(i *Info, v string) { i.CanonicalInstanceNameMetadata = v }},
+	{CanonicalPoolSlotMetadata, func(i *Info, v string) { i.CanonicalPoolSlotMetadata = v }},
+
 	{MCPIdentityMetadataKey, func(i *Info, v string) { i.MCPIdentity = v }},
 	{MCPServersSnapshotMetadataKey, func(i *Info, v string) { i.MCPServersSnapshot = v }},
 

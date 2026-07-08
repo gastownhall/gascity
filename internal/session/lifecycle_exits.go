@@ -188,6 +188,9 @@ func ConversationResetPatch(clearStartedConfigHash bool) MetadataPatch {
 	}
 	if clearStartedConfigHash {
 		patch["started_config_hash"] = ""
+		// Priming markers share started_config_hash's lifetime (S19 Stage 2): a
+		// wake failure re-primes; a churn keeps the hash and its markers.
+		clearPrimingMarkers(patch)
 	}
 	return patch
 }

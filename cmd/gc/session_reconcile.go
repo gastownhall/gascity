@@ -1047,6 +1047,11 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2): this asleep continuation reset re-primes.
+				batch[sessionpkg.PrimedAtMetadataKey] = ""
+				batch[sessionpkg.PrimingAttemptedAtMetadataKey] = ""
+				batch[sessionpkg.PromptHashMetadataKey] = ""
 			}
 		}
 	}

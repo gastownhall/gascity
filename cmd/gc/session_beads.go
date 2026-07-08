@@ -428,6 +428,11 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch["started_live_hash"] = ""
 			batch["live_hash"] = ""
 			batch["startup_dialog_verified"] = ""
+			// Priming markers share started_config_hash's lifetime (S19 Stage 2):
+			// re-claiming for a fresh spawn re-primes.
+			batch[session.PrimedAtMetadataKey] = ""
+			batch[session.PrimingAttemptedAtMetadataKey] = ""
+			batch[session.PromptHashMetadataKey] = ""
 		} else {
 			batch["pending_create_started_at"] = ""
 		}
@@ -1265,6 +1270,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				Generation:        session.DefaultGeneration,
 				ContinuationEpoch: session.DefaultContinuationEpoch,
 				InstanceToken:     instanceToken,
+				PoolSlot:          poolSlot,
+				// syncSessionBeads iterates configured agents, so agentName is
+				// always a config-resolved identity — stamp the canonical record.
+				ConfigResolved: true,
 			})
 			meta["live_hash"] = liveHash
 			meta["session_origin"] = origin
@@ -1309,7 +1318,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			meta["template"] = qualifiedTemplate
 			if poolSlot > 0 {
-				meta["pool_slot"] = strconv.Itoa(poolSlot)
+				// pool_slot is emitted by desiredSessionIdentity above (PoolSlot
+				// passed in); only the pending pool session_name is hand-stamped.
 				meta["session_name"] = pendingPoolSessionName(qualifiedTemplate, instanceToken)
 			}
 			// Store command and resume fields so gc session attach can

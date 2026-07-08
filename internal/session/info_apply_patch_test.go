@@ -42,6 +42,7 @@ var allProjectedMetadataKeys = []string{
 	"session_name_explicit", "wake_request", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
 	MetadataLastNudgeDeliveredAt, "provider_kind",
+	CanonicalInstanceNameMetadata, CanonicalPoolSlotMetadata,
 }
 
 // oracleBaseBeads returns diverse session beads: a fully-populated open bead, the
@@ -81,6 +82,7 @@ func oracleBaseBeads() []beads.Bead {
 		"session_name_explicit": "true", "wake_request": "explicit", "restart_requested": "true",
 		"session_id_flag": "--session-id", "template_overrides": `{"x":"y"}`, "wake_attempts": "3",
 		MetadataLastNudgeDeliveredAt: "2026-01-09T00:00:00Z", "provider_kind": "claude",
+		CanonicalInstanceNameMetadata: "dir/agent-1", CanonicalPoolSlotMetadata: "2",
 	}
 	clone := func(m map[string]string) map[string]string {
 		out := make(map[string]string, len(m))
@@ -147,8 +149,13 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"live_hash": "ignored"},         // unknown key: must not change Info
-		{"startup_dialog_verified": "z"}, // unknown key
+		{CanonicalInstanceNameMetadata: "dir/renamed"},                      // canonical name reset
+		{CanonicalInstanceNameMetadata: ""},                                 // canonical name cleared (record vanishes)
+		{CanonicalPoolSlotMetadata: ""},                                     // slot cleared, name kept
+		{CanonicalPoolSlotMetadata: "garbage"},                              // non-numeric slot
+		{CanonicalInstanceNameMetadata: "", CanonicalPoolSlotMetadata: "4"}, // stray slot without name
+		{"live_hash": "ignored"},                                            // unknown key: must not change Info
+		{"startup_dialog_verified": "z"},                                    // unknown key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}
 	return append(patches, edge...)

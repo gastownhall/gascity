@@ -143,6 +143,19 @@ type Info struct {
 	ManualSessionMetadata string
 	Labels                []string // bead labels (agent:<name> identity fallback + canonical checks)
 
+	// CanonicalInstanceNameMetadata / CanonicalPoolSlotMetadata are the RAW
+	// canonical-identity record mirrors (canonical_instance_name /
+	// canonical_pool_slot), verbatim. They follow the DependencyOnlyMetadata /
+	// PendingCreateClaimMetadata house pattern: projected by InfoFromPersistedBead
+	// and folded per-key (verbatim copy) by ApplyPatch, so the two keys round-trip
+	// through the fold-vs-reproject oracle trivially. The typed record is derived
+	// on demand by the Info.CanonicalIdentity() accessor over these mirrors, never
+	// stored, so nothing can go stale after a heal. Additive, internal-only
+	// (absent from the HTTP wire). S19 Stage 2 is WRITE-ONLY: stamped at
+	// create/adoption but read by no decision path yet.
+	CanonicalInstanceNameMetadata string // canonical_instance_name (raw)
+	CanonicalPoolSlotMetadata     string // canonical_pool_slot (raw)
+
 	// MCPIdentity / MCPServersSnapshot mirror the raw mcp_identity and
 	// mcp_servers_snapshot metadata (verbatim). The ACP-transport classifier
 	// treats a non-empty value on either key as evidence the session speaks ACP,

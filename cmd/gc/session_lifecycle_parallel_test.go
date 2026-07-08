@@ -4148,6 +4148,77 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	}
 }
 
+// TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered pins the B2
+// write-only stamp (S19 Stage 2): the crash-recovery re-confirmation of an
+// already-running runtime stamps the primed_at/prompt_hash confirmation pair
+// when the rebuilt prepared start would have delivered the prompt (the
+// pre-commit crash left started_config_hash="" so firstStart=true and
+// promptDelivered mirrors the original launch), and stamps NOTHING for an empty
+// prompt (the P5 gate). Nothing reads the pair in Stage 2 — this pins the write.
+func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T) {
+	const prompt = "do the work"
+	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+
+	newRecoveryBead := func(store *beads.MemStore) beads.Bead {
+		bead, err := store.Create(beads.Bead{
+			Title:  "helper",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":         "sky",
+				"pending_create_claim": "true",
+				"state":                "active",
+				"state_reason":         "creation_complete",
+				// No started_config_hash — the pre-commit crash shape, so the
+				// rebuild classifies firstStart=true and mirrors delivery.
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bead
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+
+	t.Run("delivered prompt stamps the pair", func(t *testing.T) {
+		store := beads.NewMemStore()
+		bead := newRecoveryBead(store)
+		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: prompt}
+		if ok, _ := recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+			t.Fatal("recoverRunningPendingCreate returned false, want true")
+		}
+		got, err := store.Get(bead.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := clkTime.UTC().Format(time.RFC3339); got.Metadata[sessionpkg.PrimedAtMetadataKey] != want {
+			t.Errorf("primed_at = %q, want %q", got.Metadata[sessionpkg.PrimedAtMetadataKey], want)
+		}
+		if want := sessionpkg.PromptHash(prompt); got.Metadata[sessionpkg.PromptHashMetadataKey] != want {
+			t.Errorf("prompt_hash = %q, want %q", got.Metadata[sessionpkg.PromptHashMetadataKey], want)
+		}
+	})
+
+	t.Run("empty prompt stamps nothing (P5)", func(t *testing.T) {
+		store := beads.NewMemStore()
+		bead := newRecoveryBead(store)
+		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: ""}
+		if ok, _ := recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+			t.Fatal("recoverRunningPendingCreate returned false, want true")
+		}
+		got, err := store.Get(bead.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := got.Metadata[sessionpkg.PrimedAtMetadataKey]; v != "" {
+			t.Errorf("primed_at = %q, want empty for empty prompt", v)
+		}
+		if v := got.Metadata[sessionpkg.PromptHashMetadataKey]; v != "" {
+			t.Errorf("prompt_hash = %q, want empty for empty prompt", v)
+		}
+	})
+}
+
 // TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear pins the
 // Step-5a fix: buildPreparedStart's stale-resume guard (clearStaleResumeKeyMetadata)
 // clears started_config_hash on the raw bead + store outside any folded batch. On the

@@ -305,6 +305,11 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 			"started_live_hash":       "old-live-hash",
 			"live_hash":               "old-live-hash",
 			"startup_dialog_verified": "true",
+			// Priming markers share the fresh-wake reset (S19 Stage 2); set them
+			// so the trace log lists them among the cleared keys.
+			"primed_at":            "2026-03-08T11:00:00Z",
+			"priming_attempted_at": "2026-03-08T11:00:00Z",
+			"prompt_hash":          "abc123",
 		},
 	})
 	if err != nil {
