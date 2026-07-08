@@ -257,14 +257,29 @@ func TestInfoCodecFieldsDisjoint(t *testing.T) {
 		return changed
 	}
 
+	// sentinelFor returns a per-key value that actually moves every field the
+	// key's setter writes off its zero value, so each setter contributes a
+	// non-empty touched-field set to the pairwise check. The default "1" trims
+	// to a truthy int and a non-empty string, but the `== "true"` boolean
+	// setters only flip their bool on "true", and the RFC3339-only
+	// last_nudge_delivered_at setter only moves on a valid timestamp; without
+	// these overrides those setters report an empty set and silently drop out of
+	// the disjointness assertion — the exact invariant this test exists to prove.
+	sentinelFor := func(key string) string {
+		switch key {
+		case NamedSessionMetadataKey, "pool_managed", "dependency_only",
+			"manual_session", "session_drainable", "pending_create_claim":
+			return "true"
+		case MetadataLastNudgeDeliveredAt:
+			return "2025-06-01T00:00:00Z"
+		default:
+			return "1"
+		}
+	}
+
 	fields := make([]map[int]bool, len(infoKeyCodec))
 	for i := range infoKeyCodec {
-		// A distinctive non-empty value so string/bool/int/slice setters all
-		// move their field off the zero value. "1" trims to a truthy bool and
-		// parses as an int; a non-time string leaves LastNudgeDeliveredAt zero
-		// (that key touches only a time field, still detected via its raw mirror
-		// where one exists — wake_attempts mirror moves).
-		fields[i] = touchedFields(infoKeyCodec[i].set, "1")
+		fields[i] = touchedFields(infoKeyCodec[i].set, sentinelFor(infoKeyCodec[i].key))
 	}
 
 	providerIdx, transportIdx := -1, -1
