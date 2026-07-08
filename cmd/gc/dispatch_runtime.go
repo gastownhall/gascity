@@ -405,7 +405,12 @@ type workflowServeTarget struct {
 // (config.ResidentRigControlDispatcher) are excluded from the fan-out:
 // that dispatcher exclusively serves its rig store, so skipping it here
 // makes double-serving impossible by construction and keeps the
-// singleton's idle-sweep cost off opted-in rigs.
+// singleton's idle-sweep cost off opted-in rigs. Ownership of a rig store
+// is exclusive by construction: either the city singleton fans into it, or
+// the rig's resident dispatcher owns it, never both. That disjointness is
+// the only thing preventing double dispatch — ProcessControl guards on bead
+// status alone, with no store-level claim — so this exclusion and #3873's
+// resident-routing must stay in lockstep on the same residency predicate.
 func workflowServeTargets(cityPath string, cfg *config.City, agentCfg *config.Agent, workDir string, workEnv map[string]string) ([]workflowServeTarget, error) {
 	targets := []workflowServeTarget{{storePath: workDir, workEnv: workEnv}}
 	if !isWorkflowServeControlDispatcherAgent(*agentCfg) ||
@@ -546,9 +551,13 @@ type workflowServeDrainResult struct {
 // it crosses workflowServeTargetEscalationStreak the target is escalated
 // once per failure episode via emitCityServeTargetDegraded, so a store that
 // keeps failing behind healthy targets stays reconciler-visible instead of
-// degrading silently. Returns whether it advanced a control bead and whether
-// any store's queue still contains only pending work so the --follow caller
-// can distinguish blocked work from genuine idle.
+// degrading silently. When every target fails in the same sweep the loop
+// returns a fatal error if any target produced one, in preference to a
+// transient error from another target, so runWorkflowServeFollow cannot be
+// tricked into retrying forever on a structural failure that a transient
+// city-store error happened to precede. Returns whether it advanced a control
+// bead and whether any store's queue still contains only pending work so the
+// --follow caller can distinguish blocked work from genuine idle.
 func drainWorkflowServeWork(agentCfg config.Agent, cityPath string, targets []workflowServeTarget, workQuery string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
@@ -556,7 +565,16 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath string, targets []wo
 		processedThisSweep := false
 		pendingThisSweep := false
 		failedTargets := 0
-		var firstErr error
+		// When every target fails, the returned error's transient-vs-fatal
+		// class decides whether runWorkflowServeFollow retries or exits, so it
+		// must not depend on iteration order (the city store is always
+		// targets[0]). Prefer a fatal error over a transient one: a transient
+		// city error must never mask a genuinely fatal rig error, or the
+		// follow loop retries forever on a structural failure. errors.Join is
+		// unusable here because dispatch.IsTransientControllerError
+		// substring-matches err.Error(), so a joined transient+fatal message
+		// would classify transient and re-introduce that mask.
+		var firstErr, firstFatalErr error
 		for i := range targets {
 			target := &targets[i]
 			batch, err := drainWorkflowServeStoreBatch(agentCfg, cityPath, *target, workQuery, stderr)
@@ -573,6 +591,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath string, targets []wo
 				if firstErr == nil {
 					firstErr = err
 				}
+				if firstFatalErr == nil && !dispatch.IsTransientControllerError(err) {
+					firstFatalErr = err
+				}
 				target.failStreak++
 				workflowTracef("serve target-error agent=%s store=%s streak=%d err=%v (isolating target for this sweep)",
 					agentCfg.QualifiedName(), target.storePath, target.failStreak, err)
@@ -586,6 +607,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath string, targets []wo
 			target.failStreak = 0
 		}
 		if failedTargets == len(targets) {
+			if firstFatalErr != nil {
+				return result, firstFatalErr
+			}
 			return result, firstErr
 		}
 		if processedThisSweep {

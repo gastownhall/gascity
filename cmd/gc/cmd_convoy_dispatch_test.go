@@ -2056,6 +2056,61 @@ func TestRunWorkflowServeReturnsErrorWhenAllTargetsFail(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeAllTargetsFailPrefersFatalErrorClass(t *testing.T) {
+	// When every serve target fails in the same sweep, the returned error's
+	// transient-vs-fatal class decides whether runWorkflowServeFollow retries
+	// or exits. Selecting it by iteration order (the city store is always
+	// targets[0]) lets a transient city error mask a genuinely fatal rig
+	// error: the follow loop retries forever on the structural failure — the
+	// exact "looks healthy, nothing running" signature this PR removes. A
+	// fatal error on any target must dominate the returned class regardless of
+	// order. (errors.Join is unsuitable here: dispatch.IsTransientControllerError
+	// substring-matches err.Error(), so a joined transient+fatal message still
+	// classifies transient, re-introducing the mask.)
+	cases := []struct {
+		name          string
+		rigErr        error
+		wantTransient bool
+	}{
+		{
+			name:          "transient city masks fatal rig",
+			rigErr:        fmt.Errorf("synthetic fatal store failure"),
+			wantTransient: false,
+		},
+		{
+			name:          "all transient stays transient",
+			rigErr:        fmt.Errorf("connection refused"),
+			wantTransient: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rigDir := t.TempDir()
+			cityDir := setupWorkflowServeStubTest(t, workflowServeRigCityTOML("testrig", rigDir))
+
+			workflowServeList = func(_, dir string, _ map[string]string) ([]hookBead, error) {
+				if canonicalTestPath(dir) == canonicalTestPath(cityDir) {
+					// A transient class needle so the city target (targets[0])
+					// would win a first-in-order selection with the wrong class.
+					return nil, fmt.Errorf("database is locked")
+				}
+				return nil, tc.rigErr
+			}
+			controlDispatcherServe = func(_, _ string, _ string, _ io.Writer, _ io.Writer) error {
+				return nil
+			}
+
+			err := runWorkflowServe("", false, io.Discard, io.Discard)
+			if err == nil {
+				t.Fatal("runWorkflowServe = nil, want the all-targets-failed error surfaced")
+			}
+			if got := dispatch.IsTransientControllerError(err); got != tc.wantTransient {
+				t.Fatalf("IsTransientControllerError(%v) = %v, want %v", err, got, tc.wantTransient)
+			}
+		})
+	}
+}
+
 func TestRunWorkflowServeInterleavesBusyCityStoreWithRigStores(t *testing.T) {
 	rigDir := t.TempDir()
 	cityDir := setupWorkflowServeStubTest(t, workflowServeRigCityTOML("testrig", rigDir))
