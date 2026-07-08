@@ -20,8 +20,8 @@ import (
 // TestFoldNextSessionEventRefreshesSessionsAndNotifies proves that a session
 // lifecycle event observed in the tail — with NO accompanying bead event, so the
 // bead fold does not change and build() does not fire — still (a) expires the
-// per-city sessions cache and (b) bumps the publish generation (waking any
-// detail-stream subscribers). That is what lets an idle run's session-link flip
+// per-city sessions cache and (b) wakes any detail-stream subscribers (via
+// notifySubscribers). That is what lets an idle run's session-link flip
 // push over the SSE stream promptly instead of waiting for the next bead event
 // or the sessions TTL.
 func TestFoldNextSessionEventRefreshesSessionsAndNotifies(t *testing.T) {
@@ -63,12 +63,21 @@ func TestFoldNextSessionEventRefreshesSessionsAndNotifies(t *testing.T) {
 	ctx := context.Background()
 
 	// Warm the sessions cache (a hit if the eager prime hasn't already), then
-	// snapshot the hit count and the generation.
+	// snapshot the hit count.
 	if _, ok := tl.mgr.fetchSessions(ctx, "alpha"); !ok {
 		t.Fatal("sessions prime must be available")
 	}
 	hitsBefore := sessionsHits.Load()
-	genBefore := generationForTest(tl)
+
+	// Subscribe to the detail stream so we can observe the wakeup a session event
+	// triggers, then drain any notify already pending from the cold replay / prime
+	// so the next receive is unambiguously the session event's notify.
+	sub := tl.subscribe()
+	defer tl.unsubscribe(sub)
+	select {
+	case <-sub.notify:
+	default:
+	}
 
 	// Append a session lifecycle event ONLY — seq past the fold cursor, no bead
 	// change, so proj.Apply ignores it and build() (its subscriber notify) never
@@ -81,8 +90,12 @@ func TestFoldNextSessionEventRefreshesSessionsAndNotifies(t *testing.T) {
 	})
 
 	// The tail folds it: containsSessionEvent → refreshSessionEnrichment →
-	// invalidate(sessions) + notifySubscribers → generation advances.
-	waitForGenerationAbove(t, tl, genBefore)
+	// invalidate(sessions) + notifySubscribers → our subscriber wakes.
+	select {
+	case <-sub.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session event did not notify detail-stream subscribers within 2s")
+	}
 
 	// The cache was invalidated: the next read re-hits upstream.
 	if _, ok := tl.mgr.fetchSessions(ctx, "alpha"); !ok {
@@ -91,27 +104,6 @@ func TestFoldNextSessionEventRefreshesSessionsAndNotifies(t *testing.T) {
 	if got := sessionsHits.Load(); got <= hitsBefore {
 		t.Fatalf("sessions upstream hits = %d, want > %d (a session event must invalidate the cache)", got, hitsBefore)
 	}
-}
-
-// generationForTest reads the tailer's publish generation under subMu.
-func generationForTest(tl *cityRunTailer) uint64 {
-	tl.subMu.Lock()
-	defer tl.subMu.Unlock()
-	return tl.generation
-}
-
-// waitForGenerationAbove blocks until the tailer's generation advances past prev
-// (the session event was folded and notified) or a bounded deadline elapses.
-func waitForGenerationAbove(t *testing.T, tl *cityRunTailer, prev uint64) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if generationForTest(tl) > prev {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("generation did not advance above %d within 2s (session event did not notify subscribers)", prev)
 }
 
 // sessionLinkedStepEvent builds a step bead that resolves a session link: an
