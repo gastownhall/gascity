@@ -210,6 +210,7 @@ func recordResetStallIfDue(
 	session beads.Bead,
 	template string,
 	name string,
+	running bool,
 	alive bool,
 	startupTimeout time.Duration,
 	now time.Time,
@@ -230,6 +231,34 @@ func recordResetStallIfDue(
 	}
 	elapsed := now.Sub(committedAt)
 	if elapsed <= startupTimeout {
+		return
+	}
+	// A reset that has already produced a *running* runtime is not a stalled
+	// reset: the runtime came up and the agent is still finishing startup
+	// (e.g. a slow `gc prime` under DoltLite store load), and it typically
+	// reaches ready shortly after. Firing session.reset_stalled here mislabels
+	// a slow start as a failed reset — the false-positive storm behind ga-y8s9
+	// / upstream #4081. Record the exemption so the decision stays observable,
+	// but skip the alarm. A reset that produced NO running runtime falls through
+	// and still fires below (the genuine "reset failed to bring the session up"
+	// signal). markResetStall is intentionally NOT consumed here, so a slow
+	// start that later loses its runtime is still reported as a real stall.
+	if running {
+		if trace != nil {
+			trace.RecordDecision(
+				TraceSiteReconcilerProgressStallExempt,
+				TraceReasonRuntimeStarting,
+				TraceOutcomeExempt,
+				template,
+				name,
+				map[string]any{
+					"bead_id":            session.ID,
+					"elapsed_s":          int(elapsed / time.Second),
+					"reset_committed_at": resetCommittedAt,
+					"startup_timeout_s":  int(startupTimeout / time.Second),
+				},
+			)
+		}
 		return
 	}
 	if dt != nil && !dt.markResetStall(session.ID) {
@@ -2158,7 +2187,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			shadowTick.captureRuntime(session.ID, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
-		recordResetStallIfDue(*session, tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
+		recordResetStallIfDue(*session, tp.TemplateName, name, running, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// terminalErrBatch carries the markProviderTerminalError mirror (if it ran) out

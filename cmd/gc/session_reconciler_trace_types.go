@@ -167,6 +167,7 @@ const (
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
+	TraceReasonRuntimeStarting        TraceReasonCode = "runtime_starting"
 
 	TraceReasonRateLimit                     TraceReasonCode = "rate_limit"
 	TraceReasonPendingCreate                 TraceReasonCode = "pending_create"
