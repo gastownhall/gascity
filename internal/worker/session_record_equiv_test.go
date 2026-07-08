@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -148,8 +149,10 @@ func TestSessionByRecordMatchesSessionByHandle(t *testing.T) {
 }
 
 // TestResolveSessionRecordByExactIDMatchesBeadForm pins that the record resolver
-// projects the SAME bead the bead resolver returns (Info + PersistedResponse),
-// including the in-memory empty-type normalize, and shares its not-found error.
+// projects the SAME bead the bead resolver returns (Info + PersistedResponse) for
+// a canonical typed session bead, and shares its not-found error. The empty-type
+// normalize is pinned separately in
+// TestResolveSessionRecordByExactIDNormalizesRepairableType.
 func TestResolveSessionRecordByExactIDMatchesBeadForm(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -182,6 +185,92 @@ func TestResolveSessionRecordByExactIDMatchesBeadForm(t *testing.T) {
 
 	if _, _, err := sessionpkg.ResolveSessionRecordByExactID(store, "does-not-exist"); err == nil {
 		t.Fatal("ResolveSessionRecordByExactID(absent) = nil error, want not-found")
+	}
+}
+
+// TestResolveSessionRecordByExactIDNormalizesRepairableType pins the in-memory
+// empty-type normalize: a label-only repairable bead (empty Type, gc:session
+// label) resolves to a record whose Info.Type is the canonical session type,
+// WITHOUT writing the repair back to the store (read-only resolution normalizes
+// in memory; RepairEmptyType is the mutating path). Deleting normalizeEmptyType
+// from ResolveSessionRecordByExactID makes this test red.
+func TestResolveSessionRecordByExactIDNormalizesRepairableType(t *testing.T) {
+	store := beads.NewMemStore()
+
+	created, err := store.Create(beads.Bead{
+		Title:    "repairable",
+		Labels:   []string{sessionpkg.LabelSession},
+		Metadata: map[string]string{"session_name": "repairable"},
+	})
+	if err != nil {
+		t.Fatalf("create repairable bead: %v", err)
+	}
+	// MemStore.Create defaults an empty Type to "task"; rewrite to empty so the
+	// crash/migration-damaged repairable shape (empty Type + gc:session label) is
+	// preserved for the normalize path.
+	empty := ""
+	if err := store.Update(created.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatalf("clear type on repairable bead: %v", err)
+	}
+
+	recInfo, _, err := sessionpkg.ResolveSessionRecordByExactID(store, created.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
+	}
+	if recInfo.Type != sessionpkg.BeadType {
+		t.Fatalf("record Info.Type = %q, want %q (in-memory normalize)", recInfo.Type, sessionpkg.BeadType)
+	}
+
+	// The normalize is in-memory only: the persisted bead type stays empty.
+	persisted, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if persisted.Type != "" {
+		t.Fatalf("persisted Type = %q, want empty (resolution must not write the repair)", persisted.Type)
+	}
+}
+
+// TestSessionRecordViaManagerBridgesErrorContract pins that the worker read
+// helper bridges the session.Store error contract back to the retired
+// Manager.GetWithBead one so the API factory-lane mappers keep their status
+// codes: a present-but-non-session bead surfaces session.ErrNotSession (mapped to
+// 400), and an absent id keeps the beads.ErrNotFound chain (mapped to 404).
+// Without the bridge the first case is session.ErrSessionNotFound, which those
+// mappers do not recognize and fall through to a 500.
+func TestSessionRecordViaManagerBridgesErrorContract(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+
+	// A present bead that is NOT a session bead (no session type, no gc:session
+	// label) — the resolve-then-Get race the factory lane can hit.
+	nonSession, err := store.Create(beads.Bead{
+		Title:    "task",
+		Type:     "task",
+		Metadata: map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("create non-session bead: %v", err)
+	}
+
+	_, _, err = sessionRecordViaManager(manager, nonSession.ID)
+	if err == nil {
+		t.Fatal("sessionRecordViaManager(present non-session) = nil error, want ErrNotSession")
+	}
+	if !errors.Is(err, sessionpkg.ErrNotSession) {
+		t.Fatalf("present non-session error = %v, want errors.Is ErrNotSession (400 preservation)", err)
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("present non-session error must NOT be on the beads.ErrNotFound chain: %v", err)
+	}
+
+	_, _, err = sessionRecordViaManager(manager, "does-not-exist")
+	if err == nil {
+		t.Fatal("sessionRecordViaManager(absent) = nil error, want beads.ErrNotFound")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("absent-id error = %v, want errors.Is beads.ErrNotFound (404 preservation)", err)
 	}
 }
 
