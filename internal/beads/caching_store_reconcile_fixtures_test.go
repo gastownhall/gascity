@@ -87,7 +87,7 @@ func mergeFixtures() []mergeFixture {
 	// --- B3/D4/D2: quiescent recency-keep, cached deps present → keep cached deps ---
 	{
 		in := quiIn()
-		in.freshByID = map[string]Bead{"a": beadWith("a", "closed", func(b *Bead) {})} // status change ⇒ beadChanged
+		in.freshByID = map[string]Bead{"a": beadWith("a", "closed", func(_ *Bead) {})} // status change ⇒ beadChanged
 		in.depMap = map[string][]Dep{"a": {dep("a", "fresh")}}
 		fx = append(fx, mergeFixture{
 			name: "B3_D4_recency_keep_with_cached_deps",
@@ -371,7 +371,7 @@ func mergeFixtures() []mergeFixture {
 	// --- #2210 shape: local DepAdd inside window, snapshot lags (recency keep) ---
 	{
 		in := quiIn()
-		in.freshByID = map[string]Bead{"a": beadWith("a", "in_progress", func(b *Bead) {})}
+		in.freshByID = map[string]Bead{"a": beadWith("a", "in_progress", func(_ *Bead) {})}
 		in.depMap = map[string][]Dep{"a": {}} // snapshot dropped the just-added dep
 		fx = append(fx, mergeFixture{
 			name: "reg_2210_local_depadd_in_window",
@@ -406,7 +406,7 @@ func mergeFixtures() []mergeFixture {
 	// --- boundary recency 5.000s: still recent (keeps) ---
 	{
 		in := quiIn()
-		in.freshByID = map[string]Bead{"a": beadWith("a", "closed", func(b *Bead) {})}
+		in.freshByID = map[string]Bead{"a": beadWith("a", "closed", func(_ *Bead) {})}
 		in.depMap = map[string][]Dep{"a": {dep("a", "fresh")}}
 		fx = append(fx, mergeFixture{
 			name: "boundary_recency_5000ms_recent",
@@ -424,7 +424,7 @@ func mergeFixtures() []mergeFixture {
 	// --- boundary recency 5.001s: stale (absorbs) ---
 	{
 		in := quiIn()
-		in.freshByID = map[string]Bead{"a": beadWith("a", "closed", func(b *Bead) {})}
+		in.freshByID = map[string]Bead{"a": beadWith("a", "closed", func(_ *Bead) {})}
 		in.depMap = map[string][]Dep{"a": {dep("a", "fresh")}}
 		fx = append(fx, mergeFixture{
 			name: "boundary_recency_5001ms_stale",

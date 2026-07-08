@@ -215,15 +215,13 @@ func (b *countingBacking) List(q ListQuery) ([]Bead, error) {
 // type assertion (no call), so a stray call would panic — a louder failure
 // than a count mismatch. The store starts cacheLive (promoteLiveLocked
 // overwrites it regardless).
-func newMergeHarnessStore(st storeState, backingTruth *MemStore) (*CachingStore, *countingBacking) {
+func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 	var counter *countingBacking
 	var backing Store
 	if st.backingIsBd {
 		backing = (*BdStore)(nil)
 	} else {
-		if backingTruth == nil {
-			backingTruth = NewMemStore()
-		}
+		backingTruth := NewMemStore()
 		counter = &countingBacking{Store: backingTruth, inner: backingTruth}
 		backing = counter
 	}
@@ -306,8 +304,8 @@ type mergeImplResult struct {
 }
 
 // runNewMerge exercises the LIVE collapsed seam (mergeSnapshotLocked).
-func runNewMerge(st storeState, in snapshotInputs, backingTruth *MemStore) mergeImplResult {
-	c, counter := newMergeHarnessStore(st, backingTruth)
+func runNewMerge(st storeState, in snapshotInputs) mergeImplResult {
+	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
 	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
 	c.mu.Unlock()
@@ -315,8 +313,8 @@ func runNewMerge(st storeState, in snapshotInputs, backingTruth *MemStore) merge
 }
 
 // runLegacyA exercises the frozen Branch A body.
-func runLegacyA(st storeState, in snapshotInputs, backingTruth *MemStore) mergeImplResult {
-	c, counter := newMergeHarnessStore(st, backingTruth)
+func runLegacyA(st storeState, in snapshotInputs) mergeImplResult {
+	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
 	res := legacyBranchAMerge(c, in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
 	c.mu.Unlock()
@@ -324,8 +322,8 @@ func runLegacyA(st storeState, in snapshotInputs, backingTruth *MemStore) mergeI
 }
 
 // runLegacyB exercises the frozen Branch B body.
-func runLegacyB(st storeState, in snapshotInputs, backingTruth *MemStore) mergeImplResult {
-	c, counter := newMergeHarnessStore(st, backingTruth)
+func runLegacyB(st storeState, in snapshotInputs) mergeImplResult {
+	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
 	res := legacyBranchBMerge(c, in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
 	c.mu.Unlock()
@@ -456,7 +454,7 @@ func legacyBranchBMerge(
 	c *CachingStore,
 	freshByID map[string]Bead, confirmedClosed map[string]Bead,
 	depMap map[string][]Dep, useFreshDeps bool,
-	startSeq uint64, now time.Time,
+	_ uint64, now time.Time,
 ) mergeSectionResult {
 	c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
 

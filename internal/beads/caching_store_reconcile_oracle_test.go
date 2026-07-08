@@ -151,7 +151,7 @@ func stateHasAnyOrphanEntry(end mergeEndState, id string) bool {
 
 // expectedNewView returns the per-id view NEW must produce, transforming the
 // reference view per the classified delta.
-func expectedNewView(st storeState, in snapshotInputs, refEnd mergeEndState, id string, kind deltaKind) perIDView {
+func expectedNewView(st storeState, _ snapshotInputs, refEnd mergeEndState, id string, kind deltaKind) perIDView {
 	base := viewOf(refEnd, id)
 	switch kind {
 	case deltaNone:
@@ -272,7 +272,7 @@ func allOracleIDs(st storeState, in snapshotInputs, refEnd mergeEndState) map[st
 // preserve pass, so the case-oracle sees the exact fresh beads all three
 // implementations see.
 func computePostPreserveFresh(st storeState, in snapshotInputs) map[string]Bead {
-	c, _ := newMergeHarnessStore(st, nil)
+	c, _ := newMergeHarnessStore(st)
 	fresh := cloneBeadMap(in.freshByID)
 	c.mu.Lock()
 	c.preserveCachedReadyProjectionLocked(fresh, in.depMap, in.useFreshDeps)
@@ -402,18 +402,18 @@ func assertDifferential(t *testing.T, name string, st storeState, in snapshotInp
 	t.Helper()
 
 	// Determinism self-check per implementation.
-	newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in), nil)
-	newRes2 := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+	newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in))
+	newRes2 := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in))
 	assertSelfDeterministic(t, name+" NEW", newRes, newRes2)
 
 	var ref mergeImplResult
 	if in.quiescent(st) {
-		ref = runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in), nil)
-		ref2 := runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+		ref = runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in))
+		ref2 := runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in))
 		assertSelfDeterministic(t, name+" legacyB", ref, ref2)
 	} else {
-		ref = runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in), nil)
-		ref2 := runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+		ref = runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in))
+		ref2 := runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in))
 		assertSelfDeterministic(t, name+" legacyA", ref, ref2)
 	}
 

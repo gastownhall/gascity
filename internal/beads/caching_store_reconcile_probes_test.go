@@ -37,13 +37,13 @@ func TestReconcileMergeDeltas_AreReal(t *testing.T) {
 		in := cloneSnapshotInputs(f.in)
 		var ref mergeImplResult
 		if in.quiescent(st) {
-			ref = runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+			ref = runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in))
 		} else {
-			ref = runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+			ref = runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in))
 		}
-		newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+		newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in))
 		if endStatesEqual(ref.end, newRes.end) {
-			t.Errorf("%s: labelled a delta but NEW == reference (delta is vacuous)", f.name)
+			t.Errorf("%s: labeled a delta but NEW == reference (delta is vacuous)", f.name)
 		}
 		checked++
 	}
@@ -56,7 +56,7 @@ func TestReconcileMergeDeltas_AreReal(t *testing.T) {
 // end-state, guarding against a vacuous reflect.DeepEqual.
 func TestReconcileMergeOracleHasTeeth(t *testing.T) {
 	f := mergeFixtures()[0]
-	newRes := runNewMerge(cloneStoreState(f.st), cloneSnapshotInputs(f.in), nil)
+	newRes := runNewMerge(cloneStoreState(f.st), cloneSnapshotInputs(f.in))
 	corrupt := newRes.end
 	corrupt.beads = cloneBeadMap(newRes.end.beads)
 	corrupt.beads["injected-ghost"] = bead("injected-ghost", "open")
@@ -109,11 +109,11 @@ func TestReconcileMergeReadProjection(t *testing.T) {
 
 		var ref mergeImplResult
 		if in.quiescent(st) {
-			ref = runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+			ref = runLegacyB(cloneStoreState(st), cloneSnapshotInputs(in))
 		} else {
-			ref = runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+			ref = runLegacyA(cloneStoreState(st), cloneSnapshotInputs(in))
 		}
-		newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in), nil)
+		newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in))
 
 		// Backing truth: the active beads a full scan returned this cycle.
 		truthRef := NewMemStore()
@@ -216,7 +216,7 @@ func TestReconcileMergeNoInputAliasing(t *testing.T) {
 		st := cloneStoreState(f.st)
 		in := cloneSnapshotInputs(f.in)
 
-		c, _ := newMergeHarnessStore(st, nil)
+		c, _ := newMergeHarnessStore(st)
 		c.mu.Lock()
 		res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
 		snapshot := captureEndState(c)
@@ -329,7 +329,7 @@ func decodeFuzzState(data []byte) (storeState, snapshotInputs) {
 				in.depMap[id] = fuzzDeps(cur, id)
 			}
 			if cachedPresent && st.beads[id].Status != "closed" && cur.intn(4) == 0 {
-				in.confirmedClosed[id] = beadWith(id, "closed", func(b *Bead) {})
+				in.confirmedClosed[id] = beadWith(id, "closed", func(_ *Bead) {})
 			}
 		}
 		if cur.intn(2) == 0 {

@@ -38,10 +38,10 @@ type twoPassOp struct {
 
 func twoPassOps() []twoPassOp {
 	return []twoPassOp{
-		{"tombstone", func(c *CachingStore, id string, opNow time.Time) {
+		{"tombstone", func(c *CachingStore, id string, _ time.Time) {
 			c.tombstoneLocked(id, c.noteMutationLocked(id))
 		}},
-		{"markDirty", func(c *CachingStore, id string, opNow time.Time) {
+		{"markDirty", func(c *CachingStore, id string, _ time.Time) {
 			c.markDirtyLocked(id)
 		}},
 		{"event_absorb_seqKeep", func(c *CachingStore, id string, opNow time.Time) {
@@ -102,7 +102,7 @@ func TestReconcileMergeDifferential_TwoPass(t *testing.T) {
 					assertDifferential(t, name+"/pass1", cloneStoreState(st0), cloneSnapshotInputs(in1))
 
 					live := cloneSnapshotInputs(in1) // pass1's preserve mutates freshByID
-					c, _ := newMergeHarnessStore(st0, nil)
+					c, _ := newMergeHarnessStore(st0)
 					c.mu.Lock()
 					c.mergeSnapshotLocked(live.freshByID, live.confirmedClosed, live.depMap, live.useFreshDeps, live.startSeq, live.now)
 					seqBefore := c.mutationSeq

@@ -108,16 +108,17 @@ func classifyRow(st storeState, in snapshotInputs, id string) coverageKey {
 
 	postPreserve := computePostPreserveFresh(st, in)
 	pf := postPreserve[id]
-	if f && c {
+	switch {
+	case f && c:
 		k.changed = changedCell(cached, pf)
 		k.statusPair = cached.Status + ">" + fresh.Status
-	} else if f {
+	case f:
 		k.changed = "na"
 		k.statusPair = "?>" + fresh.Status
-	} else if c {
+	case c:
 		k.changed = "na"
 		k.statusPair = cached.Status + ">?"
-	} else {
+	default:
 		k.changed = "na"
 		k.statusPair = "na"
 	}
@@ -245,7 +246,7 @@ func preserveOutcomeCell(st storeState, in snapshotInputs, id string) string {
 	if !cok || cached.IsBlocked == nil {
 		return "no-cached"
 	}
-	c, _ := newMergeHarnessStore(st, nil)
+	c, _ := newMergeHarnessStore(st)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	freshDeps := c.depsForReconcileLocked(id, item, in.depMap, in.useFreshDeps)

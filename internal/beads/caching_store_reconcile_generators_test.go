@@ -22,10 +22,12 @@ type guardCellSpec struct {
 	freshStatus  string
 }
 
-var changedVals = []string{"equal", "status", "labels", "isblocked", "metadata", "needs", "depsfield"}
-var cachedStatusVals = []string{"open", "in_progress", "closed"}
-var freshStatusVals = []string{"open", "closed"}
-var recencyVals = []string{"none", "recent", "boundary", "justover", "stale"}
+var (
+	changedVals      = []string{"equal", "status", "labels", "isblocked", "metadata", "needs", "depsfield"}
+	cachedStatusVals = []string{"open", "in_progress", "closed"}
+	freshStatusVals  = []string{"open", "closed"}
+	recencyVals      = []string{"none", "recent", "boundary", "justover", "stale"}
+)
 
 func fenceValsFor(regime string) []string {
 	if regime == "mutated" {
@@ -290,7 +292,7 @@ func genMarginalStates() []mergeFixture {
 		st, in := base()
 		st.beads["a"] = bead("a", "open")
 		st.localBeadAt["a"] = fxNow
-		in.freshByID["a"] = beadWith("a", "closed", func(b *Bead) {})
+		in.freshByID["a"] = beadWith("a", "closed", func(_ *Bead) {})
 		in.depMap["a"] = []Dep{dep("a", "x")}
 		out = append(out, mergeFixture{"marg_recency_now", st, in})
 	}
@@ -395,7 +397,7 @@ func genRandomState(rng *rand.Rand, idx int) mergeFixture {
 				in.depMap[id] = randDeps(rng, id)
 			}
 			if cachedPresent && !isClosed(st.beads[id]) && rng.Intn(4) == 0 {
-				in.confirmedClosed[id] = beadWith(id, "closed", func(b *Bead) {})
+				in.confirmedClosed[id] = beadWith(id, "closed", func(_ *Bead) {})
 			}
 		}
 		// Fences (respect V: V4 seq <= mutationSeq; quiescent ⇒ <= startSeq
