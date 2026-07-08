@@ -6705,7 +6705,7 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 			"session_name": "control-dispatcher",
 			"template":     "control-dispatcher",
 			"state":        "active",
-			"sleep_reason": sleepReasonCityStop,
+			"sleep_reason": string(sessionpkg.SleepReasonCityStop),
 		},
 	})
 	if err != nil {
@@ -6731,8 +6731,8 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 	if got.Metadata["state"] != string(sessionpkg.StateAsleep) {
 		t.Fatalf("state = %q, want %q", got.Metadata["state"], sessionpkg.StateAsleep)
 	}
-	if got.Metadata["sleep_reason"] != sleepReasonCityStop {
-		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], sleepReasonCityStop)
+	if got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonCityStop) {
+		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], string(sessionpkg.SleepReasonCityStop))
 	}
 	if got.Metadata["suspended_at"] != "" {
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])

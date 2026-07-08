@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestPoolSessionIsLive_Matrix exercises the liveness predicate used by the
@@ -52,10 +53,10 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+drained-reason", map[string]string{"state": "asleep", "sleep_reason": "drained"}, true},
 		{"asleep+idle", map[string]string{"state": "asleep", "sleep_reason": "idle"}, true},
 		{"asleep+idle-timeout", map[string]string{"state": "asleep", "sleep_reason": "idle-timeout"}, true},
-		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": sleepReasonCityStop}, true},
+		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonCityStop)}, true},
 		{"asleep+failed-create", map[string]string{"state": "asleep", "sleep_reason": "failed-create"}, true},
-		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": sleepReasonRuntimeMissing}, true},
-		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": sleepReasonProviderTerminalError}, true},
+		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing)}, true},
+		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonProviderTerminalError)}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},

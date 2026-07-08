@@ -224,10 +224,10 @@ func configWakeSuppressed(
 	if !policy.enabled() {
 		return false
 	}
-	if session.Metadata["sleep_reason"] == "idle-timeout" {
+	if session.Metadata["sleep_reason"] == string(sessionpkg.SleepReasonIdleTimeout) {
 		return false
 	}
-	if session.Metadata["sleep_reason"] == "idle" &&
+	if session.Metadata["sleep_reason"] == string(sessionpkg.SleepReasonIdle) &&
 		session.Metadata["sleep_policy_fingerprint"] != "" &&
 		session.Metadata["sleep_policy_fingerprint"] == policy.Fingerprint {
 		return true
@@ -271,7 +271,7 @@ func persistSleepPolicyMetadata(
 	}
 	fingerprint := policy.Fingerprint
 	if ((session.Metadata["state"] == "asleep" &&
-		session.Metadata["sleep_reason"] == "idle") ||
+		session.Metadata["sleep_reason"] == string(sessionpkg.SleepReasonIdle)) ||
 		session.Metadata["sleep_intent"] == "idle-stop-pending") &&
 		session.Metadata["sleep_policy_fingerprint"] != "" {
 		// Preserve the fingerprint that initiated an in-flight idle drain so the
@@ -336,7 +336,7 @@ func recoverPendingIdleSleep(
 	if session == nil || sessFront == nil || running || session.Metadata["sleep_intent"] != "idle-stop-pending" {
 		return false
 	}
-	batch := sessionpkg.SleepPatch(clk.Now(), "idle")
+	batch := sessionpkg.SleepPatch(clk.Now(), string(sessionpkg.SleepReasonIdle))
 	if fingerprint := session.Metadata["sleep_policy_fingerprint"]; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}

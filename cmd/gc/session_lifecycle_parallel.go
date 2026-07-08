@@ -3052,14 +3052,14 @@ func cityStopSessionMarked(store beads.Store, sessionID string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(b.Metadata["sleep_reason"]) == sleepReasonCityStop
+	return strings.TrimSpace(b.Metadata["sleep_reason"]) == string(sessionpkg.SleepReasonCityStop)
 }
 
 func markCityStopSessionAsAsleep(sessFront *sessionpkg.Store, sessionID string, stderr io.Writer) {
 	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	if err := sessFront.Sleep(sessionID, sleepReasonCityStop, time.Now().UTC()); err != nil && stderr != nil {
+	if err := sessFront.Sleep(sessionID, string(sessionpkg.SleepReasonCityStop), time.Now().UTC()); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

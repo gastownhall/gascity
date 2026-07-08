@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type sweepLivenessProvider struct {
@@ -771,8 +772,8 @@ func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Metadata["sleep_reason"] != sleepReasonCityStop {
-		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], sleepReasonCityStop)
+	if got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonCityStop) {
+		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], string(sessionpkg.SleepReasonCityStop))
 	}
 }
 

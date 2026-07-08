@@ -1752,8 +1752,8 @@ func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *te
 	if got := session.Metadata["state"]; got != "asleep" {
 		t.Fatalf("after first heal: state = %q, want asleep", got)
 	}
-	if got := session.Metadata["sleep_reason"]; got != sleepReasonRuntimeMissing {
-		t.Fatalf("after first heal: sleep_reason = %q, want %q", got, sleepReasonRuntimeMissing)
+	if got := session.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonRuntimeMissing) {
+		t.Fatalf("after first heal: sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonRuntimeMissing))
 	}
 	if got := session.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("after first heal: pending_create_claim = %q, want empty", got)
@@ -1894,7 +1894,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 			}(),
 			want: map[string]string{
 				"state":                      "asleep",
-				"sleep_reason":               sleepReasonRuntimeMissing,
+				"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
 				"session_key":                "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -1973,7 +1973,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 			}(),
 			want: map[string]string{
 				"state":                      "asleep",
-				"sleep_reason":               sleepReasonRuntimeMissing,
+				"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
 				"session_key":                "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -2165,7 +2165,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 		{
 			name:                   "city stop — resume metadata preserved",
 			prevState:              "active",
-			sleepReason:            sleepReasonCityStop,
+			sleepReason:            string(sessionpkg.SleepReasonCityStop),
 			sessionKey:             "abc-123",
 			startedConfigHash:      "hash-before",
 			wantKeyCleared:         false,
@@ -2717,7 +2717,7 @@ func TestCheckChurn_CityStopSleepReasonSkipped(t *testing.T) {
 
 	session := makeBead("b1", map[string]string{
 		"last_woke_at":               now.Add(-90 * time.Second).Format(time.RFC3339),
-		"sleep_reason":               sleepReasonCityStop,
+		"sleep_reason":               string(sessionpkg.SleepReasonCityStop),
 		"churn_count":                "0",
 		"session_key":                "resume-key",
 		"continuation_reset_pending": "",

@@ -2837,7 +2837,7 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	}{
 		{"idle", "idle", "idle"},
 		{"idle-timeout", "idle-timeout", "idle-timeout"},
-		{"city-stop", sleepReasonCityStop, sleepReasonCityStop},
+		{"city-stop", string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonCityStop)},
 		{"drained-reason", "drained", "drained"},
 		{"missing-reason", "", "drained"}, // fallback
 	}
