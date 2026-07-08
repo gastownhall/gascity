@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -124,6 +125,24 @@ func TestStoreGetBeadWithInfo(t *testing.T) {
 	store2 := beads.SessionStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{nonSession}, nil)}
 	if _, _, err := NewStore(store2).GetBeadWithInfo("s-task"); err == nil {
 		t.Fatal("GetBeadWithInfo(non-session): want ErrSessionNotFound, got nil")
+	}
+}
+
+// TestStoreGetNilInnerStore pins the WI-6 W4 nit-5 fix: a non-nil *Store wrapping
+// a nil inner beads.Store must NOT panic in validatedBead — it returns the wrapped
+// beads.ErrNotFound (the absence contract), mirroring ListAll's nil-inner-store
+// guard. Get and GetPersistedResponse share validatedBead, so both are covered.
+func TestStoreGetNilInnerStore(t *testing.T) {
+	is := NewStore(beads.SessionStore{Store: nil})
+	_, err := is.Get("gc-1")
+	if err == nil {
+		t.Fatal("Get on nil inner store: want error, got nil")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get on nil inner store: want errors.Is(beads.ErrNotFound), got %v", err)
+	}
+	if _, _, perr := is.GetPersistedResponse("gc-1"); !errors.Is(perr, beads.ErrNotFound) {
+		t.Fatalf("GetPersistedResponse on nil inner store: want errors.Is(beads.ErrNotFound), got %v", perr)
 	}
 }
 

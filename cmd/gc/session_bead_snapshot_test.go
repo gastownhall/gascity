@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -163,6 +164,225 @@ func TestLoadSessionBeadSnapshot_DeduplicatesAcrossQueries(t *testing.T) {
 	}
 	if got := len(snap.Open()); got != 1 {
 		t.Fatalf("Open()=%d, want 1 — bead matching both queries must dedup", got)
+	}
+}
+
+// TestSessionBeadSnapshotConstructorInfoEquivalence is the LOAD-BEARING pin for
+// WI-6 W4: newSessionBeadSnapshotFromInfos (the typed front-door constructor)
+// must build byte-identical index maps to newSessionBeadSnapshot (the raw-bead
+// constructor whose precedence is the reference) across a corpus that exercises
+// every precedence branch. An index-map precedence bug strands named sessions
+// invisibly — a leaked pool bead beats the canonical named bead, or a label-lost
+// typed bead never indexes — so this comparison, not a downstream behavior test,
+// is where such a divergence is caught.
+func TestSessionBeadSnapshotConstructorInfoEquivalence(t *testing.T) {
+	corpus := []beads.Bead{
+		// Canonical configured_named bead for template "mayor": must win the
+		// agent AND template index over the leaked pool bead below.
+		{
+			ID:     "ga-named-mayor",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                  "mayor",
+				"agent_name":                "mayor",
+				"configured_named_identity": "mayor",
+				"session_name":              "mayor",
+			},
+		},
+		// Leaked pool-style bead for the same template "mayor" (agent_name ==
+		// template, pool-managed, no slot, non-canonical): agentName clears and
+		// the whole entry is skipped, so it must NOT overwrite the canonical
+		// index above.
+		{
+			ID:     "ga-leaked-mayor",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "mayor",
+				"agent_name":   "mayor",
+				"pool_managed": "true",
+				"session_name": "s-leaked-mayor",
+			},
+		},
+		// Pool-managed bead with a slot: stampedPoolQualifiedIdentity rewrites
+		// agentName to the qualified instance ("frontend/worker-2").
+		{
+			ID:     "ga-pool-slot",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"agent_name":   "frontend/worker",
+				"pool_managed": "true",
+				"pool_slot":    "2",
+				"session_name": "s-worker-2",
+			},
+		},
+		// Non-pool bead with a distinct agent_name and a common_name: indexes by
+		// agent_name, by template, and by common_name hint.
+		{
+			ID:     "ga-scout",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "scout",
+				"agent_name":   "recon/scout",
+				"common_name":  "scout-common",
+				"session_name": "s-scout",
+			},
+		},
+		// Agent-label fallback (no agent_name metadata): sessionBeadAgentName
+		// reads the agent: label.
+		{
+			ID:     "ga-labelagent",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession, "agent:labeled/one"},
+			Metadata: map[string]string{
+				"template":     "labeled",
+				"session_name": "s-labeled",
+			},
+		},
+		// Type-only bead that lost its gc:session label after a crash: must still
+		// index (the reconciler-stranding regression this whole path guards).
+		{
+			ID:     "ga-labellost",
+			Type:   session.BeadType,
+			Labels: nil,
+			Metadata: map[string]string{
+				"template":                  "beads/reviewer",
+				"configured_named_identity": "beads/reviewer",
+				"session_name":              "beads--reviewer",
+			},
+		},
+		// Bead with no session_name: appears in openInfos but indexes nothing.
+		{
+			ID:     "ga-noname",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template": "nameless",
+			},
+		},
+		// Canonical-override pair. Bead A (non-canonical, non-pool) indexes both
+		// agent "dup-agent" and template "dup" FIRST. Bead B (canonical, same
+		// agent/template, later in order) MUST override both entries — this is
+		// the `!exists || isCanonicalNamed` precedence branch. Drop the
+		// `|| isCanonicalNamed` from the Info constructor and these entries stop
+		// overriding, diverging from the raw constructor and failing this test.
+		{
+			ID:     "ga-dup-first",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "dup",
+				"agent_name":   "dup-agent",
+				"session_name": "s-dup-first",
+			},
+		},
+		{
+			ID:     "ga-dup-canonical",
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                  "dup",
+				"agent_name":                "dup-agent",
+				"configured_named_identity": "dup-agent",
+				"session_name":              "s-dup-canonical",
+			},
+		},
+		// Closed bead: excluded from openInfos and every index.
+		{
+			ID:     "ga-closed",
+			Type:   session.BeadType,
+			Status: "closed",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "gone",
+				"agent_name":   "gone",
+				"session_name": "s-gone",
+			},
+		},
+	}
+
+	beadSnap := newSessionBeadSnapshot(corpus)
+
+	infos := make([]session.Info, 0, len(corpus))
+	for _, b := range corpus {
+		infos = append(infos, session.InfoFromPersistedBead(b))
+	}
+	infoSnap := newSessionBeadSnapshotFromInfos(infos)
+
+	if !reflect.DeepEqual(infoSnap.beadIDByAgentName, beadSnap.beadIDByAgentName) {
+		t.Errorf("beadIDByAgentName mismatch:\ninfo=%v\nbead=%v", infoSnap.beadIDByAgentName, beadSnap.beadIDByAgentName)
+	}
+	if !reflect.DeepEqual(infoSnap.beadIDByTemplateHint, beadSnap.beadIDByTemplateHint) {
+		t.Errorf("beadIDByTemplateHint mismatch:\ninfo=%v\nbead=%v", infoSnap.beadIDByTemplateHint, beadSnap.beadIDByTemplateHint)
+	}
+	if !reflect.DeepEqual(infoSnap.sessionNameByAgentName, beadSnap.sessionNameByAgentName) {
+		t.Errorf("sessionNameByAgentName mismatch:\ninfo=%v\nbead=%v", infoSnap.sessionNameByAgentName, beadSnap.sessionNameByAgentName)
+	}
+	if !reflect.DeepEqual(infoSnap.sessionNameByTemplateHint, beadSnap.sessionNameByTemplateHint) {
+		t.Errorf("sessionNameByTemplateHint mismatch:\ninfo=%v\nbead=%v", infoSnap.sessionNameByTemplateHint, beadSnap.sessionNameByTemplateHint)
+	}
+	if len(infoSnap.openInfos) != len(beadSnap.openInfos) {
+		t.Fatalf("openInfos length: info=%d bead=%d", len(infoSnap.openInfos), len(beadSnap.openInfos))
+	}
+	for i := range infoSnap.openInfos {
+		if !reflect.DeepEqual(infoSnap.openInfos[i], beadSnap.openInfos[i]) {
+			t.Errorf("openInfos[%d] mismatch:\ninfo=%+v\nbead=%+v", i, infoSnap.openInfos[i], beadSnap.openInfos[i])
+		}
+	}
+
+	// Guard the corpus actually exercises the canonical-override precedence: the
+	// canonical bead (ga-dup-canonical) must win over the earlier non-canonical
+	// bead (ga-dup-first) at BOTH the agent and template index. If it ever stops
+	// (both constructors would agree on the wrong answer, still matching above),
+	// this fails loudly.
+	if got := beadSnap.sessionNameByAgentName["dup-agent"]; got != "s-dup-canonical" {
+		t.Fatalf("corpus no longer exercises agent canonical-override: sessionNameByAgentName[dup-agent]=%q, want s-dup-canonical", got)
+	}
+	if got := beadSnap.sessionNameByTemplateHint["dup"]; got != "s-dup-canonical" {
+		t.Fatalf("corpus no longer exercises template canonical-override: sessionNameByTemplateHint[dup]=%q, want s-dup-canonical", got)
+	}
+	if got := beadSnap.FindSessionNameByTemplate("mayor"); got != "mayor" {
+		t.Fatalf("corpus no longer exercises canonical-wins precedence: FindSessionNameByTemplate(mayor)=%q, want mayor", got)
+	}
+}
+
+// TestSessionBeadSnapshotFromInfosTypedLookups pins the WI-6 W4 nit-1 fix: an
+// Info-built snapshot (raw open slice nil) must still answer the typed FindInfo*
+// lookups from openInfos + the index maps. Against the pre-fix code — where
+// findInfoByIDLocked / FindInfoByNamedIdentity scanned the nil open slice — every
+// assertion below returned (Info{}, false), silently stranding a future
+// Get-projection sweep built on this constructor.
+func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
+	seed := session.InfoFromPersistedBead(beads.Bead{
+		ID:     "ga-named-reviewer",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":                  "beads/reviewer",
+			"agent_name":                "beads/reviewer",
+			"configured_named_identity": "beads/reviewer",
+			"session_name":              "beads--reviewer",
+		},
+	})
+	snap := newSessionBeadSnapshotFromInfos([]session.Info{seed})
+
+	// Precondition: this is genuinely the nil-open (Info-built) shape the fix targets.
+	if snap.open != nil {
+		t.Fatalf("Info-built snapshot must leave open nil, got %d beads", len(snap.open))
+	}
+
+	if got, ok := snap.FindInfoByID("ga-named-reviewer"); !ok || got.ID != "ga-named-reviewer" {
+		t.Errorf("FindInfoByID = (%+v, %v), want the seeded info", got, ok)
+	}
+	if got, ok := snap.FindInfoByTemplate("beads/reviewer"); !ok || got.ID != "ga-named-reviewer" {
+		t.Errorf("FindInfoByTemplate = (%+v, %v), want the seeded info", got, ok)
+	}
+	if got, ok := snap.FindInfoByNamedIdentity("beads/reviewer"); !ok || got.ID != "ga-named-reviewer" {
+		t.Errorf("FindInfoByNamedIdentity = (%+v, %v), want the seeded info", got, ok)
 	}
 }
 

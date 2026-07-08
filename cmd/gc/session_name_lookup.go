@@ -725,8 +725,11 @@ type poolLookupCandidate struct {
 	ownsPoolSessionName bool
 }
 
-func poolLookupCandidateStateRank(b beads.Bead) int {
-	switch sessionMetadataState(b) {
+// poolLookupCandidateStateRankInfo ranks a pool-lookup candidate by its raw
+// MetadataState (via sessionMetadataStateInfo): active outranks creating/
+// start-pending, which outrank everything else.
+func poolLookupCandidateStateRankInfo(i sessionpkg.Info) int {
+	switch sessionMetadataStateInfo(i) {
 	case "active":
 		return 2
 	case "creating", string(sessionpkg.StateStartPending):
@@ -747,22 +750,22 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 	if store == nil {
 		return result, nil
 	}
-	all, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := sessionFrontDoor(store).ListAll(sessionpkg.ListAllOptions{})
 	if err != nil {
 		return result, err
 	}
-	for _, b := range all {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if b.Status == "closed" {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable and excludes closed.
+		if info.Closed {
 			continue
 		}
-		if isFailedCreateSessionBead(b) {
+		if isFailedCreateSessionInfo(info) {
 			continue
 		}
-		if isNamedSessionBead(b) || isManualSessionBeadForAgent(b, cfgAgent) {
+		if isNamedSessionInfo(info) || isManualSessionInfoForAgent(info, cfgAgent) {
 			continue
 		}
-		storedTemplateMatches := storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplate(b), template, cfg)
+		storedTemplateMatches := storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), template, cfg)
 		resolveSlot := func(identity string) int {
 			if cfgAgent != nil {
 				return resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, identity)
@@ -775,11 +778,11 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 			}
 			return template + "-" + strconv.Itoa(slot)
 		}
-		agentSlot := resolveSlot(sessionBeadAgentName(b))
-		aliasSlot := resolveSlot(strings.TrimSpace(b.Metadata["alias"]))
-		sessionName := strings.TrimSpace(b.Metadata["session_name"])
+		agentSlot := resolveSlot(sessionBeadAgentNameInfo(info))
+		aliasSlot := resolveSlot(strings.TrimSpace(info.Alias))
+		sessionName := strings.TrimSpace(info.SessionNameMetadata)
 		sessionNameSlot := 0
-		if storedTemplateMatches && strings.TrimSpace(b.Metadata["alias"]) == "" && !beadOwnsPoolSessionName(b) {
+		if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
 			sessionNameSlot = resolveSlot(sessionName)
 		}
 		if cfgAgent != nil && poolSlotHasConfiguredBound(cfgAgent) && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
@@ -799,10 +802,10 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 		if sessionName == "" {
 			continue
 		}
-		agentName := sessionBeadAgentName(b)
-		canonicalPoolManaged := cfgAgent.UsesCanonicalSingletonPoolIdentity() && isCanonicalPoolManagedSessionBeadForTemplate(b, template)
+		agentName := sessionBeadAgentNameInfo(info)
+		canonicalPoolManaged := cfgAgent.UsesCanonicalSingletonPoolIdentity() && isCanonicalPoolManagedSessionInfoForTemplate(info, template)
 		staleCanonicalSingletonSlot := 0
-		if cfgAgent.UsesCanonicalSingletonPoolIdentity() && isPoolManagedSessionBead(b) && !canonicalPoolManaged {
+		if cfgAgent.UsesCanonicalSingletonPoolIdentity() && isPoolManagedSessionInfo(info) && !canonicalPoolManaged {
 			switch {
 			case agentSlot > 0:
 				staleCanonicalSingletonSlot = agentSlot
@@ -811,7 +814,7 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 			case sessionNameSlot > 0:
 				staleCanonicalSingletonSlot = sessionNameSlot
 			default:
-				if slot, err := strconv.Atoi(strings.TrimSpace(b.Metadata["pool_slot"])); err == nil && slot > 0 {
+				if slot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); err == nil && slot > 0 {
 					staleCanonicalSingletonSlot = slot
 				}
 			}
@@ -834,8 +837,8 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 			agentName = qualifiedInstanceName(aliasSlot)
 		case sessionNameSlot > 0:
 			agentName = qualifiedInstanceName(sessionNameSlot)
-		case agentName == "" && storedTemplateMatches && strings.TrimSpace(b.Metadata["pool_slot"]) != "":
-			if slot, err := strconv.Atoi(strings.TrimSpace(b.Metadata["pool_slot"])); err == nil && slot > 0 {
+		case agentName == "" && storedTemplateMatches && strings.TrimSpace(info.PoolSlot) != "":
+			if slot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); err == nil && slot > 0 {
 				if cfgAgent == nil || !poolSlotHasConfiguredBound(cfgAgent) || inBoundsPoolSlot(cfgAgent, slot) {
 					agentName = qualifiedInstanceName(slot)
 				}
@@ -845,10 +848,10 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 			continue
 		}
 		score := 0
-		if strings.TrimSpace(b.Metadata["pool_slot"]) != "" {
+		if strings.TrimSpace(info.PoolSlot) != "" {
 			score += 2
 		}
-		if strings.TrimSpace(b.Metadata["template"]) == template {
+		if strings.TrimSpace(info.Template) == template {
 			score++
 		}
 		if agentSlot > 0 {
@@ -860,8 +863,8 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 		candidate := poolLookupCandidate{
 			sessionName:         sessionName,
 			score:               score,
-			stateRank:           poolLookupCandidateStateRank(b),
-			ownsPoolSessionName: beadOwnsPoolSessionName(b),
+			stateRank:           poolLookupCandidateStateRankInfo(info),
+			ownsPoolSessionName: infoOwnsPoolSessionName(info),
 		}
 		existing := result[agentName]
 		replaced := false

@@ -59,6 +59,18 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 	return loadSessionBeads(store)
 }
 
+// loadOpenSessionInfos is the typed front-door twin of loadSessionBeads: it
+// returns the open session beads projected to session.Info via the session
+// store's default direct union (type+label, closed excluded — the same tier as
+// loadSessionBeads). Callers that only read Info fields use this instead of
+// loadSessionBeads so no raw bead crosses into business logic.
+func loadOpenSessionInfos(store beads.Store) ([]session.Info, error) {
+	if store == nil {
+		return nil, nil
+	}
+	return sessionFrontDoor(store).ListAll(session.ListAllOptions{})
+}
+
 func findOpenSessionBeadBySessionName(store beads.Store, sessionName string) (beads.Bead, bool, error) {
 	if store == nil || strings.TrimSpace(sessionName) == "" {
 		return beads.Bead{}, false, nil

@@ -127,26 +127,24 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
 	"InfoFromPersistedBead(": {
-		"cmd/gc/adoption_barrier.go":      1,
-		"cmd/gc/build_desired_state.go":   4,
-		"cmd/gc/city_status_snapshot.go":  1,
-		"cmd/gc/cmd_nudge.go":             2,
-		"cmd/gc/cmd_prime.go":             2,
+		// WI-6 W4 residuals (honest under-reach, not silent drops): build_desired_state
+		// :2380/:2631 are sweep projections whose feeder beads aren't typed yet;
+		// cmd_prime reads builtin_ancestor (absent from session.Info) off a bead in hand;
+		// session_logs_resolve feeds ResolveCodexTranscriptBySessionOrder([]beads.Bead);
+		// session_bead_snapshot/session_hash hold the bead legitimately (rebaseline lane /
+		// snapshot.add); cmd_session's reason projection is a later wave.
+		"cmd/gc/build_desired_state.go":   2,
+		"cmd/gc/cmd_prime.go":             1,
 		"cmd/gc/cmd_session.go":           2,
-		"cmd/gc/cmd_wait.go":              1,
-		"cmd/gc/mcp_integration.go":       1,
 		"cmd/gc/session_bead_snapshot.go": 3,
 		"cmd/gc/session_hash.go":          1,
-		"cmd/gc/session_index.go":         1,
 		// WI-6 W5: start-execution reads folded onto candidate.info via ApplyPatch;
 		// the one remaining hit is the honest in-lock re-projection at the genuine
 		// whole-bead re-Get boundary in prepareStartCandidateForCity (cannot be folded).
 		"cmd/gc/session_lifecycle_parallel.go": 1,
-		"cmd/gc/session_logs_resolve.go":       3,
+		"cmd/gc/session_logs_resolve.go":       2,
 		"cmd/gc/session_reconciler.go":         3,
-		"cmd/gc/session_resolve.go":            3,
 		"cmd/gc/session_template_start.go":     1,
-		"cmd/gc/skill_visibility.go":           1,
 		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop
 		// is a genuine WI-7-era raw retire lane (bead already in hand from the raw
 		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and
@@ -156,14 +154,13 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"internal/api/session_resolution.go": 1,
 	},
 	"ListAllSessionBeads(": {
-		"cmd/gc/adoption_barrier.go":      2,
-		"cmd/gc/build_desired_state.go":   1,
-		"cmd/gc/cmd_mail.go":              2,
+		// WI-6 W4 residuals: all three feed the RAW sessionBeadSnapshot half (Open())
+		// that cmd_session.go's reason projection still consumes (LifecycleInputFromMetadata/
+		// wakeReasons(bead)) — the raw half is kept until that projection types in a later
+		// wave; deleting it now would break cmd_session, so recorded honestly.
 		"cmd/gc/doctor_session_model.go":  1,
 		"cmd/gc/session_bead_snapshot.go": 1,
 		"cmd/gc/session_beads.go":         1,
-		"cmd/gc/session_name_lookup.go":   1,
-		"cmd/gc/session_resolve.go":       1,
 	},
 	"GetWithPersistedResponse(": {
 		"internal/worker/catalog.go": 1,
