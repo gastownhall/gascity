@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +93,45 @@ func TestRepairStrandedPoolWorkerBead_DefersInsideConfirmationWindow(t *testing.
 	gotSession, _ := store.Get(session.ID)
 	if gotSession.Status != "open" {
 		t.Fatalf("session should stay open, got %q", gotSession.Status)
+	}
+}
+
+// updateFailStore lists work normally but fails every Update, modeling a store
+// where the unassign (ReleaseWorkBead → Update) cannot land.
+type updateFailStore struct {
+	beads.Store
+}
+
+func (s updateFailStore) Update(string, beads.UpdateOpts) error {
+	return fmt.Errorf("simulated update failure")
+}
+
+// A partial failure (unassign does not land) must NOT be reported as a repair:
+// the session bead stays open and the work stays claimed, so the stale-assignee
+// item is left for the next-tick sweep rather than masked behind a "repaired"
+// close. Surfaces the failure on stderr for distinct observability.
+func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails(t *testing.T) {
+	base, session, work := strandedRepairFixture(t)
+	store := updateFailStore{Store: base}
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	// Marker aged well past the confirmation window — the window is satisfied;
+	// only the failed unassign should hold the repair back.
+	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+	var stderr bytes.Buffer
+	if repairStrandedPoolWorkerBead(store, nil, &session, "worker", &clock.Fake{Time: now}, &stderr) {
+		t.Fatal("repair must return false when an unassign does not land")
+	}
+	gotWork, _ := base.Get(work.ID)
+	if gotWork.Status != "in_progress" || gotWork.Assignee != session.ID {
+		t.Fatalf("work must stay claimed after a failed unassign, got status=%q assignee=%q", gotWork.Status, gotWork.Assignee)
+	}
+	gotSession, _ := base.Get(session.ID)
+	if gotSession.Status != "open" {
+		t.Fatalf("session must stay open after a failed unassign, got %q", gotSession.Status)
+	}
+	if !strings.Contains(stderr.String(), "unassign(s) failed") {
+		t.Fatalf("stderr must surface the failed unassign, got %q", stderr.String())
 	}
 }
 
