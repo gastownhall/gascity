@@ -210,7 +210,7 @@ type preparedStart struct {
 type startResult struct {
 	prepared        preparedStart
 	err             error
-	outcome         string
+	outcome         TraceOutcomeCode
 	started         time.Time
 	finished        time.Time
 	rollbackPending bool
@@ -1292,7 +1292,7 @@ func runPreparedStartCandidate(
 			result = startResult{
 				prepared: item,
 				err:      fmt.Errorf("panic during start: %v\n%s", recovered, stack),
-				outcome:  "panic_recovered",
+				outcome:  TraceOutcomePanicRecovered,
 				started:  started,
 				finished: time.Now(),
 			}
@@ -1358,47 +1358,47 @@ func runPreparedStartCandidate(
 		return startResult{
 			prepared:        item,
 			err:             nil,
-			outcome:         "start_error_converged",
+			outcome:         TraceOutcomeStartErrorConverged,
 			started:         started,
 			finished:        finished,
 			rollbackPending: false,
 			phases:          phases,
 		}
 	}
-	var outcome string
+	var outcome TraceOutcomeCode
 	switch {
 	case errors.Is(err, runtime.ErrSessionInitializing):
-		outcome = "session_initializing"
+		outcome = TraceOutcomeSessionInitializing
 		err = nil
 	case startCtxErr == context.DeadlineExceeded:
-		outcome = "deadline_exceeded"
+		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
 			err = fmt.Errorf("session %q startup: %w", item.candidate.name(), context.DeadlineExceeded)
 		}
 	case startCtxErr == context.Canceled:
-		outcome = "canceled"
+		outcome = TraceOutcomeCanceled
 		if err == nil {
 			err = fmt.Errorf("session %q startup: %w", item.candidate.name(), context.Canceled)
 		}
 	case err == nil:
-		outcome = "success"
+		outcome = TraceOutcomeSuccess
 	case errors.Is(err, runtime.ErrSessionExists):
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
 		case runningErr != nil || !runtimeObservationLive(obs):
-			outcome = "provider_error"
+			outcome = TraceOutcomeProviderError
 		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
-			outcome = "session_exists_converged"
+			outcome = TraceOutcomeSessionExistsConverged
 			err = nil
 			rollbackPending = false
 		case rollbackPending:
-			outcome = "session_exists"
+			outcome = TraceOutcomeSessionExists
 		default:
-			outcome = "session_exists"
+			outcome = TraceOutcomeSessionExists
 			err = nil
 		}
 	default:
-		outcome = "provider_error"
+		outcome = TraceOutcomeProviderError
 	}
 	if err == nil {
 		rateLimitScreen = false
@@ -1487,7 +1487,7 @@ func enqueuePreparedStartWaveForCity(
 		now := time.Now()
 		results[i] = startResult{
 			prepared: item,
-			outcome:  "start_enqueued",
+			outcome:  TraceOutcomeStartEnqueued,
 			started:  now,
 			finished: now,
 		}
@@ -1576,7 +1576,7 @@ func commitAsyncStartResultWithContext(
 	}
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
 		refreshed.err = nil
-		refreshed.outcome = "session_exists_converged"
+		refreshed.outcome = TraceOutcomeSessionExistsConverged
 		refreshed.rollbackPending = false
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -1590,7 +1590,7 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
 		return false
 	}
-	if sp != nil && refreshed.err == nil && refreshed.outcome != "session_initializing" {
+	if sp != nil && refreshed.err == nil && refreshed.outcome != TraceOutcomeSessionInitializing {
 		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
 	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
@@ -2009,9 +2009,9 @@ func commitStartResultTraced(
 	tp := result.prepared.candidate.tp
 	// Session still starting up — back off silently without recording failure.
 	// The reconciler will retry on the next patrol tick.
-	if result.outcome == "session_initializing" {
+	if result.outcome == TraceOutcomeSessionInitializing {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 		return false
 	}
 	if result.err != nil {
@@ -2112,7 +2112,7 @@ func commitStartResultTraced(
 			"field":    "started_config_hash",
 		})
 	}
-	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 	return true
 }
 
@@ -2135,7 +2135,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 		}
 		if trace != nil {
-			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error":  formatLifecycleError(result.err),
 				"reason": reason,
 			})
@@ -2143,7 +2143,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		if result.rollbackPending {
 			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		}
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}
 	if result.rateLimitScreen {
@@ -2157,7 +2157,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 					"cause": rlErr.Error(),
 				})
 			}
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 			return
 		}
 		if trace != nil {
@@ -2165,7 +2165,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}
 	if result.rollbackPending {
@@ -2183,12 +2183,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// Genuine wake-failure accounting happens on the non-rollback path
 		// below via recordWakeFailure.
 		if trace != nil {
-			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
 			})
 		}
 		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}
 	if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
@@ -2207,11 +2207,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
 	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
 	if trace != nil {
-		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
+		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
 		})
 	}
-	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 }
 
 // recoverRunningPendingCreate heals an already-active bead whose
@@ -2675,17 +2675,17 @@ func executePlannedStartsTraced(
 			}
 			for _, result := range results {
 				if trace != nil {
-					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, TraceOutcomeCode(result.outcome), "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
+					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
 						"rollback_pending": result.rollbackPending,
 						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
 					})
 				}
-				if result.outcome == "start_enqueued" {
-					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), result.outcome, result.started, result.finished, nil)
+				if result.outcome == TraceOutcomeStartEnqueued {
+					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), string(result.outcome), result.started, result.finished, nil)
 					wakeCount++
 					continue
 				}
-				if result.err == nil && result.outcome != "session_initializing" {
+				if result.err == nil && result.outcome != TraceOutcomeSessionInitializing {
 					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace) {

@@ -58,6 +58,52 @@ func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	}
 }
 
+// timerTraceCodes maps a lifecycle-timer decision's trace reason/outcome onto
+// the typed Trace*Code vocabulary. TimerDecision.TraceReason/TraceOutcome are
+// plain strings owned by internal/session (Layer 0-1), which cannot import the
+// cmd/gc trace types — so the conversion lives here at the projection boundary.
+// The switches are exhaustive over the closed value sets that
+// DecideMaxSessionAge and DecideIdleTimeout emit today; each default arm is an
+// identity passthrough, so recorded bytes stay truthful even if a ladder grows
+// a value before this map does. TestTimerTraceCodesTotal converts that drift
+// into a red test rather than a silent un-typing.
+func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcomeCode) {
+	var reason TraceReasonCode
+	switch dec.TraceReason {
+	case string(TraceReasonMaxSessionAge):
+		reason = TraceReasonMaxSessionAge
+	case string(TraceReasonIdleTimeout):
+		reason = TraceReasonIdleTimeout
+	case string(TraceReasonUserHold):
+		reason = TraceReasonUserHold
+	case string(TraceReasonQuarantine):
+		reason = TraceReasonQuarantine
+	case string(TraceReasonPending):
+		reason = TraceReasonPending
+	case string(TraceReasonAssignedWork):
+		reason = TraceReasonAssignedWork
+	default:
+		reason = TraceReasonCode(dec.TraceReason)
+	}
+
+	var outcome TraceOutcomeCode
+	switch dec.TraceOutcome {
+	case string(TraceOutcomeStop):
+		outcome = TraceOutcomeStop
+	case string(TraceOutcomeDeferredUserHold):
+		outcome = TraceOutcomeDeferredUserHold
+	case string(TraceOutcomeDeferredQuarantine):
+		outcome = TraceOutcomeDeferredQuarantine
+	case string(TraceOutcomeDeferredPending):
+		outcome = TraceOutcomeDeferredPending
+	case string(TraceOutcomeDeferredBusy):
+		outcome = TraceOutcomeDeferredBusy
+	default:
+		outcome = TraceOutcomeCode(dec.TraceOutcome)
+	}
+	return reason, outcome
+}
+
 // isDrainAckStopPendingInfo reports whether a session is parked in the drain-ack
 // stop-pending state from the typed Info.MetadataState (raw "state") /
 // Info.StateReason mirrors, with TrimSpace compares.
@@ -1517,11 +1563,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if template == "" {
 						template = info.Template
 					}
-					result := "held"
+					result := TraceOutcomeHeld
 					if rateLimitErr != nil {
-						result = "hold_deferred"
+						result = TraceOutcomeHoldDeferred
 					}
-					trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonRateLimit, TraceOutcomeCode(result), template, name, traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonRateLimit, result, template, name, traceRecordPayload{
 						"provider_alive": providerAlive,
 					})
 				}
@@ -1625,10 +1671,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					desired = true
 				}
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonPreserve, TraceOutcomeCode(map[bool]string{
-						true:  "kept_open",
-						false: "resolution_failed",
-					}[desired]), template, name, traceRecordPayload{
+					outcome := TraceOutcomeResolutionFailed
+					if desired {
+						outcome = TraceOutcomeKeptOpen
+					}
+					trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonPreserve, outcome, template, name, traceRecordPayload{
 						"provider_alive": providerAlive,
 						"degraded":       preserveErr != nil,
 					})
@@ -2787,12 +2834,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// by wake evaluation: bypass the max-age restart so SleepPatch
 				// does not rewrite the intended sleep state.
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, nil)
+					reason, outcome := timerTraceCodes(dec)
+					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, reason, outcome, tp.TemplateName, name, nil)
 				}
 			case sessionpkg.TimerActionStop:
 				fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, nil)
+					reason, outcome := timerTraceCodes(dec)
+					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, reason, outcome, tp.TemplateName, name, nil)
 				}
 				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -2858,7 +2907,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					payload = traceRecordPayload{"drain_canceled": drainCancelled}
 				}
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, payload)
+					reason, outcome := timerTraceCodes(dec)
+					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, reason, outcome, tp.TemplateName, name, payload)
 				}
 				if dec.SkipWakePass {
 					continue
@@ -2866,7 +2916,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			case sessionpkg.TimerActionStop:
 				fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, TraceReasonCode(dec.TraceReason), TraceOutcomeCode(dec.TraceOutcome), tp.TemplateName, name, nil)
+					reason, outcome := timerTraceCodes(dec)
+					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, reason, outcome, tp.TemplateName, name, nil)
 				}
 				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr

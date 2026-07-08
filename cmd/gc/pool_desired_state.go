@@ -451,7 +451,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		}
 		if site, reason, payload, rejected := usage.rejection(req, limits); rejected {
 			if trace != nil {
-				trace.RecordDecision(TraceSiteCode(site), TraceReasonCode(reason), TraceOutcomeRejected, template, "", payload)
+				trace.RecordDecision(site, reason, TraceOutcomeRejected, template, "", payload)
 			}
 			continue
 		}
@@ -626,10 +626,10 @@ func (u nestedCapUsage) isDuplicateSessionRequest(req SessionRequest) bool {
 	return req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
 }
 
-func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (string, string, traceRecordPayload, bool) {
+func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (TraceSiteCode, TraceReasonCode, traceRecordPayload, bool) {
 	template := req.Template
 	if agentMax := limits.agentMax[template]; agentMax >= 0 && u.agentCount[template] >= agentMax {
-		return "reconciler.pool.agent_cap", "agent_cap", traceRecordPayload{
+		return TraceSitePoolAgentCap, TraceReasonAgentCap, traceRecordPayload{
 			"agent_max": agentMax,
 			"current":   u.agentCount[template],
 			"tier":      req.Tier,
@@ -642,7 +642,7 @@ func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (s
 			rigMax = -1
 		}
 		if rigMax >= 0 && u.rigCount[rig] >= rigMax {
-			return "reconciler.pool.rig_cap", "rig_cap", traceRecordPayload{
+			return TraceSitePoolRigCap, TraceReasonRigCap, traceRecordPayload{
 				"rig":     rig,
 				"rig_max": rigMax,
 				"current": u.rigCount[rig],
@@ -651,7 +651,7 @@ func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (s
 		}
 	}
 	if limits.workspaceMax >= 0 && u.workspaceCount >= limits.workspaceMax {
-		return "reconciler.pool.workspace_cap", "workspace_cap", traceRecordPayload{
+		return TraceSitePoolWorkspaceCap, TraceReasonWorkspaceCap, traceRecordPayload{
 			"workspace_max": limits.workspaceMax,
 			"current":       u.workspaceCount,
 			"tier":          req.Tier,
@@ -698,7 +698,7 @@ func recordNewDemandCapTrace(
 			blockingWork = append(blockingWork, req.WorkBeadID)
 		}
 	}
-	trace.RecordDecision(TraceSiteCode(site), TraceReasonCode(reason), TraceOutcomeRejected, template, "", traceRecordPayload{
+	trace.RecordDecision(site, reason, TraceOutcomeRejected, template, "", traceRecordPayload{
 		"scale_check":          scaleCount,
 		"accepted_new":         newCount,
 		"blocked_new":          scaleCount - newCount,
@@ -706,7 +706,7 @@ func recordNewDemandCapTrace(
 		"max":                  capMax,
 		"blocking_sessions":    blockingSessions,
 		"blocking_work_beads":  blockingWork,
-		"active_capacity_kind": reason,
+		"active_capacity_kind": string(reason),
 	})
 }
 
@@ -716,9 +716,9 @@ func newDemandBlockingScope(
 	limits nestedCapLimits,
 	usage nestedCapUsage,
 	newCount int,
-) (string, string, int, int, []SessionRequest) {
+) (TraceSiteCode, TraceReasonCode, int, int, []SessionRequest) {
 	if agentMax := limits.agentMax[template]; agentMax >= 0 && agentMax-usage.agentCount[template] <= newCount {
-		return string(TraceSitePoolNewDemandCap), string(TraceReasonAgentCap), agentMax, usage.agentCount[template], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
+		return TraceSitePoolNewDemandCap, TraceReasonAgentCap, agentMax, usage.agentCount[template], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
 			return req.Template == template
 		})
 	}
@@ -729,14 +729,14 @@ func newDemandBlockingScope(
 				rigMax = -1
 			}
 			if rigMax >= 0 && rigMax-usage.rigCount[rig] <= newCount {
-				return string(TraceSitePoolNewDemandCap), string(TraceReasonRigCap), rigMax, usage.rigCount[rig], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
+				return TraceSitePoolNewDemandCap, TraceReasonRigCap, rigMax, usage.rigCount[rig], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
 					return limits.agentRig[req.Template] == rig
 				})
 			}
 		}
 	}
 	if limits.workspaceMax >= 0 && limits.workspaceMax-usage.workspaceCount <= newCount {
-		return string(TraceSitePoolNewDemandCap), string(TraceReasonWorkspaceCap), limits.workspaceMax, usage.workspaceCount, usage.requests
+		return TraceSitePoolNewDemandCap, TraceReasonWorkspaceCap, limits.workspaceMax, usage.workspaceCount, usage.requests
 	}
 	return "", "", 0, 0, nil
 }

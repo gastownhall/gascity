@@ -11,6 +11,77 @@ import (
 
 func intPtr(n int) *int { return &n }
 
+// TestNestedCapUsageRejectionTyped verifies that the retyped rejection producer
+// returns the typed site/reason constants for each cap kind, and that the
+// underlying string values are byte-identical to the pre-S26b literals.
+func TestNestedCapUsageRejectionTyped(t *testing.T) {
+	cases := []struct {
+		name       string
+		cfg        *config.City
+		wantSite   TraceSiteCode
+		wantReason TraceReasonCode
+		wantSiteS  string
+		wantRsnS   string
+	}{
+		{
+			name:       "agent_cap",
+			cfg:        &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)}},
+			wantSite:   TraceSitePoolAgentCap,
+			wantReason: TraceReasonAgentCap,
+			wantSiteS:  "reconciler.pool.agent_cap",
+			wantRsnS:   "agent_cap",
+		},
+		{
+			name: "rig_cap",
+			cfg: &config.City{
+				Rigs:   []config.Rig{{Name: "rig", Path: "/tmp/rig", MaxActiveSessions: intPtr(1)}},
+				Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},
+			},
+			wantSite:   TraceSitePoolRigCap,
+			wantReason: TraceReasonRigCap,
+			wantSiteS:  "reconciler.pool.rig_cap",
+			wantRsnS:   "rig_cap",
+		},
+		{
+			name: "workspace_cap",
+			cfg: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: intPtr(1)},
+				Agents:    []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+			},
+			wantSite:   TraceSitePoolWorkspaceCap,
+			wantReason: TraceReasonWorkspaceCap,
+			wantSiteS:  "reconciler.pool.workspace_cap",
+			wantRsnS:   "workspace_cap",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limits := newNestedCapLimits(tc.cfg)
+			usage := newNestedCapUsage()
+			template := tc.cfg.Agents[0].QualifiedName()
+			// Fill to the cap so the next request is rejected.
+			usage.accept(SessionRequest{Template: template, Tier: "new"}, limits)
+
+			site, reason, _, rejected := usage.rejection(SessionRequest{Template: template, Tier: "new"}, limits)
+			if !rejected {
+				t.Fatalf("expected rejection at cap")
+			}
+			if site != tc.wantSite {
+				t.Errorf("site = %q, want %q", site, tc.wantSite)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if string(site) != tc.wantSiteS {
+				t.Errorf("string(site) = %q, want legacy literal %q", string(site), tc.wantSiteS)
+			}
+			if string(reason) != tc.wantRsnS {
+				t.Errorf("string(reason) = %q, want legacy literal %q", string(reason), tc.wantRsnS)
+			}
+		})
+	}
+}
+
 func workBead(id, routedTo, assignee, status string, priority int) beads.Bead {
 	p := priority
 	return beads.Bead{

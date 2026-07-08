@@ -371,11 +371,11 @@ func evaluatePendingPools(
 			}
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
-				outcome := "success"
+				outcome := TraceOutcomeSuccess
 				if err != nil {
-					outcome = "failed"
+					outcome = TraceOutcomeFailed
 				}
-				trace.RecordOperation(TraceSiteScaleCheckExec, TraceReasonScaleCheck, TraceOutcomeCode(outcome), "", template, "", time.Since(started), traceRecordPayload{
+				trace.RecordOperation(TraceSiteScaleCheckExec, TraceReasonScaleCheck, outcome, "", template, "", time.Since(started), traceRecordPayload{
 					"pool_dir":       dir,
 					"command":        sp.Check,
 					"desired":        d,

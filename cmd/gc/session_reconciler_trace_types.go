@@ -190,6 +190,10 @@ const (
 	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
 	TraceReasonStart                         TraceReasonCode = "start"
+
+	TraceReasonMaxSessionAge TraceReasonCode = "max_session_age"
+	TraceReasonUserHold      TraceReasonCode = "user_hold"
+	TraceReasonQuarantine    TraceReasonCode = "quarantine"
 )
 
 type TraceOutcomeCode string
@@ -258,6 +262,14 @@ const (
 	TraceOutcomeHoldDeferred        TraceOutcomeCode = "hold_deferred"
 	TraceOutcomeHeld                TraceOutcomeCode = "held"
 	TraceOutcomeHealed              TraceOutcomeCode = "healed"
+
+	TraceOutcomeResolutionFailed    TraceOutcomeCode = "resolution_failed"
+	TraceOutcomeStartErrorConverged TraceOutcomeCode = "start_error_converged"
+	TraceOutcomeSessionInitializing TraceOutcomeCode = "session_initializing"
+	TraceOutcomeStartEnqueued       TraceOutcomeCode = "start_enqueued"
+	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
+	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
+	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
 )
 
 type TraceCompletionStatus string
