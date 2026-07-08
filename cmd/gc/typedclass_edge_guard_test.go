@@ -83,7 +83,7 @@ var typedClassCodecNeedles = []codecNeedle{
 	{"sessions", "GetWithPersistedResponse(", "session.Store.GetPersistedResponse + Manager.EnrichInfo (internal/session)"},
 	{"sessions", "GetWithBead(", "session.Store.GetPersistedResponse / worker.Factory.SessionByHandle (internal/session, internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
 	{"sessions", "SessionByLoadedBead(", "worker.Factory.SessionByRecord (internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
-	{"sessions", "ResolveSessionBeadByExactID(", "session.ResolveSessionRecordByExactID (internal/session; worker-boundary use retired in WI-6 W3, the reconciler existence-probe use remains until its periphery wave)"},
+	{"sessions", "ResolveSessionBeadByExactID(", "session.ResolveSessionRecordByExactID (internal/session; worker-boundary use retired in WI-6 W3, the reconciler existence-probe use retired in WI-6 W6 — all-zero tripwire)"},
 	{"sessions", "PollerKeyFromBead(", "session.Store poller-key accessor (internal/session/poller_key.go)"},
 	{"orders", "RunFromTrackingBead(", "orders.Store.Get/RecentRuns (internal/orders)"},
 	{"orders", "MaxSeqFromLabels(", "orders.Store.Cursor (internal/orders)"},
@@ -165,15 +165,12 @@ var typedClassCodecCensus = map[string]map[string]int{
 	"GetWithPersistedResponse(": {
 		"internal/worker/catalog.go": 1,
 	},
-	"ResolveSessionBeadByExactID(": {
-		// The worker-boundary resolve+construct site (cmd/gc/worker_handle.go)
-		// moved to ResolveSessionRecordByExactID + SessionByRecord in WI-6 W3.
-		// This remaining hit is session_reconciler.go's attached-config-drift
-		// EXISTENCE probe, which discards the bead and only reads the error; it
-		// retires with the reconciler periphery wave. Recorded honestly rather
-		// than force-zeroed.
-		"cmd/gc/session_reconciler.go": 1,
-	},
+	// ResolveSessionBeadByExactID( is now all-zero in the interior: the
+	// worker-boundary resolve+construct site moved to ResolveSessionRecordByExactID
+	// + SessionByRecord in WI-6 W3, and the reconciler's attached-config-drift
+	// EXISTENCE probe (session_reconciler.go, which discards the record and reads
+	// only the error) moved onto the same typed twin in WI-6 W6. The raw codec now
+	// has no interior consumer, so it is a pure tripwire.
 	"PollerKeyFromBead(": {
 		"cmd/gc/cmd_wait.go": 1,
 	},

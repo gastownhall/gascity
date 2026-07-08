@@ -4268,7 +4268,11 @@ func sessionAttachedForConfigDrift(session beads.Bead, sp runtime.Provider, city
 		return false, nil
 	}
 	if store != nil && strings.TrimSpace(session.ID) != "" {
-		if _, _, err := sessionpkg.ResolveSessionBeadByExactID(store, session.ID); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+		// Existence probe: discard the record, surface only a hard read error
+		// (ErrSessionNotFound is tolerated). ResolveSessionRecordByExactID is the
+		// front-door typed twin of the raw ResolveSessionBeadByExactID — identical
+		// error contract, no bead escapes.
+		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(store, session.ID); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return false, err
 		}
 	}
