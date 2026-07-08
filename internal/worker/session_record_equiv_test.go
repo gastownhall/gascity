@@ -67,63 +67,84 @@ func seedEquivSession(t *testing.T, store beads.Store, sp runtime.Provider) sess
 	return info
 }
 
-// TestSessionByHandleMatchesSessionByID pins that the new SessionByHandle feeds
-// the resolved-runtime hook the same sessionKind, metadata map, and Info-derived
-// spec the retired GetWithBead-backed SessionByID did.
-func TestSessionByHandleMatchesSessionByID(t *testing.T) {
+// TestSessionByHandleCharacterizesResolverAndSpec pins the concrete
+// resolved-runtime hook inputs and handle spec SessionByHandle produces: the
+// persisted sessionKind, the full metadata map (including the worker_profile
+// that drives the spec Profile), and the Info-derived spec identity. This is the
+// characterization the retired GetWithBead-backed path satisfied (proven
+// differentially in Commit A before SessionByLoadedBead was deleted).
+func TestSessionByHandleCharacterizesResolverAndSpec(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	info := seedEquivSession(t, store, sp)
 
-	var oldCap, newCap resolverCapture
-	oldFactory := buildEquivFactory(t, store, sp, &oldCap)
-	newFactory := buildEquivFactory(t, store, sp, &newCap)
+	var cap resolverCapture
+	factory := buildEquivFactory(t, store, sp, &cap)
 
-	oldHandle, err := oldFactory.SessionByID(info.ID)
-	if err != nil {
-		t.Fatalf("SessionByID: %v", err)
-	}
-	newHandle, err := newFactory.SessionByHandle(info.ID)
+	handle, err := factory.SessionByHandle(info.ID)
 	if err != nil {
 		t.Fatalf("SessionByHandle: %v", err)
 	}
-
-	assertResolverCaptureEqual(t, oldCap, newCap)
-	assertHandleSpecEqual(t, oldHandle, newHandle)
+	if cap.sessionKind != "provider" {
+		t.Fatalf("resolver sessionKind = %q, want provider", cap.sessionKind)
+	}
+	if cap.metadata["real_world_app_session_kind"] != "provider" {
+		t.Fatalf("resolver metadata[real_world_app_session_kind] = %q, want provider", cap.metadata["real_world_app_session_kind"])
+	}
+	if cap.metadata["worker_profile"] != string(ProfileClaudeTmuxCLI) {
+		t.Fatalf("resolver metadata[worker_profile] = %q, want %q", cap.metadata["worker_profile"], ProfileClaudeTmuxCLI)
+	}
+	sh, ok := handle.(*SessionHandle)
+	if !ok {
+		t.Fatalf("handle is %T, not *SessionHandle", handle)
+	}
+	if sh.session.Profile != ProfileClaudeTmuxCLI {
+		t.Fatalf("spec.Profile = %q, want %q", sh.session.Profile, ProfileClaudeTmuxCLI)
+	}
+	if sh.session.ID != info.ID {
+		t.Fatalf("spec.ID = %q, want %q", sh.session.ID, info.ID)
+	}
+	// The resolver receives the PERSISTED Info (before it overlays its own
+	// runtime): Provider is the stored legacy-provider, not the resolver's own
+	// stub result that applyResolvedRuntimeToSessionSpec later writes onto the spec.
+	if cap.info.ID != info.ID {
+		t.Fatalf("resolver Info.ID = %q, want %q", cap.info.ID, info.ID)
+	}
+	if cap.info.Provider != "legacy-provider" {
+		t.Fatalf("resolver Info.Provider = %q, want legacy-provider", cap.info.Provider)
+	}
 }
 
-// TestSessionByRecordMatchesSessionByLoadedBead pins that resolving via
-// ResolveSessionRecordByExactID + SessionByRecord feeds the hook the same
-// arguments as ResolveSessionBeadByExactID + SessionByLoadedBead.
-func TestSessionByRecordMatchesSessionByLoadedBead(t *testing.T) {
+// TestSessionByRecordMatchesSessionByHandle pins that the two surviving worker
+// construction entrypoints agree: the resolve+construct path
+// (ResolveSessionRecordByExactID + SessionByRecord, used by cmd/gc/worker_handle.go)
+// feeds the resolved-runtime hook the same sessionKind, metadata map, and Info
+// as the by-id path (SessionByHandle), and builds the same handle spec.
+func TestSessionByRecordMatchesSessionByHandle(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	info := seedEquivSession(t, store, sp)
 
-	var oldCap, newCap resolverCapture
-	oldFactory := buildEquivFactory(t, store, sp, &oldCap)
-	newFactory := buildEquivFactory(t, store, sp, &newCap)
+	var byIDCap, byRecordCap resolverCapture
+	byIDFactory := buildEquivFactory(t, store, sp, &byIDCap)
+	byRecordFactory := buildEquivFactory(t, store, sp, &byRecordCap)
 
-	bead, _, err := sessionpkg.ResolveSessionBeadByExactID(store, info.ID)
+	byIDHandle, err := byIDFactory.SessionByHandle(info.ID)
 	if err != nil {
-		t.Fatalf("ResolveSessionBeadByExactID: %v", err)
-	}
-	oldHandle, err := oldFactory.SessionByLoadedBead(bead)
-	if err != nil {
-		t.Fatalf("SessionByLoadedBead: %v", err)
+		t.Fatalf("SessionByHandle: %v", err)
 	}
 
 	recInfo, pr, err := sessionpkg.ResolveSessionRecordByExactID(store, info.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
-	newHandle, err := newFactory.SessionByRecord(recInfo, pr)
+	byRecordHandle, err := byRecordFactory.SessionByRecord(recInfo, pr)
 	if err != nil {
 		t.Fatalf("SessionByRecord: %v", err)
 	}
 
-	assertResolverCaptureEqual(t, oldCap, newCap)
-	assertHandleSpecEqual(t, oldHandle, newHandle)
+	assertResolverCaptureEqual(t, byIDCap, byRecordCap)
+	assertHandleSpecEqual(t, byIDHandle, byRecordHandle)
 }
 
 // TestResolveSessionRecordByExactIDMatchesBeadForm pins that the record resolver
