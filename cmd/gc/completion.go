@@ -267,6 +267,10 @@ func loadSessionsForCompletion() []session.Info {
 			return
 		}
 		sessions = catalog.ListFromInfos(sessionBeads.OpenInfos(), "", "")
+		// loadSessionBeadSnapshot loads unsorted; restore the created-desc order the
+		// retired sorted completion feed produced so `gc <cmd> <TAB>` candidates
+		// surface newest-first (shared comparator with the session lister).
+		sortSessionsCreatedDesc(sessions)
 	})
 	return sessions
 }

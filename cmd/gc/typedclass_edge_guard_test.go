@@ -142,6 +142,13 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/session_resolve.go":            3,
 		"cmd/gc/session_template_start.go":     1,
 		"cmd/gc/skill_visibility.go":           1,
+		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop
+		// is a genuine WI-7-era raw retire lane (bead already in hand from the raw
+		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and
+		// confined to that edge — recorded here rather than gamed to zero by inlining
+		// the b.Metadata["session_name"] key. Retires with the named_config raw
+		// surfaces in WI-7.
+		"internal/api/session_resolution.go": 1,
 	},
 	"SessionInfoFromBead(": {
 		"internal/worker/factory.go": 1,

@@ -60,7 +60,7 @@ func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, Sessi
 		return SessionInfo{}, SessionPersistedResponse{}, err
 	}
 	if info.Type == "" {
-		_ = front.RepairType(id)
+		front.RepairTypeBestEffort(id)
 		info.Type = sessionpkg.BeadType
 	}
 	return c.manager.EnrichInfo(info), pr, nil

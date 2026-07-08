@@ -878,6 +878,23 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	return routeSessionList(cityPath, stateFilter, templateFilter, c, reason, jsonOutput, stdout, stderr)
 }
 
+// sortSessionsCreatedDesc orders a session listing newest-first, in place. It is
+// the single shared comparator for the CLI session listers (this file and
+// completion.go), restoring the created-desc order the retired sorted union feed
+// produced now that loadSessionBeadSnapshot loads unsorted (its first-wins
+// identity index must stay on store order, so the re-sort lives here in the CLI
+// projection, not the loader). It reproduces beads.SortCreatedDesc's comparison
+// exactly: CreatedAt descending, ties broken by ID descending — a total order, so
+// SliceStable is deterministic.
+func sortSessionsCreatedDesc(sessions []session.Info) {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].CreatedAt.Equal(sessions[j].CreatedAt) {
+			return sessions[i].ID > sessions[j].ID
+		}
+		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	})
+}
+
 // doSessionListFallback is the direct-bd path for "gc session list".
 func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
@@ -940,9 +957,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		return 1
 	}
 	sessions := catalog.ListFromInfos(sessionBeads.OpenInfos(), stateFilter, templateFilter)
-	sort.SliceStable(sessions, func(i, j int) bool {
-		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
-	})
+	sortSessionsCreatedDesc(sessions)
 
 	if jsonOutput {
 		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)

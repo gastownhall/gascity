@@ -122,10 +122,11 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	}
 	// Preserve the empty-type heal RepairEmptyType performed here: a repairable
 	// (type-lost) session bead is healed back to the canonical type as a side
-	// effect of being assigned. RepairType writes only the type field, so this is
-	// byte-equivalent to the retired heal.
+	// effect of being assigned. RepairTypeBestEffort writes only the type field
+	// and logs a failed write (as RepairEmptyType did), so this is byte-equivalent
+	// to the retired heal.
 	if info.Type == "" {
-		_ = sessFront.RepairType(id)
+		sessFront.RepairTypeBestEffort(id)
 	}
 	return session.AssigneeIdentifier(info), nil
 }

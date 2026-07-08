@@ -702,16 +702,24 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b, err := store.Get(id)
+	// Validate through the session front door: the codec stays confined inside
+	// Store.Get, so no raw session bead is cracked in the handler. A present-but-
+	// non-session bead yields ErrSessionNotFound → the existing "not a session"
+	// 400; an absent id stays on the beads.ErrNotFound chain → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
+			return
+		}
 		writeStoreError(w, err)
 		return
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
-		return
+	// Preserve the empty-type heal RepairEmptyType performed on the raw bead.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	catalog, err := s.workerSessionCatalog(store.Store)
 	if err != nil {
@@ -722,10 +730,10 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		// agent_name is read straight off the already-validated, type-healed bead
-		// (b) loaded above — the controller-managed-alias gate; identical to the
-		// retired codec projection of the persisted agent_name field.
-		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+		// agent_name comes off the persisted Info from the front door — the
+		// controller-managed-alias gate; the codec projection of the persisted
+		// agent_name field, with no raw bead in the handler's hands.
+		if strings.TrimSpace(info.AgentName) != "" {
 			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
 			return
 		}

@@ -29,6 +29,8 @@ func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
 			Metadata: map[string]string{"state": "active"}, CreatedAt: at(4)},
 		{ID: "closed", Type: BeadType, Status: "closed", Labels: []string{LabelSession},
 			Metadata: map[string]string{"state": "asleep", "template": "polecat", "session_name": "closed"}, CreatedAt: at(5)},
+		{ID: "no-state", Type: BeadType, Status: "open", Labels: []string{LabelSession}, // StateNone: no "state" metadata key
+			Metadata: map[string]string{"template": "polecat", "session_name": "no-state"}, CreatedAt: at(6)},
 	}
 
 	infos := make([]Info, 0, len(corpus))
@@ -38,7 +40,10 @@ func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
 
 	mgr := NewManager(beads.NewMemStore(), runtime.NewFake())
 
-	for _, sf := range []string{"", "asleep", "active", "all", "closed", "active,asleep"} {
+	// "active," is the empty-comma-member filter humaHandleCityPending uses
+	// (StateActive + StateNone): it must match the no-state fixture via the empty
+	// state member, exactly as the bead-form sessionMatchesFilters does.
+	for _, sf := range []string{"", "asleep", "active", "all", "closed", "active,asleep", "active,"} {
 		for _, tf := range []string{"", "polecat", "sky"} {
 			got := mgr.ListFromInfos(infos, sf, tf)
 			// want reproduces the retired ListFullFromBeads exactly: the bead-form

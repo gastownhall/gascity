@@ -40,7 +40,7 @@ func sessionGetEnriched(sessFront *session.Store, mgr *session.Manager, id strin
 		return session.Info{}, session.PersistedResponse{}, bridgeSessionGetError(id, err)
 	}
 	if info.Type == "" {
-		_ = sessFront.RepairType(id)
+		sessFront.RepairTypeBestEffort(id)
 		info.Type = session.BeadType
 	}
 	return mgr.EnrichInfo(info), pr, nil

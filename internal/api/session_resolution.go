@@ -164,10 +164,11 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			continue
 		}
 		// Raw-lane read: this loop iterates the raw ExactMetadataSessionCandidates
-		// feed (retired in WI-7 with the named_config raw surfaces). session_name is
-		// the verbatim metadata Info.SessionNameMetadata mirrors, so the direct read
-		// is byte-identical without projecting the whole bead through the codec.
-		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
+		// feed (a genuine WI-7-era raw retire lane, not converted in W2). The bead is
+		// already in hand from that raw feed, so the codec projection is confined to
+		// this edge — its honest InfoFromPersistedBead census count is recorded in
+		// the WI-0 guard rather than gamed to zero by inlining the metadata key.
+		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
 				_ = handle.Kill(context.Background())
 			}
@@ -562,17 +563,21 @@ func lookupFact(err error) session.TargetLookupFact {
 
 // liveSessionMatchIsConfigOrphan reports whether a live-resolved bead is a
 // named-session bead whose configured identity is absent from current
-// config. Lookup failures fail open: the match stands.
+// config. Lookup failures fail open: the match stands (any error → false, the
+// same outcome the old raw store.Get + non-named-bead branches produced). The
+// read routes through the session front door and the session.Info twins
+// (IsNamedSessionInfo / NamedSessionIdentityInfo), so no raw bead is cracked
+// here — the Info projections mirror the bead accessors exactly.
 func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bool {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return false
 	}
-	bead, err := store.Get(id)
-	if err != nil || !apiIsNamedSessionBead(bead) {
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
+	if err != nil || !session.IsNamedSessionInfo(info) {
 		return false
 	}
-	identity := apiNamedSessionIdentity(bead)
+	identity := session.NamedSessionIdentityInfo(info)
 	return identity != "" && config.FindNamedSession(cfg, identity) == nil
 }
 

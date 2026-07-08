@@ -1761,21 +1761,6 @@ func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
 	return m.infoFromBead(b), b, nil
 }
 
-// GetWithPersistedResponse returns the runtime-enriched session Info plus the
-// persisted-response projection (status + metadata) in a single store fetch.
-// It is the domain-typed read the API response path routes through: the caller
-// gets session.Info for the scalar/runtime fields and session.PersistedResponse
-// for the status/metadata-derived fields, without a raw *beads.Bead crossing the
-// boundary or a redundant second store.Get beside Get. Bead serialization stays
-// confined here via PersistedResponseFromBead.
-func (m *Manager) GetWithPersistedResponse(id string) (Info, PersistedResponse, error) {
-	info, b, err := m.GetWithBead(id)
-	if err != nil {
-		return Info{}, PersistedResponse{}, err
-	}
-	return info, PersistedResponseFromBead(b), nil
-}
-
 // SessionInfoFromBead converts an already-loaded session bead to Info,
 // applying the same enrichment as Get. Callers that have just resolved
 // the bead can use this to avoid a second store.Get.
