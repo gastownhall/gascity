@@ -133,7 +133,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/session_bead_snapshot.go":                3,
 		"cmd/gc/session_hash.go":                         1,
 		"cmd/gc/session_index.go":                        1,
-		"cmd/gc/session_lifecycle_parallel.go":           3,
 		"cmd/gc/session_logs_resolve.go":                 3,
 		"cmd/gc/session_reconciler.go":                   3,
 		"cmd/gc/session_resolve.go":                      3,

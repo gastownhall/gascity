@@ -2540,7 +2540,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// keys (session_key/continuation_reset_pending) stay unthreaded — neither has
 			// a same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(session, tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(session, infoByID[session.ID], tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
@@ -328,6 +329,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 
 	startCand := startCandidate{
 		session: &startBead,
+		info:    sessionpkg.InfoFromPersistedBead(startBead),
 		tp: TemplateParams{
 			TemplateName: "repo/worker",
 			SessionName:  "worker-1",

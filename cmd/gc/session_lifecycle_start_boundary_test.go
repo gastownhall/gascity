@@ -28,6 +28,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		[]preparedStart{{
 			candidate: startCandidate{
 				session: &bead,
+				info:    sessionpkg.InfoFromPersistedBead(bead),
 				tp:      TemplateParams{TemplateName: "worker"},
 			},
 			cfg: runtime.Config{
@@ -78,6 +79,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 		preparedStart{
 			candidate: startCandidate{
 				session: sessionBead,
+				info:    sessionpkg.InfoFromPersistedBead(*sessionBead),
 				tp:      TemplateParams{TemplateName: "worker"},
 			},
 			cfg: runtime.Config{

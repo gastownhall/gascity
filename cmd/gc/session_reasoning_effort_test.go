@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // codexEffortResolvedProvider builds a ResolvedProvider backed by the real
@@ -72,7 +73,7 @@ func newOptionSessionWithWork(t *testing.T, rp *config.ResolvedProvider, baseCom
 		TemplateName:     "worker",
 		ResolvedProvider: rp,
 	}
-	return startCandidate{session: &session, tp: tp, order: 0}, cfg, store
+	return startCandidate{session: &session, info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
 }
 
 func TestBuildPreparedStart_CodexDispatchEffortOptionPresent(t *testing.T) {
@@ -108,6 +109,11 @@ func TestBuildPreparedStart_ProviderEffortOptionUsesProviderSchema(t *testing.T)
 func TestBuildPreparedStart_ExplicitEffortOverrideWinsOverDispatchOption(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", map[string]string{"effort": "high"})
 	candidate.session.Metadata["template_overrides"] = `{"effort":"low"}`
+	// Re-project the typed twin after mutating the bead so it stays coherent with the
+	// session the executor reads (buildPreparedStart now decodes template_overrides off
+	// candidate.info); in production this coherence is maintained by the front-door
+	// refresh inside prepareStartCandidateForCity.
+	candidate.info = sessionpkg.InfoFromPersistedBead(*candidate.session)
 
 	prepared, err := buildPreparedStart(candidate, cfg, store)
 	if err != nil {
