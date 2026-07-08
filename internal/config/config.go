@@ -3754,6 +3754,20 @@ func implicitAgentIdentities(cfg *City) map[agentKey]bool {
 	return result
 }
 
+// namesForImplicitAgents returns set of agent names that will be created by
+// InjectImplicitAgents. Used by compose to check wildcard patches.
+func namesForImplicitAgents(cfg *City) map[string]bool {
+	ids := implicitAgentIdentities(cfg)
+	if len(ids) == 0 {
+		return nil
+	}
+	names := make(map[string]bool)
+	for key := range ids {
+		names[key.name] = true
+	}
+	return names
+}
+
 // ApplyAgentDefaults applies [agent_defaults] values to all agents that
 // don't set their own override. Call after InjectImplicitAgents so
 // implicit agents are already present. Control-dispatcher agents are

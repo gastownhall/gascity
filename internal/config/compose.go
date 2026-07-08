@@ -572,7 +572,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		implicitIDs := implicitAgentIdentities(root)
 		var nowPatches []AgentPatch
 		for _, p := range root.Patches.Agents {
-			if !agentPatchMatchesExisting(root, &p) && implicitIDs[agentKey{p.Dir, p.Name}] {
+			deferPatch := false
+			if p.Rig == "*" {
+				// Wildcard: defer if ANY implicit agent with this name
+				// will be injected (even if some already exist).
+				deferPatch = nameMatchesAnyImplicit(root, p.Name)
+			} else if !agentPatchMatchesExisting(root, &p) {
+				if targetDir, err := agentPatchTargetDir(&p); err == nil {
+					deferPatch = implicitIDs[agentKey{targetDir, p.Name}]
+				}
+			}
+			if deferPatch {
 				deferredAgentPatches = append(deferredAgentPatches, p)
 			} else {
 				nowPatches = append(nowPatches, p)
@@ -1902,16 +1912,32 @@ func readPackNameFromDir(dir string) string {
 	return pc.Pack.Name
 }
 
+func nameMatchesAnyImplicit(cfg *City, name string) bool {
+	return namesForImplicitAgents(cfg)[name]
+}
+
 // agentPatchMatchesExisting reports whether patch targets an agent already
 // present in cfg.Agents, using the same matching logic as applyAgentPatch.
 func agentPatchMatchesExisting(cfg *City, patch *AgentPatch) bool {
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	if patch.Rig == "*" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == patch.Name {
+				return true
+			}
+		}
+		return false
+	}
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return false
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if AgentMatchesIdentity(a, target) {
 			return true
 		}
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		if a.Dir == targetDir && a.Name == patch.Name {
 			return true
 		}
 	}
