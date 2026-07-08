@@ -84,8 +84,10 @@ func TestKillByPIDConfirmedDeadBeforeReturn(t *testing.T) {
 	t.Run("survives SIGKILL -> error", func(t *testing.T) {
 		var signals []syscall.Signal
 		kill := func(_ int, sig syscall.Signal) error {
-			// Record only the positive-pid delivery so the group/direct
-			// fallback does not double-count.
+			// Record every delivery attempt. signalPIDWith signals the process
+			// group (negative pid) first and returns on success, so with this
+			// always-succeeding fake these are the group deliveries; the
+			// assertion below only checks the final escalation is SIGKILL.
 			signals = append(signals, sig)
 			return nil
 		}
