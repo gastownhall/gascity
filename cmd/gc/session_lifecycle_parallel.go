@@ -2212,8 +2212,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
-		if _, err := markProviderTerminalError(session, sessFront, clk, reason); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, err) //nolint:errcheck
+		// This runs on the async start goroutine, and this failure arm is terminal
+		// (logs + returns), so the write-returns-Info fold is discarded — never assign
+		// it back into infoByID (the tick's map, out of scope here). The persist still
+		// lands via markProviderTerminalError's ApplyPatchInfo.
+		if _, markErr := markProviderTerminalError(result.prepared.candidate.info, sessFront, clk, reason); markErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 		}
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
@@ -2228,12 +2232,14 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		return
 	}
 	if result.rateLimitScreen {
-		if _, err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
+		// Terminal failure arm; discard the fold (see the terminal-provider-error note
+		// above). The persist lands via recordRateLimitQuarantine's ApplyPatchInfo.
+		if _, rlErr := recordRateLimitQuarantine(result.prepared.candidate.info, sessFront, clk); rlErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, rlErr) //nolint:errcheck
 			if trace != nil {
 				trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHoldDeferred, "", tp.TemplateName, name, 0, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
-					"cause": err.Error(),
+					"cause": rlErr.Error(),
 				})
 			}
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
@@ -2278,13 +2284,15 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// tp.DisplayName() is the exact identity the start counter records, so a
 	// quarantine triggered by repeated start failures joins the start series
 	// even for a namepool-themed pool instance whose bead predates agent_name.
-	// The refreshed candidate.info twin is coherent for the reads recordWakeFailure
-	// makes (WakeAttemptsMetadata / SessionKey / StartedConfigHash — the last two
-	// reflecting buildPreparedStart's stale-resume clears / session_key mint via the
+	// The candidate.info twin is coherent for the reads recordWakeFailure makes
+	// (WakeAttemptsMetadata / SessionKey / StartedConfigHash — the last two reflecting
+	// buildPreparedStart's stale-resume clears / session_key mint via the
 	// prepareStartCandidateForCity + refreshAsyncStartResult coherence refresh). The
 	// SetMarker of last_woke_at="" above is not one of those reads, so the twin need
-	// not carry it. recordWakeFailure still takes the raw *session for its writes.
-	recordWakeFailure(session, result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	// not carry it. Terminal failure arm; discard the fold (never assign back into
+	// infoByID — this is the async start goroutine). The persist lands via
+	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
+	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
