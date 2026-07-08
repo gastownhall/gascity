@@ -944,6 +944,11 @@ func healStateWithRollback(session *beads.Bead, alive bool, sessFront *sessionpk
 	for k, v := range batch {
 		session.Metadata[k] = v
 	}
+	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
+	// applied (no-op unless the shadow harness is enabled). Colocated with the
+	// ApplyPatch + in-memory mirror so a pure builder (healStatePatch) invoked only
+	// for inspection never records a write that never happened.
+	recordLegacyCompareWrites(session.ID, "healStateWithRollback", batch)
 	return batch
 }
 
