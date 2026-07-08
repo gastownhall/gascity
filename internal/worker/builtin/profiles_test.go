@@ -41,8 +41,8 @@ func TestBuiltinProviderMimoCodeSpec(t *testing.T) {
 	if spec.DisplayName != "MiMo Code" {
 		t.Errorf("mimocode DisplayName = %q, want %q", spec.DisplayName, "MiMo Code")
 	}
-	if len(spec.Args) != 1 || spec.Args[0] != "--never-ask-questions" {
-		t.Errorf("mimocode Args = %v, want [--never-ask-questions]", spec.Args)
+	if len(spec.Args) != 1 || spec.Args[0] != "--never-ask" {
+		t.Errorf("mimocode Args = %v, want [--never-ask]", spec.Args)
 	}
 	if spec.PromptMode != "flag" || spec.PromptFlag != "--prompt" {
 		t.Errorf("mimocode prompt = (%q, %q), want (flag, --prompt)", spec.PromptMode, spec.PromptFlag)
