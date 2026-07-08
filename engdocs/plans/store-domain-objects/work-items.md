@@ -57,9 +57,11 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 > W2 (API read-model cutover) ✅ (merge `cf77967bd`; Fable red-team caught 4
 > blockers — incl. census-gaming via inlined `Metadata["agent_name"]` magic
 > strings — all fixed + re-approved) · W3 (worker boundary) ✅ · W5 (start-exec
-> feed typing) ✅ (W3+W5 merged `2448b656c`, 6 shards + session/worker green) ·
-> W4 (periphery ListAll + snapshot raw-half) 🔍 red-team → W6 (write-helper
-> collapse + mirror drop + classifier/oracle deletion, LAST).
+> feed typing) ✅ · W4 (periphery ListAll + snapshot raw-half) ✅ (W4 merged
+> `c9e59d17c` — full W2+W3+W4+W5 integrated: 6 shards + session/worker/api green;
+> red-team zero blockers, 5 nits closed incl. a primed silent-empty `FindInfo*`
+> trap + a latent nil-store panic) → W6 (write-helper collapse + coupling-mirror
+> drop + raw classifier/oracle deletion, LAST) 🔨 impl.
 >
 > Every session-store wave (W2/W3/W5) tripped the SAME front-door-Get contract
 > subtlety (session.Store.Get/GetPersistedResponse returns `ErrSessionNotFound` +
