@@ -327,9 +327,6 @@ func TestTmuxFetcher_NoServerMapsToRuntimeUnavailable(t *testing.T) {
 	if !errors.Is(err, gcruntime.ErrRuntimeUnavailable) {
 		t.Fatalf("FetchState() err = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
 	}
-	if !gcruntime.IsRuntimeQueryPartial(err) {
-		t.Fatalf("IsRuntimeQueryPartial(%v) = false, want true", err)
-	}
 	if !isNoServerError(err) {
 		t.Fatalf("FetchState() err = %v must still satisfy isNoServerError so downstream ErrNoServer absorbers work", err)
 	}

@@ -56,16 +56,15 @@ var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 // treat it as "I could not tell" and defer, exactly as it defers on a partial
 // store read (storeQueryPartial) — never as ground truth that every session is
 // gone. Providers wrap it (with errors.Is-visible provider-specific causes) so
-// callers can dispatch on it, and IsRuntimeQueryPartial centralizes the check.
+// callers can dispatch on it with errors.Is.
+//
+// This is distinct from [PartialListError]. ErrRuntimeUnavailable is the
+// single-observation-total-failure signal: zero usable data, used to preserve
+// StateCache last-known-good. PartialListError is the multi-backend-merge
+// signal: partial-but-usable results from [MergeBackendListResults], which does
+// not even emit PartialListError for a total failure. The two are intentionally
+// separate signals for separate call paths.
 var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
-
-// IsRuntimeQueryPartial reports whether err indicates the runtime could not be
-// observed (ErrRuntimeUnavailable). It is the runtime-side mirror of the
-// store-partial predicate: a true result means a destructive arm keyed on an
-// empty/negative observation must defer rather than act on unverified absence.
-func IsRuntimeQueryPartial(err error) bool {
-	return err != nil && errors.Is(err, ErrRuntimeUnavailable)
-}
 
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like

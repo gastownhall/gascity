@@ -15,9 +15,9 @@ exist", so a brief blip drove the reconciler to drain/close healthy pool slots.
 
 ## Landed (this PR)
 
-- `runtime.ErrRuntimeUnavailable` sentinel + `runtime.IsRuntimeQueryPartial` in
-  `internal/runtime/runtime.go` — the runtime-side analogue of a partial store
-  read.
+- `runtime.ErrRuntimeUnavailable` sentinel in `internal/runtime/runtime.go` —
+  the runtime-side analogue of a partial store read. Callers dispatch on it with
+  `errors.Is`.
 - `internal/runtime/tmux/state_cache.go` `tmuxFetcher.FetchState`: an
   unreachable server (`ErrNoServer`) now returns `ErrRuntimeUnavailable`
   (wrapping the original cause) instead of an empty *success*. `refresh()`
