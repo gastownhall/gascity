@@ -416,21 +416,32 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, huma.Error422UnprocessableEntity("at least one of 'title' or 'alias' is required")
 	}
 
-	b, err := store.Get(id)
+	// Validate through the session front door: the codec stays confined inside
+	// Store.Get. A present-but-non-session bead yields ErrSessionNotFound → the
+	// existing "not a session" 400; an absent id stays on the beads.ErrNotFound
+	// chain → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, huma.Error400BadRequest(id + " is not a session")
+		}
 		return nil, humaStoreError(err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, huma.Error400BadRequest(id + " is not a session")
+	// Preserve the empty-type heal RepairEmptyType performed on the raw bead.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	updateFn := func() error {
 		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
+		// agent_name off the persisted Info from the front door — the
+		// controller-managed-alias gate; the codec projection of the persisted
+		// agent_name field, with no raw bead in the handler's hands.
+		if strings.TrimSpace(info.AgentName) != "" {
 			return nil, huma.Error403Forbidden("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
@@ -445,7 +456,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -472,6 +483,12 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
+	// WI-6 residual: raw-validation lane NOT converted to the session front door,
+	// because the raw bead is read downstream — b.Metadata feeds legacySessionKind
+	// and resolveProviderForSessionOptions below (provider/options resolution reads
+	// the raw metadata map, not projected Info fields). Converting needs an
+	// Info/PersistedResponse-fed provider-options resolution; deferred to the
+	// front-door flip (WI-7). The 400/404 contract matches the converted siblings.
 	b, err := store.Get(id)
 	if err != nil {
 		return nil, humaStoreError(err)
@@ -524,7 +541,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	s.state.Poke()
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -926,21 +943,28 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 	}
 
 	// Huma validates Body.Title (minLength:1); no handler guard needed.
-	b, err := store.Get(id)
+	// Validate through the session front door (mirrors humaHandleSessionPatch):
+	// nothing downstream reads the raw bead — rename operates by id. Present-but-
+	// non-session → the existing "not a session" 400; absent → beads.ErrNotFound
+	// → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, huma.Error400BadRequest(id + " is not a session")
+		}
 		return nil, humaStoreError(err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, huma.Error400BadRequest(id + " is not a session")
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	if err := mgr.Rename(id, input.Body.Title); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

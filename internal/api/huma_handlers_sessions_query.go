@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -28,24 +27,17 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
-	sessions := listResult.Sessions
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	for i := range listResult.Beads {
-		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
-	}
+	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
 	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, s.state.SessionProvider(), hasDeferredQueue)
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
@@ -117,7 +109,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -349,7 +341,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	}
 	mgr := s.sessionManager(store.Store)
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -363,11 +355,11 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	// runtime that could be holding a pending decision. Pending() itself
 	// degrades gracefully (runtime-gone -> no pending), so over-including a
 	// dormant empty-state bead is harmless.
-	// ListFullFromBeads takes a comma-separated state filter; StateNone is the
-	// empty string, so this resolves to "active," — both states, closed beads
-	// still excluded by ListFullFromBeads' status guard.
+	// ListFromInfos takes a comma-separated state filter; StateNone is the empty
+	// string, so this resolves to "active," — both states, closed beads still
+	// excluded by the status guard (sessionMatchesFiltersInfo).
 	stateFilter := strings.Join([]string{string(session.StateActive), string(session.StateNone)}, ",")
-	sessions := mgr.ListFullFromBeads(all, stateFilter, "").Sessions
+	sessions := mgr.ListFromInfos(infos, stateFilter, "")
 
 	// Probe sessions concurrently with bounded fan-out. Pending() can be
 	// expensive per session (e.g. a tmux pane capture), so probing a

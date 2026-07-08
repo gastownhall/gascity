@@ -163,6 +163,11 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			retired = append(retired, b)
 			continue
 		}
+		// Raw-lane read: this loop iterates the raw ExactMetadataSessionCandidates
+		// feed (a genuine WI-7-era raw retire lane, not converted in W2). The bead is
+		// already in hand from that raw feed, so the codec projection is confined to
+		// this edge — its honest InfoFromPersistedBead census count is recorded in
+		// the WI-0 guard rather than gamed to zero by inlining the metadata key.
 		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
 				_ = handle.Kill(context.Background())
@@ -418,28 +423,28 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 	if identifier == "" {
 		return "", false, nil
 	}
-	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := session.NewStore(beads.SessionStore{Store: store}).ListAll(session.ListAllOptions{})
 	if err != nil {
 		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
 	}
-	var best beads.Bead
+	var best session.Info
 	found := false
-	for _, b := range all {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if apiIsNamedSessionBead(b) {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if session.IsNamedSessionInfo(info) {
 			continue
 		}
-		if strings.TrimSpace(b.Title) != identifier {
+		if strings.TrimSpace(info.Title) != identifier {
 			continue
 		}
 		// MetadataState is the RAW state mirror; Info.State is normalizeInfoState-
 		// folded (awake->active), which would change this predicate.
-		state := session.State(session.InfoFromPersistedBead(b).MetadataState)
+		state := session.State(info.MetadataState)
 		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
 			continue
 		}
-		if !found || b.CreatedAt.After(best.CreatedAt) {
-			best = b
+		if !found || info.CreatedAt.After(best.CreatedAt) {
+			best = info
 			found = true
 		}
 	}
@@ -557,18 +562,31 @@ func lookupFact(err error) session.TargetLookupFact {
 }
 
 // liveSessionMatchIsConfigOrphan reports whether a live-resolved bead is a
-// named-session bead whose configured identity is absent from current
-// config. Lookup failures fail open: the match stands.
+// named-session bead whose configured identity is absent from current config.
+// Lookup failures fail open: the match stands (any error → false). The read
+// routes through the session front door and the session.Info twins
+// (IsNamedSessionInfo / NamedSessionIdentityInfo), so no raw bead is cracked here
+// — the Info projections mirror the bead accessors exactly.
+//
+// Byte-identical to the old raw store.Get for every real input: absent id →
+// false; present non-session bead → false; present session bead (named or not) →
+// the same verdict via the mirrored projections. ONE design-prescribed direction
+// change, and only under double corruption: a bead carrying
+// configured_named_session="true" that has lost BOTH its session type AND its
+// gc:session label was previously classified an orphan (match rejected); it now
+// fails the front door's IsSessionBeadOrRepairable check → ErrSessionNotFound →
+// false (the match stands). A named bead that is merely type-lost stays
+// repairable and reaches the identity check unchanged.
 func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bool {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return false
 	}
-	bead, err := store.Get(id)
-	if err != nil || !apiIsNamedSessionBead(bead) {
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
+	if err != nil || !session.IsNamedSessionInfo(info) {
 		return false
 	}
-	identity := apiNamedSessionIdentity(bead)
+	identity := session.NamedSessionIdentityInfo(info)
 	return identity != "" && config.FindNamedSession(cfg, identity) == nil
 }
 

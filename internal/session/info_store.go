@@ -175,9 +175,10 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 // The Get/List projection is the persisted view only — no live runtime overlay.
 // Callers that need live runtime enrichment (liveness, attachment, detected
 // transport) still go through session.Manager. The API/response-building layer
-// currently reads persisted state via Manager.GetWithPersistedResponse (same
-// InfoFromPersistedBead codec); routing that read path through Store is a
-// follow-up. The reconciler already routes its writes through this type.
+// reads persisted state through this type's GetPersistedResponse and pairs it
+// with Manager.EnrichInfo for the runtime overlay (see the api sessionGetEnriched
+// composition and worker.SessionCatalog.GetWithPersistedResponse). The reconciler
+// already routes its writes through this type.
 type Store struct {
 	store beads.SessionStore
 }
@@ -205,9 +206,11 @@ func (s *Store) Get(id string) (Info, error) {
 
 // GetPersistedResponse returns the persisted session.Info paired with the
 // persisted-response projection (status + metadata) for id, in a single store
-// fetch. It is the Store-side twin of Manager.GetWithPersistedResponse for the
-// PERSISTED view: the caller gets both projections without a raw *beads.Bead
-// crossing the boundary and without a second store.Get. It shares Get's exact
+// fetch. It is the persisted-read half of the session Get read model — pair it
+// with Manager.EnrichInfo for the runtime overlay (the api sessionGetEnriched
+// composition and worker.SessionCatalog.GetWithPersistedResponse do exactly
+// that): the caller gets both projections without a raw *beads.Bead crossing the
+// boundary and without a second store.Get. It shares Get's exact
 // error contract (both route through validatedBead): ErrSessionNotFound for a
 // present-but-non-session bead, and the wrapped store not-found error (NOT
 // ErrSessionNotFound) for an absent id.
@@ -244,7 +247,7 @@ func (s *Store) validatedBead(id string) (beads.Bead, error) {
 func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	// IncludeClosed so the in-memory filter below can honor state=closed and
 	// state=all; sessionMatchesFilters drops closed beads for the default and
-	// non-closed filters, matching Manager.ListFullFromBeads semantics.
+	// non-closed filters, matching the shared session-list filtering semantics.
 	all, err := s.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		Sort:          beads.SortCreatedDesc,
@@ -268,7 +271,8 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 
 // sessionMatchesFilters reports whether a session bead passes the state and
 // template filters. It is the single predicate for session-list filtering,
-// shared by both InfoStore listing and Manager.ListFullFromBeads.
+// shared by the Store.List projection and (via sessionMatchesFiltersInfo) the
+// Info-fed listing.
 func sessionMatchesFilters(b beads.Bead, stateFilter, templateFilter string) bool {
 	state := normalizeInfoState(State(b.Metadata["state"]))
 
