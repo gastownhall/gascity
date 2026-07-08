@@ -56,9 +56,20 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 > WI-6 waves: W0 (fold O7) ✅ · W1 (edge vocabulary + ListAll union pin) ✅ ·
 > W2 (API read-model cutover) ✅ (merge `cf77967bd`; Fable red-team caught 4
 > blockers — incl. census-gaming via inlined `Metadata["agent_name"]` magic
-> strings — all fixed + re-approved) · W3 (worker boundary) 🔨 · W4 (periphery
-> ListAll + snapshot raw-half) 🔨 · W5 (start-exec feed typing) 🔨 → W6 (write-
-> helper collapse + mirror drop + classifier/oracle deletion, LAST).
+> strings — all fixed + re-approved) · W3 (worker boundary) ✅ · W5 (start-exec
+> feed typing) ✅ (W3+W5 merged `2448b656c`, 6 shards + session/worker green) ·
+> W4 (periphery ListAll + snapshot raw-half) 🔍 red-team → W6 (write-helper
+> collapse + mirror drop + classifier/oracle deletion, LAST).
+>
+> Every session-store wave (W2/W3/W5) tripped the SAME front-door-Get contract
+> subtlety (session.Store.Get/GetPersistedResponse returns `ErrSessionNotFound` +
+> `"loading session"` wrap + rejects non-`IsSessionBeadOrRepairable` beads, unlike
+> raw `store.Get`); each swap must bridge it (W2 established `bridgeSessionGetError`
+> at `session_get_read.go:60`). Red-teams caught it in W2 (API), W3 (factory lane,
+> 400→500 in a resolve-then-Get race), W5 (front-door rejection of type+label-lost
+> beads). W5's coherence-Gets were also converted to `ApplyPatch` folds (no re-Get,
+> spec §7). Cross-wave merge conflicts are confined to the census guard alone;
+> resolve by regen-from-tree.
 
 `session.Store`: `ListAll(opts)` (carries `IncludeClosed`/`Sort`/`Live`/`Limit`; cache-first union ported from `cache_read_model.go`; characterization-pinned) + `GetPersistedResponse(handle)` (retire `Manager.GetWithPersistedResponse`/`GetWithBead`). Migrate `cache_read_model.go`/`handler_sessions.go`/`huma_handlers_sessions_query.go`/`session_resolution.go`/`handler_status.go` (fold O7). Worker: `Factory.SessionByHandle`/`SessionByInfo`, catalog off bead feeds; Manager stops accepting bead feeds and returning `(Info, Bead)` pairs. Periphery: `build_desired_state`/`pool` cluster (per-parameter split: session params → `Info`, work slices stay `[]beads.Bead`; `bindPoolSessionTriggerBead` returns a typed patch + fixes its write routing), `session_beads` repair lane, sleep/idle/name-lookup collapse; mail identity residual onto the typed session mailbox surface (closes WI-2 residual).
 **Acceptance:** session interior (minus §5 exemptions) bead-free; API/worker on typed Store; dashboard perf tier preserved (`make dashboard-check` + no per-request bd hit regression).
