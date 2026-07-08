@@ -106,13 +106,16 @@ var typedClassCodecScanDirs = []string{
 
 // typedClassCodecEdgeFiles are cmd/gc wiring/adapter files excluded from the
 // scan because calling a codec is their legitimate job (composition roots /
-// per-class front-door constructors). nudge_beads.go is the only one holding a
-// needle today; WI-1 deletes it.
+// per-class front-door constructors). nudge_beads.go used to be listed here,
+// but the nudges class closeout (WI-1) left it needle-free wiring — the nudge
+// store-open seam, the per-call front-door constructor, and the flock-callable
+// write adapters, none of which decode a bead — so it is no longer excluded and
+// is now policed like any interior file: a needle reintroduced there fails the
+// build.
 var typedClassCodecEdgeFiles = map[string]bool{
 	"cmd/gc/class_store.go":       true,
 	"cmd/gc/cli_session_store.go": true,
 	"cmd/gc/providers.go":         true,
-	"cmd/gc/nudge_beads.go":       true,
 	// internal/api/client_waits.go is the /v0/waits wire-serialization edge: its
 	// legacy rungs (ListWaitsViaBeads / GetWaitViaBead) project raw beads via
 	// WaitInfoFromBead during the rolling-deploy deprecation window. Excluded so
