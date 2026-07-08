@@ -273,7 +273,7 @@ func drainAckAsyncStopKey(sessionID, name string) string {
 // for the async drain-ack stop path (see queueDrainAckAsyncStop).
 var drainAckAsyncStopPokeController = pokeController
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string, tracker *asyncStartTracker, stderr io.Writer) {
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, tracker *asyncStartTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
@@ -293,6 +293,19 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 			}
 			done()
 		}()
+		// Token fence (mirrors verifiedStop): this kill targets the session by
+		// NAME and may fire long after it was queued. If the name was reused by
+		// a re-woken replacement in the meantime, its GC_INSTANCE_TOKEN differs
+		// from the one we intended to stop; killing it would take out a live,
+		// working session. Skip on a definite mismatch. An empty expected or
+		// live token means "cannot verify" and falls through to the kill,
+		// matching verifiedStop's conservative posture.
+		if expectedToken != "" {
+			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+				return
+			}
+		}
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
 			return
@@ -577,8 +590,9 @@ func reconcileDrainAckStopPending(
 	if err != nil || obs.Running || obs.Alive {
 		// Async-stop: queueDrainAckAsyncStop takes the session ID and mutates only
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
-		// no-op) matches the unmutated session.
-		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, asyncStopTracker, stderr)
+		// no-op) matches the unmutated session. The token fence reads the typed
+		// instance_token off the Info snapshot (mirrors verifiedStop).
+		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, asyncStopTracker, stderr)
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
@@ -618,7 +632,7 @@ func finalizeDrainAckStopPendingSessions(
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, nil)
 		if err != nil || obs.Running || obs.Alive {
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, asyncStopTracker, stderr)
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, asyncStopTracker, stderr)
 			continue
 		}
 		// Pool-managed stop-pending beads close here instead of staying open as
@@ -1751,7 +1765,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Pre-pass-masked (STEP6-PREPASS-AUDIT group 3).
 								infoByID[id] = updated
 								clearDrainTrackerForStopPending(id, dt)
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, asyncStopTracker, stderr)
+								// Token fence off the typed snapshot: the stop-pending fold
+								// preserves instance_token, so infoByID[id].InstanceToken is the
+								// token we intend to stop (mirrors verifiedStop).
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, asyncStopTracker, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2093,7 +2110,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
 							infoByID[id] = updated
 							clearDrainTrackerForStopPending(id, dt)
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, asyncStopTracker, stderr)
+							// Token fence off the typed snapshot (mirrors verifiedStop); the
+							// stop-pending fold preserves instance_token.
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, asyncStopTracker, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}
