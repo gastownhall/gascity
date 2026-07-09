@@ -844,22 +844,21 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 // the outer subprocess's cmd.Env resolved to) rather than depending on that
 // re-resolution succeeding on every poll.
 func ambientDoltConnectionQueryPrefix() string {
-	host := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
-	if host == "" {
-		host = strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_HOST"))
-	}
-	port := strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
-	if port == "" {
-		port = strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT"))
-	}
-	var prefix string
+	host := strings.TrimSpace(firstNonEmptyGCString(os.Getenv("GC_DOLT_HOST"), os.Getenv("BEADS_DOLT_SERVER_HOST")))
+	port := strings.TrimSpace(firstNonEmptyGCString(os.Getenv("GC_DOLT_PORT"), os.Getenv("BEADS_DOLT_SERVER_PORT")))
+	var pairs []string
 	if host != "" {
-		prefix += ` GC_DOLT_HOST=` + shellquote.Quote(host) + ` BEADS_DOLT_SERVER_HOST=` + shellquote.Quote(host)
+		quotedHost := shellquote.Quote(host)
+		pairs = append(pairs, `GC_DOLT_HOST=`+quotedHost, `BEADS_DOLT_SERVER_HOST=`+quotedHost)
 	}
 	if port != "" {
-		prefix += ` GC_DOLT_PORT=` + shellquote.Quote(port) + ` BEADS_DOLT_SERVER_PORT=` + shellquote.Quote(port)
+		quotedPort := shellquote.Quote(port)
+		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
 	}
-	return prefix
+	if len(pairs) == 0 {
+		return ""
+	}
+	return " " + strings.Join(pairs, " ")
 }
 
 func workflowServeLegacyControlRoute(target string) string {
