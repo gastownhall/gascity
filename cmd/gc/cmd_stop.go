@@ -353,21 +353,35 @@ func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) 
 	if !sessFront.Backed() {
 		return
 	}
+	// WI-6 R1: keep the exact label-only bead set (ListByLabel("gc:session")) so the
+	// sweep stays byte-identical, then project each bead to session.Info at this edge
+	// so the classifier read routes through the typed twin (sessionMetadataStateInfo)
+	// and the sleep_reason gate reads the Info.SleepReason mirror rather than raw
+	// metadata.
+	//
+	// The existing label-scoped Info lister session.Store.List (internal/session/
+	// info_store.go) does NOT qualify as a drop-in replacement: (a) it filters via
+	// IsSessionBeadOrRepairable, dropping gc:session-labeled beads with a non-empty
+	// non-"session" type that this raw ListByLabel sweep still marks, and (b) it
+	// queries with IncludeClosed:true (a backing-store history read on a CachingStore)
+	// then filters, changing the query shape. Retiring this edge projection therefore
+	// needs a label-only, closed-excluded, unfiltered Info lister — not just any
+	// label-scoped one.
 	sessions, err := sessFront.Store().ListByLabel("gc:session", 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
 		return
 	}
 	for _, s := range sessions {
-		state := sessionMetadataState(s)
-		if state != "active" {
+		info := session.InfoFromPersistedBead(s)
+		if sessionMetadataStateInfo(info) != "active" {
 			continue
 		}
-		if strings.TrimSpace(s.Metadata["sleep_reason"]) != "" {
+		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(s.ID, "sleep_reason", sleepReasonCityStop); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort warning
+		if err := sessFront.SetMarker(info.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }

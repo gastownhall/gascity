@@ -2829,16 +2829,11 @@ func poolSessionBeadRuntimeRunningInfo(info sessionpkg.Info, sp runtime.Provider
 	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
 }
 
-// pendingCreateClaimStillLeasedForSweep keeps pending_create_claim protection
-// aligned with the reconciler: start-in-flight claims stay protected for the
-// provider-start lease, never-started creates get the longer queue lease, and
-// stale claims stop blocking pool-slot recovery.
-func pendingCreateClaimStillLeasedForSweep(bead beads.Bead, startupTimeout time.Duration) bool {
-	return pendingCreateLeaseActive(bead, nil, startupTimeout)
-}
-
-// pendingCreateClaimStillLeasedForSweepInfo is the session.Info sibling of
-// pendingCreateClaimStillLeasedForSweep. Equivalence-proven.
+// pendingCreateClaimStillLeasedForSweepInfo keeps pending_create_claim
+// protection aligned with the reconciler: start-in-flight claims stay protected
+// for the provider-start lease, never-started creates get the longer queue
+// lease, and stale claims stop blocking pool-slot recovery. It reads the typed
+// session.Info via pendingCreateLeaseActiveInfo.
 func pendingCreateClaimStillLeasedForSweepInfo(info sessionpkg.Info, startupTimeout time.Duration) bool {
 	return pendingCreateLeaseActiveInfo(info, nil, startupTimeout)
 }

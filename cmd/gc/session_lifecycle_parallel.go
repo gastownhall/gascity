@@ -668,22 +668,26 @@ func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *
 	if store == nil || sessionName == "" {
 		return false
 	}
-	matches, err := store.ListByMetadata(map[string]string{"session_name": sessionName}, 0)
+	// WI-6 R1: the session-name match moves from a raw ListByMetadata query to the
+	// canonical open-session Info union (loadOpenSessionInfos == ListAll's type+label
+	// union, closed excluded, IsSessionBeadOrRepairable-filtered). Exact session_name
+	// equality is preserved by comparing the verbatim Info.SessionNameMetadata mirror,
+	// so a padded/mismatched name still misses just as ListByMetadata's exact-value
+	// match did. This is a desired-state read, so the Live tier is not required; a
+	// list error stays fail-safe (treat the dependency as still starting).
+	infos, err := loadOpenSessionInfos(store)
 	if err != nil {
 		return true
 	}
-	for _, session := range matches {
-		if session.Status == "closed" {
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	for _, info := range infos {
+		if info.SessionNameMetadata != sessionName {
 			continue
 		}
-		if !isSessionBead(session) {
-			continue
-		}
-		var startupTimeout time.Duration
-		if cfg != nil {
-			startupTimeout = cfg.Session.StartupTimeoutDuration()
-		}
-		if pendingCreateStartInFlight(session, clk, startupTimeout) {
+		if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 			return true
 		}
 	}

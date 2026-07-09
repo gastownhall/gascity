@@ -24,6 +24,15 @@ import (
 func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	pastRFC3339 := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
 	futureRFC3339 := time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)
+	// recentWokeRFC3339 is strictly AFTER the reap-boundary fixture's CreatedAt
+	// (-30m), so staleReapStartBoundary must advance the boundary to this woke
+	// time — the last_woke_at-upgrade branch. recentWoke is the parsed value the
+	// direct true-branch assertion compares against.
+	recentWokeRFC3339 := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	recentWoke, err := time.Parse(time.RFC3339, recentWokeRFC3339)
+	if err != nil {
+		t.Fatalf("parsing recentWokeRFC3339: %v", err)
+	}
 	clk := &clock.Fake{Time: time.Now()}
 
 	beadsByShape := map[string]beads.Bead{
@@ -230,6 +239,24 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pending_create_claim":      "true",
 				"pending_create_started_at": pastRFC3339,
 				"last_woke_at":              pastRFC3339,
+			},
+		},
+		"reap-boundary-recent-wake": {
+			// Exercises staleReapStartBoundary's last_woke_at-upgrade branch: a
+			// non-zero CreatedAt (-30m) with a parseable last_woke_at strictly AFTER
+			// it (recentWokeRFC3339, -5m), so the boundary must advance to the woke
+			// time (not CreatedAt) in BOTH the raw and Info forms. Without a fixture
+			// on this path, dropping the woke-upgrade in either form would go
+			// unnoticed and silently reap recently-woken creating sessions.
+			ID:        "ga-reapwoke",
+			Type:      session.BeadType,
+			Title:     "reapwoke",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: time.Now().Add(-30 * time.Minute),
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        string(session.StateCreating),
+				"last_woke_at": recentWokeRFC3339,
 			},
 		},
 		"post-create-protected": {
@@ -532,7 +559,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			},
 		},
 		"pending-resume-preserve": {
-			// Hits the pendingResumePreservingNamedRestart TRUE branch: creating
+			// Hits the pendingResumePreservingNamedRestartInfo TRUE branch: creating
 			// state + pending_create_claim + session_key + started_config_hash +
 			// a recent pending_create_started_at (so the lease is start-in-flight,
 			// not expired). Makes the clkBoolChecks equivalence case a real
@@ -999,10 +1026,9 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	}
 
 	const leaseStartupTimeout = 90 * time.Second
-	// leaseCfg resolves template "worker" to a live (non-suspended) agent so
-	// pendingCreateSessionStillLeased's agent-resolved tail (`return !agent.Suspended`)
-	// is exercised on the worker-template fixtures rather than only the nil-agent
-	// fallthrough. Both forms take the same cfg, so byte-identity is preserved.
+	// leaseCfg resolves template "worker" to a live (non-suspended) agent so the
+	// config-agent-resolving fixtures (e.g. the crash-lane sessionExitFactsInfo
+	// check below) see a real agent rather than only the nil-agent fallthrough.
 	leaseCfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	clkBoolChecks := map[string]struct {
 		bead func(beads.Bead) bool
@@ -1015,10 +1041,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionStartRequested": {
 			func(b beads.Bead) bool { return sessionStartRequested(b, clk) },
 			func(i session.Info) bool { return sessionStartRequestedInfo(i, clk) },
-		},
-		"pendingCreateSessionStillLeased": {
-			func(b beads.Bead) bool { return pendingCreateSessionStillLeased(b, leaseCfg, clk) },
-			func(i session.Info) bool { return pendingCreateSessionStillLeasedInfo(i, leaseCfg, clk) },
 		},
 		"pendingCreateAttemptStale": {
 			func(b beads.Bead) bool { return pendingCreateAttemptStale(b, clk) },
@@ -1036,10 +1058,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) bool { return pendingCreateLeaseActive(b, clk, leaseStartupTimeout) },
 			func(i session.Info) bool { return pendingCreateLeaseActiveInfo(i, clk, leaseStartupTimeout) },
 		},
-		"pendingCreateClaimStillLeasedForSweep": {
-			func(b beads.Bead) bool { return pendingCreateClaimStillLeasedForSweep(b, leaseStartupTimeout) },
-			func(i session.Info) bool { return pendingCreateClaimStillLeasedForSweepInfo(i, leaseStartupTimeout) },
-		},
 		"pendingCreateNeverStartedExpired": {
 			func(b beads.Bead) bool { return pendingCreateNeverStartedExpired(b, clk) },
 			func(i session.Info) bool { return pendingCreateNeverStartedExpiredInfo(i, clk) },
@@ -1050,11 +1068,18 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				return pendingCreateLeaseExpiredForRollbackInfo(i, clk, leaseStartupTimeout)
 			},
 		},
-		"pendingResumePreservingNamedRestart": {
-			func(b beads.Bead) bool { return pendingResumePreservingNamedRestart(b, clk, leaseStartupTimeout) },
-			func(i session.Info) bool {
-				return pendingResumePreservingNamedRestartInfo(i, clk, leaseStartupTimeout)
-			},
+	}
+
+	// timeBoolChecks pins the raw-vs-Info equivalence for classifiers that return a
+	// (time.Time, bool) pair rather than a scalar. Times are compared with Equal so a
+	// stripped monotonic reading never trips a false mismatch.
+	timeBoolChecks := map[string]struct {
+		bead func(beads.Bead) (time.Time, bool)
+		info func(session.Info) (time.Time, bool)
+	}{
+		"staleReapStartBoundary": {
+			func(b beads.Bead) (time.Time, bool) { return staleReapStartBoundary(b) },
+			func(i session.Info) (time.Time, bool) { return staleReapStartBoundaryInfo(i) },
 		},
 	}
 
@@ -1062,8 +1087,15 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// leaseStartupTimeout so the equivalence case above is a real true-branch
 	// comparison (exercising the Info.StartedConfigHash gate + the lease tail),
 	// not a trivial both-false pass.
-	if !pendingResumePreservingNamedRestart(beadsByShape["pending-resume-preserve"], clk, leaseStartupTimeout) {
-		t.Fatal("pendingResumePreservingNamedRestart(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
+	if !pendingResumePreservingNamedRestartInfo(session.InfoFromPersistedBead(beadsByShape["pending-resume-preserve"]), clk, leaseStartupTimeout) {
+		t.Fatal("pendingResumePreservingNamedRestartInfo(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
+	}
+	// staleReapStartBoundaryInfo must advance the boundary to the last_woke_at time
+	// (not CreatedAt) on the recent-wake fixture, exercising the woke-upgrade branch
+	// so a regression that returns CreatedAt is caught (both here and in the
+	// timeBoolChecks equivalence row above).
+	if got, ok := staleReapStartBoundaryInfo(session.InfoFromPersistedBead(beadsByShape["reap-boundary-recent-wake"])); !ok || !got.Equal(recentWoke) {
+		t.Fatalf("staleReapStartBoundaryInfo(reap-boundary-recent-wake) = (%v, %v); want the last_woke_at time %v — fixture no longer exercises the woke-upgrade branch", got, ok, recentWoke)
 	}
 	// The drain-ack fixture must hit the true branch so isDrainAckStopPendingInfo
 	// is exercised on a real stop-pending shape, not a trivial both-false pass.
@@ -1118,6 +1150,13 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			for name, c := range clkBoolChecks {
 				if got, want := c.info(info), c.bead(b); got != want {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
+				}
+			}
+			for name, c := range timeBoolChecks {
+				gotT, gotOK := c.info(info)
+				wantT, wantOK := c.bead(b)
+				if gotOK != wantOK || !gotT.Equal(wantT) {
+					t.Errorf("%s: info=(%v,%v) bead=(%v,%v)", name, gotT, gotOK, wantT, wantOK)
 				}
 			}
 			for name, c := range stringChecks {

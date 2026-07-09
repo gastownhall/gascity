@@ -230,9 +230,10 @@ const staleCreatingStateTimeout = time.Minute
 // out from under the reconciler's still-active never-started lease.
 const stalePendingCreateTimeout = 5 * time.Minute
 
-// WI-6: raw form retained — its non-oracle callers include the WI-6-owned
-// cmd_stop.go and session_name_lookup.go lanes plus the reconciler; the
-// sessionMetadataStateInfo twin is oracle-pinned. Migrates when those type.
+// WI-6: raw form retained — after R1 migrated cmd_stop.go, its sole non-oracle
+// caller is the wakeReasons display lane below (root A, session_reconcile.go);
+// the sessionMetadataStateInfo twin is oracle-pinned. Deleted in R2 when that
+// lane types onto Info.
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
 	case "awake":

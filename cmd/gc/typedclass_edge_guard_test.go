@@ -136,9 +136,20 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// session_logs_resolve feeds ResolveCodexTranscriptBySessionOrder([]beads.Bead);
 		// session_bead_snapshot/session_hash hold the bead legitimately (rebaseline lane /
 		// snapshot.add); cmd_session's reason projection is a later wave.
-		"cmd/gc/build_desired_state.go":   2,
-		"cmd/gc/cmd_prime.go":             1,
-		"cmd/gc/cmd_session.go":           2,
+		"cmd/gc/build_desired_state.go": 2,
+		"cmd/gc/cmd_prime.go":           1,
+		"cmd/gc/cmd_session.go":         2,
+		// WI-6 R1: markCityStopSessionSleepReason keeps the byte-identical label-only
+		// ListByLabel("gc:session") sweep (widening to the ListAll type+label union
+		// would also mark label-lost type-only beads — a behavior delta), so the
+		// label-listed beads are projected to session.Info at this edge to read the
+		// typed sessionMetadataStateInfo twin + Info.SleepReason. session.Store.List
+		// (the existing label-scoped Info lister) does NOT qualify: it narrows via
+		// IsSessionBeadOrRepairable (drops non-"session"-typed gc:session beads this
+		// sweep marks) and queries IncludeClosed:true (a different query shape / a
+		// CachingStore history read). Retires only when a label-only, closed-excluded,
+		// unfiltered Info lister — or the widen decision — lands in a later wave.
+		"cmd/gc/cmd_stop.go":              1,
 		"cmd/gc/session_bead_snapshot.go": 3,
 		"cmd/gc/session_hash.go":          1,
 		// WI-6 W5: start-execution reads folded onto candidate.info via ApplyPatch;

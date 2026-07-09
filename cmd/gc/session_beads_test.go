@@ -6208,6 +6208,42 @@ func TestReapStaleSessionBeads_HonorsRecentWakeGrace(t *testing.T) {
 	}
 }
 
+// TestReapStaleSessionBeads_HonorsRecentWakeOnCreatingBead pins the
+// staleReapStartBoundary last_woke_at-upgrade end-to-end on the reap path: a
+// creating-state bead created 10m ago but woken 20s ago must NOT be reaped,
+// because the reap boundary advances to the recent wake (20s <
+// staleCreatingStateTimeout). If the boundary regressed to CreatedAt (10m, past
+// the 1m timeout), the bead would be over-reaped — the exact silent failure the
+// woke-upgrade branch prevents. HonorsRecentWakeGrace above uses state=active,
+// which is skipped before the boundary is computed, so it does not cover this.
+func TestReapStaleSessionBeads_HonorsRecentWakeOnCreatingBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	now := created.CreatedAt.Add(10 * time.Minute)
+	recentWake := now.Add(-20 * time.Second).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(created.ID, "last_woke_at", recentWake); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr)
+	if got != 0 {
+		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (a recent wake must advance the reap boundary off the 10m-old CreatedAt)\nstderr: %s", got, stderr.String())
+	}
+}
+
 // TestReapStaleSessionBeads_NeverStartedPendingCreateNotReapedInPendingWindow
 // pins the gc-5tyf5 over-reaping fix: a never-started pending-create bead (no
 // last_woke_at) sitting at 7 minutes — past the 5-minute stalePendingCreateTimeout
