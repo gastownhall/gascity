@@ -20,7 +20,7 @@ func leaseBead(status string, meta map[string]string) beads.Bead {
 }
 
 func TestStateConfirmsPendingStart(t *testing.T) {
-	// The frozen list (invariant 16): "", start-pending, creating, asleep,
+	// The frozen pending-start state set: "", start-pending, creating, asleep,
 	// drained confirm; everything else does not.
 	confirm := map[State]bool{
 		"":                     true,
@@ -143,6 +143,12 @@ func oldConfirm(currentState string) bool {
 }
 
 func TestCommitVerdict_ParityWithLegacyBooleans(t *testing.T) {
+	// This grid is exhaustive over the token identity dimension. The generation
+	// fallback branch of SameIdentity (empty instance_token + non-empty
+	// generation) is delegated to TestSameIdentity and the "#1542 generation
+	// drift" row in TestCommitVerdict_NamedInvariantRows; the identity
+	// projection is shared with CommitVerdict, so re-crossing generation here
+	// would only balloon the grid without adding coverage.
 	statuses := []string{"open", "closed", "in_progress"}
 	states := []string{"", "start-pending", "creating", "asleep", "drained", "awake", "active", "draining", "archived", "quarantined", "garbage"}
 	tokens := []string{"", "tok-a", "tok-b"}
@@ -193,7 +199,6 @@ func TestCommitVerdict_ParityWithLegacyBooleans(t *testing.T) {
 }
 
 func TestCommitVerdict_NamedInvariantRows(t *testing.T) {
-	tok := map[string]string{"instance_token": "tok-a"}
 	withState := func(state string, extra map[string]string) beads.Bead {
 		m := map[string]string{"instance_token": "tok-a", "state": state}
 		for k, v := range extra {
@@ -231,7 +236,6 @@ func TestCommitVerdict_NamedInvariantRows(t *testing.T) {
 			t.Fatalf("want DiscardStopRuntime, got %v", v)
 		}
 	})
-	_ = tok
 }
 
 func trimSpace(s string) string { return strings.TrimSpace(s) }

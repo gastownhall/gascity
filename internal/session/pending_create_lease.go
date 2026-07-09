@@ -60,7 +60,7 @@ const (
 // "start-pending", "creating", "asleep", and "drained" all indicate the
 // session was pending a spawn; "awake" is treated as equivalent to "active"
 // and intentionally not restamped; every other state is left alone. This is
-// the single home for that frozen state list (invariant 16): cmd/gc's
+// the single home for that frozen pending-start state set: cmd/gc's
 // confirmPendingStart is a thin string adapter that delegates here.
 func StateConfirmsPendingStart(s State) bool {
 	switch s {

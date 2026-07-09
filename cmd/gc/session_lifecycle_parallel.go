@@ -1846,9 +1846,9 @@ func commitStartResult(
 
 // confirmPendingStart reports whether a session in the given metadata state
 // should be transitioned to "active" after a successful runtime spawn. It is a
-// thin string adapter over the single home for that frozen state list,
-// sessionpkg.StateConfirmsPendingStart (invariant 16): it trims and types the
-// raw metadata value, then delegates. Empty, "start-pending", "creating",
+// thin string adapter over the single home for that frozen pending-start state
+// set, sessionpkg.StateConfirmsPendingStart: it trims and types the raw
+// metadata value, then delegates. Empty, "start-pending", "creating",
 // "asleep", and "drained" all indicate the session was pending a spawn; "awake"
 // is treated by the reconciler as equivalent to "active" and is intentionally
 // NOT restamped (a no-op metadata write on every spawn). Any other state
