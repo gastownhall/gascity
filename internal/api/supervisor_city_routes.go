@@ -171,29 +171,33 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
-	// Mail.
-	cityGet(sm, "/mail", (*Server).humaHandleMailList)
+	// Mail. Part of the P12 error-contract slice (see Beads above): each op
+	// enumerates the error statuses it can return (Huma adds auto 422/500);
+	// mutations declare 403 for the CSRF/read-only middleware.
+	cityGet(sm, "/mail", (*Server).humaHandleMailList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-mail",
 		Method:        http.MethodPost,
 		Path:          "/mail",
 		Summary:       "Send a mail message",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleMailSend)
-	cityGet(sm, "/mail/count", (*Server).humaHandleMailCount)
-	cityGet(sm, "/mail/thread/{id}", (*Server).humaHandleMailThread)
-	cityGet(sm, "/mail/{id}", (*Server).humaHandleMailGet)
-	cityPost(sm, "/mail/{id}/read", (*Server).humaHandleMailRead)
-	cityPost(sm, "/mail/{id}/mark-unread", (*Server).humaHandleMailMarkUnread)
-	cityPost(sm, "/mail/{id}/archive", (*Server).humaHandleMailArchive)
+	cityGet(sm, "/mail/count", (*Server).humaHandleMailCount, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/mail/thread/{id}", (*Server).humaHandleMailThread, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/mail/{id}", (*Server).humaHandleMailGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/mail/{id}/read", (*Server).humaHandleMailRead, errorStatuses(http.StatusForbidden, http.StatusNotFound))
+	cityPost(sm, "/mail/{id}/mark-unread", (*Server).humaHandleMailMarkUnread, errorStatuses(http.StatusForbidden, http.StatusNotFound))
+	cityPost(sm, "/mail/{id}/archive", (*Server).humaHandleMailArchive, errorStatuses(http.StatusForbidden, http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "reply-mail",
 		Method:        http.MethodPost,
 		Path:          "/mail/{id}/reply",
 		Summary:       "Reply to a mail message",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusForbidden, http.StatusNotFound},
 	}, (*Server).humaHandleMailReply)
-	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete)
+	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete, errorStatuses(http.StatusForbidden, http.StatusNotFound))
 
 	// Convoys.
 	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList)

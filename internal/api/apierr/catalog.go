@@ -11,9 +11,13 @@ import "net/http"
 // The three sling-* URNs are frozen: they are already public in the OpenAPI spec
 // via x-gascity-problem-types and must stay byte-identical.
 var (
-	// Resource resolution.
+	// Resource resolution. Codes are per-resource (city-not-found, not a generic
+	// not-found) so a client branches on which resource was missing; rig-not-found
+	// is shared across the domains that resolve a rig.
 	CityNotFound = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
 	BeadNotFound = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
+	MailNotFound = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
+	RigNotFound  = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
 
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
@@ -27,9 +31,12 @@ var (
 	IdempotencyInFlight = Register(ProblemType{Code: "idempotency-in-flight", Status: http.StatusConflict, Title: "Idempotency Key In Flight"})
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
 
-	// Backend availability.
-	StoreUnavailable = Register(ProblemType{Code: "store-unavailable", Status: http.StatusServiceUnavailable, Title: "Store Unavailable"})
-	Internal         = Register(ProblemType{Code: "internal", Status: http.StatusInternalServerError, Title: "Internal Server Error"})
+	// Backend availability. store-unavailable is the bead-store-not-live case;
+	// service-unavailable is the generic 503 (its title matches http.StatusText so
+	// converting a plain 503 preserves the wire title).
+	StoreUnavailable   = Register(ProblemType{Code: "store-unavailable", Status: http.StatusServiceUnavailable, Title: "Store Unavailable"})
+	ServiceUnavailable = Register(ProblemType{Code: "service-unavailable", Status: http.StatusServiceUnavailable, Title: "Service Unavailable"})
+	Internal           = Register(ProblemType{Code: "internal", Status: http.StatusInternalServerError, Title: "Internal Server Error"})
 
 	// Sling. The first three are frozen (already public in the spec).
 	SlingMissingBead            = Register(ProblemType{Code: "sling-missing-bead", Status: http.StatusBadRequest, Title: "Sling Missing Bead"})

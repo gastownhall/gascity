@@ -485,7 +485,7 @@ func (c *Client) ListCities() ([]CityInfo, error) {
 	if resp == nil {
 		return nil, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
@@ -511,7 +511,7 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	if resp == nil {
 		return nil, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
@@ -552,7 +552,7 @@ func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (C
 	if resp == nil {
 		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]OrderHistoryView]{}, err
 	}
 	return CachedRead[[]OrderHistoryView]{
@@ -578,7 +578,7 @@ func (c *Client) GetMaintenanceStatus() (CachedRead[MaintenanceStatusView], erro
 	if resp == nil {
 		return CachedRead[MaintenanceStatusView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[MaintenanceStatusView]{}, err
 	}
 	return CachedRead[MaintenanceStatusView]{
@@ -608,7 +608,7 @@ func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, er
 	if resp == nil {
 		return MaintenanceTriggerView{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return MaintenanceTriggerView{}, err
 	}
 	return maintenanceTriggerViewFromGen(resp.JSON202), nil
@@ -642,7 +642,7 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	if resp == nil {
 		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]SessionView]{}, err
 	}
 	return CachedRead[[]SessionView]{
@@ -674,7 +674,7 @@ func (c *Client) GetSession(id string, peek bool, peekLines int) (CachedRead[Ses
 	if resp == nil {
 		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[SessionView]{}, err
 	}
 	if resp.JSON200 == nil {
@@ -702,7 +702,7 @@ func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 	if resp == nil {
 		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]RigView]{}, err
 	}
 	return CachedRead[[]RigView]{
@@ -727,7 +727,7 @@ func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
 	if resp == nil {
 		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
 	return CachedRead[[]beads.Bead]{
@@ -752,7 +752,7 @@ func (c *Client) GetConvoy(id string) (CachedRead[ConvoyStatusView], error) {
 	if resp == nil {
 		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[ConvoyStatusView]{}, err
 	}
 	if resp.JSON200 == nil {
@@ -778,7 +778,7 @@ func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
 	if resp == nil {
 		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[ConvoyCheckView]{}, err
 	}
 	if resp.JSON200 == nil {
@@ -896,7 +896,7 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	if resp == nil {
 		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[StatusView]{}, err
 	}
 	return CachedRead[StatusView]{
@@ -932,7 +932,7 @@ func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], err
 	if resp == nil {
 		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[MailListView]{}, err
 	}
 	return CachedRead[MailListView]{
@@ -959,7 +959,7 @@ func (c *Client) GetMail(id, rig string) (CachedRead[mail.Message], error) {
 	if resp == nil {
 		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[mail.Message]{}, err
 	}
 	if resp.JSON200 == nil {
@@ -992,7 +992,7 @@ func (c *Client) CountMail(agent, rig string) (CachedRead[MailCountView], error)
 	if resp == nil {
 		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[MailCountView]{}, err
 	}
 	return CachedRead[MailCountView]{
@@ -1013,7 +1013,7 @@ func (c *Client) GetService(name string) (workspacesvc.Status, error) {
 	if resp == nil {
 		return workspacesvc.Status{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return workspacesvc.Status{}, err
 	}
 	if resp.JSON200 == nil {
@@ -1162,7 +1162,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	if resp == nil {
 		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return SessionSubmitResponse{}, err
 	}
 	if resp.JSON202 == nil {
@@ -1457,7 +1457,7 @@ func (c *Client) BindExtMsgConversation(spec ExtMsgBindSpec) (extmsg.SessionBind
 	if resp == nil {
 		return extmsg.SessionBindingRecord{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return extmsg.SessionBindingRecord{}, err
 	}
 	if resp.JSON200 == nil {
@@ -1491,7 +1491,7 @@ func (c *Client) UnbindExtMsgConversation(conversation *extmsg.ConversationRef, 
 	if resp == nil {
 		return nil, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Unbound == nil {
