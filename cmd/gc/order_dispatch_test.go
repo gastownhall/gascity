@@ -8792,6 +8792,83 @@ func TestOrderExecEnvAppliesOrderEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvProjectsGitHubToken verifies that the controller's ambient
+// GitHub CLI auth tokens reach an exec order's subprocess env. Merge orders
+// shell out to `gh` (via the workflows pack), which authenticates from GH_TOKEN
+// / GITHUB_TOKEN; both keys are execenv.IsSensitiveKey so the curated exec env
+// would otherwise strip them and every merge order's `gh` call would fail auth.
+func TestOrderExecEnvProjectsGitHubToken(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GH_TOKEN", "ghs_controller_token")
+	t.Setenv("GITHUB_TOKEN", "github_pat_controller")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "pr-merge", Trigger: "cooldown", Interval: "1m", Exec: "gh pr merge"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+	for _, want := range []string{
+		"GH_TOKEN=ghs_controller_token",
+		"GITHUB_TOKEN=github_pat_controller",
+	} {
+		found := false
+		for _, entry := range envSlice {
+			if entry == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("orderExecEnv missing %q; every `gh` call in the order would fail auth. env=%v", want, envSlice)
+		}
+	}
+}
+
+// TestOrderExecEnvGitHubTokenOrderEnvOverrideWins verifies an explicit
+// [order.env] GH_TOKEN beats the controller's ambient token, so an order can
+// scope its own credential when needed.
+func TestOrderExecEnvGitHubTokenOrderEnvOverrideWins(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GH_TOKEN", "ghs_ambient")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{
+		Name:     "pr-merge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "gh pr merge",
+		Env:      map[string]string{"GH_TOKEN": "ghs_order_scoped"},
+	}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+	var gotScoped, gotAmbient bool
+	for _, entry := range envSlice {
+		switch entry {
+		case "GH_TOKEN=ghs_order_scoped":
+			gotScoped = true
+		case "GH_TOKEN=ghs_ambient":
+			gotAmbient = true
+		}
+	}
+	if gotAmbient {
+		t.Fatalf("ambient GH_TOKEN leaked past the order.env override; env=%v", envSlice)
+	}
+	if !gotScoped {
+		t.Fatalf("order.env GH_TOKEN override missing; env=%v", envSlice)
+	}
+}
+
 // TestOrderExecEnvRejectsReservedOrderEnvKeys verifies that `[order.env]`
 // cannot shadow controller-owned routing and identity variables after the
 // store target has already been resolved.

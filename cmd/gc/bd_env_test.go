@@ -6054,3 +6054,59 @@ dolt.auto-start: false
 		t.Fatalf("BEADS_DOLT_SERVER_TLS = %q (present=%v), want present and empty: ambient hosted-gateway TLS must not be re-injected on the dolt-resolution error fallback", got, ok)
 	}
 }
+
+// TestProjectGitHubTokenExecEnv covers the GitHub CLI auth passthrough for exec
+// orders. Merge orders (and other PR housekeeping) shell out to `gh`, which
+// authenticates from GH_TOKEN (preferred) or GITHUB_TOKEN. Both keys contain
+// "TOKEN" so execenv.IsSensitiveKey reports them sensitive and the curated
+// order-exec env never carries the controller's ambient token into the child
+// process — every `gh` call then fails auth. projectGitHubTokenExecEnv mirrors
+// the ambient token into the exec-order env map (like mirrorBeadsDoltEnv carries
+// the hosted-gateway credential command) without weakening redaction, since
+// IsSensitiveKey still masks the value in captured output and logs.
+func TestProjectGitHubTokenExecEnv(t *testing.T) {
+	t.Run("mirrors ambient GH_TOKEN and GITHUB_TOKEN", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "ghs_from_controller")
+		t.Setenv("GITHUB_TOKEN", "github_pat_from_controller")
+		env := map[string]string{}
+		projectGitHubTokenExecEnv(env)
+		if got := env["GH_TOKEN"]; got != "ghs_from_controller" {
+			t.Fatalf("GH_TOKEN = %q, want %q (from ambient)", got, "ghs_from_controller")
+		}
+		if got := env["GITHUB_TOKEN"]; got != "github_pat_from_controller" {
+			t.Fatalf("GITHUB_TOKEN = %q, want %q (from ambient)", got, "github_pat_from_controller")
+		}
+	})
+	t.Run("existing map value wins over ambient (order.env override)", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "ghs_ambient")
+		env := map[string]string{"GH_TOKEN": "ghs_order_scoped"}
+		projectGitHubTokenExecEnv(env)
+		if got := env["GH_TOKEN"]; got != "ghs_order_scoped" {
+			t.Fatalf("GH_TOKEN = %q, want %q (map value must win)", got, "ghs_order_scoped")
+		}
+	})
+	t.Run("absent when no token in the ambient env", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "")
+		t.Setenv("GITHUB_TOKEN", "")
+		env := map[string]string{}
+		projectGitHubTokenExecEnv(env)
+		if got, ok := env["GH_TOKEN"]; ok {
+			t.Fatalf("GH_TOKEN = %q, want unset (no ambient token)", got)
+		}
+		if got, ok := env["GITHUB_TOKEN"]; ok {
+			t.Fatalf("GITHUB_TOKEN = %q, want unset (no ambient token)", got)
+		}
+	})
+	t.Run("only the present token is projected", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "ghs_only")
+		t.Setenv("GITHUB_TOKEN", "")
+		env := map[string]string{}
+		projectGitHubTokenExecEnv(env)
+		if got := env["GH_TOKEN"]; got != "ghs_only" {
+			t.Fatalf("GH_TOKEN = %q, want %q", got, "ghs_only")
+		}
+		if got, ok := env["GITHUB_TOKEN"]; ok {
+			t.Fatalf("GITHUB_TOKEN = %q, want unset (empty ambient)", got)
+		}
+	})
+}
