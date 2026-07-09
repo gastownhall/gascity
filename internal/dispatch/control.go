@@ -1462,13 +1462,16 @@ func controlIdentitySet(control beads.Bead) map[string]bool {
 
 // legacyAttemptLineageHits counts attempt-lineage recoveries served by the
 // deprecated pre-S38 ref-string cascade rather than the gc.control_for stamp.
-// Operators watch this drain to zero before the legacy path is deleted (S38
-// Phase 4). Package-level counter (not an event type) per the S38
-// trace-observability note.
+// It is an in-process test hook, not a production operator surface: the
+// deletion gate for the legacy cascade (S38 Phase 4) is enforced by the
+// shadow-parity tests proving the primary stamp path subsumes the cascade,
+// with this counter asserted to stay at zero over post-S38 candidate shapes.
+// Package-level counter (not an event type) per the S38 trace-observability
+// note; wire it to a trace/metric before relying on it in production.
 var legacyAttemptLineageHits int64
 
 // legacyAttemptLineageHitCount reports the number of attempt-lineage recoveries
-// served by the deprecated ref-string cascade. Observability/test hook.
+// served by the deprecated ref-string cascade. In-process test hook.
 func legacyAttemptLineageHitCount() int64 {
 	return atomic.LoadInt64(&legacyAttemptLineageHits)
 }
