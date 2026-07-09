@@ -2273,7 +2273,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// work_query here can block assigned-work resumes behind unrelated probes.
 	workSet := make(map[string]bool)
 	traceWorkRequested := traceWorkRequestedByTemplate(result.ScaleCheckCounts, result.NamedSessionDemand, workSet, cr.cfg)
-	cr.recordReconcileTraceInputs(trace, open, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
+	cr.recordReconcileTraceInputs(trace, openInfos, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
 
 	phaseStart = time.Now()
 	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
@@ -2316,22 +2316,20 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	cr.requestDeferredDrainFollowUpTick()
-	// Load the post-reconcile session snapshot once and share it between the trace
-	// terminal-state read and the wait-nudge dispatch (this is the same snapshot the
-	// dispatch already loaded; moved up, not added). recordReconcileTraceResults sources
-	// each session's terminal state/sleep_reason from this authoritative store snapshot
-	// so the lockstep-drop (Step 5b+) can retire the raw metadata mirrors without staling
-	// the trace. This intentionally makes the trace MORE accurate than the prior raw
-	// open-bead read, which was already stale for woken sessions (preWakeCommit mirrors
-	// onto a discarded store.Get copy, never the open bead) and drain-completed sessions
-	// (completeDrain's mirror was already dropped).
-	// Post-reconcile session snapshot feeds trace + wait dispatch; read it from
+	// The RESULTS trace reads the post-tick carrier: the reconciler's
+	// WriteBackReconcileInfos folded its post-tick Info snapshot onto sessionBeads,
+	// so sessionBeads.OpenInfos() now carries the tick's in-memory heals/retires/
+	// closes. This restores the post-tick observation the old in-place raw-bead
+	// mutation provided (a dedup-retired loser under its retired session_name, a
+	// healed-then-closed session under its post-heal/closed state) — MORE accurate
+	// than a store reload, which excludes closed history.
+	cr.recordReconcileTraceResults(trace, sessionBeads.OpenInfos(), recordPhase)
+	// Post-reconcile session snapshot feeds the wait-nudge dispatch; read it from
 	// the typed session store (controller-parity fix, identity today).
 	dispatchSessionBeads, err := loadSessionBeadSnapshot(sessStore.Store)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: loading post-reconcile session snapshot: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
-	cr.recordReconcileTraceResults(trace, open, dispatchSessionBeads, recordPhase)
 	phaseStart = time.Now()
 	if err == nil {
 		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
@@ -2364,7 +2362,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 // reconcile path is not dominated by trace bookkeeping.
 func (cr *CityRuntime) recordReconcileTraceInputs(
 	trace *sessionReconcilerTraceCycle,
-	open []beads.Bead,
+	openInfos []sessionpkg.Info,
 	desiredState map[string]TemplateParams,
 	poolDesired map[string]int,
 	workSet map[string]bool,
@@ -2380,16 +2378,19 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 	templateNames := make(map[string]struct{})
 	openCounts := make(map[string]int)
 	desiredCounts := make(map[string]int)
-	for _, bead := range open {
-		template := normalizedSessionTemplate(bead, cr.cfg)
+	// Pre-tick baseline: openInfos is the tick's input row feed projected to Info,
+	// captured before the reconciler runs, so these reads are the pre-tick values
+	// (byte-equivalent to the raw open-bead read they replace).
+	for _, info := range openInfos {
+		template := normalizedSessionTemplateInfo(info, cr.cfg)
 		if template == "" {
 			continue
 		}
 		templateNames[template] = struct{}{}
 		openCounts[template]++
-		trace.RecordSessionBaseline(template, bead.Metadata["session_name"], map[string]any{
-			"state":        bead.Metadata["state"],
-			"sleep_reason": bead.Metadata["sleep_reason"],
+		trace.RecordSessionBaseline(template, info.SessionNameMetadata, map[string]any{
+			"state":        info.MetadataState,
+			"sleep_reason": info.SleepReason,
 		})
 	}
 	for _, tp := range desiredState {
@@ -2424,7 +2425,7 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 	}
 	trace.RecordCycleInputSnapshot(map[string]any{
 		"desired_session_count":               len(desiredState),
-		"open_session_count":                  len(open),
+		"open_session_count":                  len(openInfos),
 		"scale_check_counts":                  result.ScaleCheckCounts,
 		"pool_desired":                        poolDesired,
 		"ready_wait_count":                    len(readyWaitSet),
@@ -2463,51 +2464,42 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.record_trace_input_summary", phaseStart, map[string]any{
 		"template_count": len(templateNames),
-		"open_count":     len(open),
+		"open_count":     len(openInfos),
 	})
 }
 
 // recordReconcileTraceResults records the per-session terminal result for one
 // reconcile tick. No-op when trace is nil.
+//
+// postTickInfos is the tick's carrier snapshot projected to Info AFTER the
+// reconciler's WriteBackReconcileInfos fold — so the template/session_name/state/
+// sleep_reason reads are the tick's post-tick in-memory values (a dedup-retired
+// loser under its retired session_name="", a healed-then-closed session under its
+// post-heal/closed Info). Before W-tick the reconciler mutated the raw open beads
+// in place and this recorder read them post-tick; the row reshape moved the working
+// set off those beads, and the writeback restores the post-tick observation. It is
+// deliberately MORE accurate than a store reload (which excludes closed history).
 func (cr *CityRuntime) recordReconcileTraceResults(
 	trace *sessionReconcilerTraceCycle,
-	open []beads.Bead,
-	postReconcile *sessionBeadSnapshot,
+	postTickInfos []sessionpkg.Info,
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) {
 	if trace == nil {
 		return
 	}
 	phaseStart := time.Now()
-	for _, bead := range open {
-		template := normalizedSessionTemplate(bead, cr.cfg)
+	for _, info := range postTickInfos {
+		template := normalizedSessionTemplateInfo(info, cr.cfg)
 		if template == "" {
 			continue
 		}
-		// Terminal state/sleep_reason come off the authoritative post-reconcile store
-		// snapshot rather than the raw open bead. The raw open-bead read this replaces was
-		// already stale for some transitions (woken sessions kept their pre-wake state
-		// because preWakeCommit mirrors onto a discarded store.Get copy; drain-completed
-		// sessions kept "draining" because completeDrain no longer mirrors), so this is a
-		// deliberate accuracy improvement, not a byte-identical swap. It also decouples the
-		// trace from the raw metadata mirrors the lockstep drop (Step 5b+) is retiring. A
-		// bead absent from the snapshot (closed this tick — the snapshot excludes closed
-		// history) falls back to its open metadata, unchanged from the prior read.
-		state := bead.Metadata["state"]
-		sleepReason := bead.Metadata["sleep_reason"]
-		if postReconcile != nil {
-			if final, ok := postReconcile.FindByID(bead.ID); ok {
-				state = final.Metadata["state"]
-				sleepReason = final.Metadata["sleep_reason"]
-			}
-		}
-		trace.RecordSessionResult(template, bead.Metadata["session_name"], TraceOutcomeComplete, TraceCompletenessComplete, map[string]any{
-			"state":        state,
-			"sleep_reason": sleepReason,
+		trace.RecordSessionResult(template, info.SessionNameMetadata, TraceOutcomeComplete, TraceCompletenessComplete, map[string]any{
+			"state":        info.MetadataState,
+			"sleep_reason": info.SleepReason,
 		})
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.record_trace_session_results", phaseStart, map[string]any{
-		"open_count": len(open),
+		"open_count": len(postTickInfos),
 	})
 }
 
@@ -2959,14 +2951,20 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		true,
 		sessionBeads,
 	)
-	open := filterSessionBeadsByName(updated, cfgNames)
+	// The config-change tick feeds the reconciler the typed row feed filtered by
+	// configured name (filterReconcileRowsByName), and its carrier is a
+	// rows-built snapshot (newSessionBeadSnapshotFromReconcileRows) — the same
+	// row-fed shape the main tick uses. retainScaleCheckPartialPoolDesired reads
+	// only OpenInfos() off it (verified), so a rows-built snapshot serves it.
+	filteredRows := filterReconcileRowsByName(updated, cfgNames)
+	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, cfgNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts)),
-		newSessionBeadSnapshot(open),
+		filteredSnap,
 		wfcResult.PoolScaleCheckPartialTemplates,
 	)
 	if poolDesired == nil {
@@ -2976,7 +2974,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx,
 		cr.cityPath,
-		open,
+		filteredRows,
+		filteredSnap,
 		desiredState,
 		cfgNames,
 		filteredCfg,
@@ -3139,6 +3138,23 @@ func filterSessionInfosByName(snapshot *sessionBeadSnapshot, names map[string]bo
 	for _, info := range snapshot.OpenInfos() {
 		if names[info.SessionNameMetadata] {
 			filtered = append(filtered, info)
+		}
+	}
+	return filtered
+}
+
+// filterReconcileRowsByName is the ReconcileSession mirror of
+// filterSessionBeadsByName / filterSessionInfosByName: it selects the same open
+// sessions (matched on the RAW session_name metadata) in the same order, as the
+// typed row feed the config-change tick passes to the reconciler.
+func filterReconcileRowsByName(snapshot *sessionBeadSnapshot, names map[string]bool) []sessionpkg.ReconcileSession {
+	if snapshot == nil || len(names) == 0 {
+		return nil
+	}
+	var filtered []sessionpkg.ReconcileSession
+	for _, row := range snapshot.OpenForReconcile() {
+		if names[row.Info.SessionNameMetadata] {
+			filtered = append(filtered, row)
 		}
 	}
 	return filtered

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -245,6 +247,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		return store, winner, loser, work.ID
 	}
 
+	loserName := spec.SessionName + "-stale"
 	loadOpen := func(t *testing.T, store beads.Store) []beads.Bead {
 		all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
 		if err != nil {
@@ -252,68 +255,108 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		}
 		return all
 	}
-
-	// Raw run.
-	rawStore, _, rawLoser, rawWork := build(t)
-	rawSP := runtime.NewFake()
-	rawBeads := loadOpen(t, rawStore)
-	bySessionName := map[string]beads.Bead{}
-	indexBySessionName := map[string]int{}
-	for i, b := range rawBeads {
-		if sn := b.Metadata["session_name"]; sn != "" {
-			bySessionName[sn] = b
-			indexBySessionName[sn] = i
+	// newSP starts the loser's runtime (so stopRuntimeBeforeSessionBeadMutation takes
+	// the actual kill path, not the not-running early return), optionally scripting
+	// the Stop to FAIL on the loser name.
+	newSP := func(failStop bool) *runtime.Fake {
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), loserName, runtime.Config{Command: "true"}); err != nil {
+			t.Fatalf("start loser runtime: %v", err)
 		}
+		if failStop {
+			sp.StopErrors = map[string]error{loserName: errors.New("simulated stop failure")}
+		}
+		return sp
 	}
-	retireDuplicateConfiguredNamedSessionBeads(rawStore, nil, rawSP, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
-
-	// Row run.
-	rowStore, _, rowLoser, rowWork := build(t)
-	rowSP := runtime.NewFake()
-	rowBeads := loadOpen(t, rowStore)
-	rows := make([]session.ReconcileSession, len(rowBeads))
-	for i, b := range rowBeads {
-		rows[i] = session.ReconcileSession{Info: session.InfoFromPersistedBead(b)}
+	runRaw := func(store beads.Store, sp *runtime.Fake) {
+		rawBeads := loadOpen(t, store)
+		bySessionName := map[string]beads.Bead{}
+		indexBySessionName := map[string]int{}
+		for i, b := range rawBeads {
+			if sn := b.Metadata["session_name"]; sn != "" {
+				bySessionName[sn] = b
+				indexBySessionName[sn] = i
+			}
+		}
+		retireDuplicateConfiguredNamedSessionBeads(store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
 	}
-	retireDuplicateConfiguredNamedSessionRows(rowStore, nil, rowSP, cfg, cityName, rows, now, nil)
-
-	// Compare persisted loser state (retired = archived + open status) across stores.
-	rawLoserBead, err := rawStore.Get(rawLoser)
-	if err != nil {
-		t.Fatalf("get raw loser: %v", err)
-	}
-	rowLoserBead, err := rowStore.Get(rowLoser)
-	if err != nil {
-		t.Fatalf("get row loser: %v", err)
-	}
-	if rawLoserBead.Metadata["state"] != rowLoserBead.Metadata["state"] {
-		t.Fatalf("loser state diverged: raw=%q row=%q", rawLoserBead.Metadata["state"], rowLoserBead.Metadata["state"])
-	}
-	if rawLoserBead.Metadata["configured_named_session"] != rowLoserBead.Metadata["configured_named_session"] {
-		t.Fatalf("loser configured_named_session diverged: raw=%q row=%q",
-			rawLoserBead.Metadata["configured_named_session"], rowLoserBead.Metadata["configured_named_session"])
-	}
-	// Load-bearing: the loser was actually retired to archived (proving the row
-	// form did the retire, not a no-op that trivially matches).
-	if rowLoserBead.Metadata["state"] != "archived" {
-		t.Fatalf("row form did not retire the loser to archived: state=%q", rowLoserBead.Metadata["state"])
+	runRows := func(store beads.Store, sp *runtime.Fake) {
+		rowBeads := loadOpen(t, store)
+		rows := make([]session.ReconcileSession, len(rowBeads))
+		for i, b := range rowBeads {
+			rows[i] = session.ReconcileSession{Info: session.InfoFromPersistedBead(b)}
+		}
+		retireDuplicateConfiguredNamedSessionRows(store, nil, sp, cfg, cityName, rows, now, nil)
 	}
 
-	// Compare work reassignment.
-	rawWorkBead, err := rawStore.Get(rawWork)
-	if err != nil {
-		t.Fatalf("get raw work: %v", err)
-	}
-	rowWorkBead, err := rowStore.Get(rowWork)
-	if err != nil {
-		t.Fatalf("get row work: %v", err)
-	}
-	if rawWorkBead.Assignee != rowWorkBead.Assignee {
-		t.Fatalf("work reassignment diverged: raw assignee=%q row assignee=%q", rawWorkBead.Assignee, rowWorkBead.Assignee)
-	}
-	// Load-bearing: the work must have actually moved off the loser (proving the
-	// reassignment ran on both paths, not that both no-oped).
-	if rowWorkBead.Assignee == rowLoser {
-		t.Fatalf("row form did not reassign work off the retired loser (assignee still %q)", rowLoser)
-	}
+	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {
+		rawStore, _, rawLoser, rawWork := build(t)
+		rawSP := newSP(false)
+		runRaw(rawStore, rawSP)
+
+		rowStore, _, rowLoser, rowWork := build(t)
+		rowSP := newSP(false)
+		runRows(rowStore, rowSP)
+
+		for _, leg := range []struct {
+			name  string
+			store beads.Store
+			sp    *runtime.Fake
+			loser string
+			work  string
+		}{
+			{"raw", rawStore, rawSP, rawLoser, rawWork},
+			{"rows", rowStore, rowSP, rowLoser, rowWork},
+		} {
+			loserBead, err := leg.store.Get(leg.loser)
+			if err != nil {
+				t.Fatalf("%s: get loser: %v", leg.name, err)
+			}
+			if loserBead.Metadata["state"] != "archived" {
+				t.Fatalf("%s: loser not retired to archived: state=%q", leg.name, loserBead.Metadata["state"])
+			}
+			// The runtime STOP must have fired and succeeded (loser no longer running).
+			if leg.sp.IsRunning(loserName) {
+				t.Fatalf("%s: loser runtime %q still running — the pre-mutation stop was skipped", leg.name, loserName)
+			}
+			if leg.sp.CountCalls("Stop", loserName) == 0 {
+				t.Fatalf("%s: no Stop call recorded for the loser %q — dedup did not stop the runtime before retiring", leg.name, loserName)
+			}
+			workBead, err := leg.store.Get(leg.work)
+			if err != nil {
+				t.Fatalf("%s: get work: %v", leg.name, err)
+			}
+			if workBead.Assignee == leg.loser || workBead.Assignee == "" {
+				t.Fatalf("%s: work not reassigned off the retired loser (assignee=%q)", leg.name, workBead.Assignee)
+			}
+		}
+	})
+
+	t.Run("stop-fails-loser-not-retired", func(t *testing.T) {
+		// When the pre-mutation runtime stop FAILS, the loser must NOT be retired
+		// (the stop-gate `continue` is load-bearing): retiring while the runtime is
+		// still live would orphan a running agent under the winner's identity.
+		for _, leg := range []struct {
+			name string
+			run  func(beads.Store, *runtime.Fake)
+		}{
+			{"raw", runRaw},
+			{"rows", runRows},
+		} {
+			store, _, loser, _ := build(t)
+			sp := newSP(true) // Stop fails on the loser
+			leg.run(store, sp)
+
+			loserBead, err := store.Get(loser)
+			if err != nil {
+				t.Fatalf("%s: get loser: %v", leg.name, err)
+			}
+			if loserBead.Metadata["state"] == "archived" {
+				t.Fatalf("%s: loser was retired despite the runtime stop failing — the stop-gate continue regressed", leg.name)
+			}
+			if loserBead.Metadata["session_name"] == "" {
+				t.Fatalf("%s: loser session_name cleared despite stop failure — retire ran when it must not have", leg.name)
+			}
+		}
+	})
 }

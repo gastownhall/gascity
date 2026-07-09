@@ -351,6 +351,28 @@ func (s *sessionBeadSnapshot) OpenInfos() []sessionpkg.Info {
 	return result
 }
 
+// WriteBackReconcileInfos folds the reconciler's post-tick Info snapshot back onto
+// the carrier's open rows, so post-tick consumers observe the tick's in-memory
+// heals / dedup-retires / closes. Before W-tick the reconciler mutated the raw
+// open beads in place, so the RESULTS trace recorder saw post-tick values; now the
+// tick works on separate ReconcileSession rows, and this writeback restores that
+// post-tick observation. For each open row whose id appears in infoByID the row's
+// Info is replaced with the post-tick Info; rows absent from infoByID (e.g. a
+// session created mid-tick via add) keep their current Info. Circuits and the raw
+// open half are untouched. Under Lock.
+func (s *sessionBeadSnapshot) WriteBackReconcileInfos(infoByID map[string]sessionpkg.Info) {
+	if s == nil || len(infoByID) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.openInfos {
+		if post, ok := infoByID[s.openInfos[i].ID]; ok {
+			s.openInfos[i] = post
+		}
+	}
+}
+
 // OpenForReconcile is the reconciler tick feed: a copy of every open session's
 // ReconcileSession (Info paired with its circuit-breaker cluster), in the same
 // order as Open()/OpenInfos(). OpenForReconcile()[i].Info equals OpenInfos()[i]

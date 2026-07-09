@@ -1033,8 +1033,10 @@ func reconcileSessionBeadsAtPath(
 	stdout, stderr io.Writer,
 	startOptions ...startExecutionOption,
 ) int {
+	// Compat wrapper (tests): build the row feed + carrier snapshot from raw beads.
+	snap := newSessionBeadSnapshot(sessions)
 	return reconcileSessionBeadsAtPathWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 		startOptions...,
 	)
@@ -1043,7 +1045,8 @@ func reconcileSessionBeadsAtPath(
 func reconcileSessionBeadsAtPathWithNamedDemand(
 	ctx context.Context,
 	cityPath string,
-	sessions []beads.Bead,
+	rows []sessionpkg.ReconcileSession,
+	snapshot *sessionBeadSnapshot,
 	desiredState map[string]TemplateParams,
 	configuredNames map[string]bool,
 	cfg *config.City,
@@ -1068,13 +1071,11 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	stdout, stderr io.Writer,
 	startOptions ...startExecutionOption,
 ) int {
-	// Compat wrapper: build the row feed + carrier snapshot from the caller's raw
-	// beads (config-change tick + cmd_start). The throwaway snapshot carries the
-	// stranded-throttle marker within this call; cross-tick survival rides the
-	// durable store write, exactly as before.
-	snap := newSessionBeadSnapshot(sessions)
+	// The named-demand entry takes the typed row feed + its carrier snapshot
+	// directly (the config-change tick and cmd_start pass OpenForReconcile rows;
+	// reconcileSessionBeadsAtPath builds them from raw beads for tests).
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
+		ctx, cityPath, rows, snapshot, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 		startOptions...,
 	)
@@ -3294,6 +3295,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		"wake_eval_count":       len(wakeEvals),
 	})
 
+	// Fold the post-tick Info snapshot back onto the carrier so the RESULTS trace
+	// recorder observes the tick's in-memory heals/dedup-retires/closes (restoring
+	// the post-tick observation the old in-place raw-bead mutation provided). No
+	// store/wake/event effect — the openInfos carrier is a trace read surface.
+	snapshot.WriteBackReconcileInfos(infoByID)
+
 	return plannedWakes
 }
 
@@ -4337,86 +4344,23 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 	return "", false
 }
 
-func resetConfiguredNamedSessionForConfigDrift(
-	session *beads.Bead,
-	store beads.Store,
-	sp runtime.Provider,
-	sessionName string,
-	alive bool,
-	nextState string,
-	now time.Time,
-	stderr io.Writer,
-) map[string]string {
-	if session == nil || store == nil {
-		return nil
-	}
-	if nextState == "" {
-		nextState = "asleep"
-	}
-	if alive && sp != nil && sessionName != "" {
-		if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
-		}
-	}
-	// Preserve resume-eligible prior conversation metadata (session_key +
-	// started_config_hash) when transitioning straight back into creating,
-	// so the next wake builds `--resume <prior-key>` instead of
-	// `--session-id <new-uuid>`. Gated on StateCreating because the asleep
-	// repair path (called from the asleep-named-session drift block) must
-	// still clear started_config_hash — an asleep-bound reset that
-	// preserved the stale hash would re-trigger drift every tick.
-	// Conversation health is validated post-start: a stale resume that
-	// Claude rejects is recovered by recordWakeFailure clearing both
-	// fields, and the next reconcile tick mints a fresh session_key.
-	// This intentionally reads the current per-session snapshot at this
-	// call site and does not provide CAS protection — external store
-	// implementations may apply SetMetadataBatch sequentially with partial
-	// application possible. If preservation is extended to additional
-	// reset sites, reload via store.Get or add conditional-write support
-	// before deciding what to preserve.
-	nextSessionState := sessionpkg.State(nextState)
-	priorSessionKey := strings.TrimSpace(session.Metadata["session_key"])
-	priorStartedConfigHash := strings.TrimSpace(session.Metadata["started_config_hash"])
-	preserveResume := (nextSessionState == sessionpkg.StateStartPending || nextSessionState == sessionpkg.StateCreating) &&
-		priorSessionKey != "" && priorStartedConfigHash != ""
-
-	rotatedSessionKey := ""
-	if preserveResume {
-		rotatedSessionKey = priorSessionKey
-	} else if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-		rotatedSessionKey = newKey
-	}
-	batch := sessionpkg.ConfigDriftResetPatch(nextSessionState, rotatedSessionKey, now)
-	if preserveResume {
-		batch["started_config_hash"] = priorStartedConfigHash
-	}
-	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
-	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
-	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
-	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
-	if err := sessionFrontDoor(store).ApplyPatch(session.ID, batch); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
-		return nil
-	}
-	// Return the batch so the caller folds it onto the typed snapshot (Step 6d
-	// write-returns-Info). The start-pending caller (the alive lane) falls through
-	// without a `continue`, so the repaired session can reach startCandidates this
-	// same tick; wake fairness reads the Info twin captured at the append
-	// (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned batch
-	// (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured
-	// twin carries it. The batch also clears restart_requested (part of
-	// ConfigDriftResetPatch), keeping a consumed restart marker off the snapshot
-	// (#2574). The former raw session.Metadata coupling mirror is gone (WI-6 R4): its
-	// only consumer was the start-execution cluster's raw bead pointer, now deleted.
-	return batch
-}
-
-// resetConfiguredNamedSessionForConfigDriftInfo is the session.Info form of
-// resetConfiguredNamedSessionForConfigDrift: the prior session_key /
-// started_config_hash preservation reads Info.SessionKey / Info.StartedConfigHash
-// (verbatim raw mirrors) and the front-door ApplyPatch keys off Info.ID, so the
-// returned batch is byte-identical to the raw form. The raw form survives for its
-// test callers.
+// resetConfiguredNamedSessionForConfigDriftInfo repairs a configured-named
+// session whose config drifted, reading the session off the typed Info snapshot.
+//
+// It preserves resume-eligible prior conversation metadata (session_key +
+// started_config_hash, via Info.SessionKey / Info.StartedConfigHash) when
+// transitioning straight back into creating, so the next wake builds
+// `--resume <prior-key>` instead of `--session-id <new-uuid>`. Preservation is
+// gated on StateStartPending/StateCreating because the asleep repair path must
+// still clear started_config_hash — an asleep-bound reset that preserved the stale
+// hash would re-trigger drift every tick. It reads the current per-session
+// snapshot and does not provide CAS protection; if preservation is extended to
+// additional reset sites, reload or add conditional-write support first.
+//
+// The returned batch is folded onto infoByID by the caller (write-returns-Info):
+// the start-pending caller falls through without a `continue`, so wake fairness
+// reads the folded ConfigDriftResetPatch (cleared last_woke_at) and the consumed
+// restart_requested stays off the snapshot (#2574).
 func resetConfiguredNamedSessionForConfigDriftInfo(
 	info sessionpkg.Info,
 	store beads.Store,
