@@ -305,7 +305,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	if input.StoreRef != "" {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {
-			return nil, apierr.OrderNotFound.Msg("store not found")
+			return nil, apierr.ScopeNotFound.Msg("store_ref does not resolve to a known scope")
 		}
 		storeInfos = []workflowStoreInfo{info}
 	}

@@ -192,7 +192,7 @@ func maintenanceConflictFromError(err error) error {
 		if encErr != nil {
 			enc = []byte(`{"type":"maintenance-in-progress"}`)
 		}
-		return apierr.ConflictWrongState.Msg("maintenance-in-progress: " + string(enc))
+		return apierr.OperationInProgress.Msg("maintenance-in-progress: " + string(enc))
 	}
 	return apierr.Internal.Msg(err.Error())
 }
