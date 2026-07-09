@@ -897,7 +897,7 @@ func rotateCityEvents(ctx context.Context, client *genclient.ClientWithResponses
 	if err != nil {
 		return cliEventsRotateResponse{}, &eventsAPITransportError{err: err}
 	}
-	if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
 		return cliEventsRotateResponse{}, err
 	}
 	if resp.JSON200 == nil {
@@ -959,7 +959,7 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	if err != nil {
 		return &eventsAPITransportError{err: err}
 	}
-	return eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault)
+	return eventsListError(resp.StatusCode(), resp.Body)
 }
 
 func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]cliWireEvent, error) {
@@ -982,7 +982,7 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		if err != nil {
 			return nil, &eventsAPITransportError{err: err}
 		}
-		if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
 			return nil, err
 		}
 		if resp.JSON200 == nil || resp.JSON200.Items == nil {
@@ -1010,7 +1010,7 @@ func fetchCityHeadIndex(ctx context.Context, client *genclient.ClientWithRespons
 	if err != nil {
 		return "", &eventsAPITransportError{err: err}
 	}
-	if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
 		return "", err
 	}
 	if resp.HTTPResponse == nil {
@@ -1047,7 +1047,7 @@ func fetchSupervisorEventsWithLimit(ctx context.Context, client *genclient.Clien
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
@@ -1088,13 +1088,19 @@ func fetchSupervisorHeadCursor(ctx context.Context, client *genclient.ClientWith
 	return supervisorCursorFor(items), nil
 }
 
-func eventsListError(statusCode int, problem *genclient.ErrorModel) error {
+// eventsListError converts a non-2xx events response into a typed
+// eventsAPIError. It reads the problem+json body directly from the raw
+// response bytes rather than a generated per-status field: the events ops
+// enumerate their error statuses (no catch-all `default` response), so the
+// populated field varies by status, but the body is always an ErrorModel.
+func eventsListError(statusCode int, body []byte) error {
 	if statusCode >= 200 && statusCode < 300 {
 		return nil
 	}
 
 	err := &eventsAPIError{statusCode: statusCode}
-	if problem != nil {
+	var problem genclient.ErrorModel
+	if len(body) > 0 && json.Unmarshal(body, &problem) == nil {
 		if problem.Detail != nil {
 			err.detail = strings.TrimSpace(*problem.Detail)
 		}

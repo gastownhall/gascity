@@ -1265,6 +1265,21 @@ func pdOf(resp any) *genclient.ErrorModel {
 			return pd
 		}
 	}
+	// Fallback: the server returned a status the operation did not enumerate,
+	// so the generator has no field to decode the problem+json into (e.g. an
+	// infrastructure or middleware 503 like cache_not_live on a read whose
+	// declared contract is 404-only). Recover the detail from the raw response
+	// body so read-path fallback classification still works. Guarded to bodies
+	// that decode as a Problem Details document so 2xx/non-problem payloads do
+	// not masquerade as errors.
+	if bf := rv.FieldByName("Body"); bf.IsValid() {
+		if body, ok := bf.Interface().([]byte); ok && len(body) > 0 {
+			var pd genclient.ErrorModel
+			if json.Unmarshal(body, &pd) == nil && (pd.Detail != nil || pd.Title != nil || pd.Code != nil) {
+				return &pd
+			}
+		}
+	}
 	return nil
 }
 
