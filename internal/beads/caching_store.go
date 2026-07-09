@@ -513,7 +513,11 @@ func (c *CachingStore) cacheServableLocked() bool {
 // absent — so no dirty row is ever served (I1) and no new mark can slip between
 // the servability re-check and the serve (I7). suppressed holds IDs that
 // backing.Get reported ErrNotFound this pass; collect must omit them, matching
-// what the old full backing.List would have returned for deleted rows (I6).
+// what the old full backing.List would have returned for deleted rows (I6). A
+// suppressed id that a concurrent apply resurrects between fetch and re-lock is
+// caught by retrySuppressedChurnLocked and re-fetched, the symmetric fence to
+// the fetched-row deletedSeq/beadSeq check, so the serve never omits a now-live
+// row (I6).
 //
 // A non-nil error means the caller must take its existing fallback path (I5):
 // the dirty set exceeds dirtyOverlayMaxGets, a backing.Get failed with a
@@ -527,10 +531,16 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.mu.RUnlock()
 			return errDirtyOverlayFallback
 		}
+		startSeq := c.mutationSeq
 		todo := c.dirtyToRefreshLocked(suppressed)
 		if len(todo) == 0 {
 			// Cache is clean, or every remaining dirty row is a confirmed
-			// absence: serve from cache under this same lock hold.
+			// absence: serve from cache under this same lock hold — but only
+			// after re-verifying no suppressed row was resurrected (see below).
+			if c.retrySuppressedChurnLocked(suppressed, startSeq) {
+				c.mu.RUnlock()
+				continue
+			}
 			collect(suppressed)
 			c.mu.RUnlock()
 			return nil
@@ -539,7 +549,6 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.mu.RUnlock()
 			return errDirtyOverlayFallback
 		}
-		startSeq := c.mutationSeq
 		c.mu.RUnlock()
 
 		fetched, err := c.fetchDirtyOverlay(todo, suppressed)
@@ -561,11 +570,19 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			if c.deletedSeq[f.id] > startSeq || c.beadSeq[f.id] > startSeq {
 				continue
 			}
-			c.absorbFreshLocked(f.id, f.bead, now, absorbOpts{
+			opts := absorbOpts{
 				depsMode:   depsFromFields,
 				seqMode:    seqClearBeadSeqOnly,
 				clearDirty: true,
-			})
+			}
+			// R1: rows whose backing.Get carried no dependency fields had their
+			// authoritative deps fetched separately; install them verbatim so the
+			// overlay never clobbers a blocked bead's deps to nil.
+			if f.depsFromBacking {
+				opts.depsMode = depsExplicit
+				opts.deps = f.deps
+			}
+			c.absorbFreshLocked(f.id, f.bead, now, opts)
 			absorbed++
 		}
 		if absorbed > 0 {
@@ -573,6 +590,10 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.updateStatsLocked()
 		}
 		if len(c.dirtyToRefreshLocked(suppressed)) == 0 {
+			if c.retrySuppressedChurnLocked(suppressed, startSeq) {
+				c.mu.Unlock()
+				continue
+			}
 			collect(suppressed)
 			c.mu.Unlock()
 			return nil
@@ -580,6 +601,38 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 		c.mu.Unlock()
 	}
 	return errDirtyOverlayFallback
+}
+
+// retrySuppressedChurnLocked guards the serve against a torn read caused by an
+// ErrNotFound-suppressed row being re-installed by a concurrent event-apply
+// between its fetch and this final lock hold (the symmetric fence to the
+// fetched-row deletedSeq/beadSeq check). A suppressed id is churn if its fence
+// advanced past the snapshot, or a resident non-dirty row is now present — in
+// either case omitting it from collect would serve the cache MINUS a now-live
+// row. Any such id is dropped from suppressed so the next pass re-fetches it,
+// and the function reports true to signal the caller must retry (or, on the
+// final pass, fall back). Caller must hold c.mu. Returns false when the serve
+// may proceed.
+func (c *CachingStore) retrySuppressedChurnLocked(suppressed map[string]struct{}, startSeq uint64) bool {
+	if len(suppressed) == 0 {
+		return false
+	}
+	var churned []string
+	for id := range suppressed {
+		if c.beadSeq[id] > startSeq || c.deletedSeq[id] > startSeq {
+			churned = append(churned, id)
+			continue
+		}
+		if _, resident := c.beads[id]; resident {
+			if _, dirty := c.dirty[id]; !dirty {
+				churned = append(churned, id)
+			}
+		}
+	}
+	for _, id := range churned {
+		delete(suppressed, id)
+	}
+	return len(churned) > 0
 }
 
 // dirtyToRefreshLocked returns the dirty IDs still needing a backing refresh:
@@ -602,6 +655,14 @@ func (c *CachingStore) dirtyToRefreshLocked(suppressed map[string]struct{}) []st
 type overlayFetched struct {
 	id   string
 	bead Bead
+	// deps holds the authoritative dependency row pulled from backing.DepList,
+	// set only when depsFromBacking is true.
+	deps []Dep
+	// depsFromBacking is true when the fetched bead carried no dependency fields
+	// and deps was sourced from an explicit backing.DepList instead. The absorb
+	// then installs deps verbatim (depsExplicit) rather than recomputing from the
+	// bead's — absent — fields.
+	depsFromBacking bool
 }
 
 // fetchDirtyOverlay fetches each dirty ID via backing.Get with no lock held
@@ -609,13 +670,28 @@ type overlayFetched struct {
 // suppressed (their dirty mark is deliberately left set, mirroring Get's dirty
 // path — convergence stays with the reconciler). Any other error returns
 // non-nil so the caller falls back.
+//
+// R1 (gastownhall/gascity#2987 class): a backing whose Get carries no dependency
+// fields — the fork's flagship native DoltLite read store — would, if absorbed
+// with depsFromFields, have its cached deps clobbered to nil. For such rows the
+// authoritative deps are pulled here via backing.DepList (still lock-free) so the
+// absorb can install them explicitly and a blocked bead is never served as ready.
 func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]struct{}) ([]overlayFetched, error) {
 	fetched := make([]overlayFetched, 0, len(todo))
 	for _, id := range todo {
 		fresh, err := c.backing.Get(id)
 		switch {
 		case err == nil:
-			fetched = append(fetched, overlayFetched{id: id, bead: fresh})
+			row := overlayFetched{id: id, bead: fresh}
+			if !beadCarriesDependencyFields(fresh) {
+				deps, depErr := c.backing.DepList(id, "down")
+				if depErr != nil {
+					return nil, depErr
+				}
+				row.deps = deps
+				row.depsFromBacking = true
+			}
+			fetched = append(fetched, row)
 		case errors.Is(err, ErrNotFound):
 			suppressed[id] = struct{}{}
 		default:
