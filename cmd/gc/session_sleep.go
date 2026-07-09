@@ -260,6 +260,60 @@ func reconcileDetachedAt(
 	return nil
 }
 
+// reconcileDetachedAtInfo is the session.Info sibling of reconcileDetachedAt. It
+// reads detached_at off Info.DetachedAt and the session name off
+// Info.SessionNameMetadata, keeps the runtime attach probe
+// (workerSessionTargetAttachedWithConfig) and the detached_at write
+// (sessFront.SetMarker keyed by Info.ID) exactly as the raw form does (§7 live
+// edge), and returns the {"detached_at": <value>} batch for the reconciler to
+// fold onto infoByID (nil on no-op). No raw-bead mirror.
+func reconcileDetachedAtInfo(
+	info sessionpkg.Info,
+	store beads.Store,
+	policy resolvedSessionSleepPolicy,
+	alive bool,
+	sp runtime.Provider,
+	clk clock.Clock,
+) map[string]string {
+	if store == nil {
+		return nil
+	}
+	if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() || sp == nil || !alive || policy.Capability != runtime.SessionSleepCapabilityFull {
+		if info.DetachedAt != "" {
+			if err := sessionFrontDoor(store).SetMarker(info.ID, "detached_at", ""); err != nil {
+				log.Printf("session sleep: clearing detached_at for %s: %v", info.ID, err)
+			} else {
+				return map[string]string{"detached_at": ""}
+			}
+		}
+		return nil
+	}
+	name := info.SessionNameMetadata
+	if name == "" {
+		return nil
+	}
+	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, info.ID)
+	if err == nil && attached {
+		if info.DetachedAt != "" {
+			if err := sessionFrontDoor(store).SetMarker(info.ID, "detached_at", ""); err != nil {
+				log.Printf("session sleep: clearing detached_at for %s: %v", info.ID, err)
+			} else {
+				return map[string]string{"detached_at": ""}
+			}
+		}
+		return nil
+	}
+	if info.DetachedAt == "" {
+		ts := clk.Now().UTC().Format(time.RFC3339)
+		if err := sessionFrontDoor(store).SetMarker(info.ID, "detached_at", ts); err != nil {
+			log.Printf("session sleep: setting detached_at for %s: %v", info.ID, err)
+		} else {
+			return map[string]string{"detached_at": ts}
+		}
+	}
+	return nil
+}
+
 func sessionIdleReference(session beads.Bead, sp runtime.Provider) time.Time {
 	var detachedAt time.Time
 	if raw := session.Metadata["detached_at"]; raw != "" {
@@ -458,6 +512,65 @@ func persistSleepPolicyMetadata(
 	}
 }
 
+// persistSleepPolicyMetadataInfo is the session.Info sibling of
+// persistSleepPolicyMetadata. It reads the fingerprint-preservation state off
+// Info (MetadataState == "asleep", SleepReason == "idle", SleepIntent ==
+// "idle-stop-pending", SleepPolicyFingerprint) and diffs the seven policy keys
+// against their raw Info mirrors, then folds any change through ApplyPatchInfo,
+// returning the refreshed snapshot Info. The no-op-on-error swallow contract is
+// preserved by ApplyPatchInfo, which returns the INPUT Info unchanged on a
+// persist error (and on an empty diff) — so a rejected write never advances the
+// snapshot, exactly like the raw form's silent return.
+func persistSleepPolicyMetadataInfo(
+	info sessionpkg.Info,
+	sessFront *sessionpkg.Store,
+	policy resolvedSessionSleepPolicy,
+	configSuppressed bool,
+) sessionpkg.Info {
+	if sessFront == nil {
+		return info
+	}
+	fingerprint := policy.Fingerprint
+	if ((info.MetadataState == "asleep" &&
+		info.SleepReason == "idle") ||
+		info.SleepIntent == "idle-stop-pending") &&
+		info.SleepPolicyFingerprint != "" {
+		// Preserve the fingerprint that initiated an in-flight idle drain (same
+		// reasoning as the raw form: config changes while running are handled by
+		// wake evaluation before the drain completes).
+		fingerprint = info.SleepPolicyFingerprint
+	}
+	batch := map[string]string{
+		"requested_sleep_after_idle":     policy.Requested,
+		"effective_sleep_after_idle":     policy.Effective,
+		"sleep_policy_source":            policy.Source,
+		"sleep_capability":               string(policy.Capability),
+		"sleep_policy_adjustment_reason": policy.AdjustmentReason,
+		"sleep_policy_fingerprint":       fingerprint,
+		"config_wake_suppressed":         boolMetadata(configSuppressed),
+	}
+	current := map[string]string{
+		"requested_sleep_after_idle":     info.RequestedSleepAfterIdle,
+		"effective_sleep_after_idle":     info.EffectiveSleepAfterIdle,
+		"sleep_policy_source":            info.SleepPolicySource,
+		"sleep_capability":               info.SleepCapability,
+		"sleep_policy_adjustment_reason": info.SleepPolicyAdjustmentReason,
+		"sleep_policy_fingerprint":       info.SleepPolicyFingerprint,
+		"config_wake_suppressed":         info.ConfigWakeSuppressedMetadata,
+	}
+	changed := make(sessionpkg.MetadataPatch)
+	for key, value := range batch {
+		if current[key] != value {
+			changed[key] = value
+		}
+	}
+	if len(changed) == 0 {
+		return info
+	}
+	next, _ := sessFront.ApplyPatchInfo(info, changed)
+	return next
+}
+
 // markIdleSleepPending returns the metadata patch it applied (sleep_intent =
 // idle-stop-pending) so the reconciler can fold it onto the infoByID snapshot
 // (write-returns-Info), or nil when it was a no-op. The raw mirror onto
@@ -473,6 +586,22 @@ func markIdleSleepPending(session *beads.Bead, sessFront *sessionpkg.Store) sess
 		session.Metadata = make(map[string]string, 1)
 	}
 	session.Metadata["sleep_intent"] = "idle-stop-pending"
+	return sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}
+}
+
+// markIdleSleepPendingInfo is the session.Info sibling of markIdleSleepPending.
+// It reads sleep_intent off Info.SleepIntent and the handle off Info.ID, writes
+// the intent marker via sessFront.SetMarker, and returns the patch for the
+// reconciler to fold onto infoByID (nil on no-op). No raw-bead mirror: the awake
+// scan's drain arm never appends to startCandidates, so the freshly-marked bead
+// is not re-read this tick.
+func markIdleSleepPendingInfo(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.MetadataPatch {
+	if sessFront == nil || info.SleepIntent == "idle-stop-pending" {
+		return nil
+	}
+	if err := sessFront.SetMarker(info.ID, "sleep_intent", "idle-stop-pending"); err != nil {
+		return nil
+	}
 	return sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}
 }
 
@@ -497,6 +626,32 @@ func recoverPendingIdleSleep(
 	}
 	for key, value := range batch {
 		session.Metadata[key] = value
+	}
+	return true
+}
+
+// recoverPendingIdleSleepInfo is the session.Info sibling of
+// recoverPendingIdleSleep. It reads the idle-stop-pending intent and the
+// preserved fingerprint off Info (SleepIntent, SleepPolicyFingerprint), the
+// handle off Info.ID, and persists SleepPatch(now, "idle") via
+// sessFront.ApplyPatch. It returns only the bool: the caller reconstructs the
+// time-independent SleepPatch fold onto infoByID (slept_at / fingerprint are
+// non-Info), exactly as with the raw form. No raw-bead mirror.
+func recoverPendingIdleSleepInfo(
+	info sessionpkg.Info,
+	sessFront *sessionpkg.Store,
+	running bool,
+	clk clock.Clock,
+) bool {
+	if sessFront == nil || running || info.SleepIntent != "idle-stop-pending" {
+		return false
+	}
+	batch := sessionpkg.SleepPatch(clk.Now(), "idle")
+	if fingerprint := info.SleepPolicyFingerprint; fingerprint != "" {
+		batch["sleep_policy_fingerprint"] = fingerprint
+	}
+	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+		return false
 	}
 	return true
 }

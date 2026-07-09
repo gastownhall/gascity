@@ -1031,6 +1031,113 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	return emptyNil(batch)
 }
 
+// healStatePatchWithRollbackInfo is the session.Info sibling of
+// healStatePatchWithRollback. It reads every state/lease key off the typed
+// snapshot (Info.MetadataState — the RAW state metadata, matching the raw form's
+// session.Metadata["state"]; Info.SleepReason; Info.PendingCreateClaim; the
+// lifecycle projection via LifecycleInputFromInfo; Info.CreatedAt) and routes
+// each classifier through its equivalence-proven *Info twin
+// (sessionStartRequestedInfo, pendingCreateLeaseActiveInfo,
+// pendingCreateLeaseExpiredForRollbackInfo, isNamedSessionInfo,
+// namedSessionModeInfo). Byte-identical to the bead form; the reconciler forward
+// pass folds the returned batch onto its coherent infoByID snapshot.
+func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+	var now time.Time
+	var staleCreatingAfter time.Duration
+	if clk != nil {
+		now = clk.Now()
+		staleCreatingAfter = staleCreatingStateTimeout
+	}
+	lcInput := sessionpkg.LifecycleInputFromInfo(info)
+	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: true, Alive: alive}
+	lcInput.CreatedAt = info.CreatedAt
+	lcInput.StaleCreatingAfter = staleCreatingAfter
+	lcInput.Now = now
+	view := sessionpkg.ProjectLifecycle(lcInput)
+
+	batch := make(map[string]string)
+	if !alive && view.BaseState == sessionpkg.BaseStateDrained {
+		if strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateAsleep) {
+			batch["state"] = string(sessionpkg.StateAsleep)
+		}
+		if strings.TrimSpace(info.SleepReason) == "" {
+			batch["sleep_reason"] = "drained"
+		}
+		return emptyNil(batch)
+	}
+
+	target := string(view.ReconciledState)
+	if target == "" && view.BaseState == sessionpkg.BaseStateNone {
+		target = string(sessionpkg.StateAsleep)
+		if alive {
+			target = string(sessionpkg.StateAwake)
+		} else if sessionStartRequestedInfo(info, clk) {
+			target = string(sessionpkg.StateStartPending)
+		}
+	}
+	stalePendingCreateRollback := false
+	if !alive && strings.TrimSpace(info.MetadataState) == "failed-create" {
+		if info.PendingCreateClaim && pendingCreateLeaseActiveInfo(info, clk, 0) {
+			return nil
+		}
+		target = string(sessionpkg.StateAsleep)
+		clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
+	}
+	if rollbackAvailable && !alive && strings.TrimSpace(info.MetadataState) == "creating" {
+		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
+			target = string(sessionpkg.StateAsleep)
+			stalePendingCreateRollback = true
+			clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
+		}
+	}
+	if target == "" {
+		return nil
+	}
+	if info.MetadataState != target {
+		batch["state"] = target
+		if target == string(sessionpkg.StateAsleep) && (view.ResetContinuation || stalePendingCreateRollback) && strings.TrimSpace(info.SleepReason) == "" {
+			batch["sleep_reason"] = sleepReasonRuntimeMissing
+		}
+	}
+	if target == string(sessionpkg.StateAsleep) {
+		if strings.TrimSpace(info.SleepReason) == "" && strings.TrimSpace(info.MetadataState) == "failed-create" {
+			batch["sleep_reason"] = "failed-create"
+		}
+		if view.ResetContinuation || stalePendingCreateRollback {
+			if !isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always" {
+				batch["session_key"] = ""
+				batch["started_config_hash"] = ""
+				batch["continuation_reset_pending"] = "true"
+			}
+		}
+	}
+	return emptyNil(batch)
+}
+
+// healStateWithRollbackInfo is the session.Info sibling of healStateWithRollback:
+// it reads its heal decision off the coherent infoByID snapshot entry instead of
+// the raw *session bead, persists the batch through sessFront.ApplyPatch, and
+// returns the batch for the reconciler to fold onto infoByID via ApplyPatchInfo.
+// Unlike the raw form it does NOT mirror onto a raw bead — the snapshot fold is
+// the single source of truth for the same-tick downstream readers (which now
+// also read Info), so the two transitional W6 lockstep mirrors are gone.
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+	// Closed beads are terminal; their advisory state metadata should not move
+	// (matches healStateWithRollback's session.Status == "closed" guard —
+	// Info.Closed is the projected mirror).
+	if info.Closed {
+		return nil
+	}
+	batch := healStatePatchWithRollbackInfo(info, alive, clk, startupTimeout, rollbackAvailable)
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
+	}
+	return batch
+}
+
 // clearPendingCreateLease writes empty-string clears for pending_create_claim
 // and pending_create_started_at into the heal batch when the metadata
 // currently carries a claim. Shared between the failed-create rollback path
@@ -1039,6 +1146,18 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 // WakeCausePendingCreate on the next tick and re-enter state=creating.
 func clearPendingCreateLease(meta, batch map[string]string) {
 	if strings.TrimSpace(meta["pending_create_claim"]) != "true" {
+		return
+	}
+	batch["pending_create_claim"] = ""
+	batch["pending_create_started_at"] = ""
+}
+
+// clearPendingCreateLeaseInfo is the Info-form counterpart of
+// clearPendingCreateLease. Info.PendingCreateClaim already carries
+// strings.TrimSpace(pending_create_claim) == "true", so the gate is identical to
+// the raw form's TrimSpace compare.
+func clearPendingCreateLeaseInfo(pendingClaim bool, batch map[string]string) {
+	if !pendingClaim {
 		return
 	}
 	batch["pending_create_claim"] = ""

@@ -4384,6 +4384,38 @@ func namedSessionActiveUseReason(session beads.Bead, sp runtime.Provider, name s
 	return "", false
 }
 
+// namedSessionActiveUseReasonInfo is the session.Info sibling of
+// namedSessionActiveUseReason. The only bead read is the pending-interaction
+// deferral, which threads through pendingInteractionKeepsAwakeInfo (wait_hold +
+// held/quarantine timers off Info); every other check is a live runtime probe
+// (sp.IsAttached, sessionActivityReportable, sp.GetLastActivity) and stays raw.
+func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
+	if sp == nil || name == "" {
+		return "", false
+	}
+	// Pending interaction means a user is actively waiting.
+	if pendingInteractionKeepsAwakeInfo(info, sp, name, clk) {
+		return "pending_interaction", true
+	}
+	// Tmux attachment means a user is watching.
+	if sp.IsAttached(name) {
+		return "attached", true
+	}
+	// Providers that cannot report activity for this routed session cannot
+	// prove a live named session is idle. Defer config-drift rather than
+	// stopping a potentially working headless agent mid-task.
+	if !sessionActivityReportable(sp, name) {
+		return "activity_unknown", true
+	}
+	// Recent activity means the agent may still be in active use.
+	if clk != nil {
+		if lastActivity, err := sp.GetLastActivity(name); err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
+			return "recent_activity", true
+		}
+	}
+	return "", false
+}
+
 func resetConfiguredNamedSessionForConfigDrift(
 	session *beads.Bead,
 	store beads.Store,
