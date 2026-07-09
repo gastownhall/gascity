@@ -182,6 +182,10 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 			return fmt.Errorf("clearing stale resume metadata %s: %w", k, err)
 		}
 	}
+	resetCommittedAt := m.now().UTC().Format(time.RFC3339)
+	if err := m.store.SetMetadata(id, ResetCommittedAtKey, resetCommittedAt); err != nil {
+		return fmt.Errorf("clearing stale resume metadata reset_committed_at: %w", err)
+	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
 	}
@@ -191,6 +195,7 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	for _, k := range primingResetKeys {
 		b.Metadata[k] = ""
 	}
+	b.Metadata[ResetCommittedAtKey] = resetCommittedAt
 	return nil
 }
 
