@@ -92,14 +92,24 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   design's 2→0 double-counted). NOTE: `session_circuit_state` absent from `Info` →
 >   `LifecycleDisplayReasonWithLiveness` stays raw; R5 needs `Info.SessionCircuitState` + a twin
 >   before the snapshot raw `Open()` half fully retires.
-> - **R3** (HIGH) 🔨 impl: reconciler heal + sleep-write coordinated unit; DROPS both
->   transitional mirrors; deletes the pending-create lease family +
->   `sessionStartRequested`/`staleCreatingState`.
-> - **R4** (HIGH): start-execution cluster; DROPS the 4 coupling mirrors +
->   `startCandidate.session`/`wakeTarget.session`; deletes `shouldRollbackPendingCreate`/
->   `runningSessionMatchesPendingCreate`/`asyncStart*`.
-> - **R5**: periphery honest holds (snapshot raw-half delete, hash/template/logs,
->   `cmd_prime` — ADD `Info.BuiltinAncestor`).
+> - **R3** (HIGH) ✅ (merge `e3e2cc74c`): reconciler heal + sleep-write coordinated unit;
+>   DROPPED both transitional mirrors atomically; deleted the ~8-member pending-create lease
+>   family + raw sleep-reads + raw heal forms (−656 net). Red-team: zero blockers, mirror-drop
+>   audit VERIFIED COMPLETE (the audit itself caught a design-omitted reader recoverRunningPendingCreate);
+>   4 nits fixed (3 stale coherence comments + self-sufficient lease oracle). Anti-drift pin added.
+> - **R4** (HIGH) ✅ (merge `a1ff223ff`): start-execution cluster; DROPPED the 4 coupling mirrors +
+>   deleted `startCandidate.session`/`wakeTarget.session` + `shouldRollbackPendingCreate`/
+>   `runningSessionMatchesPendingCreate`/`asyncStart*` + retired `GetBeadWithInfo`; added
+>   `Info.BuiltinAncestor`/`LiveHash`/`StartupDialogVerified`. `session_lifecycle_parallel`
+>   `InfoFromPersistedBead` 1→0 (−287 net). Red-team: 1 blocker fixed (buildPreparedStart-error
+>   residue fold carried pre-prep values → same-tick config-drift gate could kill an alive session;
+>   threaded the post-mutation Info out on error) + 3 nits. The 2 non-known integration timeouts
+>   independently confirmed as contention flakes, not R4.
+> - **R5** 🔨 impl: periphery honest holds (snapshot raw-half delete — needs
+>   `Info.SessionCircuitState` + `LifecycleDisplayReasonWithLivenessInfo` twin per the R2 finding;
+>   hash/template; `cmd_prime` front-door Get; `cmd_wait` PollerKeyFromBead→0). Zeroes
+>   `ListAllSessionBeads` + `PollerKeyFromBead`. Leaves the `InfoFromPersistedBead` tail (3 tick
+>   edges + build_desired_state + session_logs_resolve + session_resolution) for WI-7.
 > - **WI-7 W7a**: front-door flip (`class_store.go` + `api.State` → domain stores).
 > - **WI-7 W7b**: unexport the codecs (tick-feed refactor for `InfoFromPersistedBead`);
 >   guards → permanent zero-pins. Orders codecs gated on deferred WI-3 two-class wiring.
