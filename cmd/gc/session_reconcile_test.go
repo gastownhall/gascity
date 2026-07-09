@@ -87,6 +87,30 @@ func makeBead(id string, meta map[string]string) beads.Bead {
 	}
 }
 
+// healStateInfo is the test shim for the retired raw healState (WI-6 R3). It
+// runs the Info-form heal and mirrors the returned batch back onto the in-memory
+// bead, reproducing the raw healState's front-door write + bead mirror so the
+// existing assertions on session.Metadata / store writes keep exercising the same
+// behavior against the typed path.
+func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store, clk clock.Clock) {
+	if session == nil {
+		return
+	}
+	batch := healStateWithRollbackInfo(sessionpkg.InfoFromPersistedBead(*session), alive, sessFront, clk, 0, true)
+	if session.Metadata == nil && len(batch) > 0 {
+		session.Metadata = make(map[string]string, len(batch))
+	}
+	for k, v := range batch {
+		session.Metadata[k] = v
+	}
+}
+
+// healStatePatchFromBead is the test shim for the retired raw healStatePatch /
+// healStatePatchWithRollback: it projects the bead to Info and calls the Info form.
+func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+	return healStatePatchWithRollbackInfo(sessionpkg.InfoFromPersistedBead(session), alive, clk, startupTimeout, rollbackAvailable)
+}
+
 // syncBeadFromStore mirrors the persisted metadata writes for session.ID back
 // onto the local bead. The WI-6 W6 write-helper collapse routed these helpers
 // through Store.ApplyPatchInfo (persist + local Info fold, no raw session.Metadata
@@ -365,7 +389,7 @@ func TestStaleCreatingStateUsesPendingCreateStartedAtWhenPresent(t *testing.T) {
 			})
 			session.CreatedAt = tt.createdAt
 
-			if got := staleCreatingState(session, clk); got != tt.wantStale {
+			if got := staleCreatingStateInfo(sessionpkg.InfoFromPersistedBead(session), clk); got != tt.wantStale {
 				t.Fatalf("staleCreatingState = %v, want %v", got, tt.wantStale)
 			}
 		})
@@ -1583,19 +1607,19 @@ func TestHealState(t *testing.T) {
 		"state": "asleep",
 	})
 
-	healState(&session, true, sessionFrontDoor(store), clk)
+	healStateInfo(&session, true, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "awake" {
 		t.Errorf("state = %q, want awake", session.Metadata["state"])
 	}
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Errorf("state = %q, want asleep", session.Metadata["state"])
 	}
 
 	// No-op when already correct.
 	prevCalls := len(store.metadata["b1"])
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if len(store.metadata["b1"]) != prevCalls {
 		t.Error("healState should not write when state unchanged")
 	}
@@ -1609,7 +1633,7 @@ func TestHealState_DeadActiveHealsToAsleep(t *testing.T) {
 		"state": "active",
 	})
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
@@ -1630,7 +1654,7 @@ func TestHealState_NoopOnClosedBead(t *testing.T) {
 	})
 	session.Status = "closed"
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if got := len(store.metadata["b1"]); got != 0 {
 		t.Errorf("healState wrote %d metadata entries on closed bead; want 0", got)
 	}
@@ -1651,7 +1675,7 @@ func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 	})
 	session.CreatedAt = clk.Now().Add(-30 * time.Second)
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "creating" {
 		t.Fatalf("state = %q, want creating", session.Metadata["state"])
 	}
@@ -1670,7 +1694,7 @@ func TestHealState_StaleCreatingWithPendingClaimHealsToAsleep(t *testing.T) {
 	})
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
@@ -1688,7 +1712,7 @@ func TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackL
 	})
 	session.CreatedAt = startedAt
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != string(sessionpkg.StateStartPending) {
 		t.Fatalf("state = %q, want start-pending while pending-create lease is active", session.Metadata["state"])
 	}
@@ -1706,7 +1730,7 @@ func TestHealState_PreservesFreshCreatingWithoutPendingClaim(t *testing.T) {
 	})
 	session.CreatedAt = clk.Now().Add(-30 * time.Second)
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "creating" {
 		t.Fatalf("state = %q, want creating", session.Metadata["state"])
 	}
@@ -1722,7 +1746,7 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
@@ -1756,7 +1780,7 @@ func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *te
 
 	// First tick: stale creating → asleep+runtime-missing, with stale
 	// pending_create lease cleared in the same batch.
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if got := session.Metadata["state"]; got != "asleep" {
 		t.Fatalf("after first heal: state = %q, want asleep", got)
 	}
@@ -1774,7 +1798,7 @@ func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *te
 	// back into state=creating. Advance the clock slightly to simulate
 	// the next reconciler tick.
 	clk.Time = clk.Time.Add(30 * time.Second)
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if got := session.Metadata["state"]; got != "asleep" {
 		t.Fatalf("after second heal: state = %q, want asleep (oscillation regression)", got)
 	}
@@ -1799,10 +1823,10 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	})
 	inFlight.CreatedAt = inFlightAt
 
-	if pendingCreateLeaseExpiredForRollback(inFlight, clk, startupTimeout) {
+	if pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(inFlight), clk, startupTimeout) {
 		t.Fatal("configured startup lease reported expired while Start is still in flight")
 	}
-	got := healStatePatchWithRollback(inFlight, false, clk, startupTimeout, true)
+	got := healStatePatchFromBead(inFlight, false, clk, startupTimeout, true)
 	if _, ok := got["pending_create_claim"]; ok {
 		t.Fatalf("healStatePatchWithRollback cleared pending_create_claim while configured startup lease is active: %#v", got)
 	}
@@ -1819,10 +1843,10 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	})
 	expired.CreatedAt = expiredAt
 
-	if !pendingCreateLeaseExpiredForRollback(expired, clk, startupTimeout) {
+	if !pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(expired), clk, startupTimeout) {
 		t.Fatal("configured startup lease stayed active after startup timeout and stale-key delay elapsed")
 	}
-	got = healStatePatchWithRollback(expired, false, clk, startupTimeout, true)
+	got = healStatePatchFromBead(expired, false, clk, startupTimeout, true)
 	if got["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim clear = %q, want empty after configured lease expiry", got["pending_create_claim"])
 	}
@@ -1993,7 +2017,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := healStatePatch(tt.session, tt.alive, clk)
+			got := healStatePatchFromBead(tt.session, tt.alive, clk, 0, true)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("healStatePatch = %#v, want %#v", got, tt.want)
 			}
@@ -2017,7 +2041,7 @@ func TestHealStatePatch_NamedAlwaysAwakeFlapsToAsleepWithoutReasonOnAliveFalse(t
 		namedSessionModeMetadata:     "always",
 	})
 
-	patch := healStatePatch(session, false, clk)
+	patch := healStatePatchFromBead(session, false, clk, 0, true)
 	if patch["state"] != "asleep" {
 		t.Fatalf("baseline: expected state=asleep on heal-from-awake when !alive, got %q (patch=%#v)", patch["state"], patch)
 	}
@@ -2035,7 +2059,7 @@ func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
 	})
 	session.CreatedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	if got := healStatePatch(session, false, nil); got != nil {
+	if got := healStatePatchFromBead(session, false, nil, 0, true); got != nil {
 		t.Fatalf("healStatePatch with nil clock = %#v, want nil patch for fresh-compatible creating", got)
 	}
 }
@@ -2235,7 +2259,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 				session.Metadata[namedSessionIdentityMetadata] = "mayor"
 				session.Metadata[namedSessionModeMetadata] = "always"
 			}
-			healState(&session, false, sessionFrontDoor(store), clk)
+			healStateInfo(&session, false, sessionFrontDoor(store), clk)
 			keyAfter := session.Metadata["session_key"]
 			startedHashAfter := session.Metadata["started_config_hash"]
 			if tt.wantKeyCleared && keyAfter != "" {
@@ -2271,7 +2295,7 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 		"last_woke_at":        now.Add(-5 * time.Second).UTC().Format(time.RFC3339),
 	})
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 	if session.Metadata["session_key"] != "" {
 		t.Fatalf("healState session_key = %q, want empty", session.Metadata["session_key"])
 	}

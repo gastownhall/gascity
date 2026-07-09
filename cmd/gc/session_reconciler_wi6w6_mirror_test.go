@@ -12,22 +12,23 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// These two tests pin the WI-6 W6 red-team blocker: the write-helper collapse
-// dropped the raw session.Metadata mirror loops, but two collapsed writes are read
-// RAW by deferred readers later in the SAME forward-pass tick. Both assertions FAIL
-// against the mirror-less collapse and PASS once the transitional lockstep mirrors
-// (session_reconciler.go, at the clearWakeFailures and zombie markProviderTerminalError
-// call sites) are restored.
+// These two tests pin the WI-6 W6 red-team blocker as an Info-native invariant.
+// W6 kept two transitional raw session.Metadata mirrors because deferred readers
+// later in the SAME forward-pass tick read the collapsed writes RAW. WI-6 R3 typed
+// every one of those readers (pendingInteractionKeepsAwakeInfo, healStateWithRollbackInfo,
+// the awake-scan sleep resolvers) so they read the coherent infoByID snapshot, and
+// DROPPED both mirrors. These assertions still describe the same fail-safe outcome
+// (a cleared quarantine defers the max-age kill; a zombie's healed sleep_reason
+// survives heal), now guaranteed by the shared Info snapshot rather than a mirror.
 
 // TestReconcileSessionBeads_ClearedQuarantineKeepsMaxAgePendingDeferral guards the
-// clearWakeFailures -> pendingInteractionKeepsAwake same-tick coupling. clearWakeFailures
-// clears a still-future quarantined_until on the snapshot; the max-age kill's blocker
+// clearWakeFailures -> pendingInteractionKeepsAwakeInfo same-tick coupling. clearWakeFailures
+// clears a still-future quarantined_until on the infoByID snapshot; the max-age kill's blocker
 // check (typed Info) then sees no blocker and proceeds to the pending check, which reads
-// quarantined_until off the RAW bead via pendingInteractionKeepsAwake. With the lockstep
-// mirror the raw value is cleared too, so a live user interaction defers the kill. Without
-// it, the raw bead keeps the stale future quarantine, pendingInteractionKeepsAwake reports
-// BlockerQuarantined (not pending), and the aged session is wrongly killed mid-interaction
-// — a fail-safe violation.
+// quarantined_until off the SAME snapshot via pendingInteractionKeepsAwakeInfo (WI-6 R3). So
+// the cleared quarantine reaches the pending check, and a live user interaction defers the kill.
+// A regression that reads a stale quarantine would report BlockerQuarantined (not pending) and
+// wrongly kill the aged session mid-interaction — a fail-safe violation.
 func TestReconcileSessionBeads_ClearedQuarantineKeepsMaxAgePendingDeferral(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
@@ -55,7 +56,7 @@ func TestReconcileSessionBeads_ClearedQuarantineKeepsMaxAgePendingDeferral(t *te
 	env.maxAgeReconcile([]beads.Bead{session}, tr)
 
 	if !env.sp.IsRunning("witness") {
-		t.Fatalf("aged witness with a pending interaction was killed; the cleared quarantine must reach pendingInteractionKeepsAwake off the RAW bead so the kill is deferred (WI-6 W6 lockstep mirror). stderr=%q", env.stderr.String())
+		t.Fatalf("aged witness with a pending interaction was killed; the cleared quarantine must reach pendingInteractionKeepsAwakeInfo off the shared infoByID snapshot so the kill is deferred (WI-6 R3, no mirror). stderr=%q", env.stderr.String())
 	}
 	b, err := env.store.Get(session.ID)
 	if err != nil {
@@ -72,17 +73,17 @@ func TestReconcileSessionBeads_ClearedQuarantineKeepsMaxAgePendingDeferral(t *te
 }
 
 // TestReconcileSessionBeads_ZombieTerminalErrorSleepReasonSurvivesHeal guards the
-// zombie markProviderTerminalError -> healState same-tick coupling. A dead pending-create
-// zombie (state=creating, pending_create_claim=true, an expired never-started lease) hits a
-// terminal provider error: the zombie block marks state=asleep + sleep_reason=
-// provider-terminal-error and CLEARS the pending-create claim, so the post-zombie rollback
-// (which reads the folded Info) is suppressed and the tick falls through to healState.
-// healState reads state / sleep_reason / pending_create_claim / pending_create_started_at
-// off the RAW bead. With the lockstep mirror it sees the healed asleep + terminal-error
-// state and makes no change. Without it, healState sees the STALE state=creating +
-// still-claimed lease, runs its stale-creating rollback, and overwrites sleep_reason with
-// the generic runtime-missing reason — erasing the terminal-error classification the
-// pool-slot reaper depends on.
+// zombie markProviderTerminalError -> healStateWithRollbackInfo same-tick coupling. A dead
+// pending-create zombie (state=creating, pending_create_claim=true, an expired never-started
+// lease) hits a terminal provider error: the zombie block marks state=asleep + sleep_reason=
+// provider-terminal-error and CLEARS the pending-create claim, folding that onto the infoByID
+// snapshot, so the post-zombie rollback is suppressed and the tick falls through to heal.
+// healStateWithRollbackInfo reads state / sleep_reason / pending_create_claim /
+// pending_create_started_at off that SAME snapshot (WI-6 R3), sees the healed asleep +
+// terminal-error state, and makes no change. A regression that read the stale state=creating +
+// still-claimed lease would run heal's stale-creating rollback and overwrite sleep_reason with
+// the generic runtime-missing reason — erasing the terminal-error classification the pool-slot
+// reaper depends on.
 func TestReconcileSessionBeads_ZombieTerminalErrorSleepReasonSurvivesHeal(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
@@ -119,6 +120,6 @@ func TestReconcileSessionBeads_ZombieTerminalErrorSleepReasonSurvivesHeal(t *tes
 		t.Fatalf("provider_terminal_error not recorded — the zombie terminal-error path did not run; scenario precondition unmet (metadata=%v)", b.Metadata)
 	}
 	if got := b.Metadata["sleep_reason"]; got != sleepReasonProviderTerminalError {
-		t.Fatalf("sleep_reason = %q, want %q — the zombie mark's healed state/sleep_reason/pending-create lease must reach the same-tick RAW healState reader via the WI-6 W6 lockstep mirror so heal's stale-creating rollback does not clobber it. stderr=%q", got, sleepReasonProviderTerminalError, env.stderr.String())
+		t.Fatalf("sleep_reason = %q, want %q — the zombie mark's healed state/sleep_reason/pending-create lease must reach the same-tick healStateWithRollbackInfo reader via the shared infoByID snapshot so heal's stale-creating rollback does not clobber it (WI-6 R3, no mirror). stderr=%q", got, sleepReasonProviderTerminalError, env.stderr.String())
 	}
 }

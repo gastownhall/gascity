@@ -2352,18 +2352,23 @@ func recoverRunningPendingCreate(
 		ProvisionHash: prepared.provisionHash,
 		LaunchHash:    prepared.launchHash,
 		CoreBreakdown: coreBreakdown,
-		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
-			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
-		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		// WI-6 R3: state/sleep_reason read off the caller's coherent infoByID
+		// snapshot (Info.MetadataState is the raw state metadata verbatim, so the
+		// confirmPendingStart / StateAwake / sleep_reason checks are byte-identical
+		// to the former raw session.Metadata reads) — the two transitional W6
+		// lockstep mirrors that kept this raw read coherent are gone.
+		ConfirmState: confirmPendingStart(info.MetadataState) ||
+			sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateAwake,
+		ClearSleepReason: info.SleepReason != "",
 		// recoverRunningPendingCreate's caller (session_reconciler.go)
-		// already gates entry on shouldRollbackPendingCreate(session), so
+		// already gates entry on shouldRollbackPendingCreateInfo(info), so
 		// at this point the claim is guaranteed to be set — hard-code the
 		// clear rather than re-evaluating the same predicate.
 		ClearPendingCreateClaim: true,
 		// Recovering an already-awake runtime must not reset the in-flight
 		// awake interval, so key the fresh epoch on a genuine dormant/creating
 		// start only — not the StateAwake re-confirmation above.
-		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
+		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
 		Now:                 now,
 	})
 	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {

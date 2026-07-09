@@ -149,7 +149,7 @@ func TestCheckRateLimitStability_BeforeHealPreservesResumeMetadata(t *testing.T)
 		t.Fatal("rate-limit rapid exit should be recorded before advisory state healing")
 	}
 
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 
 	if got := session.Metadata["session_key"]; got != "keep-session" {
 		t.Errorf("session_key = %q, want preserved", got)
@@ -219,7 +219,7 @@ func TestCheckRateLimitStability_BatchFailureDoesNotClearLastWokeAt(t *testing.T
 	if !handled {
 		t.Fatal("rate-limit detection should retry on the next tick after a failed batch")
 	}
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 
 	if got := session.Metadata["session_key"]; got != "keep-session" {
 		t.Errorf("session_key = %q, want preserved", got)
@@ -272,7 +272,7 @@ func TestCheckRateLimitStability_BatchFailureRetriesAfterStabilityThreshold(t *t
 	if !handled {
 		t.Fatal("rate-limit detection should retry after the crash stability threshold")
 	}
-	healState(&session, false, sessionFrontDoor(store), clk)
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
 
 	if got := session.Metadata["session_key"]; got != "keep-session" {
 		t.Errorf("session_key = %q, want preserved", got)

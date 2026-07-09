@@ -205,23 +205,7 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	return agent, poolDesired[template] > 0
 }
 
-// WI-6: raw form retained — prod reconciler callers still pass raw beads; the
-// sessionStartRequestedInfo twin is oracle-pinned. Migrates when those type.
-func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
-	if strings.TrimSpace(session.Metadata["state"]) == string(sessionpkg.StateStartPending) {
-		return true
-	}
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
-		return true
-	}
-	if strings.TrimSpace(session.Metadata["state"]) != "creating" {
-		return false
-	}
-	return !staleCreatingState(session, clk)
-}
-
-// sessionStartRequestedInfo is the session.Info sibling of sessionStartRequested.
-// Equivalence-proven. It reads the RAW metadata state (Info.MetadataState) and the
+// sessionStartRequestedInfo reads the RAW metadata state (Info.MetadataState) and the
 // projected pending-create claim flag (Info.PendingCreateClaim, which the codec
 // derives as strings.TrimSpace(pending_create_claim) == "true" — identical to the
 // raw read), and keeps the literal "creating" state compare the original uses.
@@ -884,75 +868,35 @@ func mergeMetadataPatch(dst, src map[string]string) map[string]string {
 	return dst
 }
 
-// healState updates advisory state metadata only when changed (dirty check).
-func healState(session *beads.Bead, alive bool, sessFront *sessionpkg.Store, clk clock.Clock) {
-	healStateWithRollback(session, alive, sessFront, clk, 0, true)
-}
-
-// healStateWithRollback is the explicit-control variant of healState. When
-// rollbackAvailable is false (e.g. the reconciler short-circuited the
-// stale-pending-create rollback because storeQueryPartial=true) the heal path
-// preserves pending_create_claim so the next non-partial tick can do the
-// proper rollback. When true (default), healState clears the stale claim
-// in-line after startupTimeout has elapsed to break the state=creating ↔
-// state=asleep oscillation described in ga-mf1.
-func healStateWithRollback(session *beads.Bead, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
-	if session == nil {
-		return nil
-	}
-	// healState is the third writer in the closed-bead flap cycle. The
-	// lifecycle projection still resolves to BaseStateDrained for closed
-	// beads, so without this guard healState writes state=asleep on
-	// every reconciler tick of a terminal bead — alternating with the
-	// gc_swept / orphaned writes from the closeBead path. Closed beads
-	// are terminal; their advisory state metadata should not move.
-	if session.Status == "closed" {
-		return nil
-	}
-	batch := healStatePatchWithRollback(*session, alive, clk, startupTimeout, rollbackAvailable)
-	if len(batch) == 0 {
-		return nil
-	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(batch))
-	}
-	if err := sessFront.ApplyPatch(session.ID, batch); err != nil {
-		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
-	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
-	return batch
-}
-
-func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]string {
-	return healStatePatchWithRollback(session, alive, clk, 0, true)
-}
-
-func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
-	meta := session.Metadata
-	if meta == nil {
-		meta = map[string]string{}
-	}
+// healStatePatchWithRollbackInfo computes the advisory-state heal batch off the
+// typed snapshot. It reads every state/lease key off Info (Info.MetadataState —
+// the RAW state metadata; Info.SleepReason; Info.PendingCreateClaim; the
+// lifecycle projection via LifecycleInputFromInfo; Info.CreatedAt) and routes
+// each classifier through its equivalence-proven *Info twin
+// (sessionStartRequestedInfo, pendingCreateLeaseActiveInfo,
+// pendingCreateLeaseExpiredForRollbackInfo, isNamedSessionInfo,
+// namedSessionModeInfo). Byte-identical to the bead form; the reconciler forward
+// pass folds the returned batch onto its coherent infoByID snapshot.
+func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	var now time.Time
 	var staleCreatingAfter time.Duration
 	if clk != nil {
 		now = clk.Now()
 		staleCreatingAfter = staleCreatingStateTimeout
 	}
-	lcInput := sessionpkg.LifecycleInputFromMetadata(session.Status, meta)
+	lcInput := sessionpkg.LifecycleInputFromInfo(info)
 	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: true, Alive: alive}
-	lcInput.CreatedAt = session.CreatedAt
+	lcInput.CreatedAt = info.CreatedAt
 	lcInput.StaleCreatingAfter = staleCreatingAfter
 	lcInput.Now = now
 	view := sessionpkg.ProjectLifecycle(lcInput)
 
 	batch := make(map[string]string)
 	if !alive && view.BaseState == sessionpkg.BaseStateDrained {
-		if strings.TrimSpace(meta["state"]) != string(sessionpkg.StateAsleep) {
+		if strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateAsleep) {
 			batch["state"] = string(sessionpkg.StateAsleep)
 		}
-		if strings.TrimSpace(meta["sleep_reason"]) == "" {
+		if strings.TrimSpace(info.SleepReason) == "" {
 			batch["sleep_reason"] = "drained"
 		}
 		return emptyNil(batch)
@@ -963,65 +907,40 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 		target = string(sessionpkg.StateAsleep)
 		if alive {
 			target = string(sessionpkg.StateAwake)
-		} else if sessionStartRequested(session, clk) {
+		} else if sessionStartRequestedInfo(info, clk) {
 			target = string(sessionpkg.StateStartPending)
 		}
 	}
 	stalePendingCreateRollback := false
-	// failed-create is a terminal rollback marker written by
-	// rollbackPendingCreate when a start attempt failed. A bead in this state
-	// whose runtime is not alive must heal toward asleep, even if
-	// pending_create_claim is still set from the failed attempt — otherwise
-	// sessionStartRequested pulls the bead back to creating and the
-	// reconciler ping-pongs forever. Clearing the stale claim in the same
-	// batch finishes the rollback the lifecycle path started.
-	if !alive && strings.TrimSpace(meta["state"]) == "failed-create" {
-		if strings.TrimSpace(meta["pending_create_claim"]) == "true" && pendingCreateLeaseActive(session, clk, 0) {
+	if !alive && strings.TrimSpace(info.MetadataState) == "failed-create" {
+		if info.PendingCreateClaim && pendingCreateLeaseActiveInfo(info, clk, 0) {
 			return nil
 		}
 		target = string(sessionpkg.StateAsleep)
-		clearPendingCreateLease(meta, batch)
+		clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
 	}
-	// ga-mf1: stale-creating projects to ReconciledState=asleep once the
-	// pending_create lease has expired (creatingStateIsStale → true). Same
-	// reasoning as failed-create above: if we leave pending_create_claim=true
-	// in metadata, the next tick's projectWakeCauses re-emits
-	// WakeCausePendingCreate and projectRuntimeProjection's post-creating
-	// branch flips the projection back to StateCreating, ping-ponging the
-	// bead forever between creating and asleep+runtime-missing. Clearing the
-	// expired lease in the same heal batch lets the bead settle in asleep.
-	//
-	// Gate the clear on pendingCreateLeaseExpiredForRollback — the same
-	// predicate the orphan rollback path uses — so we honor the longer
-	// never-started lease (10 min) for beads that haven't yet had
-	// last_woke_at recorded. creatingStateIsStale alone fires at 60s and
-	// would race the rollback path's reservation.
-	//
-	// rollbackAvailable=false means the caller deferred the formal rollback
-	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
-	// can drive attemptRollbackPendingCreate properly.
-	if rollbackAvailable && !alive && strings.TrimSpace(meta["state"]) == "creating" {
-		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
+	if rollbackAvailable && !alive && strings.TrimSpace(info.MetadataState) == "creating" {
+		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)
 			stalePendingCreateRollback = true
-			clearPendingCreateLease(meta, batch)
+			clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
 		}
 	}
 	if target == "" {
 		return nil
 	}
-	if meta["state"] != target {
+	if info.MetadataState != target {
 		batch["state"] = target
-		if target == string(sessionpkg.StateAsleep) && (view.ResetContinuation || stalePendingCreateRollback) && strings.TrimSpace(meta["sleep_reason"]) == "" {
+		if target == string(sessionpkg.StateAsleep) && (view.ResetContinuation || stalePendingCreateRollback) && strings.TrimSpace(info.SleepReason) == "" {
 			batch["sleep_reason"] = sleepReasonRuntimeMissing
 		}
 	}
 	if target == string(sessionpkg.StateAsleep) {
-		if strings.TrimSpace(meta["sleep_reason"]) == "" && strings.TrimSpace(meta["state"]) == "failed-create" {
+		if strings.TrimSpace(info.SleepReason) == "" && strings.TrimSpace(info.MetadataState) == "failed-create" {
 			batch["sleep_reason"] = "failed-create"
 		}
 		if view.ResetContinuation || stalePendingCreateRollback {
-			if !isNamedSessionBead(session) || namedSessionMode(session) != "always" {
+			if !isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always" {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
@@ -1031,14 +950,36 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	return emptyNil(batch)
 }
 
-// clearPendingCreateLease writes empty-string clears for pending_create_claim
-// and pending_create_started_at into the heal batch when the metadata
-// currently carries a claim. Shared between the failed-create rollback path
-// and the stale-creating heal path so both finish the rollback the lifecycle
-// projection started, instead of letting the stale claim re-emit
-// WakeCausePendingCreate on the next tick and re-enter state=creating.
-func clearPendingCreateLease(meta, batch map[string]string) {
-	if strings.TrimSpace(meta["pending_create_claim"]) != "true" {
+// healStateWithRollbackInfo is the session.Info sibling of healStateWithRollback:
+// it reads its heal decision off the coherent infoByID snapshot entry instead of
+// the raw *session bead, persists the batch through sessFront.ApplyPatch, and
+// returns the batch for the reconciler to fold onto infoByID via ApplyPatchInfo.
+// Unlike the raw form it does NOT mirror onto a raw bead — the snapshot fold is
+// the single source of truth for the same-tick downstream readers (which now
+// also read Info), so the two transitional W6 lockstep mirrors are gone.
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+	// Closed beads are terminal; their advisory state metadata should not move
+	// (matches healStateWithRollback's session.Status == "closed" guard —
+	// Info.Closed is the projected mirror).
+	if info.Closed {
+		return nil
+	}
+	batch := healStatePatchWithRollbackInfo(info, alive, clk, startupTimeout, rollbackAvailable)
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
+	}
+	return batch
+}
+
+// clearPendingCreateLeaseInfo is the Info-form counterpart of
+// clearPendingCreateLease. Info.PendingCreateClaim already carries
+// strings.TrimSpace(pending_create_claim) == "true", so the gate is identical to
+// the raw form's TrimSpace compare.
+func clearPendingCreateLeaseInfo(pendingClaim bool, batch map[string]string) {
+	if !pendingClaim {
 		return
 	}
 	batch["pending_create_claim"] = ""
@@ -1052,8 +993,9 @@ func emptyNil(batch map[string]string) map[string]string {
 	return batch
 }
 
-// staleCreatingState returns true when a state=creating bead has been
-// stuck in that state longer than staleCreatingStateTimeout.
+// staleCreatingStateInfo returns true when a state=creating bead has been
+// stuck in that state longer than staleCreatingStateTimeout. It reads the RAW
+// metadata state (Info.MetadataState).
 //
 // "How long" is measured from the most recent transition into the
 // creating/pending-create state, NOT from the bead's original
@@ -1068,24 +1010,7 @@ func emptyNil(batch map[string]string) map[string]string {
 //     and reopenClosedConfiguredNamedSessionBead at the moment the bead
 //     enters state=creating with pending_create_claim=true.
 //  2. session.CreatedAt — fallback for fresh pool beads minted before
-//     this metadata key was introduced, and for any caller that creates
-//     a bead in state=creating without going through the helpers above.
-//
-// WI-6: raw form retained — sessionStartRequested (raw) still calls it; the
-// staleCreatingStateInfo twin is oracle-pinned. Migrates when that caller types.
-func staleCreatingState(session beads.Bead, clk clock.Clock) bool {
-	if clk == nil {
-		return false
-	}
-	if strings.TrimSpace(session.Metadata["state"]) != string(sessionpkg.StateCreating) {
-		return false
-	}
-	return pendingCreateAttemptStale(session, clk)
-}
-
-// staleCreatingStateInfo is the session.Info sibling of staleCreatingState.
-// Equivalence-proven. It reads the RAW metadata state (Info.MetadataState),
-// matching staleCreatingState's session.Metadata["state"] read.
+//     this metadata key was introduced.
 func staleCreatingStateInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if clk == nil {
 		return false
@@ -1096,29 +1021,10 @@ func staleCreatingStateInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	return pendingCreateAttemptStaleInfo(i, clk)
 }
 
-// pendingCreateAttemptStale reports whether the current pending-create attempt
-// has aged past staleCreatingStateTimeout, regardless of the bead's current
-// projected state. This lets the reconciler keep never-started pending-create
-// leases alive after healState has already rewritten state=creating to asleep.
-//
-// WI-6: raw form retained — the reconciler forward pass and staleCreatingState
-// (raw) still call it; the pendingCreateAttemptStaleInfo twin is oracle-pinned.
-func pendingCreateAttemptStale(session beads.Bead, clk clock.Clock) bool {
-	if clk == nil {
-		return false
-	}
-	now := clk.Now()
-	if started, ok := parseRFC3339Metadata(session.Metadata["pending_create_started_at"]); ok {
-		return !now.Before(started.Add(staleCreatingStateTimeout))
-	}
-	if session.CreatedAt.IsZero() {
-		return true
-	}
-	return !now.Before(session.CreatedAt.Add(staleCreatingStateTimeout))
-}
-
-// pendingCreateAttemptStaleInfo is the session.Info sibling of
-// pendingCreateAttemptStale. Equivalence-proven.
+// pendingCreateAttemptStaleInfo reports whether the current pending-create
+// attempt has aged past staleCreatingStateTimeout, regardless of the bead's
+// current projected state. This lets the reconciler keep never-started
+// pending-create leases alive after heal has rewritten state=creating to asleep.
 func pendingCreateAttemptStaleInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if clk == nil {
 		return false

@@ -744,37 +744,8 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	return false
 }
 
-// WI-6: raw form retained — the reconciler forward pass and lifecycle-parallel
-// still call it on raw beads; the pendingCreateStartInFlightInfo twin is
-// oracle-pinned and already used where the caller holds an Info.
-func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" &&
-		sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) != sessionpkg.StateCreating {
-		return false
-	}
-	lastWoke := strings.TrimSpace(session.Metadata["last_woke_at"])
-	if lastWoke == "" {
-		return false
-	}
-	started, err := time.Parse(time.RFC3339, lastWoke)
-	if err != nil {
-		return false
-	}
-	if startupTimeout <= 0 {
-		// Disabling the provider Start() deadline must not disable stuck-bead
-		// recovery forever. Use the default lease window for in-flight detection
-		// while leaving the actual Start() context unwrapped.
-		startupTimeout = time.Minute
-	}
-	now := time.Now()
-	if clk != nil {
-		now = clk.Now()
-	}
-	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
-}
-
-// pendingCreateStartInFlightInfo is the session.Info sibling of
-// pendingCreateStartInFlight. Equivalence-proven.
+// pendingCreateStartInFlightInfo reports whether a pending-create start is still
+// within its in-flight lease window.
 func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
 	if !i.PendingCreateClaim &&
 		sessionpkg.State(strings.TrimSpace(i.MetadataState)) != sessionpkg.StateCreating {
@@ -798,21 +769,8 @@ func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupT
 	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
-func pendingCreateLeaseActive(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
-		return false
-	}
-	if pendingCreateStartInFlight(session, clk, startupTimeout) {
-		return true
-	}
-	if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
-		return !pendingCreateNeverStartedLeaseExpired(session, clk)
-	}
-	return !pendingCreateAttemptStale(session, clk)
-}
-
-// pendingCreateLeaseActiveInfo is the session.Info sibling of
-// pendingCreateLeaseActive. Equivalence-proven.
+// pendingCreateLeaseActiveInfo reports whether a pending-create claim still
+// holds a live lease.
 func pendingCreateLeaseActiveInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
 	if !i.PendingCreateClaim {
 		return false
@@ -837,20 +795,9 @@ func pendingCreateLeaseActiveInfo(i sessionpkg.Info, clk clock.Clock, startupTim
 // behind a busy pool start queue.
 const pendingCreateNeverStartedTimeout = 10 * time.Minute
 
-func pendingCreateNeverStartedExpired(session beads.Bead, clk clock.Clock) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
-		return false
-	}
-	if !pendingCreateRollbackState(session.Metadata["state"]) {
-		return false
-	}
-	return pendingCreateNeverStartedLeaseExpired(session, clk)
-}
-
-// pendingCreateNeverStartedExpiredInfo is the session.Info sibling of
-// pendingCreateNeverStartedExpired. Info.MetadataState is the RAW state metadata
-// (verbatim, untrimmed), matching the raw session.Metadata["state"] handed to
-// pendingCreateRollbackState (which trims internally). Equivalence-proven.
+// pendingCreateNeverStartedExpiredInfo reports whether a never-started
+// pending-create lease in a rollback state has expired. Info.MetadataState is the
+// RAW state metadata handed to pendingCreateRollbackState (which trims internally).
 func pendingCreateNeverStartedExpiredInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if !i.PendingCreateClaim {
 		return false
@@ -861,29 +808,9 @@ func pendingCreateNeverStartedExpiredInfo(i sessionpkg.Info, clk clock.Clock) bo
 	return pendingCreateNeverStartedLeaseExpiredInfo(i, clk)
 }
 
-func pendingCreateNeverStartedLeaseExpired(session beads.Bead, clk clock.Clock) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
-		return false
-	}
-	if strings.TrimSpace(session.Metadata["last_woke_at"]) != "" {
-		return false
-	}
-	anchor := session.CreatedAt
-	if started, ok := parseRFC3339Metadata(session.Metadata["pending_create_started_at"]); ok {
-		anchor = started
-	}
-	if anchor.IsZero() {
-		return true
-	}
-	now := time.Now()
-	if clk != nil {
-		now = clk.Now()
-	}
-	return now.After(anchor.Add(pendingCreateNeverStartedTimeout))
-}
-
-// pendingCreateNeverStartedLeaseExpiredInfo is the session.Info sibling of
-// pendingCreateNeverStartedLeaseExpired. Equivalence-proven.
+// pendingCreateNeverStartedLeaseExpiredInfo reports whether a pending-create
+// claim that never recorded a start (no last_woke_at) has aged past the
+// never-started timeout.
 func pendingCreateNeverStartedLeaseExpiredInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if !i.PendingCreateClaim {
 		return false
@@ -905,34 +832,11 @@ func pendingCreateNeverStartedLeaseExpiredInfo(i sessionpkg.Info, clk clock.Cloc
 	return now.After(anchor.Add(pendingCreateNeverStartedTimeout))
 }
 
-func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
-		return false
-	}
-	state := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
-	if !pendingCreateRollbackState(string(state)) {
-		return false
-	}
-	if state == sessionpkg.StateAsleep {
-		if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
-			return pendingCreateNeverStartedExpired(session, clk)
-		}
-		return pendingCreateAttemptStale(session, clk)
-	}
-	if pendingCreateStartInFlight(session, clk, startupTimeout) {
-		return false
-	}
-	if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
-		return pendingCreateNeverStartedExpired(session, clk)
-	}
-	return pendingCreateAttemptStale(session, clk)
-}
-
-// pendingCreateLeaseExpiredForRollbackInfo is the session.Info sibling of
-// pendingCreateLeaseExpiredForRollback. Each sub-leaf it composes
-// (pendingCreateStartInFlightInfo, pendingCreateNeverStartedExpiredInfo,
-// pendingCreateAttemptStaleInfo) is already equivalence-proven; the state read
-// uses the RAW Info.MetadataState to match the untrimmed-then-trimmed original.
+// pendingCreateLeaseExpiredForRollbackInfo reports whether a pending-create
+// lease has expired such that the reconciler should roll it back. Each sub-leaf
+// it composes (pendingCreateStartInFlightInfo, pendingCreateNeverStartedExpiredInfo,
+// pendingCreateAttemptStaleInfo) is equivalence-proven; the state read uses the
+// RAW Info.MetadataState.
 func pendingCreateLeaseExpiredForRollbackInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
 	if !i.PendingCreateClaim {
 		return false
@@ -1685,7 +1589,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[session.ID].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].LastWokeAt)
-			healBatch := healStateWithRollback(session, providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			healBatch := healStateWithRollbackInfo(infoByID[session.ID], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
 			traceHealClearedPendingCreateLease(
 				trace,
 				*session,
@@ -1698,30 +1602,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				providerAlive,
 				healBatch,
 			)
-			// Post-heal refresh: healStateWithRollback (above) persists through
-			// sessFront and mirrors healBatch onto session.Metadata in lockstep, so
-			// the top-of-loop `info` (from the snapshot at loop entry) is now stale
-			// for this switch. Fold that same healBatch onto the snapshot via
-			// write-returns-Info (Step 6d) instead of re-projecting the raw bead:
-			// healStateWithRollback returns exactly the batch it mirrored (even on a
-			// persist error the mirror runs, so the returned batch always matches the
-			// bead), and nil when it healed nothing (ApplyPatch(nil) is a no-op). This
-			// is byte-identical to the raw refresh because infoByID[session.ID] is
-			// coherent here: the top-of-loop snapshot entry, unmutated on the path
+			// Post-heal refresh: healStateWithRollbackInfo (above) persists healBatch
+			// via sessFront.ApplyPatch and returns it, but does NOT mirror onto the raw
+			// *session bead (WI-6 R3 dropped the raw-bead mirror). The top-of-loop
+			// `info` (from the snapshot at loop entry) is now stale for this switch, and
+			// nothing updates the raw bead post-heal — so this write-returns-Info fold
+			// (Step 6d) is the ONLY same-tick source of the healed state.
+			// healStateWithRollbackInfo returns exactly the batch it persisted, and nil
+			// when it healed nothing (ApplyPatch(nil) is a no-op). infoByID[session.ID]
+			// is coherent here: the top-of-loop snapshot entry, unmutated on the path
 			// that reaches the heal (the pre-heal checkRateLimitStability/rollback/
 			// failed-create-close sites all `continue`). The trace call above takes
 			// the bead by value (cannot mutate), and Go switch cases do not fall
 			// through, so both the preserveNamed body and the
 			// pendingCreateSessionStillLeasedInfo guard/body below read the same
-			// post-heal snapshot. This fold is LOAD-BEARING (and newly so in this
-			// commit): the pendingCreateSessionStillLeasedInfo guard below reads the
-			// healed MetadataState off infoPostHeal, and the downstream zombie refresh
-			// is now ApplyPatch(terminalErrBatch) — a no-op when there is no terminal
-			// error — rather than the old raw re-projection that would have repaired a
-			// stale heal snapshot, so the healed state must reach that guard (and the
-			// post-zombie rollback read on the preserveNamed fall-through) through this
-			// fold alone. Guarded by
-			// TestReconcileSessionBeads_HealStateReflectedOnSnapshot.
+			// post-heal snapshot. This fold is LOAD-BEARING: the
+			// pendingCreateSessionStillLeasedInfo guard below reads the healed
+			// MetadataState off infoPostHeal, and the downstream zombie refresh is
+			// ApplyPatch(terminalErrBatch) — a no-op when there is no terminal error —
+			// so the healed state must reach that guard (and the post-zombie rollback
+			// read on the preserveNamed fall-through) through this fold alone. Guarded
+			// by TestReconcileSessionBeads_HealStateReflectedOnSnapshot.
 			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(healBatch)
 			infoPostHeal := infoByID[session.ID]
 			switch {
@@ -1974,20 +1875,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 					}
 					infoByID[session.ID] = markInfo
-					// WI-6 transitional mirror: this zombie write falls through (no
-					// continue) to same-tick RAW readers of *session — healState (via its
-					// internal raw pendingCreateLease*/LifecycleInputFromMetadata) and, at
-					// the awake scan, persistSleepPolicyMetadata + configWakeSuppressed
-					// (target.session is this bead). They read state/sleep_reason plus the
-					// pending-create lease keys off the raw bead; keep them in lockstep with
-					// the fold until those readers migrate off *session (deferred sleep +
-					// heal clusters). markInfo's raw-mirror fields carry the persisted values
-					// verbatim (a no-op re-set when markProviderTerminalError wrote nothing).
-					session.Metadata["state"] = markInfo.MetadataState
-					session.Metadata["sleep_reason"] = markInfo.SleepReason
-					session.Metadata["last_woke_at"] = markInfo.LastWokeAt
-					session.Metadata["pending_create_claim"] = markInfo.PendingCreateClaimMetadata
-					session.Metadata["pending_create_started_at"] = markInfo.PendingCreateStartedAt
+					// WI-6 R3: the two transitional W6 lockstep mirrors are gone. Every
+					// same-tick reader of the zombie mark's state/sleep_reason/lease keys
+					// (heal, the awake-scan sleep resolvers, recoverRunningPendingCreate)
+					// now reads the coherent infoByID snapshot this fold advanced, so no
+					// raw-bead mirror is needed.
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerTerminalProviderError, TraceReasonCode(reason), TraceOutcomeUnhealthy, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": session.ID,
@@ -2009,8 +1901,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[session.ID] in place via
 		// write-returns-Info (its only same-tick session write on the paths that reach
-		// here — a no-op when it wrote nothing), and the transitional mirror above keeps
-		// the raw *session bead in lockstep for the deferred raw readers. infoByID[session.ID] is coherent here:
+		// here — a no-op when it wrote nothing). infoByID[session.ID] is coherent here:
 		// only two path shapes arrive — the desired fast path (mutates nothing but the
 		// drain tracker via recordResetStallIfDue, which takes the coherent Info
 		// snapshot), and the ONE non-continue arm of the `if !desired` block (the
@@ -2158,7 +2049,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 					}
-					if pendingInteractionKeepsAwake(*session, sp, name, clk) &&
+					if pendingInteractionKeepsAwakeInfo(infoByID[session.ID], sp, name, clk) &&
 						(cancelReconcilerAckedDrainInfo(infoByID[session.ID], sp, dt) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[session.ID], sp, name)) {
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonPending, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
@@ -2216,7 +2107,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
-				exempt := pendingInteractionKeepsAwake(*session, sp, name, clk) ||
+				exempt := pendingInteractionKeepsAwakeInfo(infoByID[session.ID], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[session.ID], clk, startupTimeout)
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
@@ -2351,13 +2242,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// without demand (#2345).
 				//
 				// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-				// is RETAINED for the surviving whole-bead helpers that still take the
-				// raw pointer this wave (the write helpers). Wake fairness itself now
-				// reads the Info twin captured at the startCandidates append below
-				// (wakeFairnessTime → Info.LastWokeAt), and last_woke_at (cleared by
-				// RestartRequestPatch) is folded onto infoByID just above, so the captured
-				// twin carries the cleared value for the same-tick re-wake ordering. Both
-				// the raw mirror and its helpers die in W6.
+				// is RETAINED for the surviving start-execution cluster that still holds
+				// the raw *session / startCandidate.session pointer this wave
+				// (shouldRollbackPendingCreate, the asyncStart* raw reads,
+				// rollbackPendingCreate/clearPendingStartInFlightLease, and the
+				// clonePreparedStartForAsync deep-copy — NOT the sleep/heal write helpers,
+				// which typed onto Info in R3). Wake fairness itself now reads the Info
+				// twin captured at the startCandidates append below (wakeFairnessTime →
+				// Info.LastWokeAt), and last_woke_at (cleared by RestartRequestPatch) is
+				// folded onto infoByID just above, so the captured twin carries the
+				// cleared value for the same-tick re-wake ordering. This mirror + the raw
+				// start-execution pointer it feeds die in Wave R4.
 				restartFold := make(sessionpkg.MetadataPatch, len(batch))
 				for key, value := range batch {
 					if key == sessionpkg.ResetCommittedAtKey {
@@ -2388,7 +2283,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
-		policy := resolveSessionSleepPolicy(*session, cfg, sp)
+		policy := resolveSessionSleepPolicyInfo(infoByID[session.ID], cfg, sp)
 
 		rlNextFwd, rateLimitHit, rateLimitErr := checkRateLimitStability(infoByID[session.ID], cfg, alive, dt, sessFront, clk, peek)
 		if rateLimitHit || rateLimitErr != nil {
@@ -2401,7 +2296,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[session.ID].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[session.ID].LastWokeAt)
-		healBatch := healStateWithRollback(session, alive, sessFront, clk, startupTimeout, true)
+		healBatch := healStateWithRollbackInfo(infoByID[session.ID], alive, sessFront, clk, startupTimeout, true)
 		traceHealClearedPendingCreateLease(
 			trace,
 			*session,
@@ -2422,7 +2317,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// one of the forward-pass writers the blanket pre-pass still masks; folding it
 		// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
 		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(healBatch)
-		if recoverPendingIdleSleep(session, sessFront, running, clk) {
+		if recoverPendingIdleSleepInfo(infoByID[session.ID], sessFront, running, clk) {
 			alive = false
 			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).
 			// recoverPendingIdleSleep mirrors SleepPatch(now,"idle") only on this true
@@ -2435,7 +2330,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Fold detached_at change onto the snapshot (Step 6d write-returns-Info).
 		// reconcileDetachedAt returns the {"detached_at": <value>} batch it mirrored,
 		// or nil on no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 6).
-		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(reconcileDetachedAt(session, store, policy, alive, sp, clk))
+		infoByID[session.ID] = infoByID[session.ID].ApplyPatch(reconcileDetachedAtInfo(infoByID[session.ID], store, policy, alive, sp, clk))
 
 		// Stability check: detect rapid crash after state healing. Rate-limit
 		// detection intentionally ran above before healState.
@@ -2465,15 +2360,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Info unchanged when nothing was cleared. Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
 		if alive && stableLongEnoughInfo(infoByID[session.ID], clk) {
 			infoByID[session.ID] = clearWakeFailures(infoByID[session.ID], sessFront)
-			// WI-6 transitional mirror: clearWakeFailures clears quarantined_until, which
-			// pendingInteractionKeepsAwake reads off the RAW *session bead
-			// (LifecycleInputFromMetadata -> BlockerQuarantined) at the config-drift drain,
-			// max-age kill, and idle kill decisions later this same tick. A just-cleared
-			// still-future quarantine must not keep those pending-interaction deferrals
-			// engaged (fail-safe: a session with a live user interaction must still defer
-			// the kill/drain). Keep the raw bead in lockstep until pendingInteractionKeepsAwake
-			// migrates off *session.
-			session.Metadata["quarantined_until"] = infoByID[session.ID].QuarantinedUntil
+			// WI-6 R3: clearWakeFailures folds the quarantined_until clear onto the
+			// snapshot, and the same-tick pending-interaction deferrals
+			// (pendingInteractionKeepsAwakeInfo at the config-drift drain, max-age kill,
+			// and idle kill) read that same snapshot — so a just-cleared quarantine no
+			// longer splits from a stale raw bead (the W6 fail-safe drift). No mirror.
 		}
 		// Clear churn counter for sessions that have been productive.
 		// clearChurn returns the write-returns-Info result (Step 6d); the input Info
@@ -2618,7 +2509,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// tmux-attached, or recent activity). This prevents
 							// draining a working agent mid-task without graceful
 							// handoff. See gastownhall/gascity#119.
-							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(*session, infoByID[session.ID], sessFront, sp, name, clk, driftKey)
+							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(infoByID[session.ID], sessFront, sp, name, clk, driftKey)
 							if deferErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
 							}
@@ -2663,7 +2554,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// Defer ordinary-session config-drift drain while a
 							// user is attached. Named-session config drift is
 							// deferred when actively in use (see above).
-							if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+							if pendingInteractionKeepsAwakeInfo(infoByID[session.ID], sp, name, clk) {
 								drainCancelled := false
 								if dt != nil {
 									drainCancelled = cancelSessionDrainForPendingInfo(infoByID[session.ID], sp, dt)
@@ -2887,7 +2778,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
 				if dec.Action == sessionpkg.TimerActionGatherPending {
 					facts.Pending = sessionpkg.PendingNo
-					if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+					if pendingInteractionKeepsAwakeInfo(infoByID[session.ID], sp, name, clk) {
 						facts.Pending = sessionpkg.PendingYes
 					}
 				} else {
@@ -2934,12 +2825,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED for the write helpers that still take the raw pointer
-					// this wave. Wake fairness now reads the Info twin captured at the
-					// wakeTargets/startCandidates append below (wakeFairnessTime →
-					// Info.LastWokeAt); the ApplyPatchInfo fold just below carries SleepPatch's
-					// cleared last_woke_at onto that captured twin for the same-tick re-wake
-					// ordering. The raw mirror and its helpers die in WI-6.
+					// loop is RETAINED for the start-execution cluster that still holds the
+					// raw startCandidate.session/wakeTarget.session pointer this wave (the
+					// asyncStart* raw reads, shouldRollbackPendingCreate, the rollback write
+					// helpers, and the async deep-copy — NOT the sleep/heal write helpers,
+					// which typed onto Info in R3). Wake fairness now reads the Info twin
+					// captured at the wakeTargets/startCandidates append below
+					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
+					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
+					// same-tick re-wake ordering. This mirror + the raw pointer it feeds die in
+					// Wave R4.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -2970,7 +2865,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			dec := sessionpkg.DecideIdleTimeout(facts)
 			for dec.Action == sessionpkg.TimerActionGatherPending {
 				facts.Pending = sessionpkg.PendingNo
-				if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+				if pendingInteractionKeepsAwakeInfo(infoByID[session.ID], sp, name, clk) {
 					facts.Pending = sessionpkg.PendingYes
 				}
 				dec = sessionpkg.DecideIdleTimeout(facts)
@@ -3020,11 +2915,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED for the write helpers — same rationale as the max-age
-					// kill. Wake fairness reads the Info twin captured at the append below
+					// loop is RETAINED for the start-execution cluster (asyncStart* raw reads,
+					// shouldRollbackPendingCreate, the rollback write helpers) — same rationale
+					// as the max-age kill; NOT the sleep/heal write helpers, which typed onto
+					// Info in R3. Wake fairness reads the Info twin captured at the append below
 					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
 					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
-					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in WI-6.
+					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in Wave R4.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -3100,14 +2997,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// a post-Phase-1 loop, and every Phase-1 mutation folds onto infoByID now
 		// (Step 6d write-returns-Info), so the snapshot entry is already coherent —
 		// no re-projection needed. The loop itself writes only wakeEvals/eval, never
-		// the bead. The sleep policy resolvers (resolveSessionSleepPolicy,
-		// configWakeSuppressed) read whole-bead + runtime state and stay raw.
+		// the bead. The sleep policy resolvers (resolveSessionSleepPolicyInfo,
+		// configWakeSuppressedInfo) read the coherent Info snapshot; their internal
+		// runtime probes stay raw (§7).
 		info := infoByID[target.session.ID]
-		policy := resolveSessionSleepPolicy(*target.session, cfg, sp)
+		policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
 		eval.Policy = policy
 		name := info.SessionNameMetadata
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
+		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" && configWakeSuppressedInfo(info, policy, sp, clk) {
 			// Direct assigned work overrides sleep suppression for every
 			// sleep class — the assignment is session-specific, so a pool
 			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)
@@ -3150,8 +3048,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Typed projection for this iteration's decision reads. infoByID is
 		// coherent here: every forward-pass mutation folds onto it, and this
 		// loop's own mutations fold back before any later read observes them.
-		// The whole-bead helpers below (persistSleepPolicyMetadata,
-		// sessionHasOpenAssignedWorkForReachableStore, pruneAgentHomeWorktreeIfSafe,
+		// persistSleepPolicyMetadataInfo folds its policy write onto the snapshot
+		// (write-returns-Info); the remaining whole-bead helpers below
+		// (sessionHasOpenAssignedWorkForReachableStore, pruneAgentHomeWorktreeIfSafe,
 		// collectSessionAssignedWork inside emitSessionStrandedDiagnostic) stay raw
 		// by design.
 		info := infoByID[target.session.ID]
@@ -3163,7 +3062,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if shouldWake && eval.ConfigSuppressed {
 			shouldWake = false
 		}
-		persistSleepPolicyMetadata(target.session, sessFront, eval.Policy, eval.ConfigSuppressed)
+		infoByID[target.session.ID] = persistSleepPolicyMetadataInfo(info, sessFront, eval.Policy, eval.ConfigSuppressed)
+		info = infoByID[target.session.ID]
 
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
@@ -3316,7 +3216,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 				if intent != "idle-stop-pending" {
-					if fold := markIdleSleepPending(target.session, sessFront); fold != nil {
+					if fold := markIdleSleepPendingInfo(info, sessFront); fold != nil {
 						infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
 					}
 				}
@@ -4085,16 +3985,18 @@ const (
 // If the provider cannot report activity, the function is conservative and
 // treats the live named session as active because config-drift cannot prove the
 // session is idle.
-func namedSessionActivelyInUse(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) bool {
-	_, active := namedSessionActiveUseReason(session, sp, name, clk)
+func namedSessionActivelyInUseInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) bool {
+	_, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
 	return active
 }
 
-// shouldDeferNamedSessionConfigDrift is a per-parameter split (WI-5 W3): the
-// RUNTIME activity probe (namedSessionActiveUseReason) stays raw (§5), while the
-// persisted deferral-timer read/write side threads typed session.Info.
-func shouldDeferNamedSessionConfigDrift(session beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
-	reason, active := namedSessionActiveUseReason(session, sp, name, clk)
+// shouldDeferNamedSessionConfigDrift threads typed session.Info end to end
+// (WI-6 R3): the active-use reason reads its pending-interaction deferral off
+// Info via namedSessionActiveUseReasonInfo (the runtime activity probes inside it
+// stay raw, §7), and the persisted deferral-timer read/write side is likewise
+// typed.
+func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
+	reason, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
 	if !active {
 		return "", false, nil
 	}
@@ -4318,11 +4220,18 @@ func traceHealClearedPendingCreateLease(
 	if name == "" {
 		name = session.Metadata["session_name"]
 	}
+	// state_after is the healed state. Heal no longer mirrors onto the raw bead
+	// (WI-6 R3), so read it off the batch it returned (batch["state"] when the
+	// heal changed state, else the pre-heal state).
+	stateAfter := stateBeforeHeal
+	if s, ok := batch["state"]; ok {
+		stateAfter = s
+	}
 	trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonHealClearedStaleLease, TraceOutcomeApplied, template, name, traceRecordPayload{
 		"last_woke_at":              lastWokeAtBeforeHeal,
 		"pending_create_started_at": pendingCreateStartedAtBeforeHeal,
 		"provider_alive":            providerAlive,
-		"state_after":               session.Metadata["state"],
+		"state_after":               stateAfter,
 		"state_before":              stateBeforeHeal,
 	})
 }
@@ -4357,12 +4266,17 @@ func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpk
 	agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, extra)
 }
 
-func namedSessionActiveUseReason(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
+// namedSessionActiveUseReasonInfo is the session.Info sibling of
+// namedSessionActiveUseReason. The only bead read is the pending-interaction
+// deferral, which threads through pendingInteractionKeepsAwakeInfo (wait_hold +
+// held/quarantine timers off Info); every other check is a live runtime probe
+// (sp.IsAttached, sessionActivityReportable, sp.GetLastActivity) and stays raw.
+func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
 	if sp == nil || name == "" {
 		return "", false
 	}
 	// Pending interaction means a user is actively waiting.
-	if pendingInteractionKeepsAwake(session, sp, name, clk) {
+	if pendingInteractionKeepsAwakeInfo(info, sp, name, clk) {
 		return "pending_interaction", true
 	}
 	// Tmux attachment means a user is watching.
@@ -4449,12 +4363,15 @@ func resetConfiguredNamedSessionForConfigDrift(
 		session.Metadata = make(map[string]string, len(batch))
 	}
 	// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror loop is
-	// RETAINED for the write helpers. The start-pending caller (the alive lane) falls
-	// through without a `continue`, so the repaired session can reach startCandidates
-	// this same tick; wake fairness reads the Info twin captured at the append
-	// (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned batch
-	// (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured twin
-	// carries it. The raw mirror dies in WI-6.
+	// RETAINED for the start-execution cluster that still holds the raw
+	// startCandidate.session pointer (the asyncStart* raw reads,
+	// shouldRollbackPendingCreate, the rollback write helpers) — NOT the sleep/heal
+	// write helpers, which typed onto Info in R3. The start-pending caller (the alive
+	// lane) falls through without a `continue`, so the repaired session can reach
+	// startCandidates this same tick; wake fairness reads the Info twin captured at the
+	// append (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned
+	// batch (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured
+	// twin carries it. The raw mirror dies in Wave R4.
 	for key, value := range batch {
 		session.Metadata[key] = value
 	}

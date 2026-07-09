@@ -9583,7 +9583,7 @@ func TestSelectOrCreatePoolSessionBead_UsesFreshCreateTimeNotBeaconTime(t *testi
 		t.Fatalf("pending_create_started_at = %s, want independent from stale beacon %s", startedAt, oldBeacon)
 	}
 	result.CreatedAt = oldBeacon
-	if staleCreatingState(result, &clock.Fake{Time: startedAt.Add(30 * time.Second)}) {
+	if staleCreatingStateInfo(sessionpkg.InfoFromPersistedBead(result), &clock.Fake{Time: startedAt.Add(30 * time.Second)}) {
 		t.Fatal("fresh pool session was stale when row CreatedAt matched old controller beacon")
 	}
 }
