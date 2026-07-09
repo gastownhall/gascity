@@ -80,6 +80,28 @@ func convergeCleanCorpus() []convergeFixture {
 			realCity: true,
 		},
 		{
+			name: "canonical_singleton_heal_clears_stale_slot",
+			// The canonical record is absent so the derivation stamps a SINGLETON
+			// name (empty predicted slot), while a stale canonical_pool_slot from a
+			// prior pooled incarnation sits in the start snapshot. Fixture mode
+			// (realCity:false) assumes the heal executed, so end==apply(derived,start)
+			// must clear the stale slot; without the clear this fixture flags a
+			// divergence, which is the canary for the S19 singleton-heal slot leak.
+			durable: durableFacts{
+				canonicalIdentity: "",
+				now:               fixtureNow,
+			},
+			runtimeCap: shadowRuntimeCapture{probeSite: "desired", probeTarget: canonName, runtimePresent: convergeTriTrue, processAlive: convergeTriTrue},
+			start:      map[string]string{sessionpkg.CanonicalPoolSlotMetadata: "3"},
+			end:        map[string]string{sessionpkg.CanonicalInstanceNameMetadata: canonName},
+			pred:       convergePredictedValues{canonicalInstanceName: canonName},
+			recorded: []legacyCompareWrite{
+				{key: sessionpkg.CanonicalInstanceNameMetadata, value: canonName, writer: "syncSessionBeads"},
+				{key: sessionpkg.CanonicalPoolSlotMetadata, value: "", writer: "syncSessionBeads"},
+			},
+			realCity: false,
+		},
+		{
 			name: "absent_closed_bead_no_heal",
 			durable: durableFacts{
 				canonicalIdentity: "",
@@ -475,6 +497,109 @@ func TestConvergeRollbackSuppression(t *testing.T) {
 	}
 }
 
+// TestCompareReplayInertWithoutLegacyFacts pins the Stage-3 production contract:
+// with no captured legacy-read facts (legacyReplayable=false) the action-set
+// parity comparator emits NOTHING — no compared actions, no divergences, no
+// suppressions — even when the facts derive a real action. Comparing the derived
+// action set against itself is a tautology, so surfacing per-action compare
+// counters or hollow agreement there would be a misleading soak signal. The
+// separate identity-skew precondition is covered by
+// TestConvergeIdentitySkewSuppressed.
+func TestCompareReplayInertWithoutLegacyFacts(t *testing.T) {
+	in := replayInput{
+		// canonical absent => derives actionStampCanonicalIdentity; promptConfigured
+		// defaults false so exactly one action derives.
+		durable: durableFacts{canonicalIdentity: "", now: fixtureNow},
+		runtime: runtimeFacts{observed: true, live: true},
+		// legacyReplayable defaults false: the legacy branch's reads were not captured.
+	}
+	if len(deriveConvergeActions(in.durable, in.runtime)) == 0 {
+		t.Fatal("test setup: facts must derive at least one action to prove the comparator stays inert despite real derived actions")
+	}
+	v := compareReplay(in)
+	if len(v.comparedActions) != 0 {
+		t.Errorf("comparedActions = %v, want none (no parity counters without captured legacy facts)", v.comparedActions)
+	}
+	if len(v.divergences) != 0 {
+		t.Errorf("divergences = %v, want none (a self-comparison must not surface a divergence)", v.divergences)
+	}
+	if len(v.suppressed) != 0 {
+		t.Errorf("suppressed = %v, want none (no comparison ran without legacy facts)", v.suppressed)
+	}
+}
+
+// TestCompareReplayDetectsDerivationGapWhenReplayable proves the comparator is
+// suppressed-until-facts, not dead: when the legacy branch's read facts ARE
+// supplied (legacyReplayable=true), an action legacy would take that the
+// derivation misses surfaces as a surviving unpredicted_delta. This is the
+// capability the Stage-4/5 reader cutover will feed in production.
+func TestCompareReplayDetectsDerivationGapWhenReplayable(t *testing.T) {
+	v := compareReplay(replayInput{
+		// Derivation reads canonical already present => derives NO stamp.
+		durable: durableFacts{canonicalIdentity: "dir/agent-1", now: fixtureNow},
+		runtime: runtimeFacts{observed: true, live: true},
+		// Legacy actually read canonical absent => legacy WOULD stamp: a
+		// legacy-present/derived-absent gap the comparator must flag.
+		legacyReplayable: true,
+		legacyValues:     durableFacts{canonicalIdentity: "", now: fixtureNow},
+		legacyRuntime:    runtimeFacts{observed: true, live: true},
+	})
+	found := false
+	for _, c := range v.divergences {
+		if c == divergenceUnpredictedDelta {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a surviving unpredicted_delta for a legacy stamp the derivation missed, got divergences=%v suppressed=%v", v.divergences, v.suppressed)
+	}
+}
+
+// TestConvergeShadowRealCityEmitsNoActionSetCompare is the production-path
+// regression guard: on a real city evaluateCaptured has no separate legacy-read
+// facts, so it must derive and evaluate the session (honest denominator) WITHOUT
+// emitting action-set compare counters that would imply a parity check the
+// harness cannot yet run. Before the fix the non-replayable comparator counted
+// the derived action as a "compared" agreement; this asserts that hollow counter
+// is gone while the real derivation and the owned-key oracle still run.
+func TestConvergeShadowRealCityEmitsNoActionSetCompare(t *testing.T) {
+	t.Setenv("GC_CONVERGE_SHADOW", "1")
+	counters := newConvergeShadowCounters()
+	tick := newConvergeShadowTick("observer-test", 1, fixtureNow, true /* realCity */, counters)
+	if tick == nil {
+		t.Fatal("newConvergeShadowTick returned nil with harness enabled")
+	}
+	const sid = "sess-1"
+	// Canonical absent at start; legacy stamps it to the predicted value => an
+	// action derives and the owned-key oracle stays clean.
+	tick.captureDurable(sid, "tok-1", "dir/agent-1",
+		durableFacts{canonicalIdentity: "", now: fixtureNow},
+		map[string]string{},
+		convergePredictedValues{canonicalInstanceName: "dir/agent-1"},
+	)
+	tick.captureRuntime(sid, "desired", "dir/agent-1", convergeTriTrue, convergeTriTrue)
+	tick.recorder.record(sid, "poolCreate", map[string]string{
+		sessionpkg.CanonicalInstanceNameMetadata: "dir/agent-1",
+	})
+	tick.finish(map[string]map[string]string{sid: {
+		sessionpkg.CanonicalInstanceNameMetadata: "dir/agent-1",
+	}})
+	snap := counters.snapshot()
+
+	if snap.SessionsEvaluated != 1 {
+		t.Fatalf("SessionsEvaluated = %d, want 1 (denominator must stay honest)", snap.SessionsEvaluated)
+	}
+	if len(snap.Derived) == 0 {
+		t.Fatalf("Derived = %v, want a derived action (the derivation must still run)", snap.Derived)
+	}
+	if len(snap.CompareTotal) != 0 {
+		t.Errorf("CompareTotal = %v, want empty (no action-set parity counters without captured legacy facts)", snap.CompareTotal)
+	}
+	if got := snap.survivingDivergences(); got != 0 {
+		t.Errorf("survivingDivergences = %d, want 0 (a clean stamp is not a divergence); classes: %v", got, snap.DivergenceTotal)
+	}
+}
+
 // TestApplyDerivedToOwnedKeysIdempotent asserts applying the empty action list
 // leaves the snapshot unchanged (C2 idempotence at the oracle boundary).
 func TestApplyDerivedToOwnedKeysIdempotent(t *testing.T) {
@@ -484,6 +609,30 @@ func TestApplyDerivedToOwnedKeysIdempotent(t *testing.T) {
 		if end[k] != v {
 			t.Errorf("key %q: got %q want %q", k, end[k], v)
 		}
+	}
+}
+
+// TestApplyDerivedToOwnedKeysClearsStaleSingletonSlot pins that a singleton heal
+// (empty predicted pool slot) CLEARS a stale canonical_pool_slot carried in the
+// start snapshot, so {canonical_instance_name:"", canonical_pool_slot:"3"} heals
+// to a singleton rather than a stray-slot pooled identity. Regression guard for
+// the S19 shadow oracle preserving a stale slot on singleton canonical heal.
+func TestApplyDerivedToOwnedKeysClearsStaleSingletonSlot(t *testing.T) {
+	start := map[string]string{sessionpkg.CanonicalPoolSlotMetadata: "3"}
+	end := applyDerivedToOwnedKeys(
+		start,
+		[]sessConvergeAction{actionStampCanonicalIdentity},
+		convergePredictedValues{canonicalInstanceName: "dir/agent-1"}, // singleton: empty slot
+	)
+	if got := end[sessionpkg.CanonicalInstanceNameMetadata]; got != "dir/agent-1" {
+		t.Errorf("%s = %q, want %q", sessionpkg.CanonicalInstanceNameMetadata, got, "dir/agent-1")
+	}
+	if got := end[sessionpkg.CanonicalPoolSlotMetadata]; got != "" {
+		t.Errorf("%s = %q, want cleared (singleton heal must not keep a stale slot)", sessionpkg.CanonicalPoolSlotMetadata, got)
+	}
+	// The predicted end must read back as a singleton identity, not a pooled one.
+	if ci := sessionpkg.CanonicalIdentityFromMetadata(end); ci.PoolSlot != 0 {
+		t.Errorf("CanonicalIdentityFromMetadata(end).PoolSlot = %d, want 0 (singleton)", ci.PoolSlot)
 	}
 }
 

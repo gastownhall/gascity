@@ -24,6 +24,17 @@ const (
 	CanonicalPoolSlotMetadata = "canonical_pool_slot"
 )
 
+// freeCanonicalIdentityMetadata clears both durable canonical-identity keys on a
+// metadata patch/update map (empty values clear at the store layer). Every
+// named-session retirement path routes through this one helper so the two keys
+// are always freed together and the "canonical identity is freed on retirement"
+// invariant (S19) cannot drift between the RetireNamedSessionPatch builder and
+// the hand-rolled Manager.Close configured-named-session path.
+func freeCanonicalIdentityMetadata(meta map[string]string) {
+	meta[CanonicalInstanceNameMetadata] = ""
+	meta[CanonicalPoolSlotMetadata] = ""
+}
+
 // CanonicalIdentity is the single durable identity record for a session bead:
 // the canonical qualified instance name plus pool slot the reconciler resolved
 // once and stamped, rather than a value re-inferred from competing sources each

@@ -356,6 +356,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"alias":                     "",
 				"session_name":              "",
 				"session_name_explicit":     "",
+				"canonical_instance_name":   "",
+				"canonical_pool_slot":       "",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"retired_named_identity":    "worker",

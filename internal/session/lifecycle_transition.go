@@ -23,8 +23,13 @@ const (
 	// (constant + clear sites) in Stage 2 but NEVER written here; its writer is
 	// the Stage-4 awake-scan path.
 	PrimingAttemptedAtMetadataKey = "priming_attempted_at"
-	// PromptHashMetadataKey records the sha256 of the exact rendered prompt that
-	// was delivered, so a later hash mismatch marks the session re-eligible.
+	// PromptHashMetadataKey records the sha256 of the rendered startup *template*
+	// prompt (tp.Prompt), so a later hash mismatch — the template/config the
+	// session would be re-launched with changed — marks the session re-eligible.
+	// It deliberately excludes the one-shot initial_message override, which is
+	// appended to the delivered payload only on a first start / fresh wake and is
+	// never replayed on a later re-launch; folding it in would make the stored
+	// hash never match a re-derivation from the template, re-priming forever.
 	PromptHashMetadataKey = "prompt_hash"
 )
 
@@ -577,6 +582,11 @@ func RetireNamedSessionPatch(now time.Time, reason, identity string) MetadataPat
 	patch["alias"] = ""
 	patch["session_name"] = ""
 	patch["session_name_explicit"] = ""
+	// Free the durable canonical-identity record (S19) alongside the legacy
+	// alias/session_name identifiers, so an archived duplicate/removed named
+	// session no longer carries a live canonical instance name or pool slot —
+	// matching this patch's contract that canonical identifiers are freed.
+	freeCanonicalIdentityMetadata(patch)
 	patch["synced_at"] = now.UTC().Format(time.RFC3339)
 	patch["held_until"] = ""
 	patch["quarantined_until"] = ""

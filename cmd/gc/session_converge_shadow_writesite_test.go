@@ -25,7 +25,7 @@ var convergeComparedKeyWriteSiteInventory = map[string]string{
 	"session_identity.go":           "desiredSessionIdentity builds the canonical stamp (pure); recorded by callers (adoptionBarrier.create, syncSessionBeads.create)",
 	"session_name_lookup.go":        "pool-create canonical stamp; recorded via recordLegacyCompareWrites(poolSessionCreate)",
 	"session_reconcile.go":          "healStatePatchWithRollback builds priming clears; recorded via recordLegacyCompareWrites(healStateWithRollback) at the ApplyPatch site",
-	"session_beads.go":              "syncSessionBeads reclaim priming clears + create canonical stamp; recorded via recordLegacyCompareWrites",
+	"session_beads.go":              "syncSessionBeads reclaim priming clears + create canonical stamp + named-session retire canonical clears; recorded via recordLegacyCompareWrites",
 	"session_lifecycle_parallel.go": "clearStaleResumeKeyMetadata priming clears; recorded via recordLegacyCompareWrites(clearStaleResumeKeyMetadata)",
 	"session_converge_shadow.go":    "the recorder + owned-key oracle itself (applyDerivedToOwnedKeys writes a local prediction map, not a store)",
 }

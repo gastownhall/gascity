@@ -1204,6 +1204,12 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	update.Metadata["session_name_explicit"] = ""
 	update.Metadata["pending_create_claim"] = ""
 	update.Metadata["pending_create_started_at"] = ""
+	// Free the durable canonical-identity record on this close path too, matching
+	// RetireNamedSessionPatch. Without it a configured named session closed via
+	// Manager.Close keeps a stale canonical instance name / pool slot — the same
+	// strand class the S19 retirement fix removed for the duplicate/removed/API
+	// paths, which this hand-rolled path is not one of.
+	freeCanonicalIdentityMetadata(update.Metadata)
 	if err := m.store.Update(id, update); err != nil {
 		return fmt.Errorf("retiring configured named session identifiers: %w", err)
 	}

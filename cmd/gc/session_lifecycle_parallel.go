@@ -198,7 +198,10 @@ type preparedStart struct {
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
 	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
-	// no priming marker. promptHash is the sha256 of the exact rendered prompt.
+	// no priming marker. promptHash is the sha256 of the rendered startup template
+	// prompt (tp.Prompt) only — it excludes the one-shot initial_message override
+	// appended to the delivered payload, so the stored hash still matches a later
+	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
 }
@@ -978,6 +981,12 @@ func buildPreparedStartWithWorkDirResolver(
 	// restartPromptNudge and delivers nothing. Reading the env marker instead
 	// would mis-stamp every resume (it is re-set to "1" for hook consumption).
 	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey)
+	// prompt_hash is the sha256 of the rendered startup TEMPLATE prompt (tp.Prompt)
+	// only, computed here BEFORE the one-shot initial_message is appended to the
+	// delivered payload below. The hash exists so a template/config change re-primes
+	// the session (S19 Stage 4); a fresh re-launch re-renders tp.Prompt but never
+	// replays the transient initial_message, so hashing the delivered bytes would
+	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""

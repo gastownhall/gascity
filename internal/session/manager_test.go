@@ -310,6 +310,50 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+// TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity pins that the
+// Manager.Close named-session retirement path frees the durable canonical-identity
+// record (canonical_instance_name / canonical_pool_slot) alongside the legacy
+// identifiers, matching RetireNamedSessionPatch. Regression guard for the second
+// retirement path that stranded canonical identity after the S19 stage-2 fix.
+func TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+
+	b, err := store.Create(beads.Bead{
+		Type: BeadType,
+		Metadata: map[string]string{
+			NamedSessionMetadataKey:       "true",
+			NamedSessionIdentityMetadata:  "myrig/worker",
+			"session_name":                "test-city--myrig--worker",
+			"session_name_explicit":       "true",
+			CanonicalInstanceNameMetadata: "myrig/worker",
+			CanonicalPoolSlotMetadata:     "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.retireConfiguredNamedSessionIdentifiers(b.ID, b); err != nil {
+		t.Fatalf("retireConfiguredNamedSessionIdentifiers: %v", err)
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if v := got.Metadata[CanonicalInstanceNameMetadata]; v != "" {
+		t.Errorf("%s = %q, want cleared", CanonicalInstanceNameMetadata, v)
+	}
+	if v := got.Metadata[CanonicalPoolSlotMetadata]; v != "" {
+		t.Errorf("%s = %q, want cleared", CanonicalPoolSlotMetadata, v)
+	}
+	// Legacy identifiers stay cleared too (unchanged behavior).
+	if v := got.Metadata["session_name"]; v != "" {
+		t.Errorf("session_name = %q, want cleared", v)
+	}
+}
+
 func TestCreateKillsUntrackedOrphanBeforeStart(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{

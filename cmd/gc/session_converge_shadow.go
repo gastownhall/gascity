@@ -525,8 +525,15 @@ func applyDerivedToOwnedKeys(start map[string]string, actions []sessConvergeActi
 		switch a {
 		case actionStampCanonicalIdentity:
 			end[sessionpkg.CanonicalInstanceNameMetadata] = pred.canonicalInstanceName
+			// Stamp the predicted pool slot for a pooled heal, and CLEAR any stale
+			// slot for a singleton heal (empty predicted slot). Without the clear, a
+			// start state carrying a stray canonical_pool_slot plus the newly-stamped
+			// singleton name would read back through CanonicalIdentityFromMetadata as
+			// an authoritative pooled identity.
 			if pred.canonicalPoolSlot != "" {
 				end[sessionpkg.CanonicalPoolSlotMetadata] = pred.canonicalPoolSlot
+			} else {
+				end[sessionpkg.CanonicalPoolSlotMetadata] = ""
 			}
 		case actionStampPrimedFromRuntime:
 			end[sessionpkg.PrimedAtMetadataKey] = pred.primedAt
@@ -727,16 +734,21 @@ func actionName(a sessConvergeAction) string {
 	}
 }
 
-// compareReplay is the judge. It derives the action set, filters the priming
-// family on real cities, applies identity-skew and boundary short-circuits,
-// models tick-global suppression, and runs deterministic replay on the values
-// legacy actually read: if the replay reproduces the derived action, the record
-// is auto-classified world_moved and suppressed. The bar is "zero divergences
-// that survive replay".
+// compareReplay is the judge. It applies the identity-skew short-circuit, then —
+// only when the legacy branch's read facts were captured (legacyReplayable) —
+// derives the action set, filters the priming family on real cities, applies the
+// boundary short-circuit, models tick-global suppression, and runs deterministic
+// replay on the values legacy actually read: if the replay reproduces the derived
+// action, the record is auto-classified world_moved and suppressed. The bar is
+// "zero divergences that survive replay".
 //
-// This comparator judges ACTION-SET agreement. The owned-key state-diff oracle
-// (evaluateStateDiffOracle) judges realized-value agreement; the two are
-// complementary and both feed the counters.
+// This comparator judges ACTION-SET agreement, which is meaningful only against
+// separately-captured legacy facts. Without them the comparison would degenerate
+// to derived-vs-derived, so the parity pass is skipped entirely (no hollow
+// compare counters) until the Stage-4/5 reader cutover supplies those facts. The
+// owned-key state-diff oracle (evaluateStateDiffOracle) judges realized-value
+// agreement and remains the live signal for this stage; the two are
+// complementary and both feed the counters once replay is available.
 func compareReplay(in replayInput) replayVerdict {
 	var v replayVerdict
 
@@ -749,15 +761,25 @@ func compareReplay(in replayInput) replayVerdict {
 		return v
 	}
 
+	// Action-set parity requires the values the legacy branch actually READ, so a
+	// deterministic replay can reconstruct the legacy action set and a genuine
+	// derived-vs-legacy mismatch can surface. Without them (legacyReplayable ==
+	// false) the only "legacy" set available is the derived set itself: every
+	// derived action trivially agrees with itself, no unrealized-prediction /
+	// unpredicted-delta divergence can arise, and emitting per-action compare
+	// counters would imply a parity check that never ran. The production
+	// reconciler cannot supply separate legacy facts until the Stage-4/5 reader
+	// cutover, so this comparator stays inert there instead of reporting hollow
+	// agreement; the owned-key state-diff oracle carries the realized-value signal
+	// for this stage.
+	if !in.legacyReplayable {
+		return v
+	}
+
 	derived := deriveConvergeActions(in.durable, in.runtime)
 	// The legacy action set is what deriveConvergeActions produces on the values
-	// legacy actually read (deterministic replay ground truth). When the legacy
-	// path is not replayable we fall back to comparing derived against itself,
-	// which can only surface suppression/boundary/priming classifications.
-	legacy := derived
-	if in.legacyReplayable {
-		legacy = deriveConvergeActions(in.legacyValues, in.legacyRuntime)
-	}
+	// legacy actually read (deterministic replay ground truth).
+	legacy := deriveConvergeActions(in.legacyValues, in.legacyRuntime)
 
 	derivedSet := actionSet(derived)
 	legacySet := actionSet(legacy)
@@ -779,13 +801,9 @@ func compareReplay(in replayInput) replayVerdict {
 			v.suppressed = append(v.suppressed, divergenceBoundary)
 			continue
 		}
-		if in.legacyReplayable {
-			// Deterministic replay already produced `legacy`; if it lacks this
-			// action the world genuinely moved between derivation and legacy read.
-			v.suppressed = append(v.suppressed, divergenceWorldMoved)
-			continue
-		}
-		v.divergences = append(v.divergences, divergenceUnrealizedPrediction)
+		// Deterministic replay already produced `legacy`; if it lacks this action
+		// the world genuinely moved between derivation and legacy read.
+		v.suppressed = append(v.suppressed, divergenceWorldMoved)
 	}
 
 	// Legacy-present, derived-absent: a derivation gap (the derivation would miss
@@ -1052,7 +1070,13 @@ func (t *convergeShadowTick) evaluateCaptured(e *shadowSessionEval, end map[stri
 		}
 	}
 
-	// Replay comparator: action-set agreement under suppression/replay.
+	// Replay comparator. The Stage-3 harness captures a single fact set (the
+	// coherent Info snapshot plus the legacy branch's own probe), so it cannot yet
+	// supply the SEPARATE legacy-read facts action-set parity needs — that arrives
+	// with the Stage-4/5 reader cutover. legacyReplayable is therefore false and
+	// this runs the identity-skew precondition check only; the action-set parity
+	// pass stays inert instead of comparing the derived action set against itself.
+	// The owned-key state-diff oracle above is the realized-value signal here.
 	verdict := compareReplay(replayInput{
 		sessionID:         e.sessionID,
 		instanceToken:     e.instanceToken,
