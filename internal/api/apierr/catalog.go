@@ -14,13 +14,22 @@ var (
 	// Resource resolution. Codes are per-resource (city-not-found, not a generic
 	// not-found) so a client branches on which resource was missing; rig-not-found
 	// is shared across the domains that resolve a rig.
-	CityNotFound     = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
-	BeadNotFound     = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
-	MailNotFound     = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
-	RigNotFound      = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
-	SessionNotFound  = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
-	AgentNotFound    = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
-	ProviderNotFound = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
+	CityNotFound        = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
+	BeadNotFound        = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
+	MailNotFound        = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
+	RigNotFound         = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
+	SessionNotFound     = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
+	AgentNotFound       = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
+	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
+	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
+	WorkflowNotFound    = Register(ProblemType{Code: "workflow-not-found", Status: http.StatusNotFound, Title: "Workflow Not Found"})
+	FormulaNotFound     = Register(ProblemType{Code: "formula-not-found", Status: http.StatusNotFound, Title: "Formula Not Found"})
+	OrderNotFound       = Register(ProblemType{Code: "order-not-found", Status: http.StatusNotFound, Title: "Order Not Found"})
+	ExtmsgGroupNotFound = Register(ProblemType{Code: "extmsg-group-not-found", Status: http.StatusNotFound, Title: "External-Message Group Not Found"})
+	// ScopeNotFound is a city-or-rig scope reference that does not resolve (the
+	// detail names which kind); it is distinct from the resource the scope was
+	// being resolved for (e.g. a formula).
+	ScopeNotFound = Register(ProblemType{Code: "scope-not-found", Status: http.StatusNotFound, Title: "Scope Not Found"})
 
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
@@ -38,6 +47,10 @@ var (
 	// client cannot today distinguish "pick a different name" from "resume/stop
 	// first" by code or prefix.
 	SessionConflict = Register(ProblemType{Code: "session-conflict", Status: http.StatusConflict, Title: "Session State Conflict"})
+
+	// AmbiguousReference is a name/reference that matched more than one resource;
+	// the client should re-address with a scoped/qualified name, not retry or wait.
+	AmbiguousReference = Register(ProblemType{Code: "ambiguous-reference", Status: http.StatusConflict, Title: "Ambiguous Reference"})
 
 	// Authorization / capability.
 	Forbidden      = Register(ProblemType{Code: "forbidden", Status: http.StatusForbidden, Title: "Forbidden"})
