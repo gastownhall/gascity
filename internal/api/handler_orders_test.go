@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -1663,6 +1664,37 @@ func TestHandleOrderHistoryDetailUsesStoreRefForCollidingIDs(t *testing.T) {
 	}
 	if resp.Output != "rig output" {
 		t.Fatalf("output = %q, want rig output", resp.Output)
+	}
+}
+
+// TestHandleOrderHistoryDetailInvalidStoreRefReturnsScopeNotFound pins the
+// machine-readable contract for an unresolvable store_ref on
+// GET /order/history/{bead_id}: because store_ref is a city-or-rig scope
+// reference, a miss must surface as the scope-not-found problem code, not
+// order-not-found, so a client branching on `code` applies scope-recovery rather
+// than order-missing recovery.
+func TestHandleOrderHistoryDetailInvalidStoreRefReturnsScopeNotFound(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/bd-1?store_ref=rig:nonexistent"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+
+	var body apierr.ErrorModel
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal problem body: %v (%s)", err, w.Body.String())
+	}
+	if body.Code != "scope-not-found" || body.Type != "urn:gascity:error:scope-not-found" {
+		t.Fatalf("invalid store_ref type/code = %q/%q, want scope-not-found", body.Type, body.Code)
+	}
+	if body.Detail != "store not found" {
+		t.Fatalf("detail = %q, want %q (wire detail must be preserved)", body.Detail, "store not found")
 	}
 }
 

@@ -312,7 +312,11 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	if input.StoreRef != "" {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {
-			return nil, apierr.OrderNotFound.Msg("store not found")
+			// The store_ref is a city-or-rig scope reference (city:/rig:), resolved
+			// exactly like a scope by workflowStoreByRef. When it does not resolve,
+			// the failing resource is that scope reference, not the order, so the
+			// machine code must name the scope (scope-not-found), not order-not-found.
+			return nil, apierr.ScopeNotFound.Msg("store not found")
 		}
 		storeInfos = []workflowStoreInfo{info}
 	}
