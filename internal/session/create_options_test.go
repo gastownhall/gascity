@@ -140,20 +140,32 @@ func TestCreateSessionFieldNamedSpecMapsCorrectly(t *testing.T) {
 	}
 }
 
-// TestCreateSessionMatchesLegacyWrapper locks parity between the collapsed
-// CreateSession path and the historical Create wrapper it now backs.
+// TestCreateSessionMatchesLegacyWrapper proves the collapsed CreateSession
+// default coincides with the legacy started-wrapper's hardcoded
+// session_origin=manual. The retired Create/CreateNamed* wrappers stamped
+// "manual" literally; the collapsed path instead relies on
+// defaultSessionOrigin(). Locking those two together means a future change to
+// the default that diverged from the historical hardcoded value would fail
+// here, rather than silently altering started-session provenance.
 func TestCreateSessionMatchesLegacyWrapper(t *testing.T) {
-	viaWrapper := createOriginMetadata(t, func(mgr *Manager) (Info, error) {
-		return mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	viaDefault := createOriginMetadata(t, func(mgr *Manager) (Info, error) {
+		// No session_origin in ExtraMeta: exercise the collapsed default path.
+		return mgr.CreateSession(context.Background(), CreateOptions{
+			Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		})
 	})
-	viaSpec := createOriginMetadata(t, func(mgr *Manager) (Info, error) {
+	viaLegacyExplicit := createOriginMetadata(t, func(mgr *Manager) (Info, error) {
+		// The value the retired started wrappers hardcoded.
 		return mgr.CreateSession(context.Background(), CreateOptions{
 			Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude",
 			ExtraMeta: map[string]string{"session_origin": "manual"},
 		})
 	})
-	if viaWrapper != viaSpec {
-		t.Errorf("session_origin parity mismatch: wrapper=%q spec=%q", viaWrapper, viaSpec)
+	if viaDefault != viaLegacyExplicit {
+		t.Errorf("session_origin parity mismatch: default=%q legacy-explicit=%q", viaDefault, viaLegacyExplicit)
+	}
+	if viaDefault != "manual" {
+		t.Errorf("collapsed default session_origin = %q, want legacy %q", viaDefault, "manual")
 	}
 }
 

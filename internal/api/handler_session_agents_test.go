@@ -21,7 +21,6 @@ func createTranscriptBackedSession(t *testing.T, store beads.Store, sp *runtime.
 	mgr := session.NewManagerWithOptions(store, sp)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "default", Title: "Transcript Backed", Command: "echo test", WorkDir: workDir, Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

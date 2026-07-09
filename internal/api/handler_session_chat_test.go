@@ -120,7 +120,6 @@ func TestBuildSessionResumeAppliesTemplateOverridesToExplicitResumeCommand(t *te
 		ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

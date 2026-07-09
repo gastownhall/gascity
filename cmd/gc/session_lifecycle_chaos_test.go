@@ -1019,7 +1019,6 @@ func (h *sessionChaosHarness) createSessionIntent() {
 		return
 	}
 	info, err := h.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: h.template, Title: "Chaos worker", Command: h.command, WorkDir: "", Provider: "fake", Transport: "", Resume: sessionpkg.ProviderResume{}})
-
 	if err != nil {
 		h.failf("CreateBeadOnly: %v", err)
 	}

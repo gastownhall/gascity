@@ -976,7 +976,6 @@ func TestCreateConfirmsStartedStateWithoutControllerDriftHash(t *testing.T) {
 			FingerprintExtra: map[string]string{"depends_on": "db"},
 			SessionLive:      []string{"echo live"},
 		}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1020,14 +1019,14 @@ func TestCreateDefaultsTitleToTemplate(t *testing.T) {
 	}
 }
 
-func TestCreateBeadOnlyDefaultsTitleToTemplate(t *testing.T) {
+func TestCreateSessionBeadOnlyDefaultsTitleToTemplate(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnly: %v", err)
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
 	}
 	b, err := store.Get(info.ID)
 	if err != nil {
@@ -1038,14 +1037,14 @@ func TestCreateBeadOnlyDefaultsTitleToTemplate(t *testing.T) {
 	}
 }
 
-func TestCreateBeadOnly(t *testing.T) {
+func TestCreateSessionBeadOnly(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnly: %v", err)
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
 	}
 	if info.Template != "helper" {
 		t.Errorf("Template = %q, want %q", info.Template, "helper")
@@ -1088,7 +1087,7 @@ func TestGetSurfacesAgentNameMetadata(t *testing.T) {
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnly: %v", err)
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "agent_name", "myrig/helper-adhoc-123"); err != nil {
 		t.Fatalf("SetMetadata(agent_name): %v", err)
@@ -1116,7 +1115,7 @@ func TestGetSurfacesLastNudgeDeliveredAtMetadata(t *testing.T) {
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnly: %v", err)
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
 	}
 
 	stamp := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
@@ -1145,7 +1144,7 @@ func TestGetIgnoresInvalidLastNudgeDeliveredAtMetadata(t *testing.T) {
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnly: %v", err)
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, MetadataLastNudgeDeliveredAt, "not-a-timestamp"); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
@@ -1160,14 +1159,14 @@ func TestGetIgnoresInvalidLastNudgeDeliveredAtMetadata(t *testing.T) {
 	}
 }
 
-func TestCreateNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
+func TestCreateSessionNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	if info.SessionName != "sky" {
 		t.Fatalf("SessionName = %q, want sky", info.SessionName)
@@ -1177,13 +1176,13 @@ func TestCreateNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
-func TestCreateNamedWithTransport_RejectsReusedName(t *testing.T) {
+func TestCreateSessionNamedWithTransport_RejectsReusedName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "first", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
-		t.Fatalf("first CreateNamedWithTransport: %v", err)
+		t.Fatalf("first CreateSessionNamedWithTransport: %v", err)
 	}
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "second", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err == nil {
 		t.Fatal("expected session name conflict")
@@ -1192,14 +1191,14 @@ func TestCreateNamedWithTransport_RejectsReusedName(t *testing.T) {
 	}
 }
 
-func TestCreateNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
+func TestCreateSessionNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "first", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("first CreateNamedWithTransport: %v", err)
+		t.Fatalf("first CreateSessionNamedWithTransport: %v", err)
 	}
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1212,7 +1211,7 @@ func TestCreateNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
 	}
 }
 
-func TestCreateNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *testing.T) {
+func TestCreateSessionNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.StartErrors["sky"] = errors.New("boom")
@@ -1228,14 +1227,14 @@ func TestCreateNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *testing.
 	delete(sp.StartErrors, "sky")
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "second", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("retry CreateNamedWithTransport: %v", err)
+		t.Fatalf("retry CreateSessionNamedWithTransport: %v", err)
 	}
 	if info.SessionName != "sky" {
 		t.Fatalf("SessionName = %q, want sky", info.SessionName)
 	}
 }
 
-func TestCreateNamedWithTransport_ConvergesLateSuccessStartError(t *testing.T) {
+func TestCreateSessionNamedWithTransport_ConvergesLateSuccessStartError(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &lateSuccessStartProvider{
 		Fake:     runtime.NewFake(),
@@ -1245,7 +1244,7 @@ func TestCreateNamedWithTransport_ConvergesLateSuccessStartError(t *testing.T) {
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "first", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	if info.SessionName != "sky" {
 		t.Fatalf("SessionName = %q, want sky", info.SessionName)
@@ -1262,7 +1261,7 @@ func TestCreateNamedWithTransport_ConvergesLateSuccessStartError(t *testing.T) {
 	}
 }
 
-func TestCreateNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *testing.T) {
+func TestCreateSessionNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
@@ -1283,7 +1282,7 @@ func TestCreateNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "second", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("retry CreateNamedWithTransport: %v", err)
+		t.Fatalf("retry CreateSessionNamedWithTransport: %v", err)
 	}
 	if !defaultSP.IsRunning(info.SessionName) {
 		t.Fatalf("default backend should own %q after ACP duplicate cleanup", info.SessionName)
@@ -1293,14 +1292,14 @@ func TestCreateNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *
 	}
 }
 
-func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
+func TestCreateSessionBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, ExplicitName: "sky", Template: "helper", Title: "queued", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnlyNamed: %v", err)
+		t.Fatalf("CreateSessionBeadOnlyNamed: %v", err)
 	}
 	if info.SessionName != "sky" {
 		t.Fatalf("SessionName = %q, want sky", info.SessionName)
@@ -1317,14 +1316,14 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
-func TestCreateAliasedBeadOnlyNamed_SetsPendingCreateMetadata(t *testing.T) {
+func TestCreateSessionAliasedBeadOnlyNamed_SetsPendingCreateMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Alias: "worker", ExplicitName: "test-city--worker", Template: "worker", Title: "queued", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+		t.Fatalf("CreateSessionAliasedBeadOnlyNamed: %v", err)
 	}
 
 	b, err := store.Get(info.ID)
@@ -1343,14 +1342,14 @@ func TestCreateAliasedBeadOnlyNamed_SetsPendingCreateMetadata(t *testing.T) {
 	}
 }
 
-func TestCreateBeadOnly_SetsPendingCreateClaimForWakeSignal(t *testing.T) {
+func TestCreateSessionBeadOnly_SetsPendingCreateClaimForWakeSignal(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "queued", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
 	if err != nil {
-		t.Fatalf("CreateBeadOnly: %v", err)
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
 	}
 	b, err := store.Get(info.ID)
 	if err != nil {
@@ -1517,9 +1516,8 @@ func TestClose_ConfiguredNamedSessionRetiresIdentifiers(t *testing.T) {
 			"configured_named_session":  "true",
 			"configured_named_identity": "mayor",
 		}})
-
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
 	if err := mgr.Close(info.ID); err != nil {
@@ -1560,12 +1558,10 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 
 	info, err := mgr.CreateSession(
 		context.Background(), CreateOptions{Alias: "refinery", ExplicitName: "test-city--refinery", Template: "refinery", Title: "Refinery", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
-
 			"configured_named_identity": "refinery",
 		}})
-
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
 	if err := mgr.Close(info.ID); err != nil {
@@ -1600,9 +1596,8 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 			"configured_named_identity": "mayor",
 			"session_origin":            "named",
 		}})
-
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
 	var start *runtime.Call
@@ -1641,9 +1636,8 @@ func TestCreateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
 			"provider_kind":    "claude-max",
 			"session_origin":   "named",
 		}})
-
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
 	cfg := sp.LastStartConfig("test-city--mayor")
@@ -1700,9 +1694,8 @@ func TestCreateAliaslessMultiSessionUsesConcreteRuntimeIdentity(t *testing.T) {
 			"agent_name":     "demo/ant-adhoc-123",
 			"session_origin": "manual",
 		}})
-
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
 	var start *runtime.Call
@@ -2434,7 +2427,6 @@ func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 
 	info, err := mgr.CreateSession(
 		context.Background(), CreateOptions{Alias: "old-alias", ExplicitName: "", Template: "helper", Title: "old title", Command: "echo test", WorkDir: "/tmp", Provider: "test", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4487,7 +4479,6 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4536,7 +4527,6 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4577,7 +4567,6 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4640,7 +4629,6 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4703,7 +4691,6 @@ func TestEnsureRunning_RetriesWhenResumeKeyDiverged(t *testing.T) {
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4752,7 +4739,6 @@ func TestEnsureRunning_RetriesWhenResumeKeyDivergedKeepsEarlierResumeText(t *tes
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4799,7 +4785,6 @@ func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *test
 		SessionIDFlag: "--session-id",
 		ResumeCommand: "claude --resume {{.SessionKey}} --dangerously-skip-permissions",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4916,7 +4901,6 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

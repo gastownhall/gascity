@@ -124,7 +124,6 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	manager := sessionpkg.NewManagerWithOptions(store, sp)
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "legacy-provider", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"}})
-
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -203,7 +202,6 @@ func TestFactoryTransportResolverReceivesProviderForLegacyProviderSession(t *tes
 	manager := sessionpkg.NewManagerWithOptions(store, sp)
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "opencode", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "opencode", Transport: "", Resume: sessionpkg.ProviderResume{}})
-
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -253,7 +251,6 @@ func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 	manager := sessionpkg.NewManagerWithOptions(store, sp)
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "legacy-provider", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"}})
-
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -283,7 +280,6 @@ func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T
 	recorder := events.NewFake()
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--session-id"}})
-
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -325,7 +321,6 @@ func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
 
 	info, err := manager.CreateSession(
 		context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

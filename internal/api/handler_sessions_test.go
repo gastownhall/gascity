@@ -1808,7 +1808,6 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Fork", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -4884,9 +4883,8 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "myrig/worker", ExplicitName: "", Template: "myrig/worker", Title: "Historic Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -5851,7 +5849,7 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{ExplicitName: "sky", Template: "myrig/worker", Title: "Sky", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -6133,7 +6131,7 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{ExplicitName: "sky", Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Transport: "", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,

@@ -67,7 +67,6 @@ STUB_ENV = "present"
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Transport: "", Resume: session.ProviderResume{
 		SessionIDFlag: "--old-session-id",
 	}})
-
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -1251,7 +1250,6 @@ session_id_flag = "--session-id"
 			ResumeStyle:   "flag",
 			SessionIDFlag: "--session-id",
 		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1314,7 +1312,6 @@ session_id_flag = "--session-id"
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

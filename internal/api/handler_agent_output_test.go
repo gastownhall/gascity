@@ -340,7 +340,6 @@ func TestResolveAgentTranscriptUsesBeadSessionIDWhenRuntimeMetaMissing(t *testin
 	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "", ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude/tmux-cli", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -729,7 +728,6 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "", ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

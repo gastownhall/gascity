@@ -1973,7 +1973,6 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 			ResumeStyle:   "flag",
 			SessionIDFlag: "--session-id",
 		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
