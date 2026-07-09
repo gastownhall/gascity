@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -8,6 +9,12 @@ import (
 )
 
 type fakeDashResolver struct{ cities []api.CityInfo }
+
+// stubRoundTripper is a sentinel http.RoundTripper for asserting that
+// dashboardDeps stores the self-read transport it is handed.
+type stubRoundTripper struct{}
+
+func (*stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { return nil, nil }
 
 func (f fakeDashResolver) ListCities() []api.CityInfo { return f.cities }
 func (f fakeDashResolver) CityState(string) api.State { return nil }
@@ -39,7 +46,7 @@ func TestDashboardLoopbackBaseURL(t *testing.T) {
 // red-team HIGH finding: attachDashboard must give the plane a non-empty
 // SupervisorBaseURL, or the host-side samplers ship permanently degraded.
 func TestDashboardDepsWiresSupervisorBaseURL(t *testing.T) {
-	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372)
+	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372, nil)
 	if deps.SupervisorBaseURL == "" {
 		t.Fatal("dashboardDeps left SupervisorBaseURL empty; samplers would never read /v0/.../status")
 	}
@@ -51,13 +58,28 @@ func TestDashboardDepsWiresSupervisorBaseURL(t *testing.T) {
 	}
 }
 
+// TestDashboardDepsWiresSelfReadTransport is the regression guard for the
+// read-auth finding: attachDashboard must give the plane the supervisor's
+// in-process loopback transport, or the host-side samplers' loopback self-reads
+// of the gated /v0/city/{name}/status route would 401 once read-auth is enabled.
+func TestDashboardDepsWiresSelfReadTransport(t *testing.T) {
+	rt := &stubRoundTripper{}
+	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372, rt)
+	if deps.SelfReadTransport == nil {
+		t.Fatal("dashboardDeps left SelfReadTransport nil; samplers' loopback reads would 401 under read-auth")
+	}
+	if deps.SelfReadTransport != http.RoundTripper(rt) {
+		t.Errorf("SelfReadTransport = %v, want the passed-in transport", deps.SelfReadTransport)
+	}
+}
+
 // TestDashboardDepsModulesCoreOnly records that core-only dashboard modules are
 // the intentional steady state: dashboardDeps leaves EnabledModules unset
 // because no first-party (gated) view module ships yet, so the omission is a
 // tested decision rather than an oversight. When a gated module is added, wire
 // its enable source in dashboardDeps and update this test.
 func TestDashboardDepsModulesCoreOnly(t *testing.T) {
-	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372)
+	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372, nil)
 	if len(deps.EnabledModules) != 0 {
 		t.Errorf("EnabledModules = %v, want empty: core-only is the intentional default; wire the enable source and update this test when a gated module ships", deps.EnabledModules)
 	}

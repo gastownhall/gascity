@@ -2068,12 +2068,15 @@ type APIConfig struct {
 	// default-on dashboard host plane (/api/*, including its /api/city/{cityName}/*
 	// samplers, run detail, run diff, and config reads), and the supervisor-scope
 	// routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the
-	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind,
-	// enable this gate only behind the grant-minting authority/edge that fronts
-	// the whole listener (the intended deployment), and/or disable the dashboard
-	// host plane with GC_SUPERVISOR_DASHBOARD=0; otherwise those surfaces remain
-	// readable by network position. Gating them is tracked as follow-up work
-	// under the supervisor-scope grant.
+	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the
+	// only complete mitigation is to front the whole listener with the
+	// grant-minting authority/edge (the intended deployment), which protects
+	// every surface above. Disabling the dashboard host plane with
+	// GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*
+	// only, while the supervisor-scope event feed /v0/events and
+	// /v0/events/stream stays readable by network position until the follow-up
+	// supervisor-scope grant lands. Gating those feeds is tracked as that
+	// follow-up work.
 	//
 	// Built-in callers (the bundled gc API client and dashboard SPA) mint no
 	// grant, so enabling this gate turns their direct /v0/city reads away with a

@@ -2,11 +2,58 @@ package dashboardbff
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+// recordingRoundTripper is a fake in-process transport standing in for the
+// supervisor's LoopbackTransport: it records the request path and returns a
+// canned response without touching the network, so a test can prove the
+// samplers dispatch loopback reads through Deps.SelfReadTransport.
+type recordingRoundTripper struct {
+	gotPath string
+	status  int
+	body    string
+}
+
+func (rt *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.gotPath = req.URL.Path
+	code := rt.status
+	if code == 0 {
+		code = http.StatusOK
+	}
+	return &http.Response{
+		StatusCode: code,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(rt.body)),
+		Request:    req,
+	}, nil
+}
+
+// TestSamplersUseSelfReadTransport is the regression test for the read-auth
+// finding at the sampler layer: fetchStatus must dispatch its loopback status
+// read through Deps.SelfReadTransport (the supervisor's in-process transport),
+// not the network. The base URL is deliberately unroutable, so a networked read
+// would fail; the canned status body proves the transport was used.
+func TestSamplersUseSelfReadTransport(t *testing.T) {
+	rt := &recordingRoundTripper{status: http.StatusOK, body: `{"store_health":{"size_bytes":42}}`}
+	m := newSamplerManager(Deps{SupervisorBaseURL: "http://supervisor.invalid", SelfReadTransport: rt}, newExecRunner())
+
+	raw, err := m.fetchStatus(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("fetchStatus via self-read transport: %v", err)
+	}
+	if rt.gotPath != "/v0/city/alpha/status" {
+		t.Fatalf("transport saw path %q, want /v0/city/alpha/status", rt.gotPath)
+	}
+	if !strings.Contains(string(raw), "size_bytes") {
+		t.Fatalf("fetchStatus body = %q, want the transport's canned status", raw)
+	}
+}
 
 // statusServer returns an httptest server that serves a fixed supervisor status
 // body at /v0/city/{name}/status, so refresh()'s fetchStatus succeeds.

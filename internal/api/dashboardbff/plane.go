@@ -57,6 +57,16 @@ type Deps struct {
 	// API (e.g. "http://127.0.0.1:8372"), used by the host-side samplers to
 	// read /v0/city/{name}/status. Empty disables the samplers' status reads.
 	SupervisorBaseURL string
+	// SelfReadTransport, when set, is the http.RoundTripper the host-side
+	// samplers and run tailers use for their loopback reads of the supervisor's
+	// own /v0/city/{name}/... routes. The supervisor supplies an in-process
+	// transport (SupervisorMux.LoopbackTransport) that dispatches these trusted
+	// self-reads against its un-gated inner handler, so they keep working when
+	// read-auth is enabled — the /api/* plane is outside the read-auth gate by
+	// design, but its data source /v0/city/{name}/status is gated, so a networked
+	// self-read would 401. Nil falls back to the default network transport, which
+	// the package tests rely on.
+	SelfReadTransport http.RoundTripper
 
 	// Runtime-config projection inputs. Neutral defaults are supplied by the
 	// caller from gc config/env (ZERO hardcoded roles).
