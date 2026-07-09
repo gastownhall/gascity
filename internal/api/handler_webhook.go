@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -636,18 +636,18 @@ type OrderRunOutput struct {
 func (s *Server) humaHandleOrderRun(ctx context.Context, input *OrderRunInput) (*OrderRunOutput, error) {
 	order, ok := resolveWebhookOrder(s.state, input.Name)
 	if !ok {
-		return nil, huma.Error404NotFound("not_found: order not found: " + input.Name)
+		return nil, apierr.OrderNotFound.Msg("not_found: order not found: " + input.Name)
 	}
 	// Refuse non-webhook-trigger orders up front for a clear 422 (the sink also
 	// enforces this — defense in depth).
 	if strings.TrimSpace(order.Trigger) != "webhook" {
-		return nil, huma.Error422UnprocessableEntity(fmt.Sprintf(
+		return nil, apierr.WebhookRejected.Msg(fmt.Sprintf(
 			"order %q has trigger %q; the run endpoint fires only trigger=\"webhook\" orders",
 			order.ScopedName(), order.Trigger))
 	}
 	dispatcher := webhookDispatcherFor(s.state)
 	if dispatcher == nil {
-		return nil, huma.Error503ServiceUnavailable("webhook dispatch is not available for this city")
+		return nil, apierr.ServiceUnavailable.Msg("webhook dispatch is not available for this city")
 	}
 	result, err := webhooksink.Route(context.WithoutCancel(ctx), webhooksink.Deps{
 		Dispatcher:   dispatcher,
@@ -659,10 +659,10 @@ func (s *Server) humaHandleOrderRun(ctx context.Context, input *OrderRunInput) (
 		Vars:   input.Body.Vars,
 	})
 	if err != nil {
-		return nil, huma.Error503ServiceUnavailable("dispatch failed: " + err.Error())
+		return nil, apierr.ServiceUnavailable.Msg("dispatch failed: " + err.Error())
 	}
 	if !result.Dispatched {
-		return nil, huma.Error422UnprocessableEntity("rejected: " + result.Reason)
+		return nil, apierr.WebhookRejected.Msg("rejected: " + result.Reason)
 	}
 	out := &OrderRunOutput{Status: http.StatusAccepted}
 	out.Body.Status = "dispatched"

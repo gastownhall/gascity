@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -61,7 +62,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		if tp, ok := ep.(events.TailProvider); ok {
 			evts, err := tp.ListTail(filter, limit)
 			if err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
+				return nil, apierr.Internal.Msg(err.Error())
 			}
 			wires := toWireEvents(evts)
 			// Total is best-effort here: when the caller narrowed with
@@ -94,7 +95,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 
 	evts, err := ep.List(filter)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	wires := toWireEvents(evts)
 
@@ -149,7 +150,7 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, false, huma.Error400BadRequest("invalid since duration: " + err.Error())
+		return 0, false, apierr.InvalidRequest.Msg("invalid since duration: " + err.Error())
 	}
 	return d, true, nil
 }
@@ -160,7 +161,7 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
-		return nil, huma.Error503ServiceUnavailable("events not enabled")
+		return nil, apierr.ServiceUnavailable.Msg("events not enabled")
 	}
 
 	ep.Record(events.Event{
@@ -181,14 +182,14 @@ func (s *Server) humaHandleEventRotate(ctx context.Context, input *EventRotateIn
 	ep := s.state.EventProvider()
 	rec, ok := ep.(*events.FileRecorder)
 	if !ok {
-		return nil, huma.Error405MethodNotAllowed(
+		return nil, apierr.MethodNotAllowed.Msg(
 			fmt.Sprintf("rotation is only supported for the file-backed events provider; current provider is '%s'", eventProviderName(s.state, ep)),
 		)
 	}
 
 	result, err := rec.ForceRotate()
 	if err != nil {
-		return nil, huma.Error500InternalServerError("rotation failed: " + err.Error())
+		return nil, apierr.Internal.Msg("rotation failed: " + err.Error())
 	}
 
 	compressionStatus := "pending"
@@ -255,7 +256,7 @@ func eventRotateResponseFromResult(result events.RotationResult, compressionStat
 // the response is committed so it can return proper HTTP errors.
 func (s *Server) checkEventStream(_ context.Context, _ *EventStreamInput) error {
 	if s.state.EventProvider() == nil {
-		return huma.Error503ServiceUnavailable("events not enabled")
+		return apierr.ServiceUnavailable.Msg("events not enabled")
 	}
 	return nil
 }

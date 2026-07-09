@@ -10,6 +10,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -171,7 +172,7 @@ func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQual
 // dispatching here.
 func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	if name == "" {
-		return nil, huma.Error400BadRequest("agent name required")
+		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
 
 	cfg := s.state.Config()
@@ -180,7 +181,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
 	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
@@ -300,11 +301,11 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 func agentVisibilityWaitHTTPError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return agentVisibilityRetryableError(huma.Error503ServiceUnavailable("agent was created, but visibility confirmation was canceled"))
+		return agentVisibilityRetryableError(apierr.ServiceUnavailable.Msg("agent was created, but visibility confirmation was canceled"))
 	case errors.Is(err, context.DeadlineExceeded):
-		return agentVisibilityRetryableError(huma.Error504GatewayTimeout("agent was created, but visibility was not confirmed before timeout"))
+		return agentVisibilityRetryableError(apierr.GatewayTimeout.Msg("agent was created, but visibility was not confirmed before timeout"))
 	default:
-		return huma.Error500InternalServerError("agent was created, but visibility confirmation failed")
+		return apierr.Internal.Msg("agent was created, but visibility confirmation failed")
 	}
 }
 
@@ -382,7 +383,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	}
 	cfg := s.state.Config()
 	if _, ok := findAgent(cfg, name); !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 	var err error
 	switch action {
@@ -391,7 +392,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	case "resume":
 		err = sm.ResumeAgent(name)
 	default:
-		return nil, huma.Error400BadRequest("unknown agent action: " + action)
+		return nil, apierr.InvalidRequest.Msg("unknown agent action: " + action)
 	}
 	if err != nil {
 		return nil, mutationError(err)
@@ -434,12 +435,12 @@ func (s *Server) agentOutputByName(name string, tail int, provided bool, before 
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
 	resp, err := s.trySessionLogOutputHuma(name, agentCfg, tail, provided, before)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
+		return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 	}
 	if resp != nil {
 		return &struct {
@@ -451,12 +452,12 @@ func (s *Server) agentOutputByName(name string, tail int, provided bool, before 
 	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
 	if !sp.IsRunning(sessionName) {
-		return nil, huma.Error404NotFound("agent " + name + " not running")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not running")
 	}
 
 	output, err := sp.Peek(sessionName, 100)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	turns := []outputTurn{}
@@ -493,13 +494,13 @@ func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		return nil, huma.Error404NotFound("agent " + name + " not found")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	provider := transcriptState.provider
 	logPath := transcriptState.path
@@ -509,7 +510,7 @@ func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 	running := sp.IsRunning(sessionName)
 
 	if logPath == "" && !running {
-		return nil, huma.Error404NotFound("agent " + name + " not running")
+		return nil, apierr.AgentNotFound.Msg("agent " + name + " not running")
 	}
 	return &agentStreamState{
 		name:     name,

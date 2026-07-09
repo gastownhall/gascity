@@ -29,11 +29,18 @@ var (
 	// ScopeNotFound is a city-or-rig scope reference that does not resolve (the
 	// detail names which kind); it is distinct from the resource the scope was
 	// being resolved for (e.g. a formula).
-	ScopeNotFound = Register(ProblemType{Code: "scope-not-found", Status: http.StatusNotFound, Title: "Scope Not Found"})
+	ScopeNotFound   = Register(ProblemType{Code: "scope-not-found", Status: http.StatusNotFound, Title: "Scope Not Found"})
+	ServiceNotFound = Register(ProblemType{Code: "service-not-found", Status: http.StatusNotFound, Title: "Service Not Found"})
+	PatchNotFound   = Register(ProblemType{Code: "patch-not-found", Status: http.StatusNotFound, Title: "Patch Not Found"})
+	PackNotFound    = Register(ProblemType{Code: "pack-not-found", Status: http.StatusNotFound, Title: "Pack Not Found"})
 
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
 	ValidationFailed = Register(ProblemType{Code: "validation-failed", Status: http.StatusUnprocessableEntity, Title: "Validation Failed"})
+	// WebhookRejected is a well-formed webhook request the receiver declined to
+	// dispatch (unknown/unwired sink, policy) — distinct from validation-failed,
+	// which is huma's schema-validation auto-stamp.
+	WebhookRejected = Register(ProblemType{Code: "webhook-rejected", Status: http.StatusUnprocessableEntity, Title: "Webhook Rejected"})
 
 	// Concurrency / state conflicts.
 	ConflictConcurrentDelete = Register(ProblemType{Code: "conflict-concurrent-delete", Status: http.StatusConflict, Title: "Concurrent Delete Conflict"})
@@ -51,6 +58,10 @@ var (
 	// AmbiguousReference is a name/reference that matched more than one resource;
 	// the client should re-address with a scoped/qualified name, not retry or wait.
 	AmbiguousReference = Register(ProblemType{Code: "ambiguous-reference", Status: http.StatusConflict, Title: "Ambiguous Reference"})
+	// OperationInProgress is a transient 409 — another operation on the same target
+	// is running; the client may retry — distinct from a terminal "already exists"
+	// wrong-state conflict.
+	OperationInProgress = Register(ProblemType{Code: "operation-in-progress", Status: http.StatusConflict, Title: "Operation In Progress"})
 
 	// Authorization / capability.
 	Forbidden      = Register(ProblemType{Code: "forbidden", Status: http.StatusForbidden, Title: "Forbidden"})
@@ -60,14 +71,19 @@ var (
 	IdempotencyInFlight = Register(ProblemType{Code: "idempotency-in-flight", Status: http.StatusConflict, Title: "Idempotency Key In Flight"})
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
 
-	// Backend availability. store-unavailable is reserved for the bead-store-not-
-	// live 503 emitted by the shared cacheLiveOr503 helper, whose conversion is
-	// tracked separately (still legacy today); service-unavailable is the generic
-	// 503 that every converted plain 503 uses — its title matches http.StatusText
+	// Backend availability. store-unavailable is the bead-store-not-live 503 emitted
+	// by the shared cacheLiveOr503 helper; service-unavailable is the generic 503
+	// that every other converted plain 503 uses — its title matches http.StatusText
 	// so the wire title is preserved.
 	StoreUnavailable   = Register(ProblemType{Code: "store-unavailable", Status: http.StatusServiceUnavailable, Title: "Store Unavailable"})
 	ServiceUnavailable = Register(ProblemType{Code: "service-unavailable", Status: http.StatusServiceUnavailable, Title: "Service Unavailable"})
 	Internal           = Register(ProblemType{Code: "internal", Status: http.StatusInternalServerError, Title: "Internal Server Error"})
+
+	// Generic transport statuses. Titles match http.StatusText so converting a
+	// plain error of these statuses preserves the wire title.
+	MethodNotAllowed = Register(ProblemType{Code: "method-not-allowed", Status: http.StatusMethodNotAllowed, Title: "Method Not Allowed"})
+	BadGateway       = Register(ProblemType{Code: "bad-gateway", Status: http.StatusBadGateway, Title: "Bad Gateway"})
+	GatewayTimeout   = Register(ProblemType{Code: "gateway-timeout", Status: http.StatusGatewayTimeout, Title: "Gateway Timeout"})
 
 	// Sling. The first three are frozen (already public in the spec).
 	SlingMissingBead            = Register(ProblemType{Code: "sling-missing-bead", Status: http.StatusBadRequest, Title: "Sling Missing Bead"})
