@@ -131,20 +131,23 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
 	"InfoFromPersistedBead(": {
-		// WI-6 W4 residuals (honest under-reach, not silent drops): build_desired_state
-		// :2380/:2631 are sweep projections whose feeder beads aren't typed yet;
-		// session_logs_resolve feeds ResolveCodexTranscriptBySessionOrder([]beads.Bead);
-		// session_bead_snapshot holds the bead legitimately (snapshot.add). WI-6 R2:
-		// cmd_session's REASON-column reason projection now reads the typed Info
-		// snapshot (wakeReasonsInfo, fed by OpenInfos); WI-6 R5 folded the rest of the
-		// reason projection (LifecycleDisplayReasonWithLivenessInfo, off the new
-		// Info.SessionCircuitState) onto Info too, so the one remaining cmd_session hit
-		// is cmdSessionKill's raw store.Get + codec, a CLI front-door-Get flip deferred
-		// to the WI-7 front-door migration (§5b/§6 — not an R2/R5 moved-Get). WI-6 R5
-		// also retired cmd_prime (routed through sessionFrontDoor().Get → Info +
-		// ProviderFamilyFromInfo, was 1).
-		"cmd/gc/build_desired_state.go": 2,
-		"cmd/gc/cmd_session.go":         1,
+		// WI-7 W-pool: build_desired_state.go reaches interior zero (was 2). The pool
+		// select/create/reuse path now returns session.Info end to end — the typed
+		// create front door (Store.CreateSessionInfo) projects the just-created bead,
+		// the reuse predicates read OpenInfos, and the normalize lane folds its
+		// bp.beadStore.Update onto Info — so the two former raw pool-loop projections
+		// (the :2384 dependency-floor boundary and the :2635 pool realize loop) are
+		// gone. session_logs_resolve feeds ResolveCodexTranscriptBySessionOrder(
+		// []beads.Bead); session_bead_snapshot holds the bead legitimately
+		// (snapshot.add). WI-6 R2: cmd_session's REASON-column reason projection now
+		// reads the typed Info snapshot (wakeReasonsInfo, fed by OpenInfos); WI-6 R5
+		// folded the rest of the reason projection (LifecycleDisplayReasonWithLivenessInfo,
+		// off the new Info.SessionCircuitState) onto Info too, so the one remaining
+		// cmd_session hit is cmdSessionKill's raw store.Get + codec, a CLI
+		// front-door-Get flip deferred to the WI-7 front-door migration (§5b/§6 — not
+		// an R2/R5 moved-Get). WI-6 R5 also retired cmd_prime (routed through
+		// sessionFrontDoor().Get → Info + ProviderFamilyFromInfo, was 1).
+		"cmd/gc/cmd_session.go": 1,
 		// WI-6 R1: markCityStopSessionSleepReason keeps the byte-identical label-only
 		// ListByLabel("gc:session") sweep (widening to the ListAll type+label union
 		// would also mark label-lost type-only beads — a behavior delta), so the

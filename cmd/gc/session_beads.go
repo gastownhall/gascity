@@ -54,6 +54,21 @@ func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 
 func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
 	if sessionBeads != nil {
+		// A same-cycle create/reopen appends to the snapshot's typed half via addInfo
+		// but NOT the raw half — the W-pool create front door returns session.Info, not
+		// a raw bead. When the typed half has outgrown the raw half, Open() is stale for
+		// exactly those new sessions, so a raw-half read here would miss them and sync
+		// would treat an already-created session_name as absent (minting a duplicate for
+		// poolSlot-0 identities, or a store-recovery reload for slot>0). Reload from the
+		// store instead — CreateSessionInfo persists the bead before projecting it, so
+		// the store durably holds every same-cycle creation and sync takes the clean
+		// update path. Byte-identical on the common no-create path (lengths equal → the
+		// fast raw-half return); the reload-on-create-cycle delta is the same
+		// NDI-tolerated concurrent-writer visibility W-delete's sync-tail re-list already
+		// sanctions. This skew check retires with the raw half in W-delete.
+		if len(sessionBeads.OpenInfos()) > len(sessionBeads.Open()) {
+			return loadSessionBeads(store)
+		}
 		return sessionBeads.Open(), nil
 	}
 	return loadSessionBeads(store)

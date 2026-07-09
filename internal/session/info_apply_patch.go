@@ -99,6 +99,12 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 		case "manual_session":
 			info.ManualSession = strings.TrimSpace(v) == "true"
 			info.ManualSessionMetadata = v
+		case "pool_alias_conflict":
+			info.PoolAliasConflict = v
+		case "pool_alias_conflict_count":
+			info.PoolAliasConflictCount = v
+		case "pool_alias_conflict_at":
+			info.PoolAliasConflictAt = v
 		case MCPIdentityMetadataKey:
 			info.MCPIdentity = v
 		case MCPServersSnapshotMetadataKey:

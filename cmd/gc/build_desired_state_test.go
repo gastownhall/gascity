@@ -4037,7 +4037,7 @@ func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) 
 		Requests: requests,
 	}, desired, &stderr)
 
-	if got := len(bp.sessionBeads.Open()); got != maxWakes {
+	if got := len(bp.sessionBeads.OpenInfos()); got != maxWakes {
 		t.Fatalf("created session beads = %d, want wake budget %d; stderr=%q", got, maxWakes, stderr.String())
 	}
 	if got := len(desired); got != maxWakes {
@@ -4077,7 +4077,7 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		}},
 	}, desired, &stderr)
 
-	sessions := bp.sessionBeads.Open()
+	sessions := bp.sessionBeads.OpenInfos()
 	if len(sessions) != 1 {
 		t.Fatalf("created session beads = %d, want 1; stderr=%q", len(sessions), stderr.String())
 	}
@@ -4150,7 +4150,7 @@ func TestRealizePoolDesiredSessionsHonorsExplicitPackWorkspace(t *testing.T) {
 		}},
 	}, map[string]TemplateParams{}, &stderr)
 
-	sessions := bp.sessionBeads.Open()
+	sessions := bp.sessionBeads.OpenInfos()
 	if len(sessions) != 1 {
 		t.Fatalf("created session beads = %d, want 1; stderr=%q", len(sessions), stderr.String())
 	}
@@ -4291,7 +4291,7 @@ func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *test
 		},
 	}, desired, &stderr)
 
-	if got := len(bp.sessionBeads.Open()); got != 2 {
+	if got := len(bp.sessionBeads.OpenInfos()); got != 2 {
 		t.Fatalf("open session beads = %d, want one fresh plus one reused; stderr=%q", got, stderr.String())
 	}
 	if _, ok := desired["worker-reusable"]; !ok {
@@ -4877,6 +4877,86 @@ func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testi
 	}
 }
 
+// TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate is the load-bearing
+// regression for the W-pool addInfo raw-half skew. buildDesiredState creates a
+// canonical-singleton pool session (poolSlot 0) through the Info create front door,
+// which appends to the snapshot's typed half only (addInfo) and leaves the raw open
+// half stale. When sync runs on that SAME snapshot in a no-reload window (the
+// controlDispatcherTick / startup-refresh / steady-refresh windows), a raw-half read
+// would miss the just-created session_name; because poolSlot-0 identities skip the
+// store-recovery fallback, sync would MINT A DUPLICATE open bead. snapshotOrLoadSessionBeads
+// reconciles the skew (OpenInfos > Open ⟹ reload from the store), so sync sees the
+// created bead and takes the clean update path. Reverting that skew reload re-mints
+// the duplicate and fails this test.
+func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1), // canonical singleton pool => poolSlot 0
+		}},
+	}
+	sessionBeads := newSessionBeadSnapshot(nil)
+	var buildStderr bytes.Buffer
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		store, nil, sessionBeads, nil, &buildStderr,
+	)
+
+	// The create must have skewed the snapshot: the typed half grew (addInfo) while
+	// the raw open half stayed stale.
+	if len(sessionBeads.OpenInfos()) <= len(sessionBeads.Open()) {
+		t.Fatalf("expected same-cycle create skew (OpenInfos>Open); OpenInfos=%d Open=%d stderr=%q",
+			len(sessionBeads.OpenInfos()), len(sessionBeads.Open()), buildStderr.String())
+	}
+	infos := sessionBeads.OpenInfos()
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 created singleton session, got %d; stderr=%q", len(infos), buildStderr.String())
+	}
+	sessionName := infos[0].SessionNameMetadata
+	if sessionName == "" {
+		t.Fatalf("created singleton has empty session_name")
+	}
+	if got := infos[0].PoolSlot; got != "" {
+		t.Fatalf("singleton pool session pool_slot = %q, want empty (the un-recovered poolSlot-0 case)", got)
+	}
+
+	// Sync on the SAME snapshot (the production no-reload window).
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
+	var syncStderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
+		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads,
+	)
+
+	// No duplicate was minted: exactly one open bead carries the created session_name.
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	count := 0
+	for _, b := range open {
+		if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("open beads for session_name %q = %d, want 1 (sync minted a duplicate); sync stderr=%q", sessionName, count, syncStderr.String())
+	}
+	// The created bead's pending_create_claim survives (a duplicate mint would orphan it).
+	createdStored, err := store.Get(infos[0].ID)
+	if err != nil {
+		t.Fatalf("Get(created %s): %v", infos[0].ID, err)
+	}
+	if strings.TrimSpace(createdStored.Metadata["pending_create_claim"]) != "true" {
+		t.Fatalf("created singleton pending_create_claim = %q, want true (orphaned by a duplicate mint?)", createdStored.Metadata["pending_create_claim"])
+	}
+}
+
 func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -5305,14 +5385,14 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	}
 
 	type createResult struct {
-		bead beads.Bead
+		info sessionpkg.Info
 		slot int
 		err  error
 	}
 	results := make(chan createResult, 2)
 	create := func() {
-		bead, slot, err := selectOrCreatePoolSessionBead(newBuildParams(), &cfgAgent, "claude", nil, map[string]bool{}, map[int]bool{})
-		results <- createResult{bead: bead, slot: slot, err: err}
+		info, slot, err := selectOrCreatePoolSessionBead(newBuildParams(), &cfgAgent, "claude", nil, map[string]bool{}, map[int]bool{})
+		results <- createResult{info: info, slot: slot, err: err}
 	}
 	go create()
 	go create()
@@ -5343,8 +5423,8 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		if result.err != nil {
 			t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
 		}
-		if result.bead.ID == "" {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty bead", i+1)
+		if result.info.ID == "" {
+			t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty session", i+1)
 		}
 		if result.slot != 1 {
 			t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
@@ -5384,15 +5464,15 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 	cfgAgent := &cfg.Agents[0]
 
 	results := make(chan struct {
-		bead beads.Bead
+		info sessionpkg.Info
 		err  error
 	}, 2)
 	create := func(qualifiedInstance string, slot int) {
-		bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, "worker", qualifiedInstance, slot, nil)
+		info, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, "worker", qualifiedInstance, slot, nil)
 		results <- struct {
-			bead beads.Bead
+			info sessionpkg.Info
 			err  error
-		}{bead: bead, err: err}
+		}{info: info, err: err}
 	}
 	go create("worker-1", 1)
 	go create("worker-2", 2)
@@ -5424,19 +5504,19 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 		if result.err != nil {
 			t.Fatalf("create result %d: %v", i+1, result.err)
 		}
-		sessionName := result.bead.Metadata["session_name"]
+		sessionName := result.info.SessionNameMetadata
 		if sessionName == "" {
-			t.Fatalf("create result %d has empty session_name: %#v", i+1, result.bead)
+			t.Fatalf("create result %d has empty session_name: %#v", i+1, result.info)
 		}
 		if seen[sessionName] {
 			t.Fatalf("duplicate session_name %q across tmux_alias pool creates", sessionName)
 		}
-		stored, err := store.Get(result.bead.ID)
+		stored, err := store.Get(result.info.ID)
 		if err != nil {
-			t.Fatalf("store.Get(%s): %v", result.bead.ID, err)
+			t.Fatalf("store.Get(%s): %v", result.info.ID, err)
 		}
 		if got := stored.Metadata["session_name"]; got != sessionName {
-			t.Fatalf("stored session_name for %s = %q, want %q", result.bead.ID, got, sessionName)
+			t.Fatalf("stored session_name for %s = %q, want %q", result.info.ID, got, sessionName)
 		}
 		seen[sessionName] = true
 	}
@@ -5465,17 +5545,17 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = newSessionBeadSnapshot(nil)
 
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1, nil)
+	info, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1, nil)
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
 
-	want := PoolSessionName("worker", bead.ID)
-	if got := bead.Metadata["session_name"]; got != want {
+	want := PoolSessionName("worker", info.ID)
+	if got := info.SessionNameMetadata; got != want {
 		t.Fatalf("session_name = %q, want unique pool fallback %q when tmux_alias lock fails", got, want)
 	}
-	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(bead.Metadata["session_name"], "crew--test-city") {
-		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", bead.Metadata["session_name"])
+	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(info.SessionNameMetadata, "crew--test-city") {
+		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", info.SessionNameMetadata)
 	}
 }
 
@@ -5635,7 +5715,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *test
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
-	if got := bead.Metadata["alias"]; got != "" {
+	if got := bead.Alias; got != "" {
 		t.Fatalf("alias = %q, want empty fallback when alias lock setup fails", got)
 	}
 	if !strings.Contains(stderr.String(), "locking alias \"claude-1\"") || !strings.Contains(stderr.String(), "creating without alias") {
@@ -5794,7 +5874,7 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 		if err := store.SetMetadata(session.ID, "pending_create_started_at", ""); err != nil {
 			t.Fatalf("clear pending_create_started_at: %v", err)
 		}
-		existingSessionNames[session.Metadata["session_name"]] = true
+		existingSessionNames[session.SessionNameMetadata] = true
 	}
 
 	sessionSnapshot, err := loadSessionBeadSnapshot(store)
@@ -9468,7 +9548,8 @@ func TestSelectOrCreatePoolSessionBead_PrefersConcreteAgentSlotOverStalePoolMeta
 		agents:       cfg.Agents,
 	}
 
-	result, slot, err := selectOrCreatePoolSessionBead(bp, cfgAgent, "frontend/worker", &poisoned, map[string]bool{}, map[int]bool{})
+	preferredPoisoned := sessionpkg.InfoFromPersistedBead(poisoned)
+	result, slot, err := selectOrCreatePoolSessionBead(bp, cfgAgent, "frontend/worker", &preferredPoisoned, map[string]bool{}, map[int]bool{})
 	if err != nil {
 		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
 	}
@@ -9510,7 +9591,8 @@ func TestSelectOrCreatePoolSessionBead_DoesNotRetagDuplicateConcreteSlot(t *test
 		agents:       cfg.Agents,
 	}
 
-	_, _, err = selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "kimi", &duplicate, map[string]bool{}, map[int]bool{9: true})
+	preferredDuplicate := sessionpkg.InfoFromPersistedBead(duplicate)
+	_, _, err = selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "kimi", &preferredDuplicate, map[string]bool{}, map[int]bool{9: true})
 	if err == nil {
 		t.Fatal("selectOrCreatePoolSessionBead returned nil error, want duplicate slot rejection")
 	}
@@ -9549,8 +9631,8 @@ func TestSelectOrCreatePoolSessionBead_DoesNotReserveFreshSlotOnCreateError(t *t
 	if slot != 1 {
 		t.Fatalf("slot after previous create error = %d, want 1", slot)
 	}
-	if result.Metadata["pool_slot"] != "1" {
-		t.Fatalf("pool_slot after previous create error = %q, want 1", result.Metadata["pool_slot"])
+	if result.PoolSlot != "1" {
+		t.Fatalf("pool_slot after previous create error = %q, want 1", result.PoolSlot)
 	}
 }
 
@@ -9572,9 +9654,9 @@ func TestSelectOrCreatePoolSessionBead_UsesFreshCreateTimeNotBeaconTime(t *testi
 	if err != nil {
 		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
 	}
-	startedAt, err := time.Parse(time.RFC3339, result.Metadata["pending_create_started_at"])
+	startedAt, err := time.Parse(time.RFC3339, result.PendingCreateStartedAt)
 	if err != nil {
-		t.Fatalf("parse pending_create_started_at %q: %v", result.Metadata["pending_create_started_at"], err)
+		t.Fatalf("parse pending_create_started_at %q: %v", result.PendingCreateStartedAt, err)
 	}
 	if startedAt.Before(beforeCreate) {
 		t.Fatalf("pending_create_started_at = %s, want current create time after %s", startedAt, beforeCreate)
@@ -9583,7 +9665,7 @@ func TestSelectOrCreatePoolSessionBead_UsesFreshCreateTimeNotBeaconTime(t *testi
 		t.Fatalf("pending_create_started_at = %s, want independent from stale beacon %s", startedAt, oldBeacon)
 	}
 	result.CreatedAt = oldBeacon
-	if staleCreatingStateInfo(sessionpkg.InfoFromPersistedBead(result), &clock.Fake{Time: startedAt.Add(30 * time.Second)}) {
+	if staleCreatingStateInfo(result, &clock.Fake{Time: startedAt.Add(30 * time.Second)}) {
 		t.Fatal("fresh pool session was stale when row CreatedAt matched old controller beacon")
 	}
 }
@@ -9615,7 +9697,8 @@ func TestSelectOrCreatePoolSessionBead_ReusesPreferredDrained(t *testing.T) {
 		agents:       []config.Agent{cfgAgent},
 	}
 
-	result, slot, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "claude", &drained, map[string]bool{}, map[int]bool{})
+	preferredDrained := sessionpkg.InfoFromPersistedBead(drained)
+	result, slot, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "claude", &preferredDrained, map[string]bool{}, map[int]bool{})
 	if err != nil {
 		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
 	}
@@ -9662,13 +9745,13 @@ func TestSelectOrCreateDependencyPoolSessionBead_SkipsDrained(t *testing.T) {
 	if result.ID == drained.ID {
 		t.Fatal("should not reuse drained dependency session bead for generic dependency demand")
 	}
-	if got := result.Metadata["agent_name"]; got != "claude-1" {
+	if got := result.AgentName; got != "claude-1" {
 		t.Fatalf("dependency agent_name = %q, want claude-1", got)
 	}
-	if got := result.Metadata["alias"]; got != "claude-1" {
+	if got := result.Alias; got != "claude-1" {
 		t.Fatalf("dependency alias = %q, want claude-1", got)
 	}
-	if got := result.Metadata["pool_slot"]; got != "1" {
+	if got := result.PoolSlot; got != "1" {
 		t.Fatalf("dependency pool_slot = %q, want 1", got)
 	}
 	if got := result.Title; got != "claude-1" {
@@ -9698,13 +9781,13 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOneUsesCanonicalIdentity(t *
 	if err != nil {
 		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
 	}
-	if got := result.Metadata["agent_name"]; got != "cashmaster/refinery" {
+	if got := result.AgentName; got != "cashmaster/refinery" {
 		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
 	}
-	if got := result.Metadata["alias"]; got != "cashmaster/refinery" {
+	if got := result.Alias; got != "cashmaster/refinery" {
 		t.Fatalf("dependency alias = %q, want canonical non-pool identity", got)
 	}
-	if got := result.Metadata["pool_slot"]; got != "" {
+	if got := result.PoolSlot; got != "" {
 		t.Fatalf("dependency pool_slot = %q, want empty for max_active_sessions=1", got)
 	}
 	if got := result.Title; got != "cashmaster/refinery" {
@@ -9763,22 +9846,22 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOneNormalizesExistingStaleId
 	if result.ID != stale.ID {
 		t.Fatalf("dependency reuse ID = %q, want stale bead %q", result.ID, stale.ID)
 	}
-	if got := result.Metadata["agent_name"]; got != "cashmaster/refinery" {
+	if got := result.AgentName; got != "cashmaster/refinery" {
 		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
 	}
-	if got := result.Metadata["alias"]; got != "cashmaster/refinery" {
+	if got := result.Alias; got != "cashmaster/refinery" {
 		t.Fatalf("dependency alias = %q, want canonical non-pool identity", got)
 	}
-	if got := result.Metadata["pool_slot"]; got != "" {
+	if got := result.PoolSlot; got != "" {
 		t.Fatalf("dependency pool_slot = %q, want empty after normalization", got)
 	}
-	if got := result.Metadata[poolAliasConflictMetadataKey]; got != "" {
+	if got := result.PoolAliasConflict; got != "" {
 		t.Fatalf("dependency pool_alias_conflict = %q, want cleared after successful normalization", got)
 	}
-	if got := result.Metadata[poolAliasConflictCountMetadataKey]; got != "" {
+	if got := result.PoolAliasConflictCount; got != "" {
 		t.Fatalf("dependency pool_alias_conflict_count = %q, want cleared after successful normalization", got)
 	}
-	if got := result.Metadata[poolAliasConflictAtMetadataKey]; got != "" {
+	if got := result.PoolAliasConflictAt; got != "" {
 		t.Fatalf("dependency pool_alias_conflict_at = %q, want cleared after successful normalization", got)
 	}
 	if containsString(result.Labels, "agent:cashmaster/refinery-1") {
@@ -9859,10 +9942,10 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOnePrefersCanonicalDependenc
 	if result.ID != canonical.ID {
 		t.Fatalf("dependency reuse ID = %q, want canonical bead %q instead of stale duplicate %q", result.ID, canonical.ID, stale.ID)
 	}
-	if got := result.Metadata["agent_name"]; got != "cashmaster/refinery" {
+	if got := result.AgentName; got != "cashmaster/refinery" {
 		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
 	}
-	if got := result.Metadata["pool_slot"]; got != "" {
+	if got := result.PoolSlot; got != "" {
 		t.Fatalf("dependency pool_slot = %q, want empty for canonical max-one bead", got)
 	}
 }
@@ -10015,13 +10098,13 @@ func TestSelectOrCreateDependencyPoolSessionBead_DefersAliasWhenConcreteAliasTak
 	if err != nil {
 		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
 	}
-	if got := result.Metadata["agent_name"]; got != "claude-1" {
+	if got := result.AgentName; got != "claude-1" {
 		t.Fatalf("dependency agent_name = %q, want claude-1", got)
 	}
-	if got := result.Metadata["alias"]; got != "" {
+	if got := result.Alias; got != "" {
 		t.Fatalf("dependency alias = %q, want deferred until alias guard accepts it", got)
 	}
-	if got := result.Metadata["pool_slot"]; got != "1" {
+	if got := result.PoolSlot; got != "1" {
 		t.Fatalf("dependency pool_slot = %q, want 1", got)
 	}
 }

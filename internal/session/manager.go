@@ -141,7 +141,18 @@ type Info struct {
 	// isManualSessionBead compares it WITHOUT trimming, so the Info mirror
 	// keeps the raw value to stay byte-identical on whitespace-padded inputs.
 	ManualSessionMetadata string
-	Labels                []string // bead labels (agent:<name> identity fallback + canonical checks)
+	// PoolAliasConflict / PoolAliasConflictCount / PoolAliasConflictAt are the RAW
+	// pool_alias_conflict{,_count,_at} metadata mirrors. The singleton-pool
+	// normalization lane (normalizeNonExpandingPoolSessionInfo in cmd/gc) reads
+	// pool_alias_conflict as the deferred canonical alias, increments the count on
+	// each deferral, and clears all three once the canonical alias is (re)acquired;
+	// the Info form of that lane needs the raw values to stay byte-identical. These
+	// keys are cmd/gc constants (session_beads.go poolAliasConflict*MetadataKey); the
+	// literals here mirror them. Additive, internal-only (absent from the HTTP wire).
+	PoolAliasConflict      string   // pool_alias_conflict (raw; deferred canonical alias)
+	PoolAliasConflictCount string   // pool_alias_conflict_count (raw)
+	PoolAliasConflictAt    string   // pool_alias_conflict_at (raw RFC3339)
+	Labels                 []string // bead labels (agent:<name> identity fallback + canonical checks)
 
 	// MCPIdentity / MCPServersSnapshot mirror the raw mcp_identity and
 	// mcp_servers_snapshot metadata (verbatim). The ACP-transport classifier

@@ -314,6 +314,45 @@ func (s *sessionBeadSnapshot) add(bead beads.Bead) {
 	s.replaceOpenLocked(open)
 }
 
+// addInfo appends a freshly created/reopened session's projected Info to the
+// snapshot's typed half so same-cycle selection observes it. The pool create/reuse
+// path (W-pool) inserts session.Info here now that it returns Info instead of a raw
+// bead. It rebuilds the agent/template index maps from the extended openInfos via
+// the equivalence-proven Info constructor while PRESERVING each existing row's
+// circuit cluster and appending the zero CircuitState for the new row (a fresh bead
+// carries no circuit metadata).
+//
+// The raw open []beads.Bead half is intentionally left untouched (addInfo holds no
+// raw bead). Consumers that read the typed half — the build's own reuse scans
+// (OpenInfos) and the reconcile tick (which re-loads the snapshot from the store
+// after buildDesiredState) — observe the new session directly. The one same-cycle
+// reader of the RAW half, the sync path via snapshotOrLoadSessionBeads, reconciles
+// the resulting skew by reloading from the store whenever len(OpenInfos()) >
+// len(Open()) (which holds iff addInfo ran this cycle), so sync never treats a
+// just-created session_name as absent and mints a duplicate. The raw half is deleted
+// with W-delete. Under Lock; safe for the parallel pool-create fan-out
+// (gastownhall/gascity#2319).
+func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	infos := make([]sessionpkg.Info, 0, len(s.openInfos)+1)
+	infos = append(infos, s.openInfos...)
+	infos = append(infos, info)
+	circuits := make([]sessionpkg.CircuitState, 0, len(s.openCircuits)+1)
+	circuits = append(circuits, s.openCircuits...)
+	circuits = append(circuits, sessionpkg.CircuitState{})
+	rebuilt := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	s.openInfos = rebuilt.openInfos
+	s.openCircuits = rebuilt.openCircuits
+	s.beadIDByAgentName = rebuilt.beadIDByAgentName
+	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
+	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
+	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
+}
+
 // WI-6: the raw-bead half of sessionBeadSnapshot (Open / FindByID /
 // FindSessionBeadByTemplate / FindSessionBeadByNamedIdentity /
 // FindSessionNameByNamedIdentity and the raw stampedPoolQualifiedIdentity used by
