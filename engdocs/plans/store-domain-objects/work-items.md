@@ -128,7 +128,18 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   fold-then-build reshape; `session_reconciler` `InfoFromPersistedBead` 3→0; 0-Get budget held. Red-team
 >   (hardest of the migration): reshape byte-identical; 3 blockers fixed (dedup-stop + fold-visible pins
 >   made load-bearing; trace-recorder/cleanup/cmd_start row flips landed). Added `Info.WorkerDir`.
-> - **W-pool** (medium-HIGH): pool selection/creation/reuse path typing (class b) + `add(info)`.
+> - **W-pool** ✅ (merge `507f7bf4a`): pool selection/creation/reuse path typing (class b). Added
+>   typed create front door `session.Store.CreateSessionInfo` (projects the created bead, no
+>   post-create Get); flipped `selectOrPlanPoolSessionBead`+normalize/reuse cluster +
+>   `realizePoolDesiredSessions` to carry Info; `snapshot.add`→`addInfo`. `build_desired_state`
+>   `InfoFromPersistedBead` 2→0. Red-team (changes-needed→approved): fixed a real regression —
+>   `addInfo` updated only the snapshot typed half while `syncSessionBeadsWithSnapshotAndRigStores`
+>   reads the raw `Open()` half on the SAME snapshot (3 no-reload windows), so poolSlot-0 creates
+>   minted a DUPLICATE session bead; fix = `snapshotOrLoadSessionBeads` reloads from store on
+>   typed/raw cardinality skew (byte-identical on no-create path), pinned load-bearing by
+>   `TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate` (fail-then-pass verified). Nits:
+>   collapsed a duplicated staleness twin; pinned create-echo==Get across backends
+>   (beadstest `CreateEchoMatchesGetOnMetadata`). Commits a62f1b6b8/abb79e1fb/db9b3e4ac.
 > - **W-delete** (mechanical, falls out): raw-half deletion + pure-read accessor migrations + zero
 >   `ListAllSessionBeads` (3) + `session_bead_snapshot` InfoFromPersistedBead (3→0) + `session_hash` (1→0).
 > - **W-flip** (§5b): front-door flip (`class_store.go` + `api.State` → domain stores).

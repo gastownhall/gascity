@@ -1,8 +1,8 @@
 # Store-domain-objects migration — HANDOFF (resume here)
 
-**As of:** migration branch `refactor/store-domain-objects`, tip **`23a0e2d43`**
-(W-tick keystone merged at `1d0260f90`). Local branch, **UNPUSHED**. Gascity Dolt is
-local-only — **`git push` only**, never `bd dolt push`.
+**As of:** migration branch `refactor/store-domain-objects`, tip **`507f7bf4a`**
+(W-tick keystone `1d0260f90`; **W-pool merged `507f7bf4a`**). Local branch, **UNPUSHED**.
+Gascity Dolt is local-only — **`git push` only**, never `bd dolt push`.
 
 ## The goal (one paragraph)
 Stores return typed **domain objects**; raw `beads.Bead` must not flow through business
@@ -28,12 +28,15 @@ Full wave-by-wave status + every merge SHA is in **`work-items.md`** (WI-6 secti
 "Corrected remaining endgame" block). Designs: **`tickfeed-design.md`** (the remaining
 W-pool→W-unexport plan — AUTHORITATIVE), `remainder-design.md` (R1–R5), `r6-finding-tickfeed-keystone.md`.
 
-## What REMAINS — 4 waves (see `tickfeed-design.md` §3 for the spec)
-1. **W-pool** (MED-HIGH) — type the pool selection/creation/reuse path (`findOpenSessionBeadByID`,
-   `selectOrPlanPoolSessionBead`, `reusablePoolSessionBeads`, `reusableDependencyPoolSessionBeads`,
-   `createPoolSessionBeadWithGuardedAlias`, `normalizeNonExpandingPoolSessionBeadForSelection`) +
-   `snapshot.add(info)`. These CREATE/REUSE beads — needs a typed create-returning-Info.
-2. **W-delete** (MED, falls out) — delete the raw `sessionBeadSnapshot` half (`Open()`/`FindByID`/
+## What REMAINS — 3 waves (see `tickfeed-design.md` §3 for the spec)
+0. ~~**W-pool**~~ ✅ DONE (merge `507f7bf4a`): typed create front door `session.Store.CreateSessionInfo`
+   + flipped selection/normalize/reuse cluster + `snapshot.add`→`addInfo`; `build_desired_state`
+   `InfoFromPersistedBead` 2→0. Red-team fix: `snapshotOrLoadSessionBeads` skew reload (raw half
+   stale after same-cycle `addInfo` → poolSlot-0 duplicate mint), pinned load-bearing. **New gotcha
+   for W-delete:** the raw `open` half is now kept coherent for sync ONLY via that skew reload — when
+   W-delete deletes the raw half, the skew check + `snapshotOrLoadSessionBeads`'s raw-half branch
+   retire with it (sync reads the store/typed feed directly).
+1. **W-delete** (MED, falls out) — delete the raw `sessionBeadSnapshot` half (`Open()`/`FindByID`/
    `newSessionBeadSnapshot(beads)`/the raw `open` slice) after W-pool frees it; flip
    `loadSessionBeadSnapshot` to build from Info; zero `session_bead_snapshot` `InfoFromPersistedBead`
    (3→0), `session_hash` (1→0), `session_logs_resolve` (2→0 via an `Info.AwakeStartedAt` field-add +
@@ -51,9 +54,10 @@ W-pool→W-unexport plan — AUTHORITATIVE), `remainder-design.md` (R1–R5), `r
 
 ## Current census (green at `23a0e2d43`) — the remaining tail
 ```
-InfoFromPersistedBead(:  build_desired_state 2, cmd_session 1, cmd_stop 1,
+InfoFromPersistedBead(:  cmd_session 1, cmd_stop 1,
                          session_bead_snapshot 3, session_hash 1,
-                         session_logs_resolve 2, internal/api/session_resolution 1   (= 11, → 0 after W-delete+W-flip)
+                         session_logs_resolve 2, internal/api/session_resolution 1   (= 9, → 0 after W-delete+W-flip;
+                         build_desired_state 2→0 DONE in W-pool)
 ListAllSessionBeads(:    doctor_session_model 1, session_bead_snapshot 1, session_beads 1
                          (→ stays PINNED at ~1: sync internals + internal/mail/beadmail compile dep;
                           full sync-typing is a separate out-of-budget "W-sync" wave — HONEST, documented)
