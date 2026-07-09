@@ -1098,13 +1098,17 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	healExpiredTimers(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
 
-	if session.Metadata["held_until"] != "" {
+	if got.HeldUntil != "" {
 		t.Error("expected held_until to be cleared")
 	}
-	if session.Metadata["sleep_reason"] != "" {
+	if got.SleepReason != "" {
 		t.Error("expected sleep_reason to be cleared")
+	}
+	// The fold reflects a persisted clear: the store must carry it too.
+	if persisted, err := store.Get(session.ID); err != nil || persisted.Metadata["held_until"] != "" {
+		t.Errorf("store held_until = %q (err %v), want cleared", persisted.Metadata["held_until"], err)
 	}
 }
 
@@ -1119,9 +1123,9 @@ func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	healExpiredTimers(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
 
-	if session.Metadata["held_until"] != future {
+	if got.HeldUntil != future {
 		t.Error("active hold should not be cleared")
 	}
 }
@@ -1137,15 +1141,15 @@ func TestHealExpiredTimers_ClearsExpiredQuarantine(t *testing.T) {
 		"sleep_reason":      "quarantine",
 	})
 
-	healExpiredTimers(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
 
-	if session.Metadata["quarantined_until"] != "" {
+	if got.QuarantinedUntil != "" {
 		t.Error("expected quarantined_until to be cleared")
 	}
-	if session.Metadata["wake_attempts"] != "0" {
-		t.Errorf("expected wake_attempts to be 0, got %q", session.Metadata["wake_attempts"])
+	if got.WakeAttemptsMetadata != "0" {
+		t.Errorf("expected wake_attempts to be 0, got %q", got.WakeAttemptsMetadata)
 	}
-	if session.Metadata["sleep_reason"] != "" {
+	if got.SleepReason != "" {
 		t.Error("expected sleep_reason to be cleared")
 	}
 }
@@ -1179,17 +1183,19 @@ func TestHealExpiredTimers_ExpiredHoldThenExpiredQuarantineSameCall(t *testing.T
 		"churn_count":       "3",
 	})
 
-	healExpiredTimers(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
 
-	for _, tc := range []struct{ key, want string }{
-		{"held_until", ""},
-		{"quarantined_until", ""},
-		{"sleep_reason", ""},
-		{"wake_attempts", "0"},
-		{"churn_count", "0"},
+	for _, tc := range []struct {
+		key, got, want string
+	}{
+		{"held_until", got.HeldUntil, ""},
+		{"quarantined_until", got.QuarantinedUntil, ""},
+		{"sleep_reason", got.SleepReason, ""},
+		{"wake_attempts", got.WakeAttemptsMetadata, "0"},
+		{"churn_count", got.ChurnCount, "0"},
 	} {
-		if got := session.Metadata[tc.key]; got != tc.want {
-			t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.key, tc.got, tc.want)
 		}
 	}
 }
@@ -2926,19 +2932,19 @@ func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
 		"sleep_reason":      "context-churn",
 	})
 
-	healExpiredTimers(&session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
 
-	if session.Metadata["quarantined_until"] != "" {
+	if got.QuarantinedUntil != "" {
 		t.Error("quarantined_until should be cleared")
 	}
-	if session.Metadata["wake_attempts"] != "0" {
-		t.Errorf("wake_attempts = %q, want 0", session.Metadata["wake_attempts"])
+	if got.WakeAttemptsMetadata != "0" {
+		t.Errorf("wake_attempts = %q, want 0", got.WakeAttemptsMetadata)
 	}
-	if session.Metadata["churn_count"] != "0" {
-		t.Errorf("churn_count = %q, want 0", session.Metadata["churn_count"])
+	if got.ChurnCount != "0" {
+		t.Errorf("churn_count = %q, want 0", got.ChurnCount)
 	}
-	if session.Metadata["sleep_reason"] != "" {
-		t.Errorf("sleep_reason = %q, want empty", session.Metadata["sleep_reason"])
+	if got.SleepReason != "" {
+		t.Errorf("sleep_reason = %q, want empty", got.SleepReason)
 	}
 }
 

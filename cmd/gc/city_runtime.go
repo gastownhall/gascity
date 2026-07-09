@@ -1156,7 +1156,7 @@ func (cr *CityRuntime) tick(
 			cr.sp,
 			cr.sessionsBeadStore(),
 			cr.rigBeadStores(),
-			sessionBeads.Open(),
+			sessionBeads.OpenInfos(),
 			cr.dops,
 			cr.sessionDrains,
 			&cr.asyncStops,
@@ -2298,7 +2298,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
 	}
 	reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
+		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
 		poolDesired,

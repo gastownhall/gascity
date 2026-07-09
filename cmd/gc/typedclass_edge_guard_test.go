@@ -173,7 +173,16 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// session_template_start (reopenClosedConfiguredNamedSessionBead now returns
 		// the resolved session name, dropping the caller's codec read, was 1).
 		"cmd/gc/session_logs_resolve.go": 2,
-		"cmd/gc/session_reconciler.go":   3,
+		// WI-7 W-tick: session_reconciler.go reaches interior zero (was 3). The tick
+		// entry now consumes the typed ReconcileSession row feed
+		// (Store.ListAllForReconcile / sessionBeadSnapshot.OpenForReconcile) and the
+		// Phase-0 heal/dedup fold onto rows BEFORE the infoByID snapshot is built
+		// (fold-then-build), so the three codec calls — the :582 finalize projection,
+		// the :1187 Phase-0 heal, and the :1272 snapshot build — are all gone. The
+		// finalize pass takes []Info (OpenInfos), the circuit cluster rides the row's
+		// Circuit field, and the last three whole-bead consumers (cycleAlive/
+		// stranded/prune) took Info twins. No Get added (the 0-Get tick budget test
+		// still reads 0).
 		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop
 		// is a genuine WI-7-era raw retire lane (bead already in hand from the raw
 		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and

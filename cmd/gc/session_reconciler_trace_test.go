@@ -559,7 +559,8 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(),
 		cityDir,
-		nil,
+		nil, // rows []session.ReconcileSession
+		nil, // snapshot *sessionBeadSnapshot
 		nil,
 		nil,
 		&config.City{},

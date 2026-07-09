@@ -425,40 +425,7 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 	return normalizeAgentTemplateIdentity(cfg, a) == normalizeAgentTemplateIdentity(cfg, b)
 }
 
-// healExpiredTimers clears expired held_until and quarantined_until.
-// Separate from wakeReasons() to keep that function pure. Decision reads route
-// through the typed info snapshot, which must equal the Info projection of *session
-// at call time; the raw session.Metadata mirror loops are kept because the Phase-0
-// caller runs before the coherent infoByID snapshot exists and later reads still
-// project from the mutated bead.
-func healExpiredTimers(session *beads.Bead, info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) {
-	if h := info.HeldUntil; h != "" {
-		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(session.ID, batch); err == nil {
-				for k, v := range batch {
-					session.Metadata[k] = v
-				}
-				// Fold the hold-clear batch onto the local Info so the quarantine
-				// block below reads the post-hold sleep_reason (ClearExpiredHoldPatch
-				// can blank it) exactly as the raw session.Metadata read did today.
-				info = info.ApplyPatch(batch)
-			}
-		}
-	}
-	if q := info.QuarantinedUntil; q != "" {
-		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(session.ID, batch); err == nil {
-				for k, v := range batch {
-					session.Metadata[k] = v
-				}
-			}
-		}
-	}
-}
-
-// healExpiredTimersInfo is the fold form of healExpiredTimers: it clears expired
+// healExpiredTimersInfo is the fold form of the Phase-0 timer heal: it clears expired
 // held_until / quarantined_until through the front door and returns the input
 // Info advanced by each successful clear (write-returns-Info), with NO raw
 // session.Metadata mirror. The reconciler's fold-then-build order (§2.3) applies
