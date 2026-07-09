@@ -135,6 +135,17 @@ func (o hostedDoltInitOptions) applyToCityConfig(cfg *config.City) error {
 	}
 	cfg.Dolt.Host = strings.TrimSpace(o.Host)
 	cfg.Dolt.Port = port
+	// A hosted city's controller runs out-of-session; the control dispatcher and
+	// gc CLI reach it only through the HTTP API, and every API consumer treats
+	// cfg.API.Port == 0 as "API disabled". Neither plain init nor the hosted
+	// endpoint flags write an [api] section (only the k8s-cell bootstrap profile
+	// does), so default the API port here — otherwise a hosted init yields a city
+	// whose control plane is unreachable until an [api] section is hand-added.
+	// applyBootstrapProfile runs first, so a profile that already pinned a
+	// port/bind (e.g. k8s-cell's 0.0.0.0 + allow_mutations) wins.
+	if cfg.API.Port == 0 {
+		cfg.API.Port = config.DefaultAPIPort
+	}
 	return nil
 }
 
