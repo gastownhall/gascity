@@ -66,6 +66,54 @@ func TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt(t *testing.
 	}
 }
 
+// TestResolveCodexTranscriptBySessionOrderInfoEquivalence pins the []Info twin
+// byte-identical to the raw []beads.Bead form across the anchor-precedence corpus:
+// the slept shape (awake_started_at anchor), a live shape (last_woke_at wins), and a
+// creation-only shape (creation_complete_at fallback). Because ResolveCodex... reads
+// only the mirrored anchor keys + work_dir + session_name + CreatedAt, the twin must
+// resolve the identical transcript path. Projecting each fixture bead through
+// InfoFromPersistedBead is the exact conversion the production caller will do.
+func TestResolveCodexTranscriptBySessionOrderInfoEquivalence(t *testing.T) {
+	root := t.TempDir()
+	workDir := "/data/projects/equiv"
+	const provider = "codex"
+
+	startA := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	startB := startA.Add(45 * time.Second)
+	pathA := writeCodexRolloutForAnchor(t, root, workDir, "019e0000-0000-7000-a1ef-000000000001", startA)
+	writeCodexRolloutForAnchor(t, root, workDir, "019e0000-0000-7000-a1ef-000000000002", startB)
+
+	// A: slept (awake_started_at anchor). B: live (last_woke_at anchor overrides).
+	beadA := sleptCodexSessionBead("sess-a", workDir, provider, startA)
+	beadB := beads.Bead{
+		ID:        "sess-b",
+		CreatedAt: startB.Add(-time.Hour),
+		Metadata: map[string]string{
+			"work_dir":     workDir,
+			"provider":     provider,
+			"last_woke_at": startB.Format(time.RFC3339Nano),
+			"session_name": "b-name",
+		},
+	}
+	sessions := []beads.Bead{beadA, beadB}
+	infos := make([]Info, 0, len(sessions))
+	for _, b := range sessions {
+		infos = append(infos, InfoFromPersistedBead(b))
+	}
+
+	for _, target := range []string{"sess-a", "sess-b", "sess-missing"} {
+		raw := ResolveCodexTranscriptBySessionOrder([]string{root}, provider, workDir, target, sessions)
+		typed := ResolveCodexTranscriptBySessionOrderInfos([]string{root}, provider, workDir, target, infos)
+		if raw != typed {
+			t.Errorf("target %q: raw=%q typed=%q diverge", target, raw, typed)
+		}
+	}
+	// Sanity: the corpus actually resolves the target (not a vacuous "" == "" pass).
+	if got := ResolveCodexTranscriptBySessionOrderInfos([]string{root}, provider, workDir, "sess-a", infos); got != pathA {
+		t.Fatalf("twin resolved %q, want %q — corpus no longer exercises a real resolution", got, pathA)
+	}
+}
+
 // sleptCodexSessionBead builds a same-workdir Codex session bead in the
 // slept/drained shape: last_woke_at and pending_create_started_at are cleared,
 // awake_started_at pins the rollout start, and creation_complete_at is 5s later.

@@ -47,6 +47,13 @@ type sessionBeadSnapshot struct {
 	sessionNameByAgentName    map[string]string
 	sessionNameByTemplateHint map[string]string
 	loadErr                   error
+	// fingerprint is the config-change cache key (sessionBeadSnapshotFingerprint):
+	// a hash of every open bead's ID + Status + Assignee + ALL metadata keys. It is
+	// computed at the store edge from the raw beads — session.Info deliberately drops
+	// unknown keys, so it CANNOT be recomputed after the raw half is gone — and
+	// carried here as a field. Set at construction (before publication, like loadErr);
+	// empty on snapshots built without raw beads (they never reach the getter).
+	fingerprint string
 }
 
 // LoadError reports a non-fatal error from the snapshot's load path (timeout
@@ -168,6 +175,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		beadIDByTemplateHint:      beadIDByTemplateHint,
 		sessionNameByAgentName:    sessionNameByAgentName,
 		sessionNameByTemplateHint: sessionNameByTemplateHint,
+		fingerprint:               sessionpkg.SessionSetFingerprint(filtered),
 	}
 }
 

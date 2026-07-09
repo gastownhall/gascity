@@ -44,6 +44,70 @@ func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDi
 	return ""
 }
 
+// ResolveCodexTranscriptBySessionOrderInfos is the session.Info twin of
+// ResolveCodexTranscriptBySessionOrder: it takes the same-workdir Codex session
+// group as typed Info rows rather than raw beads, so callers holding the front-door
+// Info feed do not crack raw metadata. Byte-identical to the raw form — the anchor
+// keys (last_woke_at / pending_create_started_at / awake_started_at /
+// creation_complete_at), work_dir, session_name, and CreatedAt are all mirrored on
+// Info — pinned by TestResolveCodexTranscriptBySessionOrderInfoEquivalence.
+func ResolveCodexTranscriptBySessionOrderInfos(searchPaths []string, provider, workDir, targetID string, sessions []Info) string {
+	if sessionlog.ProviderFamily(provider) != "codex" || strings.TrimSpace(workDir) == "" || strings.TrimSpace(targetID) == "" {
+		return ""
+	}
+	anchored := collectAnchoredCodexSessionInfos(sessions, workDir)
+	if len(anchored) < 2 {
+		return ""
+	}
+	sortAnchoredCodexSessions(anchored)
+	if hasDuplicateAnchorStart(anchored) {
+		return ""
+	}
+	for i, item := range anchored {
+		if item.id != targetID {
+			continue
+		}
+		end := codexSessionWindowEnd(anchored, i)
+		return workertranscript.DiscoverCodexPathInTimeWindow(searchPaths, workDir, item.start, end)
+	}
+	return ""
+}
+
+// collectAnchoredCodexSessionInfos is the Info twin of collectAnchoredCodexSessions:
+// it keeps the same-workdir Info rows carrying a non-zero start anchor, reading
+// Info.WorkDir (the legacy work_dir mirror), the anchor keys via
+// transcriptStartAnchorInfo, and Info.SessionNameMetadata as the tiebreak key.
+func collectAnchoredCodexSessionInfos(sessions []Info, workDir string) []anchoredCodexSession {
+	var anchored []anchoredCodexSession
+	for _, info := range sessions {
+		if info.ID == "" || strings.TrimSpace(info.WorkDir) != workDir {
+			continue
+		}
+		start := transcriptStartAnchorInfo(info)
+		if start.IsZero() {
+			continue
+		}
+		anchored = append(anchored, anchoredCodexSession{
+			id:     info.ID,
+			start:  start,
+			tieKey: strings.TrimSpace(info.SessionNameMetadata),
+		})
+	}
+	return anchored
+}
+
+// transcriptStartAnchorInfo is the Info twin of transcriptStartAnchor: same
+// most-precise-first preference (last_woke_at, pending_create_started_at,
+// awake_started_at, creation_complete_at, then CreatedAt) over the Info mirrors.
+func transcriptStartAnchorInfo(info Info) time.Time {
+	for _, raw := range []string{info.LastWokeAt, info.PendingCreateStartedAt, info.AwakeStartedAt, info.CreationCompleteAt} {
+		if parsed := parseTranscriptAnchorTime(raw); !parsed.IsZero() {
+			return parsed
+		}
+	}
+	return info.CreatedAt
+}
+
 // collectAnchoredCodexSessions keeps the same-workdir sessions that carry a
 // non-zero start anchor, dropping ones without an id or a resolvable anchor.
 func collectAnchoredCodexSessions(sessions []beads.Bead, workDir string) []anchoredCodexSession {

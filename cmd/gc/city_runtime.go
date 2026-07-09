@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -3279,35 +3278,20 @@ func (cr *CityRuntime) installDemandSnapshotSideEffects(result DesiredStateResul
 	}
 }
 
+// sessionBeadSnapshotFingerprint returns the snapshot's config-change cache key,
+// computed from the raw beads at the store edge (session.SessionSetFingerprint) and
+// carried on the snapshot as a field. It hashes every open bead's ID + Status +
+// Assignee + ALL metadata keys — a shape session.Info deliberately drops, which is
+// why it must be computed at construction, not reconstructed here. An empty string is
+// returned for a nil snapshot or one built without raw beads (which never reaches this
+// getter — only store-loaded snapshots feed loadDemandSnapshot).
 func sessionBeadSnapshotFingerprint(snapshot *sessionBeadSnapshot) string {
 	if snapshot == nil {
 		return ""
 	}
-	open := snapshot.Open()
-	sort.Slice(open, func(i, j int) bool {
-		return open[i].ID < open[j].ID
-	})
-	h := fnv.New64a()
-	for _, bead := range open {
-		_, _ = io.WriteString(h, bead.ID)
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, bead.Status)
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, bead.Assignee)
-		_, _ = io.WriteString(h, "\x00")
-		keys := make([]string, 0, len(bead.Metadata))
-		for key := range bead.Metadata {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			_, _ = io.WriteString(h, key)
-			_, _ = io.WriteString(h, "\x00")
-			_, _ = io.WriteString(h, bead.Metadata[key])
-			_, _ = io.WriteString(h, "\x00")
-		}
-	}
-	return fmt.Sprintf("%x", h.Sum64())
+	snapshot.mu.RLock()
+	defer snapshot.mu.RUnlock()
+	return snapshot.fingerprint
 }
 
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {

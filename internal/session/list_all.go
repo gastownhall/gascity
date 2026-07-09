@@ -2,6 +2,8 @@ package session
 
 import (
 	"fmt"
+	"hash/fnv"
+	"io"
 	"sort"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -224,6 +226,88 @@ func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, er
 		})
 	}
 	return out, err
+}
+
+// ReconcileRowsFromBeads projects an in-memory slice of raw session beads to the
+// reconcile row feed (Info + circuit cluster per bead), the same per-row projection
+// ListAllForReconcile applies to store rows. It exists for the callers that hold raw
+// beads directly rather than reading them from the store — the reconciler test/compat
+// wrappers and the sync-tail fallback — so the InfoFromPersistedBead +
+// CircuitStateFromMetadata codec stays confined to this package. Unlike
+// ListAllForReconcile it applies NO union/dedupe/filter: the input is taken as-is,
+// row for row, order preserved (closed beads included; the snapshot constructor drops
+// them).
+func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
+	out := make([]ReconcileSession, 0, len(beadsIn))
+	for _, b := range beadsIn {
+		out = append(out, ReconcileSession{
+			Info:    InfoFromPersistedBead(b),
+			Circuit: CircuitStateFromMetadata(b.Metadata),
+		})
+	}
+	return out
+}
+
+// SessionSetFingerprint hashes the identity-affecting shape of a raw session-bead
+// set: each bead's ID + Status + Assignee + every metadata key/value, order-
+// independent (beads sorted by ID, keys sorted per bead). It is the config-change
+// detector's cache key and MUST reflect ALL metadata keys — session.Info deliberately
+// drops keys it does not project (info_apply_patch.go), so this fingerprint CANNOT be
+// derived from Info. It is computed at the store edge (ListAllForReconcileWithFingerprint)
+// where the raw beads are still in hand and carried onto the snapshot as a field. The
+// byte layout is the reference the config-change caching depends on — a drift re-runs or
+// skips demand rebuilds — so it is pinned byte-for-byte against the pre-migration inline
+// hash by TestSessionSetFingerprintMatchesInlineHash.
+func SessionSetFingerprint(beadsIn []beads.Bead) string {
+	sorted := make([]beads.Bead, len(beadsIn))
+	copy(sorted, beadsIn)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].ID < sorted[j].ID
+	})
+	h := fnv.New64a()
+	for _, bead := range sorted {
+		_, _ = io.WriteString(h, bead.ID)
+		_, _ = io.WriteString(h, "\x00")
+		_, _ = io.WriteString(h, bead.Status)
+		_, _ = io.WriteString(h, "\x00")
+		_, _ = io.WriteString(h, bead.Assignee)
+		_, _ = io.WriteString(h, "\x00")
+		keys := make([]string, 0, len(bead.Metadata))
+		for key := range bead.Metadata {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			_, _ = io.WriteString(h, key)
+			_, _ = io.WriteString(h, "\x00")
+			_, _ = io.WriteString(h, bead.Metadata[key])
+			_, _ = io.WriteString(h, "\x00")
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+// ListAllForReconcileWithFingerprint is ListAllForReconcile paired with the
+// SessionSetFingerprint of the same raw bead set, computed in a single list so the
+// snapshot can carry the config-change fingerprint without a second store scan or a
+// raw bead escaping the package. The fingerprint is over the surviving union rows
+// (post-dedupe/filter), matching the set the snapshot projects. Error semantics match
+// ListAllForReconcile (hard error → nil rows + empty fingerprint + wrapped error;
+// partial → projected partial rows + their fingerprint + PartialResultError).
+func (s *Store) ListAllForReconcileWithFingerprint(opts ListAllOptions) ([]ReconcileSession, string, error) {
+	rows, err := s.listAllBeads(opts)
+	if rows == nil {
+		return nil, "", err
+	}
+	fingerprint := SessionSetFingerprint(rows)
+	out := make([]ReconcileSession, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, ReconcileSession{
+			Info:    InfoFromPersistedBead(b),
+			Circuit: CircuitStateFromMetadata(b.Metadata),
+		})
+	}
+	return out, fingerprint, err
 }
 
 // ListAllWithResponses is ListAll paired with the persisted-response projection:
