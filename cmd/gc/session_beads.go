@@ -428,6 +428,11 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch["started_live_hash"] = ""
 			batch["live_hash"] = ""
 			batch["startup_dialog_verified"] = ""
+			// Priming markers share started_config_hash's lifetime (S19 Stage 2):
+			// re-claiming for a fresh spawn re-primes.
+			batch[session.PrimedAtMetadataKey] = ""
+			batch[session.PrimingAttemptedAtMetadataKey] = ""
+			batch[session.PromptHashMetadataKey] = ""
 		} else {
 			batch["pending_create_started_at"] = ""
 		}
@@ -435,6 +440,10 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch[k] = v
 		}
 		if setMetaBatch(sessionFrontDoor(store), bead.ID, batch, stderr) == nil {
+			// S19 Stage 3 shadow: record the legacy priming-marker clears so the
+			// converge comparator can attribute this owned-key delta (no-op unless
+			// the shadow harness is enabled).
+			recordLegacyCompareWrites(bead.ID, "syncSessionBeads.reclaim", batch)
 			if bead.Metadata == nil {
 				bead.Metadata = make(map[string]string, len(batch))
 			}
@@ -509,6 +518,10 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 				continue
 			}
+			// S19 Stage 3 shadow: record the legacy canonical-identity clears so
+			// the converge comparator can attribute this owned-key delta (no-op
+			// unless the shadow harness is enabled).
+			recordLegacyCompareWrites(b.ID, "retireDuplicateConfiguredNamedSessionBeads", batch)
 			if err := sessionFrontDoor(store).SetStatusOpen(b.ID); err != nil {
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
 				continue
@@ -578,6 +591,10 @@ func retireRemovedConfiguredNamedSessionBead(
 	if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 		return false
 	}
+	// S19 Stage 3 shadow: record the legacy canonical-identity clears so the
+	// converge comparator can attribute this owned-key delta (no-op unless the
+	// shadow harness is enabled).
+	recordLegacyCompareWrites(b.ID, "retireRemovedConfiguredNamedSessionBead", batch)
 	if err := sessionFrontDoor(store).SetStatusOpen(b.ID); err != nil {
 		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
@@ -1265,6 +1282,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				Generation:        session.DefaultGeneration,
 				ContinuationEpoch: session.DefaultContinuationEpoch,
 				InstanceToken:     instanceToken,
+				PoolSlot:          poolSlot,
+				// syncSessionBeads iterates configured agents, so agentName is
+				// always a config-resolved identity — stamp the canonical record.
+				ConfigResolved: true,
 			})
 			meta["live_hash"] = liveHash
 			meta["session_origin"] = origin
@@ -1309,7 +1330,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			meta["template"] = qualifiedTemplate
 			if poolSlot > 0 {
-				meta["pool_slot"] = strconv.Itoa(poolSlot)
+				// pool_slot is emitted by desiredSessionIdentity above (PoolSlot
+				// passed in); only the pending pool session_name is hand-stamped.
 				meta["session_name"] = pendingPoolSessionName(qualifiedTemplate, instanceToken)
 			}
 			// Store command and resume fields so gc session attach can
@@ -1417,6 +1439,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			case finalizeErr != nil:
 				continue
 			default:
+				// S19 Stage 3 shadow: record the legacy canonical-identity stamp
+				// (built by desiredSessionIdentity above) now that the bead ID
+				// exists. No-op unless the shadow harness is enabled.
+				recordLegacyCompareWrites(newBead.ID, "syncSessionBeads.create", meta)
 				desiredNames[createdSessionName] = true
 				openIndex[createdSessionName] = newBead.ID
 				openBeads = append(openBeads, newBead)

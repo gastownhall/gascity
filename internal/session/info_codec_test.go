@@ -65,8 +65,12 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
 		ManualSessionMetadata:   b.Metadata["manual_session"],
 		Labels:                  b.Labels,
-		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
-		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
+
+		// Canonical-identity record mirrors (verbatim). S19 Stage 2 (write-only).
+		CanonicalInstanceNameMetadata: b.Metadata[CanonicalInstanceNameMetadata],
+		CanonicalPoolSlotMetadata:     b.Metadata[CanonicalPoolSlotMetadata],
+		MCPIdentity:                   b.Metadata[MCPIdentityMetadataKey],
+		MCPServersSnapshot:            b.Metadata[MCPServersSnapshotMetadataKey],
 
 		ProviderTerminalError: b.Metadata["provider_terminal_error"],
 		HealthState:           b.Metadata["session_health"],

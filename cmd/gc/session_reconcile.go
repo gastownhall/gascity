@@ -944,6 +944,11 @@ func healStateWithRollback(session *beads.Bead, alive bool, sessFront *sessionpk
 	for k, v := range batch {
 		session.Metadata[k] = v
 	}
+	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
+	// applied (no-op unless the shadow harness is enabled). Colocated with the
+	// ApplyPatch + in-memory mirror so a pure builder (healStatePatch) invoked only
+	// for inspection never records a write that never happened.
+	recordLegacyCompareWrites(session.ID, "healStateWithRollback", batch)
 	return batch
 }
 
@@ -1047,6 +1052,11 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2): this asleep continuation reset re-primes.
+				batch[sessionpkg.PrimedAtMetadataKey] = ""
+				batch[sessionpkg.PrimingAttemptedAtMetadataKey] = ""
+				batch[sessionpkg.PromptHashMetadataKey] = ""
 			}
 		}
 	}

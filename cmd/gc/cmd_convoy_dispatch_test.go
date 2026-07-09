@@ -3814,6 +3814,137 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 }
 
+// TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort guards
+// against gc-74rxa: the ready-query subprocess env is otherwise rebuilt via
+// mergeRuntimeEnv/controllerWorkQueryEnv, which can transiently resolve
+// without a Dolt port and silently drop GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT,
+// causing `bd --sandbox` to fall back to port 0. The dispatcher process's own
+// environment already carries the correct connection coordinates it was
+// spawned with, so the query string must carry them through explicitly.
+func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, want := range []string{
+		"GC_DOLT_HOST='127.0.0.1'",
+		"BEADS_DOLT_SERVER_HOST='127.0.0.1'",
+		"GC_DOLT_PORT='29620'",
+		"BEADS_DOLT_SERVER_PORT='29620'",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset ensures the
+// query stays clean (no bare "KEY=" assignments) when the current process has
+// no Dolt connection env at all (e.g. a doltlite-backed scope).
+func TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset(t *testing.T) {
+	unsetTestEnv(t, "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT="} {
+		if strings.Contains(query, unwanted) {
+			t.Fatalf("workflowServeControlReadyQuery should omit %q when ambient env is unset: %q", unwanted, query)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryDoesNotMixDoltNamespaces guards against a
+// correctness gap found in cross-provider review of gc-74rxa: host and port
+// must resolve as a matched pair from one env-var namespace, never as a host
+// from GC_DOLT_* combined with a port from BEADS_DOLT_SERVER_* (or vice
+// versa) -- a combination that may never have described the same server.
+// Here GC_DOLT_PORT is set (so the GC_DOLT_* namespace is "in use" for this
+// process) while only BEADS_DOLT_SERVER_HOST carries a value; the stale
+// BEADS host must NOT leak into the query paired with the GC port.
+func TestWorkflowServeControlReadyQueryDoesNotMixDoltNamespaces(t *testing.T) {
+	unsetTestEnv(t, "GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "29999")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "9.9.9.9")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+
+	for _, want := range []string{"GC_DOLT_PORT='29999'", "BEADS_DOLT_SERVER_PORT='29999'"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
+		}
+	}
+	if strings.Contains(query, "9.9.9.9") {
+		t.Fatalf("workflowServeControlReadyQuery must not mix BEADS_DOLT_SERVER_HOST from a different namespace than the resolved port: %q", query)
+	}
+}
+
+// unsetTestEnv unsets the given env vars for the duration of the test,
+// restoring the original values (or absence) afterward.
+func unsetTestEnv(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+}
+
+// TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution is the
+// execution-level companion to TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort:
+// cross-provider review of gc-74rxa noted that a pure string-assertion test
+// can pass while the real runtime path (shellWorkQueryWithEnv running the
+// query via `sh -c`, cmd/gc/cmd_hook.go:555) stays broken, since it never
+// crosses the process boundary. This test runs the built query through a
+// fake `bd` with an OUTER env that deliberately carries no Dolt connection
+// vars at all -- reproducing the exact failure mode (mergeRuntimeEnv having
+// stripped them) -- and asserts bd still receives the ambient port via the
+// query string's own shell-prefix assignment.
+func TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf 'GC_DOLT_PORT=%s BEADS_DOLT_SERVER_PORT=%s\n' "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_PORT:-}" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	// The outer env passed to shellWorkQueryWithEnv has no GC_DOLT_*/
+	// BEADS_DOLT_SERVER_* at all -- simulating mergeRuntimeEnv/
+	// controllerWorkQueryEnv having dropped them. Without the fix, bd would
+	// see an empty port here and resolve :0.
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read bd log: %v", readErr)
+	}
+	if !strings.Contains(string(logData), "GC_DOLT_PORT=29620") || !strings.Contains(string(logData), "BEADS_DOLT_SERVER_PORT=29620") {
+		t.Fatalf("bd did not see the ambient Dolt port despite a stripped outer env; log:\n%s", string(logData))
+	}
+}
+
 func TestWorkflowServeWorkQueryRecognizesCoreControlDispatcher(t *testing.T) {
 	query := workflowServeWorkQuery(config.Agent{Name: "core.control-dispatcher", Dir: "fixture"})
 

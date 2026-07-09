@@ -230,16 +230,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
-		c.beads[item.ID] = cloneBead(item)
-		if beadCarriesDependencyFields(item) {
-			c.deps[item.ID] = depsFromBeadFields(item)
-		}
-		delete(c.dirty, item.ID)
-		delete(c.deletedSeq, item.ID)
-		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
-			delete(c.beadSeq, item.ID)
-			delete(c.localBeadAt, item.ID)
-		}
+		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
@@ -251,16 +246,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
-		c.beads[id] = bead
-		if beadCarriesDependencyFields(bead) {
-			c.deps[id] = depsFromBeadFields(bead)
-		}
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		if !recentLocalMutation(c.localBeadAt[id], now) {
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-		}
+		c.absorbFreshLocked(id, bead, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 	}
 	for id := range removedParents {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -269,12 +259,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		c.evictLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -283,16 +268,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
-		c.beads[id] = bead
-		if beadCarriesDependencyFields(bead) {
-			c.deps[id] = depsFromBeadFields(bead)
-		}
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		if !recentLocalMutation(c.localBeadAt[id], now) {
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-		}
+		c.absorbFreshLocked(id, bead, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 	}
 	for id := range removedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -301,12 +281,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		c.evictLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -424,11 +399,11 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
 			}
-			c.beads[id] = cloneBead(fresh)
-			c.deps[id] = depsFromBeadFields(fresh)
-			delete(c.dirty, id)
-			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
+			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqClearBeadSeqOnly,
+				clearDirty: true,
+			})
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()

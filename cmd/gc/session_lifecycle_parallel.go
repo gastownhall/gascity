@@ -193,6 +193,17 @@ type preparedStart struct {
 	liveHash      string
 	provisionHash string
 	launchHash    string
+	// promptDelivered reports whether THIS incarnation actually delivers the
+	// rendered startup prompt (S19 confirmation signal 1). It is the pure
+	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
+	// exact complement of the resume override below — so a resume that swaps in
+	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
+	// no priming marker. promptHash is the sha256 of the rendered startup template
+	// prompt (tp.Prompt) only — it excludes the one-shot initial_message override
+	// appended to the delivered payload, so the stored hash still matches a later
+	// re-derivation from the template (S19 re-eligibility).
+	promptDelivered bool
+	promptHash      string
 }
 
 type startResult struct {
@@ -834,7 +845,7 @@ func buildPreparedStartWithWorkDirResolver(
 ) (*preparedStart, error) {
 	session := candidate.session
 	tp := candidate.tp
-	agentCfg := templateParamsToConfig(tp)
+	agentCfg, delivery := templateParamsToConfigWithDelivery(tp)
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
@@ -964,6 +975,19 @@ func buildPreparedStartWithWorkDirResolver(
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, parentSID, tp.ResolvedProvider, firstStart, forceFresh)
 	}
 	hasResumeKey := strings.TrimSpace(session.Metadata["session_key"]) != ""
+	// S19 priming confirmation (write-only in Stage 2): a marker is stamped only
+	// when the pure delivery decision holds AND this incarnation is a fresh
+	// launch — the exact complement of the resume override below, which swaps in
+	// restartPromptNudge and delivers nothing. Reading the env marker instead
+	// would mis-stamp every resume (it is re-set to "1" for hook consumption).
+	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey)
+	// prompt_hash is the sha256 of the rendered startup TEMPLATE prompt (tp.Prompt)
+	// only, computed here BEFORE the one-shot initial_message is appended to the
+	// delivered payload below. The hash exists so a template/config change re-primes
+	// the session (S19 Stage 4); a fresh re-launch re-renders tp.Prompt but never
+	// replays the transient initial_message, so hashing the delivered bytes would
+	// make the stored hash never match the re-derivation and re-prime forever.
+	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
@@ -1037,13 +1061,15 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:     candidate,
-		cfg:           agentCfg,
-		coreHash:      coreHash,
-		coreBreakdown: coreBreakdown,
-		liveHash:      liveHash,
-		provisionHash: provisionHash,
-		launchHash:    launchHash,
+		candidate:       candidate,
+		cfg:             agentCfg,
+		coreHash:        coreHash,
+		coreBreakdown:   coreBreakdown,
+		liveHash:        liveHash,
+		provisionHash:   provisionHash,
+		launchHash:      launchHash,
+		promptDelivered: promptDelivered,
+		promptHash:      promptHash,
 	}, nil
 }
 
@@ -1821,9 +1847,17 @@ func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Stor
 		"session_key":                "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
+		// Priming markers share started_config_hash's lifetime (S19 Stage 2):
+		// this stale-resume clear forces a first start, so they reset with it.
+		sessionpkg.PrimedAtMetadataKey:           "",
+		sessionpkg.PrimingAttemptedAtMetadataKey: "",
+		sessionpkg.PromptHashMetadataKey:         "",
 	}
 	if sessFront != nil && strings.TrimSpace(session.ID) != "" {
 		_ = sessFront.ApplyPatch(session.ID, patch)
+		// S19 Stage 3 shadow: record the legacy priming-marker clears (no-op
+		// unless the shadow harness is enabled).
+		recordLegacyCompareWrites(session.ID, "clearStaleResumeKeyMetadata", patch)
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(patch))
@@ -1891,6 +1925,16 @@ func commitStartResultTraced(
 	// from observing a transient state where the claim is gone but the
 	// post-create marker hasn't landed yet. See confirmPendingStart for
 	// the state gate.
+	// S19 priming confirmation pair (write-only in Stage 2): stamped only when
+	// this incarnation delivered the rendered startup prompt. result.err == nil
+	// here, so "start succeeded" already holds — the (Delivered && start
+	// succeeded) signal. Zero values ⇒ CommitStartedPatch emits no priming keys.
+	primedAt := time.Time{}
+	promptHash := ""
+	if result.prepared.promptDelivered {
+		primedAt = clk.Now()
+		promptHash = result.prepared.promptHash
+	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:                result.prepared.coreHash,
 		LiveHash:                result.prepared.liveHash,
@@ -1904,6 +1948,8 @@ func commitStartResultTraced(
 		// awake interval — stamp a fresh compute-usage epoch for it.
 		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
 		Now:                 clk.Now(),
+		PrimedAt:            primedAt,
+		PromptHash:          promptHash,
 	})
 	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
 	if err != nil {
@@ -2108,6 +2154,18 @@ func recoverRunningPendingCreate(
 	} else {
 		now = time.Now()
 	}
+	// S19 priming pair (write-only in Stage 2). The rebuild re-derives prepared
+	// from current durable state; a pre-commit crash left started_config_hash="",
+	// so firstStart is true and prepared.promptDelivered mirrors the original
+	// launch's delivery. If config changed since, promptHash describes the
+	// current rendered prompt — consistent with this site stamping current
+	// hashes. Zero values ⇒ no priming keys emitted.
+	primedAt := time.Time{}
+	promptHash := ""
+	if prepared.promptDelivered {
+		primedAt = now
+		promptHash = prepared.promptHash
+	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:      prepared.coreHash,
 		LiveHash:      prepared.liveHash,
@@ -2127,6 +2185,8 @@ func recoverRunningPendingCreate(
 		// start only — not the StateAwake re-confirmation above.
 		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
 		Now:                 now,
+		PrimedAt:            primedAt,
+		PromptHash:          promptHash,
 	})
 	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		if trace != nil {

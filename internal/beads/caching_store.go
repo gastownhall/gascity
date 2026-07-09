@@ -367,6 +367,124 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
+// absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.
+type absorbDepsMode int
+
+const (
+	// depsExplicit installs the caller-supplied opts.deps (cloned).
+	depsExplicit absorbDepsMode = iota
+	// depsFromFields recomputes deps from the bead's own fields, unconditionally
+	// (setting a nil entry when the bead carries no dependency fields).
+	depsFromFields
+	// depsFromFieldsIfCarried recomputes deps from the bead's fields only when
+	// the bead carries dependency fields; otherwise the cached deps row is left
+	// untouched.
+	depsFromFieldsIfCarried
+	// depsKeepCached leaves the cached deps row untouched.
+	depsKeepCached
+	// depsDrop removes the deps row.
+	depsDrop
+)
+
+// absorbSeqMode selects how absorbFreshLocked treats the beadSeq/localBeadAt
+// staleness fences for a bead.
+type absorbSeqMode int
+
+const (
+	// seqKeep touches neither fence. Used by write/event paths that ran
+	// noteMutationLocked/noteLocalMutationLocked immediately before the absorb
+	// and MUST preserve the fence they just set (the #2210 staleness defense).
+	seqKeep absorbSeqMode = iota
+	// seqClearGuarded clears both fences unless a recent local write-through is
+	// still inside the recency window.
+	seqClearGuarded
+	// seqClearBeadSeqOnly clears the beadSeq fence unconditionally and leaves
+	// localBeadAt untouched.
+	seqClearBeadSeqOnly
+)
+
+// absorbOpts describes the two axes of variation observed across the cache's
+// absorb sites: how the deps row is sourced and how the staleness fences are
+// treated. clearDirty is separate because a small number of sites (prime's
+// slow path, PrimeActive) deliberately leave a dirty mark in place across an
+// absorb.
+type absorbOpts struct {
+	depsMode   absorbDepsMode
+	deps       []Dep // consulted only for depsExplicit
+	seqMode    absorbSeqMode
+	clearDirty bool
+}
+
+// absorbFreshLocked installs a fresh row for id per opts. It is the only code
+// that installs a cached row alongside clearing the row's tombstone/staleness
+// state. now is the caller's clock read for the whole pass; it is consulted
+// only by seqClearGuarded. Caller must hold c.mu in write mode.
+func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+	c.beads[id] = cloneBead(bead)
+	switch opts.depsMode {
+	case depsExplicit:
+		c.deps[id] = cloneDeps(opts.deps)
+	case depsFromFields:
+		c.deps[id] = depsFromBeadFields(bead)
+	case depsFromFieldsIfCarried:
+		if beadCarriesDependencyFields(bead) {
+			c.deps[id] = depsFromBeadFields(bead)
+		}
+	case depsKeepCached:
+		// leave c.deps[id] untouched
+	case depsDrop:
+		delete(c.deps, id)
+	}
+	if opts.clearDirty {
+		delete(c.dirty, id)
+	}
+	delete(c.deletedSeq, id)
+	switch opts.seqMode {
+	case seqClearGuarded:
+		if !recentLocalMutation(c.localBeadAt[id], now) {
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+		}
+	case seqClearBeadSeqOnly:
+		delete(c.beadSeq, id)
+	}
+}
+
+// evictLocked removes every trace of id from the six per-row maps. It does not
+// touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu in
+// write mode.
+func (c *CachingStore) evictLocked(id string) {
+	delete(c.beads, id)
+	delete(c.deps, id)
+	delete(c.dirty, id)
+	delete(c.deletedSeq, id)
+	delete(c.beadSeq, id)
+	delete(c.localBeadAt, id)
+}
+
+// tombstoneLocked evicts id and installs a deletion fence at seq. seq must be a
+// mutationSeq value obtained under the same lock hold so the fence exceeds any
+// startSeq captured before this section. Caller must hold c.mu in write mode.
+func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
+	c.evictLocked(id)
+	c.deletedSeq[id] = seq
+}
+
+// markDirtyLocked flags id as known-stale so reads bypass the cache until a
+// refresh clears the mark. Caller must hold c.mu in write mode.
+func (c *CachingStore) markDirtyLocked(id string) {
+	c.dirty[id] = struct{}{}
+}
+
+// clearStalenessMarksLocked clears the dirty flag and deletion fence for id
+// without touching the cached row or its deps. Used by the deps-overlay
+// fallbacks that trust an in-place dependency mutation. Caller must hold c.mu
+// in write mode.
+func (c *CachingStore) clearStalenessMarksLocked(id string) {
+	delete(c.dirty, id)
+	delete(c.deletedSeq, id)
+}
+
 // PrimeActive loads the common active bead statuses (open + in_progress) across
 // both persistent issues and ephemeral wisps into the cache. These are fast indexed
 // queries that populate enough data for
@@ -423,17 +541,14 @@ func (c *CachingStore) PrimeActive() error {
 		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now, false); keep {
 			continue
 		}
-		c.beads[b.ID] = cloneBead(b)
+		opts := absorbOpts{seqMode: seqClearGuarded, clearDirty: false}
 		if depsComplete && depErr == nil {
-			c.deps[b.ID] = cloneDeps(depMap[b.ID])
+			opts.depsMode = depsExplicit
+			opts.deps = depMap[b.ID]
 		} else {
-			c.deps[b.ID] = depsFromBeadFields(b)
+			opts.depsMode = depsFromFields
 		}
-		delete(c.deletedSeq, b.ID)
-		if !recentLocalMutation(c.localBeadAt[b.ID], now) {
-			delete(c.beadSeq, b.ID)
-			delete(c.localBeadAt, b.ID)
-		}
+		c.absorbFreshLocked(b.ID, b, now, opts)
 	}
 	if c.state == cacheUninitialized {
 		c.state = cachePartial
@@ -576,14 +691,14 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			if _, exists := c.beads[id]; exists {
 				continue
 			}
-			c.beads[id] = b
-			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
+			opts := absorbOpts{seqMode: seqClearBeadSeqOnly, clearDirty: false}
 			if depsComplete && depErr == nil {
-				c.deps[id] = cloneDeps(depMap[id])
+				opts.depsMode = depsExplicit
+				opts.deps = depMap[id]
 			} else {
-				c.deps[id] = depsFromBeadFields(b)
+				opts.depsMode = depsFromFields
 			}
+			c.absorbFreshLocked(id, b, now, opts)
 		}
 		c.depsComplete = false
 	}

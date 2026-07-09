@@ -269,6 +269,16 @@ func createPoolSessionBeadWithAlias(
 		}
 		meta[key] = strings.TrimSpace(value)
 	}
+	// Durable canonical-identity record (S19 Stage 2, WRITE-ONLY). Stamped AFTER
+	// the identity.Metadata copy so a caller-supplied metadata entry can never
+	// overwrite the config-resolved record — the canonical record is the one
+	// authoritative identity (S2-3 honesty). The identity here is pool-resolved
+	// config identity, so it is safe to stamp; agentName is non-empty. Slot is
+	// coupled to the name.
+	meta[sessionpkg.CanonicalInstanceNameMetadata] = agentName
+	if identity.Slot > 0 {
+		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
+	}
 	beadID, err := sessionFrontDoor(store).CreateSession(sessionpkg.CreateSpec{
 		ID:        explicitID,
 		Title:     title,
@@ -278,6 +288,10 @@ func createPoolSessionBeadWithAlias(
 	if err != nil {
 		return beads.Bead{}, err
 	}
+	// S19 Stage 3 shadow: record the legacy canonical-identity stamp on the
+	// pool-create path now that the bead ID exists (no-op unless the shadow
+	// harness is enabled).
+	recordLegacyCompareWrites(beadID, "poolSessionCreate", meta)
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return beads.Bead{}, err

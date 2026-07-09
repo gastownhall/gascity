@@ -192,8 +192,29 @@ func (c *StateCache) refresh() {
 			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
 			c.mu.Lock()
 			c.lastError = err
+			// Two distinct failure regimes, keyed on whether the cache was ever
+			// primed (fetchedAt set by a prior success):
+			//
+			//   UNPRIMED + genuine no-server (a fresh city with no tmux server
+			//   yet): initialize to an EMPTY snapshot so the cache is primed.
+			//   Without this, currentState() sees a nil Sessions map and forces
+			//   a fresh list-panes spawn plus a failure log on EVERY IsRunning()
+			//   call — a re-spawn/log storm in the exact steady state (no server)
+			//   where nothing will change until one is started. An empty primed
+			//   snapshot correctly reports all sessions not-running and holds as
+			//   a cache hit until the TTL lapses.
+			//
+			//   PRIMED then now-unreachable: preserve last-known-good (do NOT
+			//   touch fetchedAt or sessions) until the staleTTL cliff. A server
+			//   that was up then briefly vanished (supervisor restart, socket
+			//   stall) must not wipe a good snapshot and drain healthy pool slots
+			//   — that is #4082's intent.
+			if c.fetchedAt.IsZero() && isNoServerError(err) {
+				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
+				c.fetchedAt = time.Now()
+				c.dirty = false
+			}
 			c.mu.Unlock()
-			// Preserve last-known-good — do NOT update fetchedAt or sessions.
 			return nil, err
 		}
 

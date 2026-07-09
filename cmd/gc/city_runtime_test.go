@@ -3096,8 +3096,8 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime
 		State:            map[string]TemplateParams{},
 		ScaleCheckCounts: map[string]int{"worker": 0},
 		AssignedWorkBeads: []beads.Bead{
-			// Open + unassigned == unclaimed: the slot's trigger bead the polecat
-			// never began. workBead sets gc.routed_to but leaves the assignee empty.
+			// Open + unassigned == unclaimed: the slot's trigger bead the warm pool
+			// worker never began. workBead sets gc.routed_to but leaves the assignee empty.
 			workBead("w-idle", "worker", "", "open", 5),
 		},
 	}

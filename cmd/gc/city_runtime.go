@@ -2360,7 +2360,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// Activity reporting lets the controller SEE such a slot as alive but never
 	// delivers the claim nudge, so tmux has no demand-driven wake for it. The
 	// backstop is churn-free by construction for either runtime: it keys on the
-	// trigger bead still being open (the instant a polecat claims, the bead
+	// trigger bead still being open (the instant a pool slot claims, the bead
 	// flips to in_progress and stops matching), persists its bounded
 	// observe→nudge→backoff state on the session bead, and never spams a tick.
 	// See nudgeStalledPoolClaims for the full invariant.

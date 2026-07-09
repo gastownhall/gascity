@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
@@ -105,6 +106,18 @@ func TestPhase2HookEnabledClaudeFirstTurnStartupPayload(t *testing.T) {
 	}
 	if strings.Count(payload, "Do the first task.") != 1 {
 		t.Fatalf("payload = %q, want initial_message exactly once", payload)
+	}
+
+	// prompt_hash pins the rendered startup TEMPLATE prompt only. Even though the
+	// delivered payload above carries the one-shot initial_message, the stored hash
+	// must exclude it so a later Stage-4 re-derivation from the template still
+	// matches (S19); hashing the delivered payload would re-prime the session
+	// forever.
+	if got, want := prepared.promptHash, sessionpkg.PromptHash("Base worker prompt"); got != want {
+		t.Errorf("promptHash = %q, want base-template hash %q (initial_message must be excluded)", got, want)
+	}
+	if prepared.promptHash == sessionpkg.PromptHash(payload) {
+		t.Errorf("promptHash must not hash the delivered payload %q (which includes initial_message)", payload)
 	}
 }
 
