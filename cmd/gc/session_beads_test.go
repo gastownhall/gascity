@@ -1149,11 +1149,14 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsPendingCreateStartedAtWhenA
 	}
 
 	var stderr bytes.Buffer
-	reopened, ok := reopenClosedConfiguredNamedSessionBead(
+	reopened, sn, ok := reopenClosedConfiguredNamedSessionBead(
 		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, nil, &stderr,
 	)
 	if !ok {
 		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if sn != sessionName {
+		t.Fatalf("reopen session name = %q, want %q", sn, sessionName)
 	}
 	if reopened.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want empty", reopened.Metadata["pending_create_claim"])
@@ -1213,11 +1216,14 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 	}
 
 	var stderr bytes.Buffer
-	reopened, ok := reopenClosedConfiguredNamedSessionBead(
+	reopened, sn, ok := reopenClosedConfiguredNamedSessionBead(
 		cityPath, store, cfg, "test-city", "mayor", sessionName, "creating", now, nil, &stderr,
 	)
 	if !ok {
 		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if sn != sessionName {
+		t.Fatalf("reopen session name = %q, want %q", sn, sessionName)
 	}
 	for _, key := range []string{
 		"creation_complete_at",

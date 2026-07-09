@@ -7098,7 +7098,7 @@ prompt_template = "prompts/probe.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
-		Type:  "task",
+		Type:  "session",
 		Labels: []string{
 			"gc:session",
 			"template:probe",
@@ -7177,7 +7177,7 @@ prompt_template = "prompts/probe.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
-		Type:  "task",
+		Type:  "session",
 		Labels: []string{
 			"gc:session",
 			"template:probe",
@@ -7350,7 +7350,7 @@ prompt_template = "prompts/probe.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
-		Type:  "task",
+		Type:  "session",
 		Labels: []string{
 			"gc:session",
 			"template:probe",

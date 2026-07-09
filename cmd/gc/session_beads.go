@@ -378,9 +378,9 @@ func reopenClosedConfiguredNamedSessionBead(
 	now time.Time,
 	extraMeta map[string]string,
 	stderr io.Writer,
-) (beads.Bead, bool) {
+) (beads.Bead, string, bool) {
 	if store == nil || cfg == nil {
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -388,23 +388,23 @@ func reopenClosedConfiguredNamedSessionBead(
 	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: finding closed configured named session %q: %v\n", identity, err) //nolint:errcheck
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
 	if !ok {
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
 	// Explicit gc session close retires the canonical identifiers before
 	// closing. In that case, mint a fresh canonical bead instead of reviving
 	// a deliberately retired runtime identity.
 	if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
 	if strings.TrimSpace(bead.Metadata["session_name"]) != strings.TrimSpace(sessionName) {
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok || strings.TrimSpace(spec.SessionName) != strings.TrimSpace(sessionName) {
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
 	var reopened beads.Bead
 	err = session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
@@ -467,9 +467,13 @@ func reopenClosedConfiguredNamedSessionBead(
 		fmt.Fprintf(stderr, "session beads: locking identifiers for %q reopen: %v\n", identity, err) //nolint:errcheck
 	}
 	if reopened.ID == "" {
-		return beads.Bead{}, false
+		return beads.Bead{}, "", false
 	}
-	return reopened, true
+	// The reopened bead's session_name is guaranteed to equal the (non-empty,
+	// trimmed) input sessionName by the guards above; returning it as a typed
+	// string lets the caller (session_template_start) drop its InfoFromPersistedBead
+	// read while still holding the raw bead for snapshot.add.
+	return reopened, strings.TrimSpace(reopened.Metadata["session_name"]), true
 }
 
 func retireDuplicateConfiguredNamedSessionBeads(
@@ -1196,7 +1200,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
-			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
+			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
 				b = reopened
 				exists = true
 				state = syncSessionCachedState(sn, b, exists, sp)
