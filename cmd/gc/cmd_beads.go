@@ -40,6 +40,10 @@ fallback to direct bd reads.`,
 }
 
 func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
+	var (
+		label, status, format string
+		all                   bool
+	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List beads (API-routed with bd fallback)",
@@ -47,26 +51,30 @@ func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format flags. --json is an
-alias for --format=json. API-path JSON output includes _cache_age_s;
-fallback-path JSON omits it.`,
+Supports --label, --status, --all, and --format. --format=json emits
+JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
+it). The bare --json flag is reserved by the CLI's JSON-contract layer
+and is not wired for this command; use --format=json.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
-  gc beads list --status open --json
-  gc beads list --format=toon`,
-		DisableFlagParsing: true,
-		Args:               cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdBeadsList(args, stdout, stderr) != 0 {
+  gc beads list --status open --format=json`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if cmdBeadsList(format, beadFilters{label: label, status: status, all: all}, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&label, "label", "", "filter to beads carrying this label")
+	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
+	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: open only)")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
 
 func newBeadsShowCmd(stdout, stderr io.Writer) *cobra.Command {
+	var format string
 	cmd := &cobra.Command{
 		Use:   "show <bead-id>",
 		Short: "Show a single bead (API-routed with bd fallback)",
@@ -74,28 +82,38 @@ func newBeadsShowCmd(stdout, stderr io.Writer) *cobra.Command {
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format and --json. API-path JSON output includes
-_cache_age_s; fallback-path JSON omits it.`,
+Supports --format. --format=json emits JSON (API-path JSON includes
+_cache_age_s; fallback-path JSON omits it). The bare --json flag is
+reserved by the CLI's JSON-contract layer and is not wired for this
+command; use --format=json.`,
 		Example: `  gc beads show ga-abc
-  gc beads show ga-abc --json`,
-		DisableFlagParsing: true,
-		Args:               cobra.ArbitraryArgs,
+  gc beads show ga-abc --format=json`,
+		// MaximumNArgs(1), not ExactArgs(1): a missing id must reach the internal
+		// guard AFTER resolveReadTarget (so a resolve error still takes
+		// precedence), which the routeReadCmdWithHooks ordering in cmdBeadsShow
+		// depends on. ExactArgs would reject the zero-arg case in cobra, before
+		// the resolver, inverting that documented ordering.
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdBeadsShow(args, stdout, stderr) != 0 {
+			id := ""
+			if len(args) > 0 {
+				id = args[0]
+			}
+			if cmdBeadsShow(id, format, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
 
-// cmdBeadsList is the CLI entry point for "gc beads list". Routes through
-// the supervisor API when a controller is up and falls back to direct bd
-// multi-store reads otherwise.
-func cmdBeadsList(args []string, stdout, stderr io.Writer) int {
-	format, rest := parseBeadFormat(args)
-	filters, _ := parseBeadFilters(rest)
+// cmdBeadsList is the CLI entry point for "gc beads list". The output format
+// and filters are parsed by cobra (see newBeadsListCmd) and passed in. Routes
+// through the supervisor API when a controller is up and falls back to a direct
+// multi-store read otherwise.
+func cmdBeadsList(format string, filters beadFilters, stdout, stderr io.Writer) int {
 	return routeReadCmd("beads list", stderr, beadsListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
 		return routeBeadsList(cityPath, c, nilReason, format, filters, stdout, stderr)
 	})
@@ -176,28 +194,27 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 	return 0
 }
 
-// cmdBeadsShow is the CLI entry point for "gc beads show". Routes through
-// the supervisor API and falls back to a direct store lookup.
+// cmdBeadsShow is the CLI entry point for "gc beads show". The bead id and
+// output format are parsed by cobra (see newBeadsShowCmd) and passed in. Routes
+// through the supervisor API and falls back to a direct store lookup.
 //
 // It uses routeReadCmdWithHooks with a guard hook because the missing-id guard
 // must fire AFTER resolveReadTarget (so a resolve error still takes precedence)
 // but BEFORE the local beadsShowAPIClient seam (whose apiClient() call has
 // observable side effects — the classifyGCNoAPI stderr warning on a malformed
 // GC_NO_API, plus a controller-liveness probe and config.Load). The hook runs in
-// exactly that slot. parseBeadFormat is pure, so hoisting it above the call is
-// side-effect-free.
-func cmdBeadsShow(args []string, stdout, stderr io.Writer) int {
-	format, rest := parseBeadFormat(args)
+// exactly that slot.
+func cmdBeadsShow(id, format string, stdout, stderr io.Writer) int {
 	return routeReadCmdWithHooks("beads show", stderr, readCmdHooks{
 		guard: func() (int, bool) {
-			if len(rest) == 0 {
+			if id == "" {
 				fmt.Fprintln(stderr, "gc beads show: missing bead id") //nolint:errcheck // best-effort stderr
 				return 1, true
 			}
 			return 0, false
 		},
 	}, beadsShowAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
-		return routeBeadsShow(cityPath, c, nilReason, rest[0], format, stdout, stderr)
+		return routeBeadsShow(cityPath, c, nilReason, id, format, stdout, stderr)
 	})
 }
 
