@@ -635,7 +635,7 @@ func RestartRequestPatchAt(sessionKey string, now time.Time) MetadataPatch {
 // config drift. Creating claims a new runtime start; asleep stays dormant
 // until the next normal wake reason.
 func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) MetadataPatch {
-	patch := configDriftReset(nextState, sessionKey)
+	patch := configDriftReset(nextState, sessionKey, now)
 	if nextState == StateCreating || nextState == StateStartPending {
 		patch["pending_create_claim"] = "true"
 		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
@@ -644,16 +644,18 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 }
 
 // ConfigDriftAsleepResetPatch is ConfigDriftResetPatch(StateAsleep, ...),
-// which reads no clock: the v2 asleep named repair's (SESS-568).
+// which reads no clock: the v2 asleep named repair's (SESS-568). It reads
+// the wall clock itself for ResetCommittedAtKey, same as RestartRequestPatch's
+// IsZero fallback, since every continuation-reset re-arm site stamps it.
 func ConfigDriftAsleepResetPatch(sessionKey string) MetadataPatch {
-	return configDriftReset(StateAsleep, sessionKey)
+	return configDriftReset(StateAsleep, sessionKey, time.Now().UTC())
 }
 
 // ConfigDriftRestartPatch is ConfigDriftResetPatch(StateStartPending, ...)
 // at now, which it reads from its caller: the v2 named restart in place's
 // (SESS-557), written after its stop.
 func ConfigDriftRestartPatch(sessionKey string, now time.Time) MetadataPatch {
-	patch := configDriftReset(StateStartPending, sessionKey)
+	patch := configDriftReset(StateStartPending, sessionKey, now)
 	patch["pending_create_claim"] = "true"
 	patch["pending_create_started_at"] = now.UTC().Format(time.RFC3339)
 	return patch
@@ -661,7 +663,7 @@ func ConfigDriftRestartPatch(sessionKey string, now time.Time) MetadataPatch {
 
 // configDriftReset is a config-drift reset into nextState, its pending
 // create claim (a start's) aside.
-func configDriftReset(nextState State, sessionKey string) MetadataPatch {
+func configDriftReset(nextState State, sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
 		"last_woke_at":               "",
