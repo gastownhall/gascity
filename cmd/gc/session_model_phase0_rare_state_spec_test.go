@@ -312,33 +312,33 @@ func TestNamedSessionActivelyInUse(t *testing.T) {
 	}
 
 	// No attachment, no activity -> not active.
-	if namedSessionActivelyInUse(session, sp, name, clk) {
+	if namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), sp, name, clk) {
 		t.Error("expected not active with no attachment and no activity")
 	}
 
 	// Attached -> active.
 	sp.SetAttached(name, true)
-	if !namedSessionActivelyInUse(session, sp, name, clk) {
+	if !namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), sp, name, clk) {
 		t.Error("expected active when attached")
 	}
 	sp.SetAttached(name, false)
 
 	// Recent activity -> active.
 	sp.SetActivity(name, clk.Now().Add(-30*time.Second))
-	if !namedSessionActivelyInUse(session, sp, name, clk) {
+	if !namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), sp, name, clk) {
 		t.Error("expected active with recent activity (30s ago)")
 	}
 
 	// Stale activity -> not active.
 	sp.SetActivity(name, clk.Now().Add(-5*time.Minute))
-	if namedSessionActivelyInUse(session, sp, name, clk) {
+	if namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), sp, name, clk) {
 		t.Error("expected not active with stale activity (5m ago)")
 	}
 
 	// Unknown provider activity is conservative: an alive named session is
 	// treated as active because config-drift cannot prove it is idle.
 	unknownActivity := capabilityOverrideProvider{Provider: sp}
-	if !namedSessionActivelyInUse(session, unknownActivity, name, clk) {
+	if !namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), unknownActivity, name, clk) {
 		t.Error("expected active when provider cannot report activity")
 	}
 
@@ -350,7 +350,7 @@ func TestNamedSessionActivelyInUse(t *testing.T) {
 		sleepCap: runtime.SessionSleepCapabilityFull,
 	}
 	sp.SetActivity(name, clk.Now().Add(-5*time.Minute))
-	if namedSessionActivelyInUse(session, routedActivity, name, clk) {
+	if namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), routedActivity, name, clk) {
 		t.Error("expected not active when routed backend reports stale activity")
 	}
 
@@ -358,17 +358,17 @@ func TestNamedSessionActivelyInUse(t *testing.T) {
 		Provider: sp,
 		sleepCap: runtime.SessionSleepCapabilityTimedOnly,
 	}
-	if !namedSessionActivelyInUse(session, timedOnlyUnknownActivity, name, clk) {
+	if !namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), timedOnlyUnknownActivity, name, clk) {
 		t.Error("expected active when timed-only backend cannot report activity")
 	}
 
 	// Nil provider -> not active.
-	if namedSessionActivelyInUse(session, nil, name, clk) {
+	if namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), nil, name, clk) {
 		t.Error("expected not active with nil provider")
 	}
 
 	// Empty name -> not active.
-	if namedSessionActivelyInUse(session, sp, "", clk) {
+	if namedSessionActivelyInUseInfo(sessionpkg.InfoFromPersistedBead(session), sp, "", clk) {
 		t.Error("expected not active with empty name")
 	}
 }
@@ -393,7 +393,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 		t.Fatalf("Create session bead: %v", err)
 	}
 
-	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), provider, name, clk, "drift-1")
+	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), provider, name, clk, "drift-1")
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	}
 
 	clk.Time = clk.Now().Add(namedSessionActivityThreshold + time.Second)
-	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), provider, name, clk, "drift-1")
+	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), provider, name, clk, "drift-1")
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift after threshold: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 		t.Fatal("expected unknown-activity config drift to stop deferring after threshold")
 	}
 
-	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), provider, name, clk, "drift-2")
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), provider, name, clk, "drift-2")
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift new drift: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestShouldDeferNamedSessionConfigDriftDoesNotDeferWhenMarkerWriteFails(t *t
 		},
 	}
 
-	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(beads.NewMemStore()), provider, name, clk, "drift-1")
+	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(beads.NewMemStore()), provider, name, clk, "drift-1")
 	if err == nil {
 		t.Fatal("expected marker write error")
 	}

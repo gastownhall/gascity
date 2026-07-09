@@ -1533,7 +1533,7 @@ func (h *sessionChaosHarness) assertPostReconcileInvariants() {
 	if runtimeName == "" {
 		return
 	}
-	if pendingInteractionKeepsAwake(b, h.env.sp, runtimeName, h.env.clk) {
+	if pendingInteractionKeepsAwakeInfo(sessionpkg.InfoFromPersistedBead(b), h.env.sp, runtimeName, h.env.clk) {
 		if ds := h.env.dt.get(b.ID); ds != nil {
 			if !drainReasonCancelable(ds.reason) {
 				return

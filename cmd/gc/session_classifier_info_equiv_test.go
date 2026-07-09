@@ -1131,40 +1131,158 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// config-agent-resolving fixtures (e.g. the crash-lane sessionExitFactsInfo
 	// check below) see a real agent rather than only the nil-agent fallthrough.
 	leaseCfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Reference implementations of the pending-create lease classifiers whose raw
+	// bead forms were deleted in WI-6 R3. They reproduce the exact deleted logic
+	// off beads.Bead so each surviving *Info twin keeps a byte-identical oracle
+	// independent of the production Info projection (the sessionMetadataStateInfo
+	// precedent, scaled to the interdependent lease family). A mutation of any
+	// twin diverges from its reference here.
+	refPendingCreateAttemptStale := func(b beads.Bead) bool {
+		if clk == nil {
+			return false
+		}
+		now := clk.Now()
+		if started, ok := parseRFC3339Metadata(b.Metadata["pending_create_started_at"]); ok {
+			return !now.Before(started.Add(staleCreatingStateTimeout))
+		}
+		if b.CreatedAt.IsZero() {
+			return true
+		}
+		return !now.Before(b.CreatedAt.Add(staleCreatingStateTimeout))
+	}
+	refStaleCreatingState := func(b beads.Bead) bool {
+		if clk == nil {
+			return false
+		}
+		if strings.TrimSpace(b.Metadata["state"]) != string(session.StateCreating) {
+			return false
+		}
+		return refPendingCreateAttemptStale(b)
+	}
+	refSessionStartRequested := func(b beads.Bead) bool {
+		if strings.TrimSpace(b.Metadata["state"]) == string(session.StateStartPending) {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["state"]) != "creating" {
+			return false
+		}
+		return !refStaleCreatingState(b)
+	}
+	refPendingCreateStartInFlight := func(b beads.Bead) bool {
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "true" &&
+			session.State(strings.TrimSpace(b.Metadata["state"])) != session.StateCreating {
+			return false
+		}
+		lastWoke := strings.TrimSpace(b.Metadata["last_woke_at"])
+		if lastWoke == "" {
+			return false
+		}
+		started, err := time.Parse(time.RFC3339, lastWoke)
+		if err != nil {
+			return false
+		}
+		st := leaseStartupTimeout
+		if st <= 0 {
+			st = time.Minute
+		}
+		return clk.Now().Before(started.Add(st + staleKeyDetectDelay + 5*time.Second))
+	}
+	refPendingCreateNeverStartedLeaseExpired := func(b beads.Bead) bool {
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "true" {
+			return false
+		}
+		if strings.TrimSpace(b.Metadata["last_woke_at"]) != "" {
+			return false
+		}
+		anchor := b.CreatedAt
+		if started, ok := parseRFC3339Metadata(b.Metadata["pending_create_started_at"]); ok {
+			anchor = started
+		}
+		if anchor.IsZero() {
+			return true
+		}
+		return clk.Now().After(anchor.Add(pendingCreateNeverStartedTimeout))
+	}
+	refPendingCreateLeaseActive := func(b beads.Bead) bool {
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "true" {
+			return false
+		}
+		if refPendingCreateStartInFlight(b) {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["last_woke_at"]) == "" {
+			return !refPendingCreateNeverStartedLeaseExpired(b)
+		}
+		return !refPendingCreateAttemptStale(b)
+	}
+	refPendingCreateNeverStartedExpired := func(b beads.Bead) bool {
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "true" {
+			return false
+		}
+		if !pendingCreateRollbackState(b.Metadata["state"]) {
+			return false
+		}
+		return refPendingCreateNeverStartedLeaseExpired(b)
+	}
+	refPendingCreateLeaseExpiredForRollback := func(b beads.Bead) bool {
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "true" {
+			return false
+		}
+		state := session.State(strings.TrimSpace(b.Metadata["state"]))
+		if !pendingCreateRollbackState(string(state)) {
+			return false
+		}
+		if state == session.StateAsleep {
+			if strings.TrimSpace(b.Metadata["last_woke_at"]) == "" {
+				return refPendingCreateNeverStartedExpired(b)
+			}
+			return refPendingCreateAttemptStale(b)
+		}
+		if refPendingCreateStartInFlight(b) {
+			return false
+		}
+		if strings.TrimSpace(b.Metadata["last_woke_at"]) == "" {
+			return refPendingCreateNeverStartedExpired(b)
+		}
+		return refPendingCreateAttemptStale(b)
+	}
 	clkBoolChecks := map[string]struct {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
 	}{
 		"staleCreatingState": {
-			func(b beads.Bead) bool { return staleCreatingState(b, clk) },
+			refStaleCreatingState,
 			func(i session.Info) bool { return staleCreatingStateInfo(i, clk) },
 		},
 		"sessionStartRequested": {
-			func(b beads.Bead) bool { return sessionStartRequested(b, clk) },
+			refSessionStartRequested,
 			func(i session.Info) bool { return sessionStartRequestedInfo(i, clk) },
 		},
 		"pendingCreateAttemptStale": {
-			func(b beads.Bead) bool { return pendingCreateAttemptStale(b, clk) },
+			refPendingCreateAttemptStale,
 			func(i session.Info) bool { return pendingCreateAttemptStaleInfo(i, clk) },
 		},
 		"pendingCreateNeverStartedLeaseExpired": {
-			func(b beads.Bead) bool { return pendingCreateNeverStartedLeaseExpired(b, clk) },
+			refPendingCreateNeverStartedLeaseExpired,
 			func(i session.Info) bool { return pendingCreateNeverStartedLeaseExpiredInfo(i, clk) },
 		},
 		"pendingCreateStartInFlight": {
-			func(b beads.Bead) bool { return pendingCreateStartInFlight(b, clk, leaseStartupTimeout) },
+			refPendingCreateStartInFlight,
 			func(i session.Info) bool { return pendingCreateStartInFlightInfo(i, clk, leaseStartupTimeout) },
 		},
 		"pendingCreateLeaseActive": {
-			func(b beads.Bead) bool { return pendingCreateLeaseActive(b, clk, leaseStartupTimeout) },
+			refPendingCreateLeaseActive,
 			func(i session.Info) bool { return pendingCreateLeaseActiveInfo(i, clk, leaseStartupTimeout) },
 		},
 		"pendingCreateNeverStartedExpired": {
-			func(b beads.Bead) bool { return pendingCreateNeverStartedExpired(b, clk) },
+			refPendingCreateNeverStartedExpired,
 			func(i session.Info) bool { return pendingCreateNeverStartedExpiredInfo(i, clk) },
 		},
 		"pendingCreateLeaseExpiredForRollback": {
-			func(b beads.Bead) bool { return pendingCreateLeaseExpiredForRollback(b, clk, leaseStartupTimeout) },
+			refPendingCreateLeaseExpiredForRollback,
 			func(i session.Info) bool {
 				return pendingCreateLeaseExpiredForRollbackInfo(i, clk, leaseStartupTimeout)
 			},
@@ -1362,19 +1480,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		b := b
 		info := session.InfoFromPersistedBead(b)
 		t.Run("wakeTwins/"+shape, func(t *testing.T) {
-			policy := resolveSessionSleepPolicy(b, wakeCfg, wakeSP)
-			if got := resolveSessionSleepPolicyInfo(info, wakeCfg, wakeSP); got != policy {
-				t.Fatalf("resolveSessionSleepPolicyInfo = %+v, want %+v", got, policy)
-			}
-			if got, want := sessionIdleReferenceInfo(info, wakeSP), sessionIdleReference(b, wakeSP); !got.Equal(want) {
-				t.Errorf("sessionIdleReferenceInfo = %v, want %v", got, want)
-			}
-			if got, want := configWakeSuppressedInfo(info, policy, wakeSP, clk), configWakeSuppressed(b, policy, wakeSP, clk); got != want {
-				t.Errorf("configWakeSuppressedInfo = %v, want %v", got, want)
-			}
-			if got, want := sessionKeepWarmEligibleInfo(info, policy, wakeSP, clk), sessionKeepWarmEligible(b, policy, wakeSP, clk); got != want {
-				t.Errorf("sessionKeepWarmEligibleInfo = %v, want %v", got, want)
-			}
+			// The raw sleep-read forms were deleted in WI-6 R3; the *Info twins are
+			// now the only form. Their non-trivial branches are pinned by the
+			// load-bearing Info assertions below (fingerprint-match, idle-reference
+			// detached branch, keep-warm true branch, pending-clear/held).
 			for _, pd := range wakePools {
 				// sessionWithinDesiredConfig (raw) survives until R3, so its Info twin
 				// stays pinned against it directly here.
@@ -1408,14 +1517,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"pending-waithold": makeBead("gp-wh", map[string]string{"template": "worker", "session_name": "worker-pending", "wait_hold": " true "}),
 		"no-pending":       makeBead("gp-none", map[string]string{"template": "worker", "session_name": "worker-none"}),
 	}
-	for shape, pb := range pendFixtures {
-		pb := pb
-		pinfo := session.InfoFromPersistedBead(pb)
-		name := pb.Metadata["session_name"]
-		if got, want := pendingInteractionKeepsAwakeInfo(pinfo, pendSP, name, clk), pendingInteractionKeepsAwake(pb, pendSP, name, clk); got != want {
-			t.Errorf("pendingInteractionKeepsAwakeInfo[%s] = %v, want %v", shape, got, want)
-		}
-	}
 	// Load-bearing: pending-clear keeps the session awake (true); pending-held does
 	// NOT (BlockerHeld), exercising the LifecycleInputFromInfo blocker read rather
 	// than a trivial both-false pass.
@@ -1425,12 +1526,24 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-held"]), pendSP, "worker-pending", clk) {
 		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-held) = true; want false — fixture no longer exercises the held-blocker branch")
 	}
+	// pending-quar: a still-future quarantine blocks the deferral (BlockerQuarantined).
+	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-quar"]), pendSP, "worker-pending", clk) {
+		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-quar) = true; want false — the quarantine-blocker branch regressed")
+	}
+	// pending-waithold: a non-empty (trimmed) wait_hold suppresses the deferral.
+	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-waithold"]), pendSP, "worker-pending", clk) {
+		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-waithold) = true; want false — the trimmed wait_hold gate regressed")
+	}
+	// no-pending: without a live pending interaction the readiness gate is closed.
+	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["no-pending"]), pendSP, "worker-none", clk) {
+		t.Fatal("pendingInteractionKeepsAwakeInfo(no-pending) = true; want false — the runtime readiness gate regressed")
+	}
 
 	// Load-bearing: an asleep idle session whose sleep_policy_fingerprint matches
-	// the resolved policy is config-wake-suppressed via the exact fingerprint branch,
-	// on both forms. fpPolicy is computed from a template/session-name-only bead so
-	// its fingerprint is independent of the sleep_reason/fingerprint metadata below.
-	fpPolicy := resolveSessionSleepPolicy(makeBead("ga-fp0", map[string]string{"template": "worker", "session_name": "worker-fp"}), wakeCfg, wakeSP)
+	// the resolved policy is config-wake-suppressed via the exact fingerprint branch.
+	// fpPolicy is computed from a template/session-name-only bead so its fingerprint
+	// is independent of the sleep_reason/fingerprint metadata below.
+	fpPolicy := resolveSessionSleepPolicyInfo(session.InfoFromPersistedBead(makeBead("ga-fp0", map[string]string{"template": "worker", "session_name": "worker-fp"})), wakeCfg, wakeSP)
 	fpBead := makeBead("ga-fp", map[string]string{
 		"template":                 "worker",
 		"session_name":             "worker-fp",
@@ -1442,8 +1555,22 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	if !configWakeSuppressedInfo(fpInfo, fpPolicy, wakeSP, clk) {
 		t.Fatal("configWakeSuppressedInfo(idle-fingerprint-match) = false; want true — fixture no longer exercises the fingerprint-match branch")
 	}
-	if configWakeSuppressedInfo(fpInfo, fpPolicy, wakeSP, clk) != configWakeSuppressed(fpBead, fpPolicy, wakeSP, clk) {
-		t.Fatal("configWakeSuppressedInfo/configWakeSuppressed diverge on the fingerprint-match fixture")
+
+	// Load-bearing: sessionIdleReferenceInfo reads the detached_at branch (non-zero)
+	// on a recently-detached session, and sessionKeepWarmEligibleInfo is true while
+	// that session is still inside its idle window (keep-warm true branch).
+	warmInfo := session.InfoFromPersistedBead(makeBead("ga-warm", map[string]string{
+		"template":     "worker",
+		"session_name": "worker-warm",
+		"state":        "active",
+		"detached_at":  clk.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339),
+	}))
+	warmPolicy := resolveSessionSleepPolicyInfo(warmInfo, wakeCfg, wakeSP)
+	if sessionIdleReferenceInfo(warmInfo, wakeSP).IsZero() {
+		t.Fatal("sessionIdleReferenceInfo(recent-detach) = zero; the detached_at branch regressed")
+	}
+	if !sessionKeepWarmEligibleInfo(warmInfo, warmPolicy, wakeSP, clk) {
+		t.Fatal("sessionKeepWarmEligibleInfo(recent-detach) = false; want true within the idle window — the keep-warm true branch regressed")
 	}
 
 	// Load-bearing: the always-named fixture must be config-eligible AND (under an

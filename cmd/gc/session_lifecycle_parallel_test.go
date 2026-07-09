@@ -2574,7 +2574,7 @@ func TestPendingCreateStartInFlight_ZeroStartupTimeoutUsesRecoveryLease(t *testi
 			"last_woke_at":         now.Add(-10 * time.Second).Format(time.RFC3339),
 		},
 	}
-	if !pendingCreateStartInFlight(recent, &clock.Fake{Time: now}, 0) {
+	if !pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(recent), &clock.Fake{Time: now}, 0) {
 		t.Fatal("explicit zero startup timeout should still use a finite recovery lease while recent")
 	}
 	stale := beads.Bead{
@@ -2583,7 +2583,7 @@ func TestPendingCreateStartInFlight_ZeroStartupTimeoutUsesRecoveryLease(t *testi
 			"last_woke_at":         now.Add(-24 * time.Hour).Format(time.RFC3339),
 		},
 	}
-	if pendingCreateStartInFlight(stale, &clock.Fake{Time: now}, 0) {
+	if pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(stale), &clock.Fake{Time: now}, 0) {
 		t.Fatal("explicit zero startup timeout should not suppress recovery forever")
 	}
 }
@@ -3632,7 +3632,7 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess
 	if got := updated.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared on closed failed-create bead", got)
 	}
-	if pendingCreateStartInFlight(updated, clk, 0) {
+	if pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(updated), clk, 0) {
 		t.Fatal("canceled async success left the pending-create bead leased")
 	}
 }
@@ -3749,7 +3749,7 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 	if got := updated.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared after failed-create metadata lands", got)
 	}
-	if pendingCreateStartInFlight(updated, clk, 0) {
+	if pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(updated), clk, 0) {
 		t.Fatal("rollback-pending error left the pending-create bead leased")
 	}
 }

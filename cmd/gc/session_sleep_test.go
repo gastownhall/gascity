@@ -75,7 +75,7 @@ func TestResolveSessionSleepPolicyPrecedence(t *testing.T) {
 		"session_name": "worker",
 	})
 
-	policy := resolveSessionSleepPolicy(session, cfg, runtime.NewFake())
+	policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), cfg, runtime.NewFake())
 	if policy.Class != config.SessionSleepInteractiveResume {
 		t.Fatalf("Class = %q, want %q", policy.Class, config.SessionSleepInteractiveResume)
 	}
@@ -199,12 +199,12 @@ func TestReconcileDetachedAtUsesRoutedSleepCapability(t *testing.T) {
 		capabilities: runtime.ProviderCapabilities{},
 		sleep:        runtime.SessionSleepCapabilityFull,
 	}
-	policy := resolveSessionSleepPolicy(session, cfg, provider)
+	policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), cfg, provider)
 	if policy.Capability != runtime.SessionSleepCapabilityFull {
 		t.Fatalf("policy capability = %q, want %q", policy.Capability, runtime.SessionSleepCapabilityFull)
 	}
 
-	reconcileDetachedAt(&session, store, policy, true, provider, &clock.Fake{Time: now})
+	reconcileDetachedAtInfo(sessionpkg.InfoFromPersistedBead(session), store, policy, true, provider, &clock.Fake{Time: now})
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -578,7 +578,7 @@ func TestReconcileSessionBeads_IdleLatchedSessionDoesNotWake(t *testing.T) {
 	}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
-	policy := resolveSessionSleepPolicy(session, env.cfg, env.sp)
+	policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), env.cfg, env.sp)
 	ts := env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339)
 	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
 		"sleep_reason":             "idle",
@@ -607,7 +607,7 @@ func TestReconcileSessionBeads_AssignedWorkWakesIdleLatchedInteractiveSession(t 
 	}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
-	policy := resolveSessionSleepPolicy(session, env.cfg, env.sp)
+	policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), env.cfg, env.sp)
 	ts := env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339)
 	env.setSessionMetadata(&session, map[string]string{
 		"sleep_reason":             "idle",
@@ -658,7 +658,7 @@ func TestReconcileSessionBeads_ConfigChangeDoesNotWakeIdleLatchedSession(t *test
 	env.cfg = oldCfg
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
-	oldPolicy := resolveSessionSleepPolicy(session, oldCfg, env.sp)
+	oldPolicy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), oldCfg, env.sp)
 	ts := env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339)
 	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
 		"sleep_reason":             "idle",
@@ -691,7 +691,7 @@ func TestReconcileSessionBeads_ConfigChangeDoesNotRetryIdleLatchedSingletonWake(
 	env.cfg = oldCfg
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
-	oldPolicy := resolveSessionSleepPolicy(session, oldCfg, env.sp)
+	oldPolicy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), oldCfg, env.sp)
 	ts := env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339)
 	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
 		"state":                    "asleep",
@@ -731,7 +731,7 @@ func TestReconcileSessionBeads_ConfigChangeCancelsPendingIdleDrain(t *testing.T)
 	env.cfg = oldCfg
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
-	oldPolicy := resolveSessionSleepPolicy(session, oldCfg, env.sp)
+	oldPolicy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), oldCfg, env.sp)
 	ts := env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339)
 	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
 		"state":                    "active",
@@ -948,7 +948,7 @@ func TestReconcileSessionBeads_RecoversPendingIdleSleep(t *testing.T) {
 	}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
-	policy := resolveSessionSleepPolicy(session, env.cfg, env.sp)
+	policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(session), env.cfg, env.sp)
 	lastWoke := env.clk.Time.Add(-10 * time.Second).UTC().Format(time.RFC3339)
 	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
 		"state":                    "active",
@@ -997,7 +997,7 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !recoverPendingIdleSleep(&session, sessionFrontDoor(store), false, clk) {
+	if !recoverPendingIdleSleepInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), false, clk) {
 		t.Fatal("expected pending idle sleep to recover")
 	}
 	got, err := store.Get(session.ID)

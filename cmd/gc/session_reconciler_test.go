@@ -6721,8 +6721,8 @@ func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
 				}
 			}
 			bead.CreatedAt = tt.createdAt
-			if got := pendingCreateNeverStartedExpired(bead, clk); got != tt.want {
-				t.Fatalf("pendingCreateNeverStartedExpired() = %v, want %v", got, tt.want)
+			if got := pendingCreateNeverStartedExpiredInfo(sessionpkg.InfoFromPersistedBead(bead), clk); got != tt.want {
+				t.Fatalf("pendingCreateNeverStartedExpiredInfo() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -6740,13 +6740,13 @@ func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLas
 
 	recent := base
 	recent.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout - time.Second))
-	if pendingCreateLeaseExpiredForRollback(recent, clk, time.Minute) {
+	if pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(recent), clk, time.Minute) {
 		t.Fatal("invalid last_woke_at used never-started lease; want legacy stale window before rollback")
 	}
 
 	stale := base
 	stale.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout + time.Second))
-	if !pendingCreateLeaseExpiredForRollback(stale, clk, time.Minute) {
+	if !pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(stale), clk, time.Minute) {
 		t.Fatal("invalid last_woke_at preserved after stale window; want rollback")
 	}
 }

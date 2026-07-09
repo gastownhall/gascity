@@ -380,24 +380,24 @@ func TestPhase2ReconcileSessionBeads_PinWakesThroughSessionSleepSuppression(t *t
 		}},
 	}
 	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
-	session := env.createSessionBead(sessionName, "worker")
-	env.setSessionMetadata(&session, map[string]string{
+	sessionBead := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&sessionBead, map[string]string{
 		namedSessionMetadataKey:      "true",
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "on_demand",
 		"pin_awake":                  "true",
 	})
-	policy := resolveSessionSleepPolicy(session, env.cfg, env.sp)
+	policy := resolveSessionSleepPolicyInfo(session.InfoFromPersistedBead(sessionBead), env.cfg, env.sp)
 	if !policy.enabled() {
 		t.Fatalf("test policy should be enabled: %+v", policy)
 	}
-	env.setSessionMetadata(&session, map[string]string{
+	env.setSessionMetadata(&sessionBead, map[string]string{
 		"state":                    "asleep",
 		"sleep_reason":             "idle",
 		"sleep_policy_fingerprint": policy.Fingerprint,
 	})
 
-	woken := env.reconcile([]beads.Bead{session})
+	woken := env.reconcile([]beads.Bead{sessionBead})
 	if woken != 1 {
 		t.Fatalf("woken = %d, want pinned idle-slept session to wake", woken)
 	}
