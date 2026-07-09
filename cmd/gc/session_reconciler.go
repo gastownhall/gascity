@@ -1483,8 +1483,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
-			providerAlive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, id)
-			if err != nil {
+			providerAlive, livenessErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, id)
+			if livenessErr != nil {
 				providerAlive = false
 			}
 			// Run this before configured named-session preservation. A stale
@@ -1508,6 +1508,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					template := normalizedSessionTemplateInfo(info, cfg)
 					if template == "" {
 						template = info.Template
+					}
+					if livenessErr != nil {
+						// Fail CLOSED: providerAlive=false here is "observation
+						// unavailable", not "confirmed dead". Rolling back this
+						// pending-create bead when its session may still be alive on a
+						// transient tmux/store blip would orphan it (#3872-family). The
+						// level-triggered loop re-observes next tick; skip the
+						// destructive rollback for now.
+						fmt.Fprintf(stderr, "session reconciler: skipping pending-create rollback of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode("pending_create_lease_expired"), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
+								"liveness_error": livenessErr.Error(),
+							})
+						}
+						continue
 					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, id, nil)
 					// info == infoByID[id] here (pre-heal region; every reachable
@@ -1607,6 +1622,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 				if !providerAlive {
+					if livenessErr != nil {
+						// Fail CLOSED: providerAlive=false here is "observation
+						// unavailable", not "confirmed dead". Closing this
+						// failed-create bead when its session may still be alive on a
+						// transient tmux/store blip would orphan it (#3872-family). The
+						// level-triggered loop re-observes next tick; skip the
+						// destructive close for now.
+						fmt.Fprintf(stderr, "session reconciler: skipping failed-create close of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
+								"liveness_error": livenessErr.Error(),
+							})
+						}
+						continue
+					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeClosed, template, name, nil)
 					}
@@ -1779,6 +1809,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if template == "" {
 							template = infoPostHeal.Template
 						}
+						if livenessErr != nil {
+							// Fail CLOSED: providerAlive=false here is "observation
+							// unavailable", not "confirmed dead". Finalizing (closing)
+							// this drain-acked session when its runtime may still be
+							// alive on a transient tmux/store blip would orphan it
+							// (#3872-family). The level-triggered loop re-observes next
+							// tick; skip the destructive finalize for now.
+							fmt.Fprintf(stderr, "session reconciler: skipping drain-ack finalize of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
+									"liveness_error": livenessErr.Error(),
+								})
+							}
+							continue
+						}
 						result := finalizeDrainAckStoppedSession(
 							cityPath, cfg, store, rigStores, infoByID[id], template,
 							true, dops, dt, clk, rec, stderr,
@@ -1877,6 +1922,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 					if template == "" {
 						template = infoPostHeal.Template
+					}
+					if livenessErr != nil {
+						// Fail CLOSED: the runtime liveness probe errored, so
+						// providerAlive=false is "observation unavailable", not
+						// "confirmed dead". Closing here would orphan a bead whose
+						// session may still be alive on a transient tmux/store blip
+						// (#3872-family). The level-triggered loop re-observes next
+						// tick; skip the destructive close for now. (The plain Ctrl-C
+						// drain path above is unaffected — it only runs when
+						// providerAlive. The other !providerAlive destructive paths in
+						// this block — pending-create rollback, failed-create close, and
+						// drain-ack finalize — carry the same fail-closed guard.)
+						fmt.Fprintf(stderr, "session reconciler: skipping close of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
+								"liveness_error": livenessErr.Error(),
+							})
+						}
+						continue
 					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), TraceOutcomeClosed, template, name, nil)
