@@ -243,6 +243,29 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"last_woke_at":              pastRFC3339,
 			},
 		},
+		"pending-create-inflight-lease": {
+			// DECIDES pendingCreateLeaseActiveInfo's in-flight true-branch:
+			// pending_create_claim=true with a RECENT last_woke_at (within the
+			// startup lease window, so pendingCreateStartInFlightInfo fires and the
+			// lease is active) BUT a pending_create_started_at aged past
+			// staleCreatingStateTimeout (so pendingCreateAttemptStaleInfo is TRUE —
+			// the non-in-flight tail would return false). Without this fixture,
+			// mutating the in-flight `return true` to fall through survives the
+			// equivalence sweep. leaseStartupTimeout is 90s, staleKeyDetectDelay 2s,
+			// staleCreatingStateTimeout 1m; last_woke_at -30s stays in-flight, and
+			// pending_create_started_at -5m is attempt-stale.
+			ID:     "ga-inflightlease",
+			Type:   session.BeadType,
+			Title:  "inflightlease",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                  "worker",
+				"state":                     string(session.StateCreating),
+				"pending_create_claim":      "true",
+				"last_woke_at":              clk.Now().Add(-30 * time.Second).UTC().Format(time.RFC3339),
+				"pending_create_started_at": clk.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
 		"reap-boundary-recent-wake": {
 			// Exercises staleReapStartBoundary's last_woke_at-upgrade branch: a
 			// non-zero CreatedAt (-30m) with a parseable last_woke_at strictly AFTER
@@ -1308,6 +1331,23 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// not a trivial both-false pass.
 	if !pendingResumePreservingNamedRestartInfo(session.InfoFromPersistedBead(beadsByShape["pending-resume-preserve"]), clk, leaseStartupTimeout) {
 		t.Fatal("pendingResumePreservingNamedRestartInfo(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
+	}
+	// The "pending-create-inflight-lease" fixture MUST decide
+	// pendingCreateLeaseActiveInfo via the in-flight branch: the lease is active
+	// (pendingCreateStartInFlightInfo true) even though the attempt is stale, so a
+	// regression that drops the in-flight `return true` would fall through to the
+	// attempt-stale tail and wrongly report the lease inactive. This makes the
+	// clkBoolChecks equivalence row for pendingCreateLeaseActive a real in-flight
+	// true-branch decision, not a both-agree-by-accident pass.
+	inflightInfo := session.InfoFromPersistedBead(beadsByShape["pending-create-inflight-lease"])
+	if !pendingCreateStartInFlightInfo(inflightInfo, clk, leaseStartupTimeout) {
+		t.Fatal("pendingCreateStartInFlightInfo(pending-create-inflight-lease) = false; fixture no longer exercises the in-flight lease window")
+	}
+	if !pendingCreateAttemptStaleInfo(inflightInfo, clk) {
+		t.Fatal("pendingCreateAttemptStaleInfo(pending-create-inflight-lease) = false; fixture no longer makes the non-in-flight tail return false — the in-flight branch would not be decisive")
+	}
+	if !pendingCreateLeaseActiveInfo(inflightInfo, clk, leaseStartupTimeout) {
+		t.Fatal("pendingCreateLeaseActiveInfo(pending-create-inflight-lease) = false; the in-flight true-branch regressed (an active in-flight lease must stay active despite a stale attempt)")
 	}
 	// staleReapStartBoundaryInfo must advance the boundary to the last_woke_at time
 	// (not CreatedAt) on the recent-wake fixture, exercising the woke-upgrade branch

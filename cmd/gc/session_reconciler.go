@@ -1602,30 +1602,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				providerAlive,
 				healBatch,
 			)
-			// Post-heal refresh: healStateWithRollback (above) persists through
-			// sessFront and mirrors healBatch onto session.Metadata in lockstep, so
-			// the top-of-loop `info` (from the snapshot at loop entry) is now stale
-			// for this switch. Fold that same healBatch onto the snapshot via
-			// write-returns-Info (Step 6d) instead of re-projecting the raw bead:
-			// healStateWithRollback returns exactly the batch it mirrored (even on a
-			// persist error the mirror runs, so the returned batch always matches the
-			// bead), and nil when it healed nothing (ApplyPatch(nil) is a no-op). This
-			// is byte-identical to the raw refresh because infoByID[session.ID] is
-			// coherent here: the top-of-loop snapshot entry, unmutated on the path
+			// Post-heal refresh: healStateWithRollbackInfo (above) persists healBatch
+			// via sessFront.ApplyPatch and returns it, but does NOT mirror onto the raw
+			// *session bead (WI-6 R3 dropped the raw-bead mirror). The top-of-loop
+			// `info` (from the snapshot at loop entry) is now stale for this switch, and
+			// nothing updates the raw bead post-heal — so this write-returns-Info fold
+			// (Step 6d) is the ONLY same-tick source of the healed state.
+			// healStateWithRollbackInfo returns exactly the batch it persisted, and nil
+			// when it healed nothing (ApplyPatch(nil) is a no-op). infoByID[session.ID]
+			// is coherent here: the top-of-loop snapshot entry, unmutated on the path
 			// that reaches the heal (the pre-heal checkRateLimitStability/rollback/
 			// failed-create-close sites all `continue`). The trace call above takes
 			// the bead by value (cannot mutate), and Go switch cases do not fall
 			// through, so both the preserveNamed body and the
 			// pendingCreateSessionStillLeasedInfo guard/body below read the same
-			// post-heal snapshot. This fold is LOAD-BEARING (and newly so in this
-			// commit): the pendingCreateSessionStillLeasedInfo guard below reads the
-			// healed MetadataState off infoPostHeal, and the downstream zombie refresh
-			// is now ApplyPatch(terminalErrBatch) — a no-op when there is no terminal
-			// error — rather than the old raw re-projection that would have repaired a
-			// stale heal snapshot, so the healed state must reach that guard (and the
-			// post-zombie rollback read on the preserveNamed fall-through) through this
-			// fold alone. Guarded by
-			// TestReconcileSessionBeads_HealStateReflectedOnSnapshot.
+			// post-heal snapshot. This fold is LOAD-BEARING: the
+			// pendingCreateSessionStillLeasedInfo guard below reads the healed
+			// MetadataState off infoPostHeal, and the downstream zombie refresh is
+			// ApplyPatch(terminalErrBatch) — a no-op when there is no terminal error —
+			// so the healed state must reach that guard (and the post-zombie rollback
+			// read on the preserveNamed fall-through) through this fold alone. Guarded
+			// by TestReconcileSessionBeads_HealStateReflectedOnSnapshot.
 			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(healBatch)
 			infoPostHeal := infoByID[session.ID]
 			switch {
@@ -1904,8 +1901,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[session.ID] in place via
 		// write-returns-Info (its only same-tick session write on the paths that reach
-		// here — a no-op when it wrote nothing), and the transitional mirror above keeps
-		// the raw *session bead in lockstep for the deferred raw readers. infoByID[session.ID] is coherent here:
+		// here — a no-op when it wrote nothing). infoByID[session.ID] is coherent here:
 		// only two path shapes arrive — the desired fast path (mutates nothing but the
 		// drain tracker via recordResetStallIfDue, which takes the coherent Info
 		// snapshot), and the ONE non-continue arm of the `if !desired` block (the
@@ -2246,13 +2242,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// without demand (#2345).
 				//
 				// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-				// is RETAINED for the surviving whole-bead helpers that still take the
-				// raw pointer this wave (the write helpers). Wake fairness itself now
-				// reads the Info twin captured at the startCandidates append below
-				// (wakeFairnessTime → Info.LastWokeAt), and last_woke_at (cleared by
-				// RestartRequestPatch) is folded onto infoByID just above, so the captured
-				// twin carries the cleared value for the same-tick re-wake ordering. Both
-				// the raw mirror and its helpers die in W6.
+				// is RETAINED for the surviving start-execution cluster that still holds
+				// the raw *session / startCandidate.session pointer this wave
+				// (shouldRollbackPendingCreate, the asyncStart* raw reads,
+				// rollbackPendingCreate/clearPendingStartInFlightLease, and the
+				// clonePreparedStartForAsync deep-copy — NOT the sleep/heal write helpers,
+				// which typed onto Info in R3). Wake fairness itself now reads the Info
+				// twin captured at the startCandidates append below (wakeFairnessTime →
+				// Info.LastWokeAt), and last_woke_at (cleared by RestartRequestPatch) is
+				// folded onto infoByID just above, so the captured twin carries the
+				// cleared value for the same-tick re-wake ordering. This mirror + the raw
+				// start-execution pointer it feeds die in Wave R4.
 				restartFold := make(sessionpkg.MetadataPatch, len(batch))
 				for key, value := range batch {
 					if key == sessionpkg.ResetCommittedAtKey {
@@ -2825,12 +2825,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED for the write helpers that still take the raw pointer
-					// this wave. Wake fairness now reads the Info twin captured at the
-					// wakeTargets/startCandidates append below (wakeFairnessTime →
-					// Info.LastWokeAt); the ApplyPatchInfo fold just below carries SleepPatch's
-					// cleared last_woke_at onto that captured twin for the same-tick re-wake
-					// ordering. The raw mirror and its helpers die in WI-6.
+					// loop is RETAINED for the start-execution cluster that still holds the
+					// raw startCandidate.session/wakeTarget.session pointer this wave (the
+					// asyncStart* raw reads, shouldRollbackPendingCreate, the rollback write
+					// helpers, and the async deep-copy — NOT the sleep/heal write helpers,
+					// which typed onto Info in R3). Wake fairness now reads the Info twin
+					// captured at the wakeTargets/startCandidates append below
+					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
+					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
+					// same-tick re-wake ordering. This mirror + the raw pointer it feeds die in
+					// Wave R4.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -2911,11 +2915,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						session.Metadata = make(map[string]string, len(batch))
 					}
 					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED for the write helpers — same rationale as the max-age
-					// kill. Wake fairness reads the Info twin captured at the append below
+					// loop is RETAINED for the start-execution cluster (asyncStart* raw reads,
+					// shouldRollbackPendingCreate, the rollback write helpers) — same rationale
+					// as the max-age kill; NOT the sleep/heal write helpers, which typed onto
+					// Info in R3. Wake fairness reads the Info twin captured at the append below
 					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
 					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
-					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in WI-6.
+					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in Wave R4.
 					for key, value := range batch {
 						session.Metadata[key] = value
 					}
@@ -4357,12 +4363,15 @@ func resetConfiguredNamedSessionForConfigDrift(
 		session.Metadata = make(map[string]string, len(batch))
 	}
 	// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror loop is
-	// RETAINED for the write helpers. The start-pending caller (the alive lane) falls
-	// through without a `continue`, so the repaired session can reach startCandidates
-	// this same tick; wake fairness reads the Info twin captured at the append
-	// (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned batch
-	// (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured twin
-	// carries it. The raw mirror dies in WI-6.
+	// RETAINED for the start-execution cluster that still holds the raw
+	// startCandidate.session pointer (the asyncStart* raw reads,
+	// shouldRollbackPendingCreate, the rollback write helpers) — NOT the sleep/heal
+	// write helpers, which typed onto Info in R3. The start-pending caller (the alive
+	// lane) falls through without a `continue`, so the repaired session can reach
+	// startCandidates this same tick; wake fairness reads the Info twin captured at the
+	// append (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned
+	// batch (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured
+	// twin carries it. The raw mirror dies in Wave R4.
 	for key, value := range batch {
 		session.Metadata[key] = value
 	}
