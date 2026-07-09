@@ -72,8 +72,16 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		PoolAliasConflictCount:  b.Metadata["pool_alias_conflict_count"],
 		PoolAliasConflictAt:     b.Metadata["pool_alias_conflict_at"],
 		Labels:                  b.Labels,
-		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
-		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
+
+		// Canonical-identity record mirrors (verbatim). S19 Stage 2 (write-only).
+		CanonicalInstanceNameMetadata: b.Metadata[CanonicalInstanceNameMetadata],
+		CanonicalPoolSlotMetadata:     b.Metadata[CanonicalPoolSlotMetadata],
+		// Priming-marker mirrors (verbatim). S19 Stage 2 (write-only).
+		PrimedAtMetadata:           b.Metadata[PrimedAtMetadataKey],
+		PrimingAttemptedAtMetadata: b.Metadata[PrimingAttemptedAtMetadataKey],
+		PromptHashMetadata:         b.Metadata[PromptHashMetadataKey],
+		MCPIdentity:                b.Metadata[MCPIdentityMetadataKey],
+		MCPServersSnapshot:         b.Metadata[MCPServersSnapshotMetadataKey],
 
 		ProviderTerminalError: b.Metadata["provider_terminal_error"],
 		HealthState:           b.Metadata["session_health"],

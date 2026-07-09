@@ -778,6 +778,19 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 // launch or nudge path, it marks the runtime env so SessionStart hooks can add
 // context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
+	cfg, _ := templateParamsToConfigWithDelivery(tp)
+	return cfg
+}
+
+// templateParamsToConfigWithDelivery is templateParamsToConfig plus the pure
+// promptDelivery result it computed. The launch path (buildPreparedStart) needs
+// the Delivered decision to stamp the S19 priming markers, but it must NOT infer
+// delivery from cfg.Env[GC_STARTUP_PROMPT_DELIVERED]: the resume override in
+// buildPreparedStartWithWorkDirResolver re-sets that env marker to "1" for hook
+// consumption even when nothing is delivered that incarnation. Threading the
+// result avoids that trap. templateParamsToConfig is the wrapper that discards
+// the second value; all other call sites are unchanged.
+func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult) {
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
@@ -824,7 +837,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg
+	return cfg, delivery
 }
 
 func prependStartupPromptToNudge(prompt, nudge string) string {

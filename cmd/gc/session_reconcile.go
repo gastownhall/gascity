@@ -937,6 +937,11 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2): this asleep continuation reset re-primes.
+				batch[sessionpkg.PrimedAtMetadataKey] = ""
+				batch[sessionpkg.PrimingAttemptedAtMetadataKey] = ""
+				batch[sessionpkg.PromptHashMetadataKey] = ""
 			}
 		}
 	}
@@ -964,6 +969,11 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sess
 	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
 		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
 	}
+	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
+	// applied (no-op unless the shadow harness is enabled). Colocated with the
+	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
+	// inspection never records a write that never happened.
+	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
 	return batch
 }
 

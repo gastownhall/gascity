@@ -148,12 +148,22 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "continuation_reset_pending", "true"); err != nil {
 		return fmt.Errorf("clearing stale resume metadata continuation_reset_pending: %w", err)
 	}
+	// Priming markers share started_config_hash's lifetime (S19 Stage 2): this
+	// stale-resume clear forces a fresh start, so the markers reset with it.
+	for _, k := range primingResetKeys {
+		if err := m.store.SetMetadata(id, k, ""); err != nil {
+			return fmt.Errorf("clearing stale resume metadata %s: %w", k, err)
+		}
+	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
 	}
 	b.Metadata["session_key"] = ""
 	b.Metadata["started_config_hash"] = ""
 	b.Metadata["continuation_reset_pending"] = "true"
+	for _, k := range primingResetKeys {
+		b.Metadata[k] = ""
+	}
 	return nil
 }
 

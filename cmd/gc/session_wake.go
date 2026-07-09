@@ -89,6 +89,15 @@ func freshWakeResetPriorValues(info sessions.Info) map[string]string {
 		"started_live_hash":       info.StartedLiveHash,
 		"live_hash":               info.LiveHash,
 		"startup_dialog_verified": info.StartupDialogVerified,
+		// Priming markers share the fresh-wake reset (S19 Stage 2), so their prior
+		// values come off the verbatim raw Info mirrors — otherwise the trace's
+		// before[key] lookup reads "" and the cleared list omits them even though
+		// FreshWakeConversationResetKeys() clears them. Written as raw string keys
+		// (matching the sibling entries) so this read-only prior-value map is not
+		// mistaken for a store write by the compared-key write-site gate.
+		"primed_at":            info.PrimedAtMetadata,
+		"priming_attempted_at": info.PrimingAttemptedAtMetadata,
+		"prompt_hash":          info.PromptHashMetadata,
 	}
 }
 

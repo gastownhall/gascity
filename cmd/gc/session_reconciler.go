@@ -1393,6 +1393,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		"session_count": len(orderedRows),
 	})
 
+	// S19 Stage 3 shadow harness (OBSERVATION-ONLY): assemble the per-tick
+	// collector from the ALREADY-observed coherent typed Info snapshot — no new
+	// probes, no writes. The typed reconciler carries no raw session beads through
+	// the loop, so the compared keys are snapshotted off Info's verbatim raw
+	// mirrors (canonical identity + priming markers) via snapshotComparedKeysFromInfo;
+	// orderedInfos is the tick-start coherent projection (built once, pre-forward-pass),
+	// the typed equivalent of the raw tick-start Metadata snapshot on the legacy tree.
+	// shadowTick is nil (and every method a no-op) unless GC_CONVERGE_SHADOW is set,
+	// so this reconciler is byte-identical when the harness is off. The deferred
+	// detach handles the loop's early returns.
+	var shadowTick *convergeShadowTick
+	var shadowStartSnaps map[string]map[string]string
+	if convergeShadowEnabled() {
+		shadowTick = newConvergeShadowTick(cityName, nextConvergeShadowTickSeq(), clk.Now().UTC(), true, convergeShadowMetrics)
+		// Safety-net detach for the loop's early returns; idempotent with the detach
+		// finish already runs, and ownership-guarded so a concurrent city tick's live
+		// recorder is never cleared here.
+		defer shadowTick.detach()
+		shadowStartSnaps = make(map[string]map[string]string, len(orderedInfos))
+		for i := range orderedInfos {
+			shadowStartSnaps[orderedInfos[i].ID] = snapshotComparedKeysFromInfo(orderedInfos[i])
+		}
+	}
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
@@ -1445,6 +1468,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info := infoByID[id]
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		tp, desired := desiredState[name]
+		if shadowTick != nil {
+			// 3a: durable facts from the already-observed coherent typed Info (the
+			// priming + canonical mirrors are projected Info fields). The predicted
+			// canonical value is a best-effort heal proxy; it is only consulted by the
+			// C4 value-parity check when legacy also wrote the key this tick, which
+			// this reconciler pass never does (identity is stamped at create/adopt), so
+			// it can never manufacture a false divergence here.
+			shadowTick.captureDurable(id, info.InstanceToken, name,
+				buildDurableFactsFromInfo(info, shadowTick.tickNow),
+				shadowStartSnaps[id],
+				convergePredictedValues{
+					canonicalInstanceName: strings.TrimSpace(info.AgentName),
+					canonicalPoolSlot:     strings.TrimSpace(info.PoolSlot),
+				})
+		}
 		if _, _, pending := resetPendingCommittedAtInfo(info); !pending && dt != nil {
 			dt.clearResetStall(id)
 		}
@@ -1467,6 +1505,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// snapshot, no *session mutation before the finalize call). Guarded by
 			// TestReconcileSessionBeads_MinFloorCountReflectsMidTickCloseDrainAck.
 			tick.applyResult(id, result)
+			if shadowTick != nil {
+				// Pre-probe early-continue (drain-ack): nothing was compared this tick,
+				// so leave the denominator with a typed skip. Without this the session
+				// would carry its loop-entry durable capture but no runtime probe into
+				// finish and inflate sessions_evaluated with an unproven "clean"
+				// (hardening 2).
+				shadowTick.markSkip(id, skipEarlyContinue)
+			}
 			continue
 		}
 
@@ -1484,6 +1530,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					"state": info.MetadataState,
 				})
 			}
+			if shadowTick != nil {
+				// Pre-probe early-continue (unknown state): forward-compat skip with
+				// nothing to compare — leave the denominator with a typed skip
+				// (hardening 2).
+				shadowTick.markSkip(id, skipEarlyContinue)
+			}
 			continue
 		}
 		// Back in a known state: drop any stale unknown-state throttle markers so a
@@ -1500,6 +1552,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			providerAlive, livenessErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, id)
 			if livenessErr != nil {
 				providerAlive = false
+			}
+			if shadowTick != nil {
+				// 3a: capture the !desired path's OWN probe result (presence only,
+				// by bead ID). alive is unknown on this path; probe target is left
+				// empty because this path probes by ID, not name (no name to skew).
+				shadowTick.captureRuntime(id, "workerSessionTargetRunningWithConfig", "", triFromBool(providerAlive), convergeTriUnknown)
 			}
 			// Run this before configured named-session preservation. A stale
 			// state=creating bead with an expired pending-create lease would
@@ -1984,6 +2042,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// The desired-session fast path only needs running/alive; attachment
 		// and activity are probed by the narrower branches that use them.
 		running, alive := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
+		if shadowTick != nil {
+			// 3a: capture the desired fast path's OWN two-bit probe (present +
+			// alive) by name, enabling zombie (present && !alive) expression.
+			shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
+		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
@@ -3065,6 +3128,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// this append would NOT be reflected in this value-typed snapshot; keep any
 		// such writer's fold ahead of the append (or refresh the twin) if one is added.
 		wakeTargets = append(wakeTargets, wakeTarget{info: infoByID[id], tp: tp, alive: alive})
+	}
+	if shadowTick != nil {
+		// 3b/3c: snapshot the compared keys at tick end from the coherent post-Phase-1
+		// typed Info snapshot (infoByID, folded after every mutation via the tick front
+		// door), then run the oracle + replay comparator and update the counters. This
+		// is the typed-tree equivalent of re-reading the raw beads at tick end; the
+		// compared keys are Info's verbatim raw mirrors. Pure observation — no writes.
+		endSnaps := make(map[string]map[string]string, len(orderedInfos))
+		for i := range orderedInfos {
+			endID := orderedInfos[i].ID
+			endSnaps[endID] = snapshotComparedKeysFromInfo(infoByID[endID])
+		}
+		shadowTick.finish(endSnaps)
+		// Operator read path (Q3: no new event type): surface the soak signal on the
+		// reconciler's existing stderr channel — one bounded line per enabled tick,
+		// so a live GC_CONVERGE_SHADOW soak reports its denominator and surviving
+		// divergences instead of incrementing counters nothing can read.
+		fmt.Fprintf(stderr, "session reconciler: %s\n", convergeShadowMetrics.snapshot().operatorSummary()) //nolint:errcheck // best-effort operator log
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
 		"ordered_session_count":  len(orderedRows),

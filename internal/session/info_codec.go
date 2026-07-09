@@ -104,6 +104,23 @@ var infoKeyCodec = []infoKeySpec{
 	{"pool_alias_conflict", func(i *Info, v string) { i.PoolAliasConflict = v }},
 	{"pool_alias_conflict_count", func(i *Info, v string) { i.PoolAliasConflictCount = v }},
 	{"pool_alias_conflict_at", func(i *Info, v string) { i.PoolAliasConflictAt = v }},
+
+	// Canonical-identity record mirrors (verbatim). The typed record is derived
+	// on demand via Info.CanonicalIdentity(); these keep the raw values so the
+	// fold copies them per-key. S19 Stage 2 is WRITE-ONLY: stamped at
+	// create/adoption but read by no decision path yet.
+	{CanonicalInstanceNameMetadata, func(i *Info, v string) { i.CanonicalInstanceNameMetadata = v }},
+	{CanonicalPoolSlotMetadata, func(i *Info, v string) { i.CanonicalPoolSlotMetadata = v }},
+
+	// Priming-marker mirrors (verbatim). The S19 Stage 3 shadow harness snapshots
+	// these compared keys off Info at tick start/end (the reconciler loop carries
+	// no raw beads), so each priming key is a projected Info field. Write-only in
+	// Stage 2: stamped by CommitStartedPatch / cleared at the started_config_hash
+	// clear sites, read by no decision path yet.
+	{PrimedAtMetadataKey, func(i *Info, v string) { i.PrimedAtMetadata = v }},
+	{PrimingAttemptedAtMetadataKey, func(i *Info, v string) { i.PrimingAttemptedAtMetadata = v }},
+	{PromptHashMetadataKey, func(i *Info, v string) { i.PromptHashMetadata = v }},
+
 	{MCPIdentityMetadataKey, func(i *Info, v string) { i.MCPIdentity = v }},
 	{MCPServersSnapshotMetadataKey, func(i *Info, v string) { i.MCPServersSnapshot = v }},
 
