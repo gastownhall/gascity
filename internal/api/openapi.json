@@ -28524,12 +28524,17 @@
             }
           },
           {
-            "description": "Action to perform (suspend, resume, restart).",
+            "description": "Action to perform.",
             "in": "path",
             "name": "action",
             "required": true,
             "schema": {
-              "description": "Action to perform (suspend, resume, restart).",
+              "description": "Action to perform.",
+              "enum": [
+                "suspend",
+                "resume",
+                "restart"
+              ],
               "type": "string"
             }
           }

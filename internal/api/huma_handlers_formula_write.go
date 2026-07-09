@@ -56,7 +56,7 @@ func (s *Server) humaHandleFormulaSource(_ context.Context, input *FormulaSource
 	}
 	src, found, err := fm.FormulaSource(input.Name)
 	if err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.FormulaNotFound)
 	}
 	if !found {
 		return nil, apierr.FormulaNotFound.Msg("no editable city-local formula " + input.Name)
@@ -105,7 +105,7 @@ func (s *Server) humaHandleFormulaUpsert(_ context.Context, input *FormulaUpsert
 		return nil, apierr.InvalidRequest.Msg("formula validation failed: " + strings.Join(errs, "; "))
 	}
 	if err := fm.UpsertFormula(input.Name, input.RawBody); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.FormulaNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "saved"
@@ -124,7 +124,7 @@ func (s *Server) humaHandleFormulaDelete(_ context.Context, input *FormulaDelete
 		return nil, errMutationsNotSupported
 	}
 	if err := fm.DeleteFormula(input.Name); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.FormulaNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "deleted"

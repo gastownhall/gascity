@@ -159,7 +159,7 @@ func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCrea
 	}
 
 	if err := sm.CreateProvider(input.Body.Name, spec); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.ProviderNotFound)
 	}
 	resp := &ProviderCreatedOutput{}
 	resp.Body.Status = "created"
@@ -199,7 +199,7 @@ func (s *Server) humaHandleProviderUpdate(_ context.Context, input *ProviderUpda
 			return nil, apierr.ConflictWrongState.Msg(
 				"provider " + input.Name + " is a builtin; use PUT /v0/patches/providers to override")
 		}
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.ProviderNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
@@ -220,7 +220,7 @@ func (s *Server) humaHandleProviderDelete(_ context.Context, input *ProviderDele
 			return nil, apierr.ConflictWrongState.Msg(
 				"provider " + input.Name + " is a builtin; use DELETE /v0/patches/provider/" + input.Name + " to remove overrides")
 		}
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.ProviderNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "deleted"

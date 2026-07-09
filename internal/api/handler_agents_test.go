@@ -804,6 +804,21 @@ func TestAgentActionNotMutator(t *testing.T) {
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotImplemented)
 	}
+	// The shared errMutationsNotSupported sentinel now carries the typed
+	// not-implemented code so this 501 is machine-identifiable too.
+	var pd struct {
+		Type string `json:"type"`
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&pd); err != nil {
+		t.Fatalf("decode 501 body: %v", err)
+	}
+	if pd.Code != "not-implemented" {
+		t.Errorf("code = %q, want not-implemented", pd.Code)
+	}
+	if pd.Type != "urn:gascity:error:not-implemented" {
+		t.Errorf("type = %q, want urn:gascity:error:not-implemented", pd.Type)
+	}
 }
 
 func TestAgentProviderAndDisplayName(t *testing.T) {

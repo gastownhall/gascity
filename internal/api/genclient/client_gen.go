@@ -357,6 +357,27 @@ func (e GetV0CityByCityNameExtmsgTranscriptParamsOrder) Valid() bool {
 	}
 }
 
+// Defines values for PostV0CityByCityNameRigByNameByActionParamsAction.
+const (
+	Restart PostV0CityByCityNameRigByNameByActionParamsAction = "restart"
+	Resume  PostV0CityByCityNameRigByNameByActionParamsAction = "resume"
+	Suspend PostV0CityByCityNameRigByNameByActionParamsAction = "suspend"
+)
+
+// Valid indicates whether the value is a known member of the PostV0CityByCityNameRigByNameByActionParamsAction enum.
+func (e PostV0CityByCityNameRigByNameByActionParamsAction) Valid() bool {
+	switch e {
+	case Restart:
+		return true
+	case Resume:
+		return true
+	case Suspend:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdapterCapabilities defines model for AdapterCapabilities.
 type AdapterCapabilities struct {
 	MaxMessageLength           int64 `json:"MaxMessageLength"`
@@ -6733,6 +6754,9 @@ type PostV0CityByCityNameRigByNameByActionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
 }
+
+// PostV0CityByCityNameRigByNameByActionParamsAction defines parameters for PostV0CityByCityNameRigByNameByAction.
+type PostV0CityByCityNameRigByNameByActionParamsAction string
 
 // GetV0CityByCityNameRigsParams defines parameters for GetV0CityByCityNameRigs.
 type GetV0CityByCityNameRigsParams struct {
@@ -13270,7 +13294,7 @@ type ClientInterface interface {
 	PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameRigByNameByAction request
-	PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action PostV0CityByCityNameRigByNameByActionParamsAction, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameRigs request
 	GetV0CityByCityNameRigs(ctx context.Context, cityName string, params *GetV0CityByCityNameRigsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15262,7 +15286,7 @@ func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+func (c *Client) PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action PostV0CityByCityNameRigByNameByActionParamsAction, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameRigByNameByActionRequest(c.Server, cityName, name, action, params)
 	if err != nil {
 		return nil, err
@@ -23382,7 +23406,7 @@ func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName st
 }
 
 // NewPostV0CityByCityNameRigByNameByActionRequest generates requests for PostV0CityByCityNameRigByNameByAction
-func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams) (*http.Request, error) {
+func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName string, name string, action PostV0CityByCityNameRigByNameByActionParamsAction, params *PostV0CityByCityNameRigByNameByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -26127,7 +26151,7 @@ type ClientWithResponsesInterface interface {
 	PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
 
 	// PostV0CityByCityNameRigByNameByActionWithResponse request
-	PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error)
+	PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action PostV0CityByCityNameRigByNameByActionParamsAction, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error)
 
 	// GetV0CityByCityNameRigsWithResponse request
 	GetV0CityByCityNameRigsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRigsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRigsResponse, error)
@@ -31284,7 +31308,7 @@ func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx con
 }
 
 // PostV0CityByCityNameRigByNameByActionWithResponse request returning *PostV0CityByCityNameRigByNameByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error) {
+func (c *ClientWithResponses) PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action PostV0CityByCityNameRigByNameByActionParamsAction, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error) {
 	rsp, err := c.PostV0CityByCityNameRigByNameByAction(ctx, cityName, name, action, params, reqEditors...)
 	if err != nil {
 		return nil, err

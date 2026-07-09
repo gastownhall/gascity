@@ -680,7 +680,7 @@ func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, er
 		err = sm.DisableOrder(a.Name, a.Rig)
 	}
 	if err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.OrderNotFound)
 	}
 
 	resp := &OKResponse{}

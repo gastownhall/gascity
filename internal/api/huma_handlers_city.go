@@ -45,7 +45,7 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 		err = sm.ResumeCity()
 	}
 	if err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.CityNotFound)
 	}
 
 	resp := &OKResponse{}

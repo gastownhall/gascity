@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -130,5 +131,20 @@ func TestHandleRigDelete_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	// The shared mutationError helper must stamp the caller's resource-specific
+	// 404 code so a client can branch on which resource was missing.
+	var pd struct {
+		Type string `json:"type"`
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&pd); err != nil {
+		t.Fatalf("decode 404 body: %v", err)
+	}
+	if pd.Code != "rig-not-found" {
+		t.Errorf("code = %q, want rig-not-found", pd.Code)
+	}
+	if pd.Type != "urn:gascity:error:rig-not-found" {
+		t.Errorf("type = %q, want urn:gascity:error:rig-not-found", pd.Type)
 	}
 }

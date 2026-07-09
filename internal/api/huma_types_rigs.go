@@ -53,7 +53,7 @@ type RigDeleteInput struct {
 type RigActionInput struct {
 	CityScope
 	Name   string `path:"name" doc:"Rig name."`
-	Action string `path:"action" doc:"Action to perform (suspend, resume, restart)."`
+	Action string `path:"action" enum:"suspend,resume,restart" doc:"Action to perform."`
 }
 
 // RigActionResponse is the response for rig actions (suspend/resume/restart).

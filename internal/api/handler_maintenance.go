@@ -179,8 +179,10 @@ var triggerMaintenanceAsync = func(loop MaintenanceProvider) (time.Time, error) 
 }
 
 // maintenanceConflictFromError converts a supervisor-layer error into the
-// appropriate HTTP error. MaintenanceInProgressError becomes a 409 with a
-// typed body; anything else surfaces as a 500 with the underlying message.
+// appropriate HTTP error. MaintenanceInProgressError becomes a 409
+// operation-in-progress — the retryable "another run on this target is active,
+// try again once it finishes" conflict, not the terminal wrong-state one — with
+// a typed body; anything else surfaces as a 500 with the underlying message.
 func maintenanceConflictFromError(err error) error {
 	var inProg *supervisor.MaintenanceInProgressError
 	if errors.As(err, &inProg) {
@@ -192,7 +194,7 @@ func maintenanceConflictFromError(err error) error {
 		if encErr != nil {
 			enc = []byte(`{"type":"maintenance-in-progress"}`)
 		}
-		return apierr.ConflictWrongState.Msg("maintenance-in-progress: " + string(enc))
+		return apierr.OperationInProgress.Msg("maintenance-in-progress: " + string(enc))
 	}
 	return apierr.Internal.Msg(err.Error())
 }

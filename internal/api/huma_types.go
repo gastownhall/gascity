@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/configedit"
 )
 
@@ -218,30 +219,36 @@ type StatusMailCounts struct {
 // --- Error helpers ---
 
 // mutationError converts a domain error from a create/update/delete operation
-// into the appropriate Huma HTTP error.
+// into the typed apierr HTTP error, preserving the HTTP status each case has
+// always used (404/409/400/500) so the wire status is unchanged while the body
+// gains a stable machine code + type URN. notFound is the caller's
+// resource-specific 404 (e.g. apierr.RigNotFound for rig mutations), so a client
+// can branch on which resource was missing instead of a generic not-found.
 //
 // Uses typed sentinel errors from the configedit package (ErrNotFound,
 // ErrAlreadyExists, ErrPackDerived, ErrValidation) via errors.Is instead of
 // fragile strings.Contains matching. New domain errors should be added as
-// sentinels in their originating package and matched here.
-func mutationError(err error) error {
+// sentinels in their originating package and matched here. ErrValidation maps to
+// invalid-request (400), not validation-failed (422), to preserve the 400 these
+// mutation surfaces have always returned.
+func mutationError(err error, notFound apierr.ProblemType) error {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, configedit.ErrNotFound):
-		return huma.Error404NotFound(msg)
+		return notFound.Msg(msg)
 	case errors.Is(err, configedit.ErrAlreadyExists):
-		return huma.Error409Conflict(msg)
+		return apierr.ConflictWrongState.Msg(msg)
 	case errors.Is(err, configedit.ErrPackDerived):
-		return huma.Error409Conflict(msg)
+		return apierr.ConflictWrongState.Msg(msg)
 	case errors.Is(err, configedit.ErrValidation):
-		return huma.Error400BadRequest(msg)
+		return apierr.InvalidRequest.Msg(msg)
 	default:
-		return huma.Error500InternalServerError(msg)
+		return apierr.Internal.Msg(msg)
 	}
 }
 
 // errMutationsNotSupported is returned when the state doesn't implement StateMutator.
-var errMutationsNotSupported = huma.Error501NotImplemented("mutations not supported")
+var errMutationsNotSupported = apierr.NotImplemented.Msg("mutations not supported")
 
 // --- Simple response types ---
 

@@ -275,7 +275,7 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 	}
 
 	if err := sm.CreateAgent(a); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.AgentNotFound)
 	}
 	// Block until the new agent is reachable through findAgent, so the
 	// 201 response is a strict read-after-write signal: a follow-up
@@ -332,7 +332,7 @@ func (s *Server) updateAgentByName(name, provider, scope string, suspended *bool
 	}
 	patch := AgentUpdate{Provider: provider, Scope: scope, Suspended: suspended}
 	if err := sm.UpdateAgent(name, patch); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.AgentNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
@@ -357,7 +357,7 @@ func (s *Server) deleteAgentByName(name string) (*OKResponse, error) {
 		return nil, errMutationsNotSupported
 	}
 	if err := sm.DeleteAgent(name); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.AgentNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "deleted"
@@ -395,7 +395,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 		return nil, apierr.InvalidRequest.Msg("unknown agent action: " + action)
 	}
 	if err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.AgentNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "ok"

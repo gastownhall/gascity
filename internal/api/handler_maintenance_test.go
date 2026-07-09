@@ -196,10 +196,21 @@ func TestHumaHandleMaintenanceTriggerDoltGC_Conflict(t *testing.T) {
 		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
 	}
 	var pd struct {
+		Type   string `json:"type"`
+		Code   string `json:"code"`
 		Detail string `json:"detail"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&pd); err != nil {
 		t.Fatalf("decode 409 body: %v", err)
+	}
+	// A maintenance run already in flight is a retryable conflict: the body must
+	// carry the transient operation-in-progress code, not the terminal
+	// wrong-state one, so an autonomous client knows to retry once it finishes.
+	if pd.Code != "operation-in-progress" {
+		t.Errorf("code = %q, want operation-in-progress", pd.Code)
+	}
+	if pd.Type != "urn:gascity:error:operation-in-progress" {
+		t.Errorf("type = %q, want urn:gascity:error:operation-in-progress", pd.Type)
 	}
 	if !strings.HasPrefix(pd.Detail, "maintenance-in-progress") {
 		t.Errorf("detail missing maintenance-in-progress prefix: %q", pd.Detail)

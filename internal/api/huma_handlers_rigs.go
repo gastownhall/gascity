@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -79,7 +78,7 @@ func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (
 	}
 
 	if err := sm.CreateRig(rig); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.RigNotFound)
 	}
 	resp := &RigCreatedOutput{}
 	resp.Body.Status = "created"
@@ -102,7 +101,7 @@ func (s *Server) humaHandleRigUpdate(_ context.Context, input *RigUpdateInput) (
 	}
 
 	if err := sm.UpdateRig(input.Name, patch); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.RigNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
@@ -117,7 +116,7 @@ func (s *Server) humaHandleRigDelete(_ context.Context, input *RigDeleteInput) (
 	}
 
 	if err := sm.DeleteRig(input.Name); err != nil {
-		return nil, mutationError(err)
+		return nil, mutationError(err, apierr.RigNotFound)
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "deleted"
@@ -142,7 +141,7 @@ func (s *Server) humaHandleRigAction(_ context.Context, input *RigActionInput) (
 			err = sm.ResumeRig(name)
 		}
 		if err != nil {
-			return nil, mutationError(err)
+			return nil, mutationError(err, apierr.RigNotFound)
 		}
 		resp := &RigActionResponse{}
 		resp.Body.Status = "ok"
@@ -154,7 +153,12 @@ func (s *Server) humaHandleRigAction(_ context.Context, input *RigActionInput) (
 		return s.humaHandleRigRestart(name)
 
 	default:
-		return nil, huma.Error404NotFound("unknown rig action: " + action)
+		// Unreachable in practice: RigActionInput.Action carries an
+		// enum:"suspend,resume,restart" schema, so Huma rejects unknown actions
+		// with the typed validation-failed contract before the handler runs.
+		// Kept as defense-in-depth and to mirror agentActionByName, emitting a
+		// typed apierr problem rather than a legacy bare-huma 404.
+		return nil, apierr.InvalidRequest.Msg("unknown rig action: " + action)
 	}
 }
 
