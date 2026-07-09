@@ -24,7 +24,7 @@ func newSessionFront(store beads.Store) *session.Store {
 // beads.ErrNotFound chain (NOT ErrNotSession) and maps to 404.
 func TestSessionGetEnrichedAbsentIsNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := session.NewManager(store, runtime.NewFake())
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake())
 
 	_, _, err := sessionGetEnriched(newSessionFront(store), mgr, "missing")
 	if err == nil {
@@ -48,7 +48,7 @@ func TestSessionGetEnrichedAbsentIsNotFound(t *testing.T) {
 func TestSessionGetEnrichedNonSessionIsBadRequest(t *testing.T) {
 	nonSession := beads.Bead{ID: "task-1", Type: "task", Status: "open", Labels: []string{"work"}}
 	store := beads.NewMemStoreFrom(1, []beads.Bead{nonSession}, nil)
-	mgr := session.NewManager(store, runtime.NewFake())
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake())
 
 	_, _, err := sessionGetEnriched(newSessionFront(store), mgr, "task-1")
 	if err == nil {
@@ -80,7 +80,7 @@ func TestSessionGetEnrichedHealsTypeLostBead(t *testing.T) {
 		Metadata: map[string]string{"state": "asleep", "session_name": "s-typelost"},
 	}
 	store := beads.NewMemStoreFrom(1, []beads.Bead{typeLost}, nil)
-	mgr := session.NewManager(store, runtime.NewFake())
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake())
 
 	info, _, err := sessionGetEnriched(newSessionFront(store), mgr, "s-typelost")
 	if err != nil {

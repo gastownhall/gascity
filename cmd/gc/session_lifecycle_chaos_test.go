@@ -1007,7 +1007,7 @@ func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	return &sessionChaosHarness{
 		t:        t,
 		env:      env,
-		manager:  sessionpkg.NewManager(env.store, env.sp),
+		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp),
 		rng:      rand.New(rand.NewSource(seed)), //nolint:gosec // deterministic test chaos, not security-sensitive.
 		seed:     seed,
 		template: template,
@@ -1019,16 +1019,7 @@ func (h *sessionChaosHarness) createSessionIntent() {
 	if h.sessionID != "" {
 		return
 	}
-	info, err := h.manager.CreateBeadOnly(
-		h.template,
-		"Chaos worker",
-		h.command,
-		"",
-		"fake",
-		"",
-		nil,
-		sessionpkg.ProviderResume{},
-	)
+	info, err := h.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: h.template, Title: "Chaos worker", Command: h.command, WorkDir: "", Provider: "fake", Transport: "", Resume: sessionpkg.ProviderResume{}})
 	if err != nil {
 		h.failf("CreateBeadOnly: %v", err)
 	}

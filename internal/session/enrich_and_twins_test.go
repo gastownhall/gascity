@@ -50,12 +50,12 @@ func TestEnrichInfoMatchesBeadOverlay(t *testing.T) {
 	activeAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	fake.SetActivity("s-running", activeAt)
 
-	m := NewManagerWithTransportResolverAndCityPath(beads.NewMemStore(), fake, "", func(template, provider string) string {
+	m := NewManagerWithOptions(beads.NewMemStore(), fake, WithCityPath(""), WithTransportResolver(func(template, provider string) string {
 		if template == "pending-tmpl" {
 			return "tmux"
 		}
 		return ""
-	})
+	}))
 
 	mk := func(id, status string, meta map[string]string) beads.Bead {
 		return beads.Bead{ID: id, Type: BeadType, Status: status, Labels: []string{LabelSession}, Metadata: meta}

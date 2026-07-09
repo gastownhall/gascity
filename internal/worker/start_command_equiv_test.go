@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -16,18 +17,18 @@ func newStartCommandHandle(t *testing.T, spec SessionSpec, resume sessionpkg.Pro
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManager(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
 
-	info, err := manager.CreateBeadOnly(
-		"worker",
-		"Probe",
-		command,
-		t.TempDir(),
-		"legacy-provider",
-		"",
-		nil,
-		resume,
-	)
+	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly:  true,
+		Template:  "worker",
+		Title:     "Probe",
+		Command:   command,
+		WorkDir:   t.TempDir(),
+		Provider:  "legacy-provider",
+		Transport: "",
+		Resume:    resume,
+	})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}

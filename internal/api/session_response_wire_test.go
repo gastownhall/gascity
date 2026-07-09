@@ -77,7 +77,7 @@ func TestSessionGetEnrichedWireByteIdentical(t *testing.T) {
 		b := b
 		t.Run(b.ID, func(t *testing.T) {
 			store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
-			mgr := session.NewManager(store, runtime.NewFake())
+			mgr := session.NewManagerWithOptions(store, runtime.NewFake())
 
 			// Golden: the pre-cutover double-read. mgr.Get for the runtime-enriched
 			// Info, then a separate store.Get projected to PersistedResponse.

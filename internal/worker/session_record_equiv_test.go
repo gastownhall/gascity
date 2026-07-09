@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -46,17 +47,17 @@ type resolverCapture struct {
 
 func seedEquivSession(t *testing.T, store beads.Store, sp runtime.Provider) sessionpkg.Info {
 	t.Helper()
-	manager := sessionpkg.NewManager(store, sp)
-	info, err := manager.CreateBeadOnly(
-		"worker",
-		"Probe",
-		"",
-		t.TempDir(),
-		"legacy-provider",
-		"",
-		nil,
-		sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"},
-	)
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly:  true,
+		Template:  "worker",
+		Title:     "Probe",
+		Command:   "",
+		WorkDir:   t.TempDir(),
+		Provider:  "legacy-provider",
+		Transport: "",
+		Resume:    sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"},
+	})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestResolveSessionRecordByExactIDNormalizesRepairableType(t *testing.T) {
 func TestSessionRecordViaManagerBridgesErrorContract(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManager(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
 
 	// A present bead that is NOT a session bead (no session type, no gc:session
 	// label) — the resolve-then-Get race the factory lane can hit.

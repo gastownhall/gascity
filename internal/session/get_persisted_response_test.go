@@ -27,7 +27,7 @@ func TestGetPersistedResponseWithEnrich(t *testing.T) {
 		"real_world_app_project_id": "proj-9",
 	})
 	store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
-	mgr := NewManager(store, runtime.NewFake())
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
 
 	persistedInfo, pr, err := mgr.PersistedStore().GetPersistedResponse("s-pr-1")
 	if err != nil {
@@ -61,7 +61,7 @@ func TestGetPersistedResponseWithEnrich(t *testing.T) {
 // through the Store front door (the persisted-read half of the Get read model).
 func TestGetPersistedResponseNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := NewManager(store, runtime.NewFake())
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
 	if _, _, err := mgr.PersistedStore().GetPersistedResponse("missing"); err == nil {
 		t.Fatal("GetPersistedResponse(missing): want error, got nil")
 	}
