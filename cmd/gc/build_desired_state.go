@@ -2708,12 +2708,27 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workspace := packWorkspaceSlug(request); strings.TrimSpace(sessionBead.Metadata[beadmeta.PackWorkspaceMetadataKey]) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
-			metadata[beadmeta.WorkDirMetadataKey] = workDir
-		}
-		if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
-			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+	// Only (re)derive the work_dir when the binding is new or re-pointed to a
+	// different trigger bead. For an unchanged trigger bead the recorded
+	// gc.work_dir is the path the launcher ACTUALLY created (with the work-bead
+	// title-slug suffix, e.g. "dip-<bead>-implement-compound-work-item") and is
+	// the single source of truth: it must not be re-derived here. A resume/wake
+	// SessionRequest for the same bead does not carry WorkBeadTitle, so
+	// poolTriggerWorkDir would re-derive the suffix-less "dip-<bead>" form and
+	// clobber the real worktree path — the recorded value would then point at a
+	// directory that never existed, breaking the build-artifact-valid gate that
+	// chdirs into it (sc-s5mfl3). Sibling to the reaped-workdir bug in #4021:
+	// there the recorded path was correct but later deleted; here it is wrong
+	// from birth.
+	existingWorkDir := strings.TrimSpace(sessionBead.Metadata[beadmeta.WorkDirMetadataKey])
+	if oldWorkBeadID != workBeadID || existingWorkDir == "" {
+		if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+			if existingWorkDir != workDir {
+				metadata[beadmeta.WorkDirMetadataKey] = workDir
+			}
+			if strings.TrimSpace(sessionBead.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != workDir {
+				metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+			}
 		}
 	}
 	if len(metadata) == 0 {
