@@ -73,13 +73,13 @@ func newOptionSessionWithWork(t *testing.T, rp *config.ResolvedProvider, baseCom
 		TemplateName:     "worker",
 		ResolvedProvider: rp,
 	}
-	return startCandidate{session: &session, info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
+	return startCandidate{info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
 }
 
 func TestBuildPreparedStart_CodexDispatchEffortOptionPresent(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", map[string]string{"effort": "high"})
 
-	prepared, err := buildPreparedStart(candidate, cfg, store)
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestBuildPreparedStart_CodexDispatchEffortOptionPresent(t *testing.T) {
 func TestBuildPreparedStart_ProviderEffortOptionUsesProviderSchema(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, claudeEffortResolvedProvider(), "claude", map[string]string{"effort": "high"})
 
-	prepared, err := buildPreparedStart(candidate, cfg, store)
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
@@ -108,14 +108,13 @@ func TestBuildPreparedStart_ProviderEffortOptionUsesProviderSchema(t *testing.T)
 
 func TestBuildPreparedStart_ExplicitEffortOverrideWinsOverDispatchOption(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", map[string]string{"effort": "high"})
-	candidate.session.Metadata["template_overrides"] = `{"effort":"low"}`
-	// Re-project the typed twin after mutating the bead so it stays coherent with the
-	// session the executor reads (buildPreparedStart now decodes template_overrides off
-	// candidate.info); in production this coherence is maintained by the front-door
-	// refresh inside prepareStartCandidateForCity.
-	candidate.info = sessionpkg.InfoFromPersistedBead(*candidate.session)
+	// Set an explicit effort override on the typed twin the executor reads
+	// (buildPreparedStart now decodes template_overrides off candidate.info); in
+	// production this coherence is maintained by the front-door refresh inside
+	// prepareStartCandidateForCity.
+	candidate.info.TemplateOverrides = `{"effort":"low"}`
 
-	prepared, err := buildPreparedStart(candidate, cfg, store)
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}

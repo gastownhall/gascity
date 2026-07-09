@@ -27,36 +27,41 @@ var errTokenMismatch = errors.New("instance token mismatch")
 
 // preWakeCommit persists a new incarnation (generation + token) BEFORE
 // starting the process. This is Phase 1 of the two-phase wake protocol.
-// Returns the new generation and instance token on success.
+// Returns the new generation, instance token, and the PreWakePatch batch it
+// persisted so the caller can fold it onto its coherent typed snapshot
+// (write-returns-Info) instead of re-projecting the bead. It reads the current
+// persisted state off the caller's typed Info (session_name, generation,
+// continuation epoch, sleep_reason, wake_mode, and the continuation-reset
+// signals) — every field a verbatim raw mirror — so no raw bead crosses in.
 func preWakeCommit(
-	session *beads.Bead,
+	info sessions.Info,
 	sessFront *sessions.Store,
 	clk clock.Clock,
-) (newGen int, token string, err error) {
-	name := session.Metadata["session_name"]
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
-		return 0, "", fmt.Errorf("invalid session_name %q", name)
+		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
 
-	gen, _ := strconv.Atoi(session.Metadata["generation"])
+	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
 	token = sessions.NewInstanceToken()
-	continuationEpoch, _ := strconv.Atoi(session.Metadata["continuation_epoch"])
+	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
 	if continuationEpoch <= 0 {
 		continuationEpoch = sessions.DefaultContinuationEpoch
 	}
-	if shouldBumpContinuationEpoch(session.Metadata) {
+	if shouldBumpContinuationEpoch(info) {
 		continuationEpoch++
 	}
 
 	sleepReason := ""
-	if session.Metadata["sleep_reason"] == "idle-timeout" {
+	if info.SleepReason == "idle-timeout" {
 		// Preserve the idle-timeout wake override until the replacement
 		// session has actually started. Failed starts must retry next tick.
 		sleepReason = "idle-timeout"
 	}
 
-	freshWake := session.Metadata["wake_mode"] == "fresh" || pendingContinuationResetNeedsFreshStart(session.Metadata)
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
@@ -65,18 +70,26 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
-	if writeErr := sessFront.ApplyPatch(session.ID, batch); writeErr != nil {
-		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
-	traceFreshWakeMetadataReset(name, session.Metadata, batch, freshWake)
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(batch))
-	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
+	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
 
-	return newGen, token, nil
+	return newGen, token, batch, nil
+}
+
+// freshWakeResetPriorValues reconstructs the pre-reset values of the fresh-wake
+// conversation-reset keys off the typed Info so traceFreshWakeMetadataReset can
+// report which durable provider markers a fresh wake cleared without the raw
+// bead. The keys mirror sessions.FreshWakeConversationResetKeys().
+func freshWakeResetPriorValues(info sessions.Info) map[string]string {
+	return map[string]string{
+		"session_key":             info.SessionKey,
+		"started_config_hash":     info.StartedConfigHash,
+		"started_live_hash":       info.StartedLiveHash,
+		"live_hash":               info.LiveHash,
+		"startup_dialog_verified": info.StartupDialogVerified,
+	}
 }
 
 func traceFreshWakeMetadataReset(name string, before map[string]string, batch sessions.MetadataPatch, freshWake bool) {
@@ -100,26 +113,20 @@ func traceFreshWakeMetadataReset(name string, before map[string]string, batch se
 	)
 }
 
-func shouldBumpContinuationEpoch(meta map[string]string) bool {
-	if meta == nil {
-		return false
-	}
-	if meta["continuation_reset_pending"] != "" {
+func shouldBumpContinuationEpoch(info sessions.Info) bool {
+	if info.ContinuationResetPending != "" {
 		return true
 	}
-	return meta["wake_mode"] == "fresh" && meta["last_woke_at"] != ""
+	return info.WakeMode == "fresh" && info.LastWokeAt != ""
 }
 
-func pendingContinuationResetNeedsFreshStart(meta map[string]string) bool {
-	if meta == nil {
-		return false
-	}
-	switch sessions.State(strings.TrimSpace(meta["state"])) {
+func pendingContinuationResetNeedsFreshStart(info sessions.Info) bool {
+	switch sessions.State(strings.TrimSpace(info.MetadataState)) {
 	case sessions.StateStartPending, sessions.StateCreating:
 		return false
 	}
-	return strings.TrimSpace(meta["continuation_reset_pending"]) != "" &&
-		strings.TrimSpace(meta["started_config_hash"]) != ""
+	return strings.TrimSpace(info.ContinuationResetPending) != "" &&
+		strings.TrimSpace(info.StartedConfigHash) != ""
 }
 
 // validateWorkDir ensures the path is safe to use as a working directory.

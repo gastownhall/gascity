@@ -319,6 +319,14 @@ type Info struct {
 	StartedProvisionHash string // started_provision_hash (raw)
 	StartedLaunchHash    string // started_launch_hash (raw)
 	StartedLiveHash      string // started_live_hash (raw)
+	// LiveHash / StartupDialogVerified are the RAW live_hash / startup_dialog_verified
+	// metadata, verbatim. They are two of the fresh-wake conversation-reset keys
+	// (FreshWakeConversationResetKeys) a fresh wake clears; preWakeCommit's fresh-wake
+	// reset trace reads their pre-reset values to report which durable provider markers
+	// it cleared. The mirrors let that trace read the pre-reset state off Info instead
+	// of the raw bead. Additive, internal-only (absent from the HTTP wire).
+	LiveHash              string // live_hash (raw)
+	StartupDialogVerified string // startup_dialog_verified (raw)
 	// ConfigDriftDeferredAt / ConfigDriftDeferredKey mirror the named-session
 	// config-drift deferral timer (config_drift_deferred_at / _key). The deferral
 	// path compares the stored key against the current drift key (exact compare)
@@ -373,6 +381,15 @@ type Info struct {
 	// raw value. Additive, internal-only (absent from the HTTP wire). Session-class
 	// periphery front-door migration.
 	ProviderKind string // provider_kind (raw)
+	// BuiltinAncestor is the RAW builtin_ancestor metadata, verbatim — the highest-
+	// precedence rung of the provider-FAMILY resolution ladder (builtin_ancestor →
+	// provider_kind → provider) that ProviderFamilyFromMetadata walks. It is stamped
+	// from ResolvedProvider.BuiltinAncestor at session-bead creation for custom
+	// providers with an explicit `base = "builtin:..."`. The mirror completes the
+	// family-resolution vocab already partly present on Info (Provider, ProviderKind)
+	// so ProviderFamilyFromInfo can resolve the family without the bead. Additive,
+	// internal-only (absent from the HTTP wire).
+	BuiltinAncestor string // builtin_ancestor (raw)
 
 	// --- sleep-policy cluster (controller decision-read surface) ---
 	//

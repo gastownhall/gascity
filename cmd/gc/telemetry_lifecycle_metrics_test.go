@@ -131,8 +131,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 		return startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					session: session,
-					info:    sessionpkg.InfoFromPersistedBead(*session),
+					info: sessionpkg.InfoFromPersistedBead(*session),
 					tp: TemplateParams{
 						SessionName:  "sky",
 						TemplateName: "helper",

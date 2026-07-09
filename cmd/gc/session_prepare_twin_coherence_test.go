@@ -14,25 +14,25 @@ import (
 // TestPrepareStartCandidateTwinNeverConsumedStale is the WI-6 W5 red-team drift
 // guard. prepareStartCandidateForCity re-Gets the session bead and preWakeCommit /
 // buildPreparedStart mutate it, so candidate.info must be kept coherent with the
-// re-Got + mutated bead. The rejected fix (front-door coherence Gets that swallowed
-// their error) drifted: on a bead the front-door read rejects (lost BOTH type and
-// gc:session label — IsSessionBeadOrRepairable == false) the raw store.Get at the
-// re-Get boundary still succeeds, so candidate.session went fresh while the swallowed
-// twin stayed stale, launching stale template_overrides.
+// re-Got + mutated bead. The append-captured twin can go stale when the persisted
+// template_overrides changes out of band between append and start; a fix that
+// swallowed a coherence Get would leave the twin on that stale value and launch it.
 //
 // The fold-based fix keeps the twin coherent: the EARLY twin is re-projected from the
-// SAME bead the re-Get returned (no separate, swallowable Get), and buildPreparedStart
-// folds its own mutations. This test proves the twin tracks the re-Got bead's
-// template_overrides — NOT the stale append value — and would FAIL against the
-// swallow-error code (verified by temporarily restoring the front-door-Get-then-
-// swallow form: the assertions below trip because info stays stale on the rejected bead).
+// SAME bead the single front-door re-Get returned (no separate, swallowable Get), and
+// buildPreparedStart folds its own mutations. This test proves the twin tracks the
+// re-Got bead's fresh template_overrides — NOT the stale append value — so it FAILS
+// against any swallow-error form that leaves info stale.
 func TestPrepareStartCandidateTwinNeverConsumedStale(t *testing.T) {
 	store := beads.NewMemStore()
 	const freshOverrides = `{"model":"opus"}`
-	// A mid-start bead that lost BOTH its session type and its gc:session label — the
-	// exact shape the old EARLY front-door Get rejected while the raw re-Get succeeded.
+	// A mid-start session bead whose persisted template_overrides was changed out of
+	// band (opus) since the append-captured twin was taken (sonnet). The single
+	// front-door re-Get must reload this fresh value onto the twin.
 	session, err := store.Create(beads.Bead{
-		Title: "worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":       "worker",
 			"template":           "worker",
@@ -53,8 +53,7 @@ func TestPrepareStartCandidateTwinNeverConsumedStale(t *testing.T) {
 		},
 	})
 	candidate := startCandidate{
-		session: &session,
-		info:    staleInfo,
+		info: staleInfo,
 		tp: TemplateParams{
 			TemplateName:     "worker",
 			SessionName:      "worker",
@@ -79,9 +78,15 @@ func TestPrepareStartCandidateTwinNeverConsumedStale(t *testing.T) {
 		t.Fatalf("info.TemplateOverrides = %q, want fresh %q — twin left stale (swallow-error drift)",
 			prepared.candidate.info.TemplateOverrides, freshOverrides)
 	}
-	// Coherent with the re-Got raw bead the write helpers still see.
-	if got := prepared.candidate.session.Metadata["template_overrides"]; prepared.candidate.info.TemplateOverrides != got {
-		t.Fatalf("twin/raw drift: info=%q raw=%q", prepared.candidate.info.TemplateOverrides, got)
+	// Coherent with the persisted bead the write helpers still see through the
+	// store front door (candidate.info is now the sole read surface; the raw
+	// pointer is gone).
+	stored, err := store.Get(prepared.candidate.info.ID)
+	if err != nil {
+		t.Fatalf("Get persisted bead: %v", err)
+	}
+	if got := stored.Metadata["template_overrides"]; prepared.candidate.info.TemplateOverrides != got {
+		t.Fatalf("twin/store drift: info=%q store=%q", prepared.candidate.info.TemplateOverrides, got)
 	}
 	// buildPreparedStart consumed the fresh override off the twin (opus), not the stale sonnet.
 	if !strings.Contains(prepared.cfg.Command, "claude-opus-4-8") {

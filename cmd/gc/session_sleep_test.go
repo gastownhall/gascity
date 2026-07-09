@@ -18,8 +18,8 @@ import (
 func infoByIDForTargets(targets []wakeTarget) map[string]sessionpkg.Info {
 	m := make(map[string]sessionpkg.Info, len(targets))
 	for _, tg := range targets {
-		if tg.session != nil {
-			m[tg.session.ID] = sessionpkg.InfoFromPersistedBead(*tg.session)
+		if tg.info.ID != "" {
+			m[tg.info.ID] = tg.info
 		}
 	}
 	return m
@@ -1179,12 +1179,6 @@ func TestEvaluateWakeReasons_KeepWarmForDetachedInteractive(t *testing.T) {
 func TestSelectIdleProbeTargets_RotatesAcrossTicks(t *testing.T) {
 	mkTarget := func(id string) wakeTarget {
 		return wakeTarget{
-			session: &beads.Bead{
-				ID: id,
-				Metadata: map[string]string{
-					"session_name": id,
-				},
-			},
 			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
 				ID: id,
 				Metadata: map[string]string{
@@ -1236,13 +1230,6 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 		Capability: runtime.SessionSleepCapabilityFull,
 	}
 	wakeTargets := []wakeTarget{{
-		session: &beads.Bead{
-			ID: "wait-hold",
-			Metadata: map[string]string{
-				"session_name": "worker",
-				"sleep_intent": "wait-hold",
-			},
-		},
 		info: sessionpkg.InfoFromPersistedBead(beads.Bead{
 			ID: "wait-hold",
 			Metadata: map[string]string{

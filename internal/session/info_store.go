@@ -126,6 +126,8 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		StartedProvisionHash:           b.Metadata["started_provision_hash"],
 		StartedLaunchHash:              b.Metadata["started_launch_hash"],
 		StartedLiveHash:                b.Metadata["started_live_hash"],
+		LiveHash:                       b.Metadata["live_hash"],
+		StartupDialogVerified:          b.Metadata["startup_dialog_verified"],
 		ConfigDriftDeferredAt:          b.Metadata["config_drift_deferred_at"],
 		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
 		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
@@ -138,6 +140,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
 		ProviderKind:                   b.Metadata["provider_kind"],
+		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
 
 		// sleep-policy cluster (raw mirrors; see Info doc). The 7 key literals
 		// match the inline keys in cmd/gc/session_sleep.go today (they are inline
@@ -220,25 +223,6 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 		return Info{}, PersistedResponse{}, err
 	}
 	return InfoFromPersistedBead(b), PersistedResponseFromBead(b), nil
-}
-
-// GetBeadWithInfo returns the validated raw session bead alongside its typed Info
-// projection from a SINGLE store fetch. It shares Get's exact gate/error contract
-// (validatedBead: ErrSessionNotFound for a present-but-non-session bead, the wrapped
-// store not-found error for an absent id), so a caller that needs BOTH the raw bead
-// — a still-raw transitional classifier — and the Info reads one consistent snapshot,
-// with no inter-Get window where a cross-process writer could split the two views.
-// The raw bead escapes deliberately for those transitional consumers and retires
-// with them; new callers should prefer Get. This is the (Bead, Info) analogue of
-// GetPersistedResponse's (Info, PersistedResponse) single-fetch pairing. Named for
-// its (beads.Bead, Info, error) return order — deliberately distinct from the
-// W3-retiring Manager.GetWithBead (which returns (Info, beads.Bead, error)).
-func (s *Store) GetBeadWithInfo(id string) (beads.Bead, Info, error) {
-	b, err := s.validatedBead(id)
-	if err != nil {
-		return beads.Bead{}, Info{}, err
-	}
-	return b, InfoFromPersistedBead(b), nil
 }
 
 // validatedBead loads the session bead for id. A load failure (including an

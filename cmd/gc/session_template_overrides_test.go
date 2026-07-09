@@ -159,8 +159,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 			t.Fatalf("Create(session): %v", err)
 		}
 		return startCandidate{
-			session: &session,
-			info:    sessionpkg.InfoFromPersistedBead(session),
+			info: sessionpkg.InfoFromPersistedBead(session),
 			tp: TemplateParams{
 				TemplateName:     "worker",
 				SessionName:      "worker",
@@ -173,7 +172,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 
 	t.Run("invalid json ignored without failing start", func(t *testing.T) {
 		store := beads.NewMemStore()
-		prepared, err := buildPreparedStart(newCandidate(t, store, "{not json"), &config.City{}, store)
+		prepared, _, err := buildPreparedStart(newCandidate(t, store, "{not json"), &config.City{}, store)
 		if err != nil {
 			t.Fatalf("buildPreparedStart: %v", err)
 		}
@@ -187,7 +186,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 
 	t.Run("valid overrides apply schema flag and initial message", func(t *testing.T) {
 		store := beads.NewMemStore()
-		prepared, err := buildPreparedStart(newCandidate(t, store, `{"model":"sonnet","initial_message":"hello from the user"}`), &config.City{}, store)
+		prepared, _, err := buildPreparedStart(newCandidate(t, store, `{"model":"sonnet","initial_message":"hello from the user"}`), &config.City{}, store)
 		if err != nil {
 			t.Fatalf("buildPreparedStart: %v", err)
 		}

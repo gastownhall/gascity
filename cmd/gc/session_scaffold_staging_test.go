@@ -67,8 +67,7 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 	}
 
 	prepared, err := prepareStartCandidateForCity(startCandidate{
-		session: &session,
-		info:    sessionpkg.InfoFromPersistedBead(session),
+		info: sessionpkg.InfoFromPersistedBead(session),
 		tp: TemplateParams{
 			TemplateName: "gascity/builder",
 			SessionName:  "builder-ga-ajw1no",

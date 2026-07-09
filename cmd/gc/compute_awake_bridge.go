@@ -175,7 +175,7 @@ func buildAwakeInputFromReconciler(
 		infoBy[in.ID] = in
 	}
 	for _, target := range wakeTargets {
-		info := infoBy[target.session.ID]
+		info := infoBy[target.info.ID]
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
 			continue

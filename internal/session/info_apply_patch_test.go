@@ -36,12 +36,13 @@ var allProjectedMetadataKeys = []string{
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
 	"churn_count", "wake_mode", "sleep_intent", "instance_token", "detached_at",
 	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
-	"started_launch_hash", "started_live_hash", "config_drift_deferred_at",
+	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
+	"config_drift_deferred_at",
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
 	"session_name_explicit", "wake_request", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
-	MetadataLastNudgeDeliveredAt, "provider_kind",
+	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",
 	"sleep_policy_fingerprint", "requested_sleep_after_idle",
 	"effective_sleep_after_idle", "sleep_policy_source", "sleep_capability",
 	"sleep_policy_adjustment_reason", "config_wake_suppressed",
@@ -78,12 +79,14 @@ func oracleBaseBeads() []beads.Bead {
 		"detached_at": "2026-01-04T00:00:00Z", CurrentBeadIDKey: "bead-9",
 		"core_hash_breakdown": `{"a":1}`, "started_provision_hash": "ph",
 		"started_launch_hash": "lh", "started_live_hash": "lvh",
+		"live_hash": "lvh-current", "startup_dialog_verified": "true",
 		"config_drift_deferred_at": "2026-01-06T00:00:00Z", "config_drift_deferred_key": "k",
 		"attached_config_drift_deferred_at":  "2026-01-07T00:00:00Z",
 		"attached_config_drift_deferred_key": "ak", "stranded_event_emitted_at": "2026-01-08T00:00:00Z",
 		"session_name_explicit": "true", "wake_request": "explicit", "restart_requested": "true",
 		"session_id_flag": "--session-id", "template_overrides": `{"x":"y"}`, "wake_attempts": "3",
 		MetadataLastNudgeDeliveredAt: "2026-01-09T00:00:00Z", "provider_kind": "claude",
+		"builtin_ancestor":         "codex",
 		"sleep_policy_fingerprint": "fp-1", "requested_sleep_after_idle": "30m",
 		"effective_sleep_after_idle": "15m", "sleep_policy_source": "config",
 		"sleep_capability": "full", "sleep_policy_adjustment_reason": "capped",
@@ -154,8 +157,8 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"live_hash": "ignored"},         // unknown key: must not change Info
-		{"startup_dialog_verified": "z"}, // unknown key
+		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // unprojected key: must not change Info
+		{"env.GC_FOO": "bar"},                         // unprojected key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}
 	return append(patches, edge...)

@@ -81,6 +81,7 @@ var typedClassCodecNeedles = []codecNeedle{
 	{"sessions", "PersistedResponseFromBead(", "session.Store.GetPersistedResponse (internal/session/persisted_response.go)"},
 	{"sessions", "ListFullFromBeads(", "session.Store.ListAll + Manager.ListFromInfos (internal/session)"},
 	{"sessions", "GetWithPersistedResponse(", "session.Store.GetPersistedResponse + Manager.EnrichInfo (internal/session)"},
+	{"sessions", "GetBeadWithInfo(", "session.Store.GetPersistedResponse (internal/session; the transitional raw+Info single-fetch escape, retired + deleted in WI-6 R4 — all-zero tripwire)"},
 	{"sessions", "GetWithBead(", "session.Store.GetPersistedResponse / worker.Factory.SessionByHandle (internal/session, internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
 	{"sessions", "SessionByLoadedBead(", "worker.Factory.SessionByRecord (internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
 	{"sessions", "ResolveSessionBeadByExactID(", "session.ResolveSessionRecordByExactID (internal/session; worker-boundary use retired in WI-6 W3, the reconciler existence-probe use retired in WI-6 W6 — all-zero tripwire)"},
@@ -156,13 +157,15 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"cmd/gc/cmd_stop.go":              1,
 		"cmd/gc/session_bead_snapshot.go": 3,
 		"cmd/gc/session_hash.go":          1,
-		// WI-6 W5: start-execution reads folded onto candidate.info via ApplyPatch;
-		// the one remaining hit is the honest in-lock re-projection at the genuine
-		// whole-bead re-Get boundary in prepareStartCandidateForCity (cannot be folded).
-		"cmd/gc/session_lifecycle_parallel.go": 1,
-		"cmd/gc/session_logs_resolve.go":       2,
-		"cmd/gc/session_reconciler.go":         3,
-		"cmd/gc/session_template_start.go":     1,
+		// WI-6 R4: session_lifecycle_parallel.go reaches interior zero. The former
+		// in-lock re-projection at prepareStartCandidateForCity now re-reads through
+		// the session front door (GetPersistedResponse → Info directly), and
+		// refreshAsyncStartResult moved off GetBeadWithInfo to the same Info-only
+		// re-read, so the file no longer calls the codec (was 1). GetBeadWithInfo is
+		// now fully retired (deleted from internal/session).
+		"cmd/gc/session_logs_resolve.go":   2,
+		"cmd/gc/session_reconciler.go":     3,
+		"cmd/gc/session_template_start.go": 1,
 		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop
 		// is a genuine WI-7-era raw retire lane (bead already in hand from the raw
 		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and

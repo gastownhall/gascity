@@ -35,11 +35,10 @@ import (
 const maxIdleSleepProbesPerTick = 3
 
 type wakeTarget struct {
-	session *beads.Bead
-	// info is the typed session.Info twin of session, captured from the coherent
-	// post-fold infoByID snapshot at the append site below. It carries the typed
-	// read surface forward to the wake evaluation + start-candidate stage (WI-6 W5);
-	// the raw session pointer is retained this wave (it dies in W6).
+	// info is the typed session.Info the wake evaluation + start-candidate stage
+	// carries, captured from the coherent post-fold infoByID snapshot at the append
+	// site below. It is the sole read surface (WI-6 R4 deleted the raw session bead
+	// pointer).
 	info  sessionpkg.Info
 	tp    TemplateParams
 	alive bool
@@ -1217,23 +1216,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Topo-order sessions by template dependencies.
 	//
 	// orderedBeads is the tick's raw working set, in topo order. After the W2-W4
-	// leaf/identity migrations its remaining raw-bead consumers are exactly four
+	// leaf/identity migrations its remaining raw-bead consumers are exactly three
 	// (in-code census; this is a mixed file, not a Tier-2 codec edge):
-	//   1. snapshot construction — the infoByID/orderedIDs/orderedInfos build
-	//      immediately below projects each bead once (the load edge).
-	//   2. the forward pass's write-helper raw-mirror parameter (&orderedBeads[i]
-	//      threaded into the mutating heal/rollback/close helpers) — dies in W5
-	//      when those helpers collapse onto ApplyPatchInfo.
-	//   3. the start-execution feed (startCandidate.session / wakeTarget.session
-	//      raw pointers) — dies in WI-6 when startCandidate is typed.
-	//   4. Phase 0.5 circuit-breaker restore/reset — reads orderedBeads[i].Metadata
+	//   1. snapshot construction — the infoByID/orderedIDs/orderedInfos/beadByID
+	//      build immediately below projects each bead once (the load edge).
+	//   2. Phase 0.5 circuit-breaker restore/reset — reads orderedBeads[i].Metadata
 	//      via sessionpkg.CircuitStateFromMetadata (below), a DISTINCT typed codec on
 	//      the bead, not the session.Info projection. It stays raw by design (the
-	//      breaker cluster is a separate concern from Info); W5 must not fold it into
-	//      the Info snapshot when it shrinks orderedBeads.
+	//      breaker cluster is a separate concern from Info).
+	//   3. the §5-exempt whole-bead raw-by-design awake-scan consumers reached via
+	//      beadByID (emitSessionStrandedDiagnostic's collectSessionAssignedWork +
+	//      emit-once throttle mirror; pruneAgentHomeWorktreeIfSafe's worktree GC;
+	//      cycleAliveSessionForFreshReassign's restart handoff) — none read a session
+	//      Info-DOMAIN field. WI-6 R4 retired the former start-execution raw pointers
+	//      (startCandidate.session / wakeTarget.session) and the write-helper raw-mirror
+	//      parameter; both are gone.
 	// No session.Info-DOMAIN decision read reaches into orderedBeads[i] any more:
-	// order-sensitive rebuilds walk orderedIDs and read infoByID; the only remaining
-	// interior read is the CircuitState codec in (4).
+	// order-sensitive rebuilds walk orderedIDs and read infoByID; the remaining raw
+	// reads are the CircuitState codec in (2) and the whole-bead consumers in (3).
 	phaseStart = time.Now()
 	orderedBeads := topoOrder(sessions, deps)
 	recordPhase(TraceSiteSessionReconcileTopoOrder, "session_reconcile.topo_order", phaseStart, map[string]any{
@@ -1260,12 +1260,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	orderedIDs := make([]string, len(orderedBeads))
 	orderedInfos := make([]sessionpkg.Info, len(orderedBeads))
 	infoByID := make(map[string]sessionpkg.Info, len(orderedBeads))
+	// beadByID indexes the raw working set by ID for the two §5-exempt raw-by-design
+	// awake-scan consumers that legitimately need the whole bead — emitSessionStrandedDiagnostic
+	// (collectSessionAssignedWork walks the bead's assigned work + stamps the emit-once
+	// throttle marker) and pruneAgentHomeWorktreeIfSafe (worktree GC). It replaces the
+	// wakeTarget.session pointer they used to be fed (deleted in WI-6 R4). Pointers into
+	// orderedBeads stay valid because the working set is not reallocated after Phase 0.
+	beadByID := make(map[string]*beads.Bead, len(orderedBeads))
 	for i := range orderedBeads {
 		id := orderedBeads[i].ID
 		info := sessionpkg.InfoFromPersistedBead(orderedBeads[i])
 		orderedIDs[i] = id
 		orderedInfos[i] = info
 		infoByID[id] = info
+		beadByID[id] = &orderedBeads[i]
 	}
 
 	phaseStart = time.Now()
@@ -1348,7 +1356,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// (Step 6d write-returns-Info). The batch carries NO Closed change: the close is
 	// store-only, so a raw re-projection of *session still sees it open — the fold
 	// must match that.
-	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string, clearClaim bool) map[string]string {
+	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
 		if rollbacksThisTick >= maxRollbacksPerTick {
 			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
 			if trace != nil {
@@ -1365,9 +1373,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode(action), TraceOutcomeRollback, templateName, name, nil)
 		}
 		if clearClaim {
-			return rollbackPendingCreateClearingClaim(session, sessFront, clk.Now().UTC(), stderr)
+			return rollbackPendingCreateClearingClaim(info, sessFront, clk.Now().UTC(), stderr)
 		}
-		return rollbackPendingCreate(session, sessFront, clk.Now().UTC(), stderr)
+		return rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 	}
 	phaseStart = time.Now()
 	for i := range orderedBeads {
@@ -1472,7 +1480,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// Fold the rollback's mirrored metadata onto the snapshot (Step 6d
 					// write-returns-Info; no Closed change — store-only close).
 					// Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(session, template, name, "pending_create_lease_expired", "lease expired and no live runtime", clearClaim))
+					infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(infoByID[session.ID], template, name, "pending_create_lease_expired", "lease expired and no live runtime", clearClaim))
 					continue
 				}
 			}
@@ -1917,7 +1925,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && !runningSessionMatchesPendingCreateInfo(infoPostZombie, name, sp) {
 			// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 			// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
-			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
+			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(infoByID[session.ID], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
 			continue
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeasedInfo: a
@@ -1942,7 +1950,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 				// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
-				infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime", false))
+				infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(infoByID[session.ID], tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime", false))
 				continue
 			}
 		}
@@ -2226,39 +2234,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
 					continue
 				}
-				if session.Metadata == nil {
-					session.Metadata = make(map[string]string, len(batch))
-				}
-				// Fold the mirrored batch onto the snapshot too (Step 6d
-				// write-returns-Info), so the restart handoff — which CONSUMES the
-				// in-memory restart_requested marker (RestartRequestPatch sets it to "")
-				// and clears started_config_hash / last_woke_at / pending_create_* —
-				// clears the marker (and its siblings) on the snapshot the awake scan
-				// reads. Without this, once the blanket pre-pass is dropped a consumed
-				// restart_requested would survive on the snapshot and re-fire as a
-				// phantom second restart (#2574). Excludes ResetCommittedAtKey exactly
-				// like the in-memory mirror above: the durable reset marker is for the
-				// next tick, and admitting it here would force-wake on-demand sessions
-				// without demand (#2345).
-				//
-				// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-				// is RETAINED for the surviving start-execution cluster that still holds
-				// the raw *session / startCandidate.session pointer this wave
-				// (shouldRollbackPendingCreate, the asyncStart* raw reads,
-				// rollbackPendingCreate/clearPendingStartInFlightLease, and the
-				// clonePreparedStartForAsync deep-copy — NOT the sleep/heal write helpers,
-				// which typed onto Info in R3). Wake fairness itself now reads the Info
-				// twin captured at the startCandidates append below (wakeFairnessTime →
-				// Info.LastWokeAt), and last_woke_at (cleared by RestartRequestPatch) is
-				// folded onto infoByID just above, so the captured twin carries the
-				// cleared value for the same-tick re-wake ordering. This mirror + the raw
-				// start-execution pointer it feeds die in Wave R4.
+				// Fold the batch onto the snapshot (Step 6d write-returns-Info), so the
+				// restart handoff — which CONSUMES the restart_requested marker
+				// (RestartRequestPatch sets it to "") and clears started_config_hash /
+				// last_woke_at / pending_create_* — clears the marker (and its siblings)
+				// on the snapshot the awake scan and the start-execution feed read.
+				// Without this a consumed restart_requested would survive on the snapshot
+				// and re-fire as a phantom second restart (#2574). Excludes
+				// ResetCommittedAtKey: the durable reset marker is for the next tick, and
+				// admitting it here would force-wake on-demand sessions without demand
+				// (#2345). The former raw session.Metadata coupling mirror is gone (WI-6
+				// R4): its only consumer was the start-execution cluster's raw bead
+				// pointer, now deleted — the executor reads the captured Info twin, which
+				// this fold keeps coherent.
 				restartFold := make(sessionpkg.MetadataPatch, len(batch))
 				for key, value := range batch {
 					if key == sessionpkg.ResetCommittedAtKey {
 						continue
 					}
-					session.Metadata[key] = value
 					restartFold[key] = value
 				}
 				infoByID[session.ID] = infoByID[session.ID].ApplyPatch(restartFold)
@@ -2384,16 +2377,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			// Fold recoverRunningPendingCreate's batch onto the snapshot (Step 6d
 			// write-returns-Info). The batch carries CommitStartedPatch PLUS
-			// buildPreparedStart's persisted residue (threaded out in
-			// pendingCreateResidueFold, on the abort paths): the instance_token mint,
-			// read by the Phase-2 drain scan (info.InstanceToken via verifiedStop,
-			// Step 2b), and the stale-resume started_config_hash clear, read by the
-			// forward-pass config-drift gate below (info.StartedConfigHash, Step 5a,
-			// #127). STEP6-PREPASS-AUDIT group 7. The other two clearStaleResumeKeyMetadata
-			// keys (session_key/continuation_reset_pending) stay unthreaded — neither has
-			// a same-tick Info reader whose verdict the residue changes — and self-heal on
+			// buildPreparedStart's persisted residue. On BOTH abort paths that residue
+			// is folded via pendingCreateResidueFold from the store-coherent
+			// post-mutation Info — buildPreparedStart's success return on the
+			// commit-failure path, and its error-return partial Info on the
+			// build-failure path (WI-6 R4 threads it out so the snapshot matches the
+			// store even on a partway abort). It carries the instance_token mint, read
+			// by the Phase-2 drain scan (info.InstanceToken via verifiedStop, Step 2b),
+			// and the stale-resume started_config_hash clear, read by the forward-pass
+			// config-drift gate below (info.StartedConfigHash, Step 5a, #127).
+			// STEP6-PREPASS-AUDIT group 7. The other two clearStaleResumeKeyMetadata keys
+			// (session_key/continuation_reset_pending) stay unthreaded — neither has a
+			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(session, infoByID[session.ID], tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(infoByID[session.ID], tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
@@ -2821,28 +2818,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					})
 					telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					if session.Metadata == nil {
-						session.Metadata = make(map[string]string, len(batch))
-					}
-					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED for the start-execution cluster that still holds the
-					// raw startCandidate.session/wakeTarget.session pointer this wave (the
-					// asyncStart* raw reads, shouldRollbackPendingCreate, the rollback write
-					// helpers, and the async deep-copy — NOT the sleep/heal write helpers,
-					// which typed onto Info in R3). Wake fairness now reads the Info twin
-					// captured at the wakeTargets/startCandidates append below
-					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
-					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
-					// same-tick re-wake ordering. This mirror + the raw pointer it feeds die in
-					// Wave R4.
-					for key, value := range batch {
-						session.Metadata[key] = value
-					}
 					// Persist + fold the sleep onto the snapshot in one step (Step 6d
 					// write-returns-Info): the same-tick re-wake's awake-scan read of
 					// state=asleep needs the sleep on the snapshot. Base is coherent (the
 					// aggregating refresh @~2692 synced it and the intervening drift blocks
-					// `continue`). A pre-pass-masked writer (STEP6-PREPASS-AUDIT group 11).
+					// `continue`). Wake fairness reads the captured Info twin
+					// (wakeFairnessTime → Info.LastWokeAt), which this fold keeps coherent
+					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
+					// coupling mirror is gone (WI-6 R4): its only consumer was the
+					// start-execution cluster's raw bead pointer, now deleted.
 					infoByID[session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[session.ID], batch)
 					alive = false
 				}
@@ -2911,25 +2895,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// last_woke_at and setting state to asleep. The wake logic
 					// below will pick it up.
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					if session.Metadata == nil {
-						session.Metadata = make(map[string]string, len(batch))
-					}
-					// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror
-					// loop is RETAINED for the start-execution cluster (asyncStart* raw reads,
-					// shouldRollbackPendingCreate, the rollback write helpers) — same rationale
-					// as the max-age kill; NOT the sleep/heal write helpers, which typed onto
-					// Info in R3. Wake fairness reads the Info twin captured at the append below
-					// (wakeFairnessTime → Info.LastWokeAt); the ApplyPatchInfo fold just below
-					// carries SleepPatch's cleared last_woke_at onto that captured twin for the
-					// same-tick re-wake ordering. Dies with the other start-coupled mirrors in Wave R4.
-					for key, value := range batch {
-						session.Metadata[key] = value
-					}
 					// Persist + fold the sleep onto the snapshot in one step (Step 6d
 					// write-returns-Info): the idle kill falls through to the wakeTargets
 					// append below, whose awake-scan read of state=asleep drives a same-tick
 					// re-wake. Base coherent (aggregating refresh @~2692 + intervening
-					// `continue`s). A pre-pass-masked writer (STEP6-PREPASS-AUDIT group 12).
+					// `continue`s). Wake fairness reads the captured Info twin
+					// (wakeFairnessTime → Info.LastWokeAt), which this fold keeps coherent
+					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
+					// coupling mirror is gone (WI-6 R4): its only consumer was the
+					// start-execution cluster's raw bead pointer, now deleted.
 					infoByID[session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[session.ID], batch)
 					alive = false
 				}
@@ -2938,15 +2912,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Capture-at-append: infoByID[session.ID] is the coherent typed twin of
-		// this tick's session. Every this-tick coupling write already folded onto
-		// it via ApplyPatchInfo BEFORE this append (the restart-handoff, max-age,
-		// idle-kill, and config-drift-reset mirrors all `continue` or fall THROUGH
-		// to here), so the frozen twin agrees with the raw bead's same-tick reads —
-		// notably the cleared last_woke_at that drives same-tick re-wake fairness
-		// (#2574-class). A NEW writer added between a coupling mirror and this
-		// append would NOT be reflected in this value-typed snapshot; keep any such
-		// writer's fold ahead of the append (or refresh the twin) if one is added.
-		wakeTargets = append(wakeTargets, wakeTarget{session: session, info: infoByID[session.ID], tp: tp, alive: alive})
+		// this tick's session — the only session state the wakeTarget carries now
+		// that the raw bead pointer is gone (WI-6 R4). Every this-tick coupling write
+		// already folded onto it via ApplyPatchInfo BEFORE this append (the
+		// restart-handoff, max-age, idle-kill, and config-drift-reset writers all
+		// `continue` or fall THROUGH to here), so the frozen twin carries the same-tick
+		// state — notably the cleared last_woke_at that drives same-tick re-wake
+		// fairness (#2574-class). A NEW writer added between one of those writers and
+		// this append would NOT be reflected in this value-typed snapshot; keep any
+		// such writer's fold ahead of the append (or refresh the twin) if one is added.
+		wakeTargets = append(wakeTargets, wakeTarget{info: infoByID[session.ID], tp: tp, alive: alive})
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
 		"ordered_session_count":  len(orderedBeads),
@@ -2991,7 +2966,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// This pass updates wakeEvals so selectIdleProbeTargets sees the correct
 	// ConfigSuppressed and Policy fields.
 	for _, target := range wakeTargets {
-		eval := wakeEvals[target.session.ID]
+		eval := wakeEvals[target.info.ID]
 		// Typed projection for this iteration's decision reads (session_name,
 		// pin_awake, template, sleep_intent). Refreshed from the snapshot: this is
 		// a post-Phase-1 loop, and every Phase-1 mutation folds onto infoByID now
@@ -3000,7 +2975,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the bead. The sleep policy resolvers (resolveSessionSleepPolicyInfo,
 		// configWakeSuppressedInfo) read the coherent Info snapshot; their internal
 		// runtime probes stay raw (§7).
-		info := infoByID[target.session.ID]
+		info := infoByID[target.info.ID]
 		policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
 		eval.Policy = policy
 		name := info.SessionNameMetadata
@@ -3027,7 +3002,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				eval.Reason = ""
 			}
 		}
-		wakeEvals[target.session.ID] = eval
+		wakeEvals[target.info.ID] = eval
 	}
 
 	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
@@ -3053,17 +3028,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// (sessionHasOpenAssignedWorkForReachableStore, pruneAgentHomeWorktreeIfSafe,
 		// collectSessionAssignedWork inside emitSessionStrandedDiagnostic) stay raw
 		// by design.
-		info := infoByID[target.session.ID]
+		info := infoByID[target.info.ID]
 		name := info.SessionNameMetadata
 		decision, hasDec := awakeDecisions[name]
 		shouldWake := hasDec && decision.ShouldWake
 
-		eval := wakeEvals[target.session.ID]
+		eval := wakeEvals[target.info.ID]
 		if shouldWake && eval.ConfigSuppressed {
 			shouldWake = false
 		}
-		infoByID[target.session.ID] = persistSleepPolicyMetadataInfo(info, sessFront, eval.Policy, eval.ConfigSuppressed)
-		info = infoByID[target.session.ID]
+		infoByID[target.info.ID] = persistSleepPolicyMetadataInfo(info, sessFront, eval.Policy, eval.ConfigSuppressed)
+		info = infoByID[target.info.ID]
 
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
@@ -3095,7 +3070,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				identity := namedSessionIdentityInfo(info)
 				if identity != "" {
 					if cb.IsOpen(identity, cbNow) {
-						if err := persistSessionCircuitBreakerMetadata(sessFront, target.session.ID, cb, identity, cbNow); err != nil {
+						if err := persistSessionCircuitBreakerMetadata(sessFront, target.info.ID, cb, identity, cbNow); err != nil {
 							fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 						}
 						cb.LogOpenOnce(identity, stderr)
@@ -3136,19 +3111,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					"should_wake": shouldWake,
 				})
 			}
-			if fold := recordCurrentBeadIDOnWake(target.session, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
-				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+				infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
 			}
 			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
-			// infoByID BEFORE this append, so the captured twin is coherent with the
-			// raw bead for this tick (currently_processing_bead_id included). The raw
-			// session pointer is retained this wave; both are refreshed in lockstep
-			// wherever the start executor re-Gets the bead.
+			// infoByID BEFORE this append, so the captured twin carries this tick's
+			// currently_processing_bead_id. It is the start-execution feed's only
+			// session state (the raw bead pointer was deleted in WI-6 R4); the
+			// sanctioned re-reads at prepareStartCandidateForCity / refreshAsyncStartResult
+			// refresh it before the commit decision.
 			startCandidates = append(startCandidates, startCandidate{
-				session: target.session,
-				info:    infoByID[target.session.ID],
-				tp:      target.tp,
-				order:   len(startCandidates),
+				info:  infoByID[target.info.ID],
+				tp:    target.tp,
+				order: len(startCandidates),
 			})
 		}
 
@@ -3162,9 +3137,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// See #1893 (controller: alive on_demand session ignores
 			// bd update --assignee).
 			if decision.RequiresFreshCycle && info.WakeMode == "fresh" {
-				if ran, fold := cycleAliveSessionForFreshReassign(target.session, target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+				if ran, fold := cycleAliveSessionForFreshReassign(beadByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
 					if fold != nil {
-						infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
+						infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
 					}
 					continue
 				}
@@ -3173,13 +3148,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// check has a baseline. Backfills legacy sessions that were
 			// already alive before this metadata existed and refreshes the
 			// record after the agent picks up its next bead in resume mode.
-			if fold := recordCurrentBeadIDOnWake(target.session, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
-				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+				infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
 			}
 			// Session is correctly awake. Cancel any non-drift drain
 			// (handles scale-back-up: agent returns to desired set while draining).
 			cancelSessionDrainInfo(info, sp, dt)
-			clearCompletedIdleProbe(target.session.ID, dt)
+			clearCompletedIdleProbe(target.info.ID, dt)
 			if info.SleepIntent == "idle-stop-pending" {
 				// Persist + fold the intent clear in one step (Step 6d write-returns-Info).
 				// This runs on an ALIVE session (the shouldWake && alive arm), which never
@@ -3188,7 +3163,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// raw session.Metadata mirror.
 				// The single-key clear now rides ApplyPatchInfo's SetMetadataBatch
 				// (empty-string clear), byte-equivalent to the raw SetMetadata it replaced.
-				infoByID[target.session.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[target.session.ID], sessionpkg.MetadataPatch{"sleep_intent": ""})
+				infoByID[target.info.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[target.info.ID], sessionpkg.MetadataPatch{"sleep_intent": ""})
 			}
 		}
 
@@ -3209,15 +3184,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				reason = "no-wake-reason"
 			}
 			if reason != "idle" {
-				clearCompletedIdleProbe(target.session.ID, dt)
+				clearCompletedIdleProbe(target.info.ID, dt)
 			}
-			if reason == "idle" && dt.get(target.session.ID) == nil {
+			if reason == "idle" && dt.get(target.info.ID) == nil {
 				if intent != "idle-stop-pending" && !shouldBeginIdleDrainInfo(info, eval, dt, sp) {
 					continue
 				}
 				if intent != "idle-stop-pending" {
 					if fold := markIdleSleepPendingInfo(info, sessFront); fold != nil {
-						infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
+						infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
 					}
 				}
 			}
@@ -3265,8 +3240,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// happened. Emit a single diagnostic per session bead
 			// generation; the throttle marker on the bead itself
 			// keeps subsequent reconciler ticks quiet.
-			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, target.session, target.tp.TemplateName, rec, clk, stderr); fold != nil {
-				infoByID[target.session.ID] = infoByID[target.session.ID].ApplyPatch(fold)
+			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, beadByID[target.info.ID], target.tp.TemplateName, rec, clk, stderr); fold != nil {
+				infoByID[target.info.ID] = infoByID[target.info.ID].ApplyPatch(fold)
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
@@ -3284,15 +3259,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr) {
+			if closeBead(store, target.info.ID, closeReason, clk.Now().UTC(), stderr) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
-				infoByID[target.session.ID] = infoByID[target.session.ID].MarkClosed()
+				infoByID[target.info.ID] = infoByID[target.info.ID].MarkClosed()
 				// Pool worktrees are transient by design — reclaim disk
 				// when the session bead is retired. Skipped under safety
 				// gates (uncommitted, unpushed, stashed) and overridable
 				// via cfg.Daemon.AutoPruneWorkerDir.
-				pruneAgentHomeWorktreeIfSafe(*target.session, cityPath, cfg, stderr)
+				pruneAgentHomeWorktreeIfSafe(*beadByID[target.info.ID], cityPath, cfg, stderr)
 			}
 		}
 	}
@@ -4359,33 +4334,23 @@ func resetConfiguredNamedSessionForConfigDrift(
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return nil
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(batch))
-	}
-	// START-EXECUTION COUPLING (Step 5c): the raw session.Metadata mirror loop is
-	// RETAINED for the start-execution cluster that still holds the raw
-	// startCandidate.session pointer (the asyncStart* raw reads,
-	// shouldRollbackPendingCreate, the rollback write helpers) — NOT the sleep/heal
-	// write helpers, which typed onto Info in R3. The start-pending caller (the alive
-	// lane) falls through without a `continue`, so the repaired session can reach
-	// startCandidates this same tick; wake fairness reads the Info twin captured at the
-	// append (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned
-	// batch (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured
-	// twin carries it. The raw mirror dies in Wave R4.
-	for key, value := range batch {
-		session.Metadata[key] = value
-	}
-	// Return the mirrored batch so the caller can fold it onto the typed snapshot
-	// (Step 6d write-returns-Info). The batch clears restart_requested (part of
-	// ConfigDriftResetPatch), so folding it keeps a consumed restart marker off the
-	// snapshot once the pre-pass is dropped (#2574).
+	// Return the batch so the caller folds it onto the typed snapshot (Step 6d
+	// write-returns-Info). The start-pending caller (the alive lane) falls through
+	// without a `continue`, so the repaired session can reach startCandidates this
+	// same tick; wake fairness reads the Info twin captured at the append
+	// (wakeFairnessTime → Info.LastWokeAt), and the caller folds this returned batch
+	// (ConfigDriftResetPatch's cleared last_woke_at) onto infoByID so the captured
+	// twin carries it. The batch also clears restart_requested (part of
+	// ConfigDriftResetPatch), keeping a consumed restart marker off the snapshot
+	// (#2574). The former raw session.Metadata coupling mirror is gone (WI-6 R4): its
+	// only consumer was the start-execution cluster's raw bead pointer, now deleted.
 	return batch
 }
 
 // shouldBeginIdleDrainInfo reads the session id and session_name off the Info
 // snapshot (both verbatim raw mirrors), so it is byte-identical to the raw form
 // it replaced. The former nil-bead guard is gone: the sole caller passes
-// infoByID[target.session.ID] for a wakeTarget whose bead is always non-nil.
+// infoByID[target.info.ID] for a wakeTarget whose bead is always non-nil.
 func shouldBeginIdleDrainInfo(
 	info sessionpkg.Info,
 	eval wakeEvaluation,
@@ -4439,26 +4404,26 @@ func selectIdleProbeTargets(
 		return targets
 	}
 	for _, target := range wakeTargets {
-		if target.session == nil || !target.alive {
+		if strings.TrimSpace(target.info.ID) == "" || !target.alive {
 			continue
 		}
-		if infoByID[target.session.ID].SleepIntent != "" {
+		if infoByID[target.info.ID].SleepIntent != "" {
 			continue
 		}
-		if dt.drains[target.session.ID] != nil {
+		if dt.drains[target.info.ID] != nil {
 			continue
 		}
-		if dt.idleProbes[target.session.ID] != nil {
+		if dt.idleProbes[target.info.ID] != nil {
 			continue
 		}
-		eval, ok := wakeEvals[target.session.ID]
+		eval, ok := wakeEvals[target.info.ID]
 		if !ok || len(eval.Reasons) > 0 || !eval.ConfigSuppressed || !eval.Policy.enabled() {
 			continue
 		}
 		if eval.Policy.Class == config.SessionSleepNonInteractive {
 			continue
 		}
-		candidates = append(candidates, target.session.ID)
+		candidates = append(candidates, target.info.ID)
 	}
 	if len(candidates) == 0 {
 		if activeProbes == 0 {
@@ -4494,18 +4459,18 @@ func launchIdleProbes(
 		return
 	}
 	for _, target := range wakeTargets {
-		if target.session == nil || !idleProbeTargets[target.session.ID] {
+		if strings.TrimSpace(target.info.ID) == "" || !idleProbeTargets[target.info.ID] {
 			continue
 		}
-		name := infoByID[target.session.ID].SessionNameMetadata
-		probe := dt.startIdleProbe(target.session.ID)
+		name := infoByID[target.info.ID].SessionNameMetadata
+		probe := dt.startIdleProbe(target.info.ID)
 		if name == "" || probe == nil {
 			continue
 		}
 		go func(beadID, sessionName string, probe *idleProbeState) {
 			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeout)
 			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
-		}(target.session.ID, name, probe)
+		}(target.info.ID, name, probe)
 	}
 }
 

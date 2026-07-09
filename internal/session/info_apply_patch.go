@@ -174,6 +174,10 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.StartedLaunchHash = v
 		case "started_live_hash":
 			info.StartedLiveHash = v
+		case "live_hash":
+			info.LiveHash = v
+		case "startup_dialog_verified":
+			info.StartupDialogVerified = v
 		case "config_drift_deferred_at":
 			info.ConfigDriftDeferredAt = v
 		case "config_drift_deferred_key":
@@ -203,6 +207,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			}
 		case "provider_kind":
 			info.ProviderKind = v
+		case "builtin_ancestor":
+			info.BuiltinAncestor = v
 		case "sleep_policy_fingerprint":
 			info.SleepPolicyFingerprint = v
 		case "requested_sleep_after_idle":
@@ -225,10 +231,10 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 				}
 			}
 		default:
-			// Keys InfoFromPersistedBead does not project (e.g. live_hash,
-			// startup_dialog_verified, env.*) have no Info field, so a patch to
-			// them changes no Info fact. Ignoring them keeps ApplyPatch
-			// byte-identical to a full re-projection.
+			// Keys InfoFromPersistedBead does not project (e.g. env.*,
+			// wake_requested_at) have no Info field, so a patch to them changes no
+			// Info fact. Ignoring them keeps ApplyPatch byte-identical to a full
+			// re-projection.
 		}
 	}
 	return info

@@ -5924,7 +5924,7 @@ func TestReconcileAndWake_RestartRequestBumpsContinuationEpoch(t *testing.T) {
 	}
 
 	// Phase 2: preWakeCommit consumes continuation_reset_pending → bumps epoch.
-	if _, _, err := preWakeCommit(&got, sessionFrontDoor(env.store), env.clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(got), sessionFrontDoor(env.store), env.clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	woke, _ := env.store.Get(session.ID)
