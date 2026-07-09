@@ -184,6 +184,14 @@ type Info struct {
 	// independently, so the Info form needs a mirror for each; this one carries the
 	// canonical value verbatim. Additive, internal-only (absent from the HTTP wire).
 	WorkDirCanonical string // gc.work_dir (raw)
+	// WorkerDir is the RAW worker_dir metadata (beadmeta.WorkerDirMetadataKey),
+	// the canonical agent-process-cwd key. It is DISTINCT from both Info.WorkDir
+	// (the legacy "work_dir" key) and Info.WorkDirCanonical (the "gc.work_dir"
+	// key). WorkerDirFromInfo reads this canonical value first and falls back to
+	// the legacy Info.WorkDir, mirroring contract.WorkerDirFromMetadata's
+	// canonical→legacy precedence. Additive, internal-only (absent from the HTTP
+	// wire).
+	WorkerDir string // worker_dir (raw)
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//

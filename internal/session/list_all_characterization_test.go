@@ -122,6 +122,112 @@ func TestListAllMatchesListAllSessionBeads(t *testing.T) {
 	}
 }
 
+// reconcileCorpus extends listAllCorpus with a bead carrying a fully-populated
+// 9-key circuit-breaker cluster, so the ReconcileSession row's Circuit projection
+// is exercised against a non-zero fixture (not just the empty-cluster rows).
+func reconcileCorpus() []beads.Bead {
+	corpus := listAllCorpus()
+	at := time.Date(2026, 3, 1, 0, 0, 6, 0, time.UTC)
+	circuit := beads.Bead{
+		ID: "s-circuit", Type: BeadType, Status: "open", Title: "circuit", Labels: []string{LabelSession},
+		CreatedAt: at, Metadata: map[string]string{
+			"session_name":                             "circuit",
+			"state":                                    "active",
+			SessionCircuitStateMetadataKey:             SessionCircuitStateOpen,
+			SessionCircuitRestartsMetadataKey:          `["2026-03-01T00:00:00Z"]`,
+			SessionCircuitLastRestartMetadataKey:       "2026-03-01T00:00:01Z",
+			SessionCircuitLastProgressMetadataKey:      "2026-03-01T00:00:02Z",
+			SessionCircuitLastObservedMetadataKey:      "2026-03-01T00:00:03Z",
+			SessionCircuitProgressSignatureMetadataKey: "sig-abc",
+			SessionCircuitOpenedAtMetadataKey:          "2026-03-01T00:00:04Z",
+			SessionCircuitOpenRestartCountMetadataKey:  "3",
+			SessionCircuitResetGenerationMetadataKey:   "2",
+		},
+	}
+	return append(corpus, circuit)
+}
+
+// TestListAllForReconcileMatchesListAllSessionBeads is the ReconcileSession row
+// oracle: across the same option matrix as ListAll, ListAllForReconcile's row
+// set/order/errors equal ListAllSessionBeads, and per row Info ==
+// InfoFromPersistedBead(b) AND Circuit == CircuitStateFromMetadata(b.Metadata).
+// The corpus carries the label-lost type-only bead, the label-only repairable
+// bead, closed beads, and a populated 9-key circuit cluster, so it fails loudly
+// if the row projection drops a leg, skips the filter/dedupe/sort, or diverges on
+// either the Info or the Circuit projection.
+func TestListAllForReconcileMatchesListAllSessionBeads(t *testing.T) {
+	corpus := reconcileCorpus()
+	newFront := func() (*Store, beads.Store) {
+		mem := beads.NewMemStoreFrom(len(corpus), corpus, nil)
+		return NewStore(beads.SessionStore{Store: mem}), mem
+	}
+
+	cases := []struct {
+		name  string
+		opts  ListAllOptions
+		query beads.ListQuery
+	}{
+		{"default", ListAllOptions{}, beads.ListQuery{}},
+		{"include-closed", ListAllOptions{IncludeClosed: true}, beads.ListQuery{IncludeClosed: true}},
+		{"sort-asc", ListAllOptions{Sort: beads.SortCreatedAsc}, beads.ListQuery{Sort: beads.SortCreatedAsc}},
+		{"sort-desc", ListAllOptions{Sort: beads.SortCreatedDesc}, beads.ListQuery{Sort: beads.SortCreatedDesc}},
+		{"limit-post-union", ListAllOptions{Sort: beads.SortCreatedAsc, Limit: 2}, beads.ListQuery{Sort: beads.SortCreatedAsc, Limit: 2}},
+		{"include-closed-sorted", ListAllOptions{IncludeClosed: true, Sort: beads.SortCreatedAsc}, beads.ListQuery{IncludeClosed: true, Sort: beads.SortCreatedAsc}},
+		{"live", ListAllOptions{Live: true, Sort: beads.SortCreatedAsc}, beads.ListQuery{Live: true, Sort: beads.SortCreatedAsc}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			front, mem := newFront()
+			got, gotErr := front.ListAllForReconcile(tc.opts)
+			wantBeads, wantErr := ListAllSessionBeads(mem, tc.query)
+			switch {
+			case (gotErr == nil) != (wantErr == nil):
+				t.Fatalf("opts=%+v: error presence mismatch got=%v want=%v", tc.opts, gotErr, wantErr)
+			case gotErr != nil && gotErr.Error() != wantErr.Error():
+				t.Fatalf("opts=%+v: error text got=%q want=%q", tc.opts, gotErr, wantErr)
+			}
+			if len(got) != len(wantBeads) {
+				t.Fatalf("opts=%+v: row count got=%d want=%d", tc.opts, len(got), len(wantBeads))
+			}
+			for i := range wantBeads {
+				wantInfo := InfoFromPersistedBead(wantBeads[i])
+				wantCircuit := CircuitStateFromMetadata(wantBeads[i].Metadata)
+				if !reflect.DeepEqual(got[i].Info, wantInfo) {
+					t.Fatalf("opts=%+v row %d (%s): Info diverged\n got=%+v\nwant=%+v", tc.opts, i, wantBeads[i].ID, got[i].Info, wantInfo)
+				}
+				if !reflect.DeepEqual(got[i].Circuit, wantCircuit) {
+					t.Fatalf("opts=%+v row %d (%s): Circuit diverged\n got=%+v\nwant=%+v", tc.opts, i, wantBeads[i].ID, got[i].Circuit, wantCircuit)
+				}
+			}
+		})
+	}
+}
+
+// TestListAllForReconcile_CircuitClusterProjected pins that a populated circuit
+// cluster survives the row projection non-empty (guarding a mutation that zeroes
+// the Circuit field or reads the wrong keys).
+func TestListAllForReconcile_CircuitClusterProjected(t *testing.T) {
+	corpus := reconcileCorpus()
+	front := NewStore(beads.SessionStore{Store: beads.NewMemStoreFrom(len(corpus), corpus, nil)})
+	rows, err := front.ListAllForReconcile(ListAllOptions{})
+	if err != nil {
+		t.Fatalf("ListAllForReconcile: %v", err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.Info.ID != "s-circuit" {
+			continue
+		}
+		found = true
+		if r.Circuit.State != SessionCircuitStateOpen || r.Circuit.OpenRestartCount != "3" || r.Circuit.ResetGeneration != "2" {
+			t.Fatalf("circuit cluster not projected verbatim: %+v", r.Circuit)
+		}
+	}
+	if !found {
+		t.Fatal("s-circuit row missing from ListAllForReconcile output")
+	}
+}
+
 // TestListAll_GlobalSortInterleavesLegs pins that the merged union is sorted
 // globally, not per leg: with SortCreatedAsc the label-leg row (label-only,
 // created between the two type-leg rows) must interleave, not trail.

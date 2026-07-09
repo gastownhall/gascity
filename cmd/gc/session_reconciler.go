@@ -651,6 +651,41 @@ func freshRestartSessionKey(tp TemplateParams, meta map[string]string) (string, 
 	return "", true
 }
 
+// freshRestartSessionKeyInfo is the session.Info form of freshRestartSessionKey:
+// the provider-capability arm is unchanged, and the bead-metadata fallback reads
+// Info.SessionIDFlag / Info.ResumeFlag / Info.ResumeCommand / Info.ResumeStyle
+// (verbatim raw mirrors), so it is byte-identical to the raw form. Pinned by the
+// classifier equivalence oracle.
+func freshRestartSessionKeyInfo(tp TemplateParams, info sessionpkg.Info) (string, bool) {
+	if tp.ResolvedProvider != nil {
+		if strings.TrimSpace(tp.ResolvedProvider.SessionIDFlag) != "" {
+			newKey, err := sessionpkg.GenerateSessionKey()
+			if err != nil {
+				return "", false
+			}
+			return newKey, true
+		}
+		if strings.TrimSpace(tp.ResolvedProvider.ResumeFlag) != "" ||
+			strings.TrimSpace(tp.ResolvedProvider.ResumeCommand) != "" ||
+			strings.TrimSpace(tp.ResolvedProvider.ResumeStyle) != "" {
+			return "", true
+		}
+	}
+	if strings.TrimSpace(info.SessionIDFlag) != "" {
+		newKey, err := sessionpkg.GenerateSessionKey()
+		if err != nil {
+			return "", false
+		}
+		return newKey, true
+	}
+	if strings.TrimSpace(info.ResumeFlag) != "" ||
+		strings.TrimSpace(info.ResumeCommand) != "" ||
+		strings.TrimSpace(info.ResumeStyle) != "" {
+		return "", true
+	}
+	return "", true
+}
+
 // allDependenciesAliveForTemplate checks that all template dependencies of a
 // resolved logical template have at least one alive instance. Uses the
 // runtime.Provider directly instead of agent types for liveness checks.
@@ -3775,6 +3810,55 @@ func collectSessionAssignedWork(cityPath string, cfg *config.City, store beads.S
 	return out, nil
 }
 
+// collectSessionAssignedWorkInfo is the session.Info form of
+// collectSessionAssignedWork: the session-side identity resolution and store
+// routing read Info (via sessionAssignmentIdentifiersForConfigInfo and
+// reachableStoresForSessionInfo, both equivalence-proven), while the work-bead
+// walk stays bead-shaped (ClassWork). Byte-identical to the raw form.
+func collectSessionAssignedWorkInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) ([]strandedAssignedWork, error) {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	seen := make(map[string]struct{})
+	out := make([]strandedAssignedWork, 0, 4)
+	collect := func(s beads.Store) error {
+		if s == nil {
+			return nil
+		}
+		wa := workAssignmentForStore(beads.WorkStore{Store: s})
+		for _, status := range []string{"open", "in_progress"} {
+			for _, assignee := range identifiers {
+				if assignee == "" {
+					continue
+				}
+				items, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
+				if err != nil {
+					return err
+				}
+				for _, item := range items {
+					if sessionpkg.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					if _, dup := seen[item.ID]; dup {
+						continue
+					}
+					seen[item.ID] = struct{}{}
+					out = append(out, strandedAssignedWork{bead: item, store: s})
+				}
+			}
+		}
+		return nil
+	}
+	stores, err := reachableStoresForSessionInfo(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return out, err
+	}
+	for _, s := range stores {
+		if err := collect(s); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
 func strandedAssignedWorkIDs(work []strandedAssignedWork) []string {
 	ids := make([]string, 0, len(work))
 	for _, item := range work {
@@ -4211,6 +4295,53 @@ func traceHealClearedPendingCreateLease(
 	})
 }
 
+// traceHealClearedPendingCreateLeaseInfo is the session.Info form of
+// traceHealClearedPendingCreateLease: the template/name fallbacks read Info
+// (normalizedSessionTemplateInfo, Info.Template, Info.SessionNameMetadata) instead
+// of cracking the raw bead; every other read is a plain argument, so it is
+// byte-identical to the raw form.
+func traceHealClearedPendingCreateLeaseInfo(
+	trace *sessionReconcilerTraceCycle,
+	info sessionpkg.Info,
+	cfg *config.City,
+	template string,
+	name string,
+	stateBeforeHeal string,
+	pendingCreateStartedAtBeforeHeal string,
+	lastWokeAtBeforeHeal string,
+	providerAlive bool,
+	batch map[string]string,
+) {
+	if trace == nil || !pendingCreateQueuedOrCreatingState(stateBeforeHeal) {
+		return
+	}
+	if cleared, ok := batch["pending_create_claim"]; !ok || cleared != "" {
+		return
+	}
+	template = strings.TrimSpace(template)
+	if template == "" {
+		template = normalizedSessionTemplateInfo(info, cfg)
+	}
+	if template == "" {
+		template = info.Template
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = info.SessionNameMetadata
+	}
+	stateAfter := stateBeforeHeal
+	if s, ok := batch["state"]; ok {
+		stateAfter = s
+	}
+	trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonHealClearedStaleLease, TraceOutcomeApplied, template, name, traceRecordPayload{
+		"last_woke_at":              lastWokeAtBeforeHeal,
+		"pending_create_started_at": pendingCreateStartedAtBeforeHeal,
+		"provider_alive":            providerAlive,
+		"state_after":               stateAfter,
+		"state_before":              stateBeforeHeal,
+	})
+}
+
 // applyTemplateOverridesToConfigInfo applies a session's parsed template
 // overrides onto the launch runtime.Config, reading them directly off Info.
 func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpkg.Info, tp TemplateParams) {
@@ -4344,6 +4475,60 @@ func resetConfiguredNamedSessionForConfigDrift(
 	// ConfigDriftResetPatch), keeping a consumed restart marker off the snapshot
 	// (#2574). The former raw session.Metadata coupling mirror is gone (WI-6 R4): its
 	// only consumer was the start-execution cluster's raw bead pointer, now deleted.
+	return batch
+}
+
+// resetConfiguredNamedSessionForConfigDriftInfo is the session.Info form of
+// resetConfiguredNamedSessionForConfigDrift: the prior session_key /
+// started_config_hash preservation reads Info.SessionKey / Info.StartedConfigHash
+// (verbatim raw mirrors) and the front-door ApplyPatch keys off Info.ID, so the
+// returned batch is byte-identical to the raw form. The raw form survives for its
+// test callers.
+func resetConfiguredNamedSessionForConfigDriftInfo(
+	info sessionpkg.Info,
+	store beads.Store,
+	sp runtime.Provider,
+	sessionName string,
+	alive bool,
+	nextState string,
+	now time.Time,
+	stderr io.Writer,
+) map[string]string {
+	if store == nil {
+		return nil
+	}
+	if nextState == "" {
+		nextState = "asleep"
+	}
+	if alive && sp != nil && sessionName != "" {
+		if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
+		}
+	}
+	nextSessionState := sessionpkg.State(nextState)
+	priorSessionKey := strings.TrimSpace(info.SessionKey)
+	priorStartedConfigHash := strings.TrimSpace(info.StartedConfigHash)
+	preserveResume := (nextSessionState == sessionpkg.StateStartPending || nextSessionState == sessionpkg.StateCreating) &&
+		priorSessionKey != "" && priorStartedConfigHash != ""
+
+	rotatedSessionKey := ""
+	if preserveResume {
+		rotatedSessionKey = priorSessionKey
+	} else if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
+		rotatedSessionKey = newKey
+	}
+	batch := sessionpkg.ConfigDriftResetPatch(nextSessionState, rotatedSessionKey, now)
+	if preserveResume {
+		batch["started_config_hash"] = priorStartedConfigHash
+	}
+	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
+	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
+	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
+	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
+	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
+		return nil
+	}
 	return batch
 }
 

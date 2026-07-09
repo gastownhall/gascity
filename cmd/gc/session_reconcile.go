@@ -458,6 +458,39 @@ func healExpiredTimers(session *beads.Bead, info sessionpkg.Info, sessFront *ses
 	}
 }
 
+// healExpiredTimersInfo is the fold form of healExpiredTimers: it clears expired
+// held_until / quarantined_until through the front door and returns the input
+// Info advanced by each successful clear (write-returns-Info), with NO raw
+// session.Metadata mirror. The reconciler's fold-then-build order (§2.3) applies
+// this before the infoByID snapshot is built, so the returned Info is what the
+// build projects — the mirror the raw form kept for the later re-projection is
+// therefore unnecessary here.
+//
+// The hold-clear fold BEFORE the quarantine check is preserved from the raw body:
+// ClearExpiredHoldPatch can blank sleep_reason, and ClearExpiredQuarantinePatch
+// reads the post-hold sleep_reason (info.SleepReason), so the ordering is
+// load-bearing. On a persist error the segment is returned unchanged, matching the
+// raw `err == nil` mirror gate.
+func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
+	if h := info.HeldUntil; h != "" {
+		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
+			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
+			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
+				info = info.ApplyPatch(batch)
+			}
+		}
+	}
+	if q := info.QuarantinedUntil; q != "" {
+		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
+			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
+			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
+				info = info.ApplyPatch(batch)
+			}
+		}
+	}
+	return info
+}
+
 // checkStability detects dead sessions that still have last_woke_at. Provider
 // rate-limit screens are retried until the hold metadata persists; ordinary
 // crash wake failures are counted only inside stabilityThreshold.
@@ -1122,6 +1155,80 @@ func topoOrder(sessions []beads.Bead, deps map[string][]string) []beads.Bead {
 	var result []beads.Bead
 	for _, t := range order {
 		result = append(result, templateSessions[t]...)
+	}
+	return result
+}
+
+// topoOrderRows is the ReconcileSession form of topoOrder: it orders the tick's
+// rows by template dependency edges, reading each row's template off
+// Info.Template (the verbatim raw mirror of b.Metadata["template"], so the
+// grouping is byte-identical to the raw form). With no deps, or on a dependency
+// cycle, it returns the input rows unchanged — identical fallback semantics to
+// topoOrder. TestTopoOrderRowsMatchesTopoOrder pins the equivalence.
+func topoOrderRows(rows []sessionpkg.ReconcileSession, deps map[string][]string) []sessionpkg.ReconcileSession {
+	if len(deps) == 0 {
+		return rows
+	}
+
+	templateRows := make(map[string][]sessionpkg.ReconcileSession)
+	for _, r := range rows {
+		template := r.Info.Template
+		templateRows[template] = append(templateRows[template], r)
+	}
+
+	var templates []string
+	seen := make(map[string]bool)
+	for _, r := range rows {
+		t := r.Info.Template
+		if !seen[t] {
+			seen[t] = true
+			templates = append(templates, t)
+		}
+	}
+
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[string]int, len(templates))
+	var order []string
+	hasCycle := false
+
+	var visit func(t string)
+	visit = func(t string) {
+		if hasCycle {
+			return
+		}
+		color[t] = gray
+		for _, dep := range deps[t] {
+			switch color[dep] {
+			case gray:
+				hasCycle = true
+				return
+			case white:
+				if seen[dep] {
+					visit(dep)
+				}
+			}
+		}
+		color[t] = black
+		order = append(order, t)
+	}
+
+	for _, t := range templates {
+		if color[t] == white {
+			visit(t)
+		}
+	}
+
+	if hasCycle {
+		return rows
+	}
+
+	var result []sessionpkg.ReconcileSession
+	for _, t := range order {
+		result = append(result, templateRows[t]...)
 	}
 	return result
 }

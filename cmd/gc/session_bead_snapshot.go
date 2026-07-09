@@ -34,7 +34,14 @@ type sessionBeadSnapshot struct {
 	// openInfos[i] == InfoFromPersistedBead(open[i]). It is the typed front
 	// door the P4 consumers migrate onto; the raw open slice and the index
 	// maps below stay byte-identical for the current callers.
-	openInfos                 []sessionpkg.Info
+	openInfos []sessionpkg.Info
+	// openCircuits is the persisted circuit-breaker cluster projection of open, in
+	// lockstep order: openCircuits[i] == CircuitStateFromMetadata(open[i].Metadata).
+	// The reconciler tick feed (OpenForReconcile) pairs it with openInfos so the
+	// circuit cluster — deliberately off session.Info — reaches Phase 0.5 without a
+	// per-id store Get. An Info-fed snapshot (FromInfos) has no backing circuit
+	// metadata, so its entries are the zero CircuitState.
+	openCircuits              []sessionpkg.CircuitState
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
@@ -102,6 +109,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	sessionNameByTemplateHint := make(map[string]string)
 
 	openInfos := make([]sessionpkg.Info, 0, len(beadsIn))
+	openCircuits := make([]sessionpkg.CircuitState, 0, len(beadsIn))
 
 	for _, b := range beadsIn {
 		if b.Status == "closed" {
@@ -109,6 +117,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		}
 		filtered = append(filtered, b)
 		openInfos = append(openInfos, sessionpkg.InfoFromPersistedBead(b))
+		openCircuits = append(openCircuits, sessionpkg.CircuitStateFromMetadata(b.Metadata))
 
 		sn := b.Metadata["session_name"]
 		if sn == "" {
@@ -154,6 +163,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	return &sessionBeadSnapshot{
 		open:                      filtered,
 		openInfos:                 openInfos,
+		openCircuits:              openCircuits,
 		beadIDByAgentName:         beadIDByAgentName,
 		beadIDByTemplateHint:      beadIDByTemplateHint,
 		sessionNameByAgentName:    sessionNameByAgentName,
@@ -183,18 +193,50 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 // FindInfoByNamedIdentity) is backed by openInfos and the index maps this
 // constructor populates, so it works correctly on an Info-built snapshot.
 func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
+	return newSessionBeadSnapshotFromInfosAndCircuits(infos, nil)
+}
+
+// newSessionBeadSnapshotFromReconcileRows builds a snapshot from a typed
+// ReconcileSession feed, retaining each row's circuit cluster alongside its Info.
+// It is the reconciler-tick constructor: the tick's working set is fed as rows
+// (OpenForReconcile), and the retire/heal folds mutate rows in place, so the
+// snapshot rebuilt from them must keep the circuit projections that OpenForReconcile
+// needs. Like newSessionBeadSnapshotFromInfos, the raw open []beads.Bead half is
+// left nil.
+func newSessionBeadSnapshotFromReconcileRows(rows []sessionpkg.ReconcileSession) *sessionBeadSnapshot {
+	infos := make([]sessionpkg.Info, len(rows))
+	circuits := make([]sessionpkg.CircuitState, len(rows))
+	for i := range rows {
+		infos[i] = rows[i].Info
+		circuits[i] = rows[i].Circuit
+	}
+	return newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+}
+
+// newSessionBeadSnapshotFromInfosAndCircuits is the shared index-map builder
+// behind newSessionBeadSnapshotFromInfos and newSessionBeadSnapshotFromReconcileRows.
+// circuits, when non-nil, is parallel to infos (same length, same order) and is
+// filtered in lockstep with the closed-drop; a nil circuits yields the zero
+// CircuitState for every open row (an Info-fed snapshot has no circuit metadata).
+func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuits []sessionpkg.CircuitState) *sessionBeadSnapshot {
 	beadIDByAgentName := make(map[string]string)
 	beadIDByTemplateHint := make(map[string]string)
 	sessionNameByAgentName := make(map[string]string)
 	sessionNameByTemplateHint := make(map[string]string)
 
 	openInfos := make([]sessionpkg.Info, 0, len(infos))
+	openCircuits := make([]sessionpkg.CircuitState, 0, len(infos))
 
-	for _, in := range infos {
+	for i, in := range infos {
 		if in.Closed {
 			continue
 		}
 		openInfos = append(openInfos, in)
+		if circuits != nil {
+			openCircuits = append(openCircuits, circuits[i])
+		} else {
+			openCircuits = append(openCircuits, sessionpkg.CircuitState{})
+		}
 
 		sn := in.SessionNameMetadata
 		if sn == "" {
@@ -239,6 +281,7 @@ func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapsh
 
 	return &sessionBeadSnapshot{
 		openInfos:                 openInfos,
+		openCircuits:              openCircuits,
 		beadIDByAgentName:         beadIDByAgentName,
 		beadIDByTemplateHint:      beadIDByTemplateHint,
 		sessionNameByAgentName:    sessionNameByAgentName,
@@ -252,6 +295,7 @@ func (s *sessionBeadSnapshot) replaceOpenLocked(open []beads.Bead) {
 	rebuilt := newSessionBeadSnapshot(open)
 	s.open = rebuilt.open
 	s.openInfos = rebuilt.openInfos
+	s.openCircuits = rebuilt.openCircuits
 	s.beadIDByAgentName = rebuilt.beadIDByAgentName
 	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
 	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
@@ -305,6 +349,48 @@ func (s *sessionBeadSnapshot) OpenInfos() []sessionpkg.Info {
 	result := make([]sessionpkg.Info, len(s.openInfos))
 	copy(result, s.openInfos)
 	return result
+}
+
+// OpenForReconcile is the reconciler tick feed: a copy of every open session's
+// ReconcileSession (Info paired with its circuit-breaker cluster), in the same
+// order as Open()/OpenInfos(). OpenForReconcile()[i].Info equals OpenInfos()[i]
+// and OpenForReconcile()[i].Circuit equals the circuit projection of that bead.
+func (s *sessionBeadSnapshot) OpenForReconcile() []sessionpkg.ReconcileSession {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]sessionpkg.ReconcileSession, len(s.openInfos))
+	for i := range s.openInfos {
+		circuit := sessionpkg.CircuitState{}
+		if i < len(s.openCircuits) {
+			circuit = s.openCircuits[i]
+		}
+		result[i] = sessionpkg.ReconcileSession{Info: s.openInfos[i], Circuit: circuit}
+	}
+	return result
+}
+
+// ApplyOpenInfoPatch folds a metadata patch onto the matching open row's Info
+// (openInfos[i] where openInfos[i].ID == id), via Info.ApplyPatch, under Lock. It
+// is the explicit carrier for the stranded-throttle marker (§2.5n): before its
+// durable SetMarker, emitSessionStrandedDiagnostic folds the throttle key here so
+// a REUSED snapshot's OpenForReconcile row carries the marker even when the store
+// write failed — reproducing the emit-once guarantee the shared-metadata-map
+// aliasing used to provide accidentally. No-op when id is absent.
+func (s *sessionBeadSnapshot) ApplyOpenInfoPatch(id string, patch sessionpkg.MetadataPatch) {
+	if s == nil || strings.TrimSpace(id) == "" || len(patch) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.openInfos {
+		if s.openInfos[i].ID == id {
+			s.openInfos[i] = s.openInfos[i].ApplyPatch(patch)
+			return
+		}
+	}
 }
 
 func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string {
