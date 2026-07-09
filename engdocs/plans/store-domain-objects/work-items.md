@@ -63,8 +63,20 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 > feed typing) ✅ · W4 (periphery ListAll + snapshot raw-half) ✅ (W4 merged
 > `c9e59d17c` — full W2+W3+W4+W5 integrated: 6 shards + session/worker/api green;
 > red-team zero blockers, 5 nits closed incl. a primed silent-empty `FindInfo*`
-> trap + a latent nil-store panic) → W6 (write-helper collapse + coupling-mirror
-> drop + raw classifier/oracle deletion, LAST) 🔨 impl.
+> trap + a latent nil-store panic) · W6 **PARTIAL** ✅ (merge `e02175188`, 6 shards
+> green): landed the SAFE half — the 10 wake/churn/stability write helpers collapsed
+> onto `Store.ApplyPatchInfo`, and `ResolveSessionBeadByExactID` retired from the
+> reconciler (census→0). Two TRANSITIONAL lockstep raw mirrors kept
+> (`clearWakeFailures` `quarantined_until`; zombie `markProviderTerminalError` 5 keys)
+> because deferred same-tick raw readers survive — red-team caught a fail-safe drift
+> (mid-tick quarantine clear losing the pending-interaction kill/drain deferral),
+> fixed + pinned. **The delete-heavy tail is DEFERRED** (the W6 brief under-scoped it):
+> the 6 raw classifiers have live production consumers (`healStatePatchWithRollback`,
+> `dependencySessionStartInFlight`, lease helpers) that must migrate first; the sleep
+> + lifecycle clusters are same-tick coupled → migrate as a coordinated unit; then
+> drop the 2 transitional + 4 coupling mirrors, remove `startCandidate.session`/
+> `wakeTarget.session`, delete the classifiers + oracle siblings. Tracked in
+> `/tmp/remainder_design.md` (WI-6-remainder + WI-7 coordinated plan).
 >
 > Every session-store wave (W2/W3/W5) tripped the SAME front-door-Get contract
 > subtlety (session.Store.Get/GetPersistedResponse returns `ErrSessionNotFound` +
