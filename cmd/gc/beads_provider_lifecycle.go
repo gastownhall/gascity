@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
@@ -376,6 +377,12 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
+	// Go owns canonical types.custom shaping (formerly gc-beads-bd.sh's
+	// ensure_types_custom_in_yaml). doctor.RequiredCustomTypes is the single
+	// source; union (not replace) so the baseline is always present even if a
+	// future caller supplies its own extra types, and EnsureCanonicalConfig
+	// then unions the result with any on-disk extensions.
+	state.CustomTypes = contract.MergeCustomTypes(state.CustomTypes, doctor.RequiredCustomTypes)
 	changed, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
 	if err != nil {
 		return err

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 )
 
 // RequiredCustomTypes lists the bead types that Gas City requires
@@ -122,36 +123,8 @@ func (c *CustomTypesCheck) Fix(_ *CheckContext) error {
 	if err != nil {
 		return fmt.Errorf("reading current custom types: %w", err)
 	}
-	merged := mergeCustomTypes(current, RequiredCustomTypes)
+	merged := contract.MergeCustomTypes(current, RequiredCustomTypes)
 	return setCustomTypes(c.Dir, strings.Join(merged, ","))
-}
-
-// mergeCustomTypes returns the union of current and required, in order:
-// current entries first (preserving user order), then any required entries
-// not already present. Empty/whitespace-only entries are dropped and
-// duplicates are removed.
-func mergeCustomTypes(current, required []string) []string {
-	seen := make(map[string]bool, len(current)+len(required))
-	merged := make([]string, 0, len(current)+len(required))
-	for _, t := range current {
-		trimmed := strings.TrimSpace(t)
-		if trimmed == "" {
-			continue
-		}
-		if seen[trimmed] {
-			continue
-		}
-		seen[trimmed] = true
-		merged = append(merged, trimmed)
-	}
-	for _, req := range required {
-		if seen[req] {
-			continue
-		}
-		seen[req] = true
-		merged = append(merged, req)
-	}
-	return merged
 }
 
 // getCustomTypes reads the current types.custom config from a bd store.
