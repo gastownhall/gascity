@@ -13,7 +13,7 @@ import (
 // consumes, read once through a confined codec instead of cracking the raw
 // bead inline at every call site.
 //
-// It is the workflow-domain analogue of session.InfoFromPersistedBead's Info:
+// It is the workflow-domain analog of session.InfoFromPersistedBead's Info:
 // molecule is the package that materializes a formula run as a root bead plus
 // child step beads, so it owns what a workflow bead means. WorkflowBeadFromBead
 // is pure, side-effect-free, and backend-invariant — it reads only stored bead

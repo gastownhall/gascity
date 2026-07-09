@@ -22,8 +22,8 @@ func TestWorkflowStatus(t *testing.T) {
 			name: "open assigned is pending",
 			bead: beads.Bead{
 				Status:   "open",
-				Assignee: "mayor",
-				Metadata: map[string]string{"gc.routed_to": "mayor"},
+				Assignee: "assigned-role",
+				Metadata: map[string]string{"gc.routed_to": "routed-role"},
 			},
 			want: "pending",
 		},
@@ -36,7 +36,7 @@ func TestWorkflowStatus(t *testing.T) {
 			name: "in_progress routed-only is pending",
 			bead: beads.Bead{
 				Status:   "in_progress",
-				Metadata: map[string]string{"gc.routed_to": "mayor"},
+				Metadata: map[string]string{"gc.routed_to": "routed-role"},
 			},
 			want: "pending",
 		},
