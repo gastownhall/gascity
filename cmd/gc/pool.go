@@ -242,16 +242,154 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 	return result
 }
 
-// deepCopyAgent creates a deep copy of a config.Agent as a pool instance with a
-// new name and dir. The deep copy comes from the single config.Agent.Clone()
-// source (slice/map/pointer fields independently allocated); this wrapper only
-// stamps the pool-instance identity: Name, Dir, and PoolName (the template's
-// qualified name, used for gc.routed_to work discovery).
+// deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
+// Slice and map fields are independently allocated so mutations to the copy
+// don't affect the original.
 func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
-	dst := src.Clone()
-	dst.Name = name
-	dst.Dir = dir
-	dst.PoolName = src.QualifiedName()
+	dst := config.Agent{
+		Name:              name,
+		Description:       src.Description,
+		Dir:               dir,
+		WorkDir:           src.WorkDir,
+		TmuxAlias:         src.TmuxAlias,
+		Scope:             src.Scope,
+		Session:           src.Session,
+		Provider:          src.Provider,
+		Upstream:          src.Upstream,
+		InheritedProvider: src.InheritedProvider,
+		PromptTemplate:    src.PromptTemplate,
+		Nudge:             src.Nudge,
+		StartCommand:      src.StartCommand,
+		Lifecycle:         src.Lifecycle,
+		PromptMode:        src.PromptMode,
+		PromptFlag:        src.PromptFlag,
+		ReadyPromptPrefix: src.ReadyPromptPrefix,
+		// DefaultSlingFormula: deep-copied below with other pointer fields.
+		WorkQuery:          src.WorkQuery,
+		SlingQuery:         src.SlingQuery,
+		SessionSetupScript: src.SessionSetupScript,
+		OverlayDir:         src.OverlayDir,
+		SourceDir:          src.SourceDir,
+		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
+		IdleTimeout:          src.IdleTimeout,
+		MaxSessionAge:        src.MaxSessionAge,
+		MaxSessionAgeJitter:  src.MaxSessionAgeJitter,
+		SleepAfterIdle:       src.SleepAfterIdle,
+		SleepAfterIdleSource: src.SleepAfterIdleSource,
+		Suspended:            src.Suspended,
+		ResumeCommand:        src.ResumeCommand,
+		WakeMode:             src.WakeMode,
+		MouseMode:            src.MouseMode,
+		PoolName:             src.QualifiedName(),
+		Implicit:             src.Implicit,
+		ScaleCheck:           src.ScaleCheck,
+		BindingName:          src.BindingName,
+		PackName:             src.PackName,
+	}
+	if len(src.DependsOn) > 0 {
+		dst.DependsOn = make([]string, len(src.DependsOn))
+		copy(dst.DependsOn, src.DependsOn)
+	}
+	if len(src.Args) > 0 {
+		dst.Args = make([]string, len(src.Args))
+		copy(dst.Args, src.Args)
+	}
+	if len(src.ProcessNames) > 0 {
+		dst.ProcessNames = make([]string, len(src.ProcessNames))
+		copy(dst.ProcessNames, src.ProcessNames)
+	}
+	if len(src.Env) > 0 {
+		dst.Env = make(map[string]string, len(src.Env))
+		for k, v := range src.Env {
+			dst.Env[k] = v
+		}
+	}
+	if len(src.PreStart) > 0 {
+		dst.PreStart = make([]string, len(src.PreStart))
+		copy(dst.PreStart, src.PreStart)
+	}
+	if len(src.SessionSetup) > 0 {
+		dst.SessionSetup = make([]string, len(src.SessionSetup))
+		copy(dst.SessionSetup, src.SessionSetup)
+	}
+	if len(src.SessionLive) > 0 {
+		dst.SessionLive = make([]string, len(src.SessionLive))
+		copy(dst.SessionLive, src.SessionLive)
+	}
+	if len(src.InjectFragments) > 0 {
+		dst.InjectFragments = make([]string, len(src.InjectFragments))
+		copy(dst.InjectFragments, src.InjectFragments)
+	}
+	if len(src.AppendFragments) > 0 {
+		dst.AppendFragments = make([]string, len(src.AppendFragments))
+		copy(dst.AppendFragments, src.AppendFragments)
+	}
+	if len(src.InheritedAppendFragments) > 0 {
+		dst.InheritedAppendFragments = make([]string, len(src.InheritedAppendFragments))
+		copy(dst.InheritedAppendFragments, src.InheritedAppendFragments)
+	}
+	if len(src.InstallAgentHooks) > 0 {
+		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
+		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
+	}
+	dst.SkillsDir = src.SkillsDir
+	dst.MCPDir = src.MCPDir
+	if src.MaxActiveSessions != nil {
+		v := *src.MaxActiveSessions
+		dst.MaxActiveSessions = &v
+	}
+	dst.MinActiveSessions = src.MinActiveSessions
+	dst.ScaleCheck = src.ScaleCheck
+	if len(src.NamepoolNames) > 0 {
+		dst.NamepoolNames = make([]string, len(src.NamepoolNames))
+		copy(dst.NamepoolNames, src.NamepoolNames)
+	}
+	dst.DrainTimeout = src.DrainTimeout
+	dst.OnBoot = src.OnBoot
+	dst.OnDeath = src.OnDeath
+	dst.Namepool = src.Namepool
+	if src.ReadyDelayMs != nil {
+		v := *src.ReadyDelayMs
+		dst.ReadyDelayMs = &v
+	}
+	if src.EmitsPermissionWarning != nil {
+		v := *src.EmitsPermissionWarning
+		dst.EmitsPermissionWarning = &v
+	}
+	if src.HooksInstalled != nil {
+		v := *src.HooksInstalled
+		dst.HooksInstalled = &v
+	}
+	if src.InjectAssignedSkills != nil {
+		v := *src.InjectAssignedSkills
+		dst.InjectAssignedSkills = &v
+	}
+	if src.DefaultSlingFormula != nil {
+		v := *src.DefaultSlingFormula
+		dst.DefaultSlingFormula = &v
+	}
+	if src.InheritedDefaultSlingFormula != nil {
+		v := *src.InheritedDefaultSlingFormula
+		dst.InheritedDefaultSlingFormula = &v
+	}
+	if src.Attach != nil {
+		v := *src.Attach
+		dst.Attach = &v
+	}
+	if src.MaxActiveSessions != nil {
+		v := *src.MaxActiveSessions
+		dst.MaxActiveSessions = &v
+	}
+	if src.MinActiveSessions != nil {
+		v := *src.MinActiveSessions
+		dst.MinActiveSessions = &v
+	}
+	if len(src.OptionDefaults) > 0 {
+		dst.OptionDefaults = make(map[string]string, len(src.OptionDefaults))
+		for k, v := range src.OptionDefaults {
+			dst.OptionDefaults[k] = v
+		}
+	}
 	return dst
 }
 

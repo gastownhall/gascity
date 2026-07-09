@@ -868,14 +868,17 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		PackName:                     "gastown",
 	}
 
-	// Fields left unexercised by this cmd/gc-level fixture. Tombstones
-	// (Skills/MCP/SharedSkills/SharedMCP, deprecated in v0.15.1 and removed in
-	// v0.16) and the unexported provenance enums (source ga-tpfc, layout
-	// ga-9ogb) are not set here — the former are runtime-inert and the latter
-	// cannot be assigned across the package boundary. config.Agent.Clone (the
-	// single deep-copy source this wrapper now delegates to) carries whatever
-	// the template holds for them; its completeness is proven by
-	// TestAgentCloneIsDeep in the config package.
+	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not
+	// deep-copied; they are accepted by the TOML parser but not propagated
+	// through the runtime. The deep-copy contract deliberately drops them.
+	//
+	// The unexported `source` (ga-tpfc) and `layout` (ga-9ogb) fields
+	// are also intentionally dropped: they are config-package-internal
+	// provenance enums that describe the agent's discovery origin. Pool
+	// instances are derived objects, not discovery sites, so leaving
+	// them at the zero value is semantically correct and the deep-copy
+	// in cmd/gc cannot reach across the package boundary to set an
+	// unexported field anyway.
 	tombstones := map[string]bool{
 		"Skills":       true,
 		"MCP":          true,
