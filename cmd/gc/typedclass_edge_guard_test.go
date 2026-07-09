@@ -143,8 +143,12 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// ListByLabel("gc:session") sweep (widening to the ListAll type+label union
 		// would also mark label-lost type-only beads — a behavior delta), so the
 		// label-listed beads are projected to session.Info at this edge to read the
-		// typed sessionMetadataStateInfo twin + Info.SleepReason. Retires when a
-		// label-scoped Info lister or the widen decision lands in a later wave.
+		// typed sessionMetadataStateInfo twin + Info.SleepReason. session.Store.List
+		// (the existing label-scoped Info lister) does NOT qualify: it narrows via
+		// IsSessionBeadOrRepairable (drops non-"session"-typed gc:session beads this
+		// sweep marks) and queries IncludeClosed:true (a different query shape / a
+		// CachingStore history read). Retires only when a label-only, closed-excluded,
+		// unfiltered Info lister — or the widen decision — lands in a later wave.
 		"cmd/gc/cmd_stop.go":              1,
 		"cmd/gc/session_bead_snapshot.go": 3,
 		"cmd/gc/session_hash.go":          1,

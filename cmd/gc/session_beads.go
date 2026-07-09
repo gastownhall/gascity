@@ -63,12 +63,18 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 // returns the open session beads projected to session.Info via the session
 // store's default direct union (type+label, closed excluded — the same tier as
 // loadSessionBeads). Callers that only read Info fields use this instead of
-// loadSessionBeads so no raw bead crosses into business logic.
+// loadSessionBeads so no raw bead crosses into business logic. The error is
+// wrapped with the same "listing session beads:" layer loadSessionBeads adds so
+// the two feeds emit byte-identical diagnostics.
 func loadOpenSessionInfos(store beads.Store) ([]session.Info, error) {
 	if store == nil {
 		return nil, nil
 	}
-	return sessionFrontDoor(store).ListAll(session.ListAllOptions{})
+	infos, err := sessionFrontDoor(store).ListAll(session.ListAllOptions{})
+	if err != nil {
+		return infos, fmt.Errorf("listing session beads: %w", err)
+	}
+	return infos, nil
 }
 
 func findOpenSessionBeadBySessionName(store beads.Store, sessionName string) (beads.Bead, bool, error) {
@@ -2421,6 +2427,11 @@ func stopRuntimeBeforeSessionBeadMutation(
 	return true
 }
 
+// WI-6 R1: raw form is now oracle-only — reapStaleSessionBeads reads via
+// staleReapStartBoundaryInfo. It survives solely as the raw side of the
+// TestSessionClassifierInfoEquivalence timeBoolChecks "staleReapStartBoundary"
+// row; delete it together with that row (whose recent-wake fixture pins the
+// last_woke_at-upgrade branch on both forms).
 func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 	if b.CreatedAt.IsZero() {
 		return time.Time{}, false

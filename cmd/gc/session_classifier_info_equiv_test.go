@@ -24,6 +24,15 @@ import (
 func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	pastRFC3339 := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
 	futureRFC3339 := time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)
+	// recentWokeRFC3339 is strictly AFTER the reap-boundary fixture's CreatedAt
+	// (-30m), so staleReapStartBoundary must advance the boundary to this woke
+	// time — the last_woke_at-upgrade branch. recentWoke is the parsed value the
+	// direct true-branch assertion compares against.
+	recentWokeRFC3339 := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	recentWoke, err := time.Parse(time.RFC3339, recentWokeRFC3339)
+	if err != nil {
+		t.Fatalf("parsing recentWokeRFC3339: %v", err)
+	}
 	clk := &clock.Fake{Time: time.Now()}
 
 	beadsByShape := map[string]beads.Bead{
@@ -230,6 +239,24 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pending_create_claim":      "true",
 				"pending_create_started_at": pastRFC3339,
 				"last_woke_at":              pastRFC3339,
+			},
+		},
+		"reap-boundary-recent-wake": {
+			// Exercises staleReapStartBoundary's last_woke_at-upgrade branch: a
+			// non-zero CreatedAt (-30m) with a parseable last_woke_at strictly AFTER
+			// it (recentWokeRFC3339, -5m), so the boundary must advance to the woke
+			// time (not CreatedAt) in BOTH the raw and Info forms. Without a fixture
+			// on this path, dropping the woke-upgrade in either form would go
+			// unnoticed and silently reap recently-woken creating sessions.
+			ID:        "ga-reapwoke",
+			Type:      session.BeadType,
+			Title:     "reapwoke",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: time.Now().Add(-30 * time.Minute),
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        string(session.StateCreating),
+				"last_woke_at": recentWokeRFC3339,
 			},
 		},
 		"post-create-protected": {
@@ -1062,6 +1089,13 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// not a trivial both-false pass.
 	if !pendingResumePreservingNamedRestartInfo(session.InfoFromPersistedBead(beadsByShape["pending-resume-preserve"]), clk, leaseStartupTimeout) {
 		t.Fatal("pendingResumePreservingNamedRestartInfo(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
+	}
+	// staleReapStartBoundaryInfo must advance the boundary to the last_woke_at time
+	// (not CreatedAt) on the recent-wake fixture, exercising the woke-upgrade branch
+	// so a regression that returns CreatedAt is caught (both here and in the
+	// timeBoolChecks equivalence row above).
+	if got, ok := staleReapStartBoundaryInfo(session.InfoFromPersistedBead(beadsByShape["reap-boundary-recent-wake"])); !ok || !got.Equal(recentWoke) {
+		t.Fatalf("staleReapStartBoundaryInfo(reap-boundary-recent-wake) = (%v, %v); want the last_woke_at time %v — fixture no longer exercises the woke-upgrade branch", got, ok, recentWoke)
 	}
 	// The drain-ack fixture must hit the true branch so isDrainAckStopPendingInfo
 	// is exercised on a real stop-pending shape, not a trivial both-false pass.
