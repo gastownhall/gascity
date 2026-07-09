@@ -186,14 +186,8 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	exp.localBeadAt = map[string]time.Time{}
 	exp.deletedSeq = map[string]uint64{}
 
-	depsCompleteFlip := false
 	for id := range allOracleIDs(st, in, refEnd) {
 		kind := classifyDelta(st, in, postPreserveFresh, refEnd, id)
-		if kind == deltaD4RecencyKept {
-			if _, ok := st.deps[id]; !ok {
-				depsCompleteFlip = true
-			}
-		}
 		v := expectedNewView(st, in, refEnd, id, kind)
 		if v.hasBead {
 			exp.beads[id] = v.bead
@@ -214,11 +208,61 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 			exp.deletedSeq[id] = v.deletedSeq
 		}
 	}
-	if in.quiescent(st) {
-		exp.depsComplete = refEnd.depsComplete && !depsCompleteFlip
-	}
-	// (Mutated regime: NEW's depsComplete == A's; refEnd already carries it.)
+	// depsComplete is regime-uniform in the collapsed seam: reconcileMergeDecision
+	// has no regime concept, so the flag is a single fold — useFreshDeps, dropped
+	// to false the moment any absorb-cell skip leaves the cached deps map an
+	// unfaithful projection of the fresh scan. Re-derived here independently from
+	// the input state and the shared pure helpers (never reconcileMergeDecision).
+	// Without the D4 divergent-deps term this reproduces refEnd.depsComplete for
+	// BOTH frozen branches exactly; the term adds the degradation the collapse
+	// deliberately introduces so a recency-keep can no longer serve stale cached
+	// deps under depsComplete=true.
+	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
 	return exp
+}
+
+// expectedNextDepsComplete independently reproduces the seam's nextDepsComplete
+// fold: it starts at useFreshDeps and drops to false on any absorb-cell (fresh
+// present) skip over a cached row that leaves a deps hole — a fence or recency
+// skip whose row has no cached deps entry, or a recency-keep that retains cached
+// deps diverging from the fresh snapshot. Fence beats recency, matching the
+// decision's arm ordering. Derived from input state + shared pure helpers only.
+func expectedNextDepsComplete(st storeState, in snapshotInputs, postPreserveFresh map[string]Bead) bool {
+	freshDepsByID := computeFreshDepsByID(st, in, postPreserveFresh)
+	complete := in.useFreshDeps
+	for id, fresh := range postPreserveFresh {
+		cached, cachedExists := st.beads[id]
+		if !cachedExists {
+			continue // created row: no skip, no degradation
+		}
+		cachedDeps, hasCachedDeps := st.deps[id]
+		switch {
+		case st.deletedSeq[id] > in.startSeq || st.beadSeq[id] > in.startSeq:
+			if !hasCachedDeps {
+				complete = false
+			}
+		case recentLocalMutation(st.localBeadAt[id], in.now) && beadChanged(cached, fresh, true):
+			if !hasCachedDeps || depsChanged(cachedDeps, freshDepsByID[id]) {
+				complete = false
+			}
+		}
+	}
+	return complete
+}
+
+// computeFreshDepsByID returns, per fresh row, the deps depsForReconcileLocked
+// would compute — the identical fresh-deps input all three implementations feed
+// their skip/absorb arms. A pre-merge harness store gives depsForReconcileLocked
+// the same cached-deps view (and BdStore vs mem fallback) the live seam reads.
+func computeFreshDepsByID(st storeState, in snapshotInputs, postPreserveFresh map[string]Bead) map[string][]Dep {
+	c, _ := newMergeHarnessStore(st)
+	out := make(map[string][]Dep, len(postPreserveFresh))
+	c.mu.Lock()
+	for id, fresh := range postPreserveFresh {
+		out[id] = c.depsForReconcileLocked(id, fresh, in.depMap, in.useFreshDeps)
+	}
+	c.mu.Unlock()
+	return out
 }
 
 // allOracleIDs is the id universe the oracle must decide: every id referenced
@@ -400,6 +444,17 @@ func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in sna
 // flake.
 func assertDifferential(t *testing.T, name string, st storeState, in snapshotInputs) {
 	t.Helper()
+
+	// Normalize inputs exactly as the seam does before any implementation or the
+	// oracle reads them. cloneStoreState/cloneSnapshotInputs run cloneDeps over
+	// every deps entry, collapsing an empty-non-nil []Dep{} to nil just as the
+	// live seam stores it. The three impl runs already clone internally, but the
+	// case-oracle reads st directly (viewOfState/expectedNewView); without this
+	// the oracle would expect a raw []Dep{} on a recency-kept orphan while the
+	// seam produced nil — a harness-only false divergence (regression-pinned by
+	// the FuzzReconcileMergeDifferential seed).
+	st = cloneStoreState(st)
+	in = cloneSnapshotInputs(in)
 
 	// Determinism self-check per implementation.
 	newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in))

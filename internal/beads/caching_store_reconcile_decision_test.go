@@ -6,11 +6,19 @@ import (
 )
 
 // T4: exhaustive test of the pure reconcileMergeDecision over its input
-// lattice, plus the §1.2 structural invariants. An independent transcription
-// of the normative semantics (expectedDecision) is asserted equal to the
-// production function on every lattice point — a decision-table oracle that
-// catches any drift of the production switch away from the spec — and the
-// structural invariants pin type-level properties the switch must uphold.
+// lattice, plus the §1.2 structural invariants.
+//
+// Scope of the oracle: expectedDecision is a hand-transcription of the same
+// decision table the production switch encodes, so this test is DRIFT and
+// STRUCTURAL-INVARIANT coverage — it catches an accidental future edit that
+// moves one function out of step with the other, and the invariants pin
+// type-level properties the switch must uphold on every lattice point. It is
+// deliberately NOT an independent semantic oracle: a spec misunderstanding
+// baked into both functions would pass here. The independent semantic ground
+// truth is the frozen Branch A / Branch B differential gate
+// (caching_store_reconcile_differential_test.go), which runs the real
+// pre-collapse bodies and would fail on a wrong decision; this table sits on
+// top of that as cheap, exhaustive drift protection.
 
 func expectedDecision(in mergeRowInput) mergeDecision {
 	switch {
@@ -19,7 +27,7 @@ func expectedDecision(in mergeRowInput) mergeDecision {
 			return mergeDecision{action: mergeSkipFenced, degradeDepsComplete: in.cachedExists && !in.hasCachedDeps}
 		}
 		if in.cachedExists && recentLocalMutation(in.localAt, in.now) && beadChanged(in.cached, in.fresh, in.skipLabels) {
-			return mergeDecision{action: mergeSkipRecentLocal, degradeDepsComplete: !in.hasCachedDeps}
+			return mergeDecision{action: mergeSkipRecentLocal, degradeDepsComplete: !in.hasCachedDeps || depsChanged(in.cachedDeps, in.freshDeps)}
 		}
 		n := ""
 		switch {

@@ -376,9 +376,15 @@ type mergeDecision struct {
 	// notification is the event type to synthesize: "", "bead.created",
 	// "bead.updated", or "bead.closed".
 	notification string
-	// degradeDepsComplete reports that this skip leaves a deps coverage hole
-	// (cached row with no deps entry), so the pass must fold
-	// nextDepsComplete = false. Matches the two Branch-A skip-arm degradations.
+	// degradeDepsComplete reports that this skip leaves the cached deps map an
+	// unfaithful projection of the fresh full scan, so the pass must fold
+	// nextDepsComplete = false and dep readers fall back to the backing. Two
+	// shapes trip it: a coverage hole (cached row with no deps entry), and a
+	// recency-keep that retains cached deps which diverge from the fresh
+	// snapshot's deps (the row's body is kept as local truth, but its deps can
+	// no longer be claimed complete). The first shape matches the two Branch-A
+	// skip-arm degradations; the second closes the D4 contract gap where a
+	// recency-keep could serve stale cached deps under depsComplete=true.
 	degradeDepsComplete bool
 }
 
@@ -422,7 +428,7 @@ func reconcileMergeDecision(in mergeRowInput) mergeDecision {
 			beadChanged(in.cached, in.fresh, in.skipLabels) {
 			return mergeDecision{
 				action:              mergeSkipRecentLocal,
-				degradeDepsComplete: !in.hasCachedDeps,
+				degradeDepsComplete: !in.hasCachedDeps || depsChanged(in.cachedDeps, in.freshDeps),
 			}
 		}
 		n := ""

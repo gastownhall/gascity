@@ -95,10 +95,13 @@ func mountEndState(end mergeEndState, truth *MemStore) *CachingStore {
 
 // TestReconcileMergeReadProjection mounts the reference and NEW end-states over
 // an identical backing that reflects reality (freshByID rows exist; orphan and
-// deleted ids do not) and asserts Get/DepList/CachedReady serve identically.
-// Map equality already implies read equality on non-delta cells; this probe is
-// the check that the §2 delta divergences are invisible at the read surface —
-// D1's tombstone GC falls through to a backing that also says not-found, etc.
+// deleted ids do not) and asserts Get and CachedReady serve identically (or that
+// NEW only ever moves in the safe direction). Map equality already implies read
+// equality on non-delta cells; this probe is the check that the §2 delta
+// divergences are invisible at the read surface — D1's tombstone GC falls
+// through to a backing that also says not-found, etc. The dependency-list read
+// surface is covered separately by TestReconcileMergeD4RecencyKeepDepListContract,
+// which exercises the one delta (D4) that touches deps.
 func TestReconcileMergeReadProjection(t *testing.T) {
 	states := append(mergeFixtures(), genGridStates()...)
 	states = append(states, genSeededStates(3, 400)...)
@@ -163,6 +166,76 @@ func TestReconcileMergeReadProjection(t *testing.T) {
 				t.Fatalf("%s: CachedReady declined on NEW but Branch A served — a serving regression", f.name)
 			}
 		}
+	}
+}
+
+// TestReconcileMergeD4RecencyKeepDepListContract pins the dependency-read
+// contract for the D4 cell — a quiescent recency-keep whose retained cached deps
+// diverge from the fresh full-scan snapshot. The collapse keeps the local deps
+// (they may reflect an in-flight local write the snapshot lags — see the
+// reg_2210 fixture) but must not then advertise the deps map as a complete,
+// faithful projection of the scan. This closes the attempt-2 gap: the general
+// read-projection probe exercised only Get and CachedReady, leaving the deps
+// read surface for this delta unproven.
+func TestReconcileMergeD4RecencyKeepDepListContract(t *testing.T) {
+	const startSeq = uint64(100)
+	// Quiescent recency-keep: the cached row is recent and body-changed vs the
+	// fresh row, and its cached deps ([cached]) differ from the fresh snapshot
+	// deps ([fresh]).
+	st := storeState{
+		beads:       map[string]Bead{"a": bead("a", "open")},
+		deps:        map[string][]Dep{"a": {dep("a", "cached")}},
+		beadSeq:     map[string]uint64{"a": 90},
+		localBeadAt: map[string]time.Time{"a": fxRecent()},
+		mutationSeq: startSeq,
+	}
+	in := snapshotInputs{
+		freshByID:    map[string]Bead{"a": beadWith("a", "closed", func(_ *Bead) {})},
+		depMap:       map[string][]Dep{"a": {dep("a", "fresh")}},
+		useFreshDeps: true,
+		startSeq:     startSeq,
+		now:          fxNow,
+	}
+	newRes := runNewMerge(cloneStoreState(st), cloneSnapshotInputs(in))
+
+	// The fix: a divergent recency-keep degrades depsComplete instead of
+	// over-claiming a complete deps projection.
+	if newRes.end.depsComplete {
+		t.Fatal("D4 divergent recency-keep left depsComplete=true — the cache over-claims a complete deps projection")
+	}
+	// The retained local deps stay in the cache (the collapse keeps them where
+	// Branch B overwrote them with the snapshot deps).
+	if depsChanged(newRes.end.deps["a"], []Dep{dep("a", "cached")}) {
+		t.Fatalf("D4 recency-keep should retain cached deps, got %v", newRes.end.deps["a"])
+	}
+
+	// Mount the NEW end-state over a backing whose DepList is the authoritative
+	// answer, distinct from both the cached and the snapshot deps, so a fallback
+	// is observable.
+	truth := NewMemStore()
+	truth.deps = []Dep{dep("a", "authoritative")}
+	c := mountEndState(newRes.end, truth)
+
+	// The public DepList reader fails closed to the backing: with depsComplete
+	// degraded it must NOT serve the retained (possibly stale) cached deps as an
+	// authoritative, complete projection.
+	got, err := c.DepList("a", "down")
+	if err != nil {
+		t.Fatalf("DepList returned error: %v", err)
+	}
+	if depsChanged(got, []Dep{dep("a", "authoritative")}) {
+		t.Fatalf("DepList must fall back to the backing when depsComplete is degraded; got %v (cached deps leaked to an authoritative read)", got)
+	}
+
+	// The cache-only reader still surfaces the retained local deps — the same
+	// local-truth view cachedGetOnly serves for the retained bead body. It is the
+	// explicit best-effort cache surface, not the authoritative projection.
+	cached, err := c.cachedDepListOnly("a", "down")
+	if err != nil {
+		t.Fatalf("cachedDepListOnly returned error: %v", err)
+	}
+	if depsChanged(cached, []Dep{dep("a", "cached")}) {
+		t.Fatalf("cachedDepListOnly should surface the retained local deps, got %v", cached)
 	}
 }
 
@@ -404,6 +477,12 @@ func FuzzReconcileMergeDifferential(f *testing.F) {
 	f.Add([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9})
 	f.Add([]byte{1, 1, 1, 0, 2, 2, 2, 3, 3, 3, 4, 4})
 	f.Add([]byte{255, 254, 253, 200, 100, 50, 25, 12, 6, 3, 1})
+	// Regression seed: decodes to a recent quiescent orphan (delta
+	// D1RecentOrphan) carrying an empty-non-nil deps entry. Before the harness
+	// normalized its inputs, the oracle read that raw []Dep{} while the seam
+	// stored the cloneDeps-normalized nil, producing a false end-state
+	// divergence. Pinned so the fuzz tier stays honest.
+	f.Add([]byte("100071101001"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		st, in := decodeFuzzState(data)
 		assertDifferential(t, "fuzz", st, in)

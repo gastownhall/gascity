@@ -116,12 +116,11 @@ func cloneDepMap(m map[string][]Dep) map[string][]Dep {
 	}
 	out := make(map[string][]Dep, len(m))
 	for k, v := range m {
-		// Preserve the nil-vs-empty distinction: cloneDeps(nil)==nil and
-		// cloneDeps([]Dep{}) stays non-nil, both faithfully.
-		if v == nil {
-			out[k] = nil
-			continue
-		}
+		// Match the production cloneDeps helper: an empty entry (nil or []Dep{})
+		// clones to nil, a non-empty one is copied. This mirrors what the live
+		// seam stores, so the differential oracle reasons about the same
+		// normalized deps. Key presence is preserved; the empty-vs-nil value
+		// distinction is intentionally collapsed, exactly as the seam collapses it.
 		out[k] = cloneDeps(v)
 	}
 	return out
