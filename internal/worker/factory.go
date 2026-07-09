@@ -52,16 +52,16 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	var manager *sessionpkg.Manager
 	switch {
 	case cfg.ResolveTransport != nil:
-		manager = sessionpkg.NewManagerWithTransportResolverAndCityPath(
+		manager = sessionpkg.NewManagerWithOptions(
 			cfg.Store,
 			cfg.Provider,
-			cfg.CityPath,
-			cfg.ResolveTransport,
+			sessionpkg.WithCityPath(cfg.CityPath),
+			sessionpkg.WithTransportResolver(cfg.ResolveTransport),
 		)
 	case cfg.CityPath != "":
-		manager = sessionpkg.NewManagerWithCityPath(cfg.Store, cfg.Provider, cfg.CityPath)
+		manager = sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, sessionpkg.WithCityPath(cfg.CityPath))
 	default:
-		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
+		manager = sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider)
 	}
 	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.UsageSink, cfg.ResolveSessionRuntime, cfg.Pricing)
 }

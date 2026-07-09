@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -64,19 +65,23 @@ func attachDashboard(mux *api.SupervisorMux, resolver api.CityResolver, readOnly
 	if err != nil {
 		return nil, err
 	}
-	plane := dashboardbff.New(dashboardDeps(resolver, readOnly, bind, port))
+	plane := dashboardbff.New(dashboardDeps(resolver, readOnly, bind, port, mux.LoopbackTransport()))
 	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
 	return plane, nil
 }
 
 // dashboardDeps builds the plane's dependencies. Extracted so a regression test
 // can assert the wiring (notably a non-empty SupervisorBaseURL, without which
-// the host-side samplers would silently ship permanently degraded).
-func dashboardDeps(resolver api.CityResolver, readOnly bool, bind string, port int) dashboardbff.Deps {
+// the host-side samplers would silently ship permanently degraded, and a
+// non-nil SelfReadTransport, without which the samplers' loopback self-reads
+// would 401 under read-auth). selfRead is the supervisor's in-process loopback
+// transport so those trusted self-reads bypass the read-auth gate.
+func dashboardDeps(resolver api.CityResolver, readOnly bool, bind string, port int, selfRead http.RoundTripper) dashboardbff.Deps {
 	return dashboardbff.Deps{
 		Resolver:           dashboardCityResolver{resolver},
 		ReadOnly:           readOnly,
 		SupervisorBaseURL:  dashboardLoopbackBaseURL(bind, port),
+		SelfReadTransport:  selfRead,
 		RunCwdAllowedRoots: runCwdAllowedRootsFromEnv(),
 		OperatorAlias:      os.Getenv("DASHBOARD_OPERATOR_ALIAS"),
 		OperatorWireAlias:  os.Getenv("DASHBOARD_OPERATOR_WIRE_ALIAS"),

@@ -1137,7 +1137,7 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 			if getErr != nil {
 				return nudgeTarget{}, getErr
 			}
-			return resolveNudgeTargetFromSessionBead(cityPath, cfg, b), nil
+			return resolveNudgeTargetFromSessionInfo(cityPath, cfg, session.InfoFromPersistedBead(b)), nil
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return nudgeTarget{}, err
@@ -1147,8 +1147,8 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 }
 
 // nudgeTargetFields carries the pre-extracted session attributes buildNudgeTarget
-// needs. Both resolvers (raw bead and typed session.Info) populate it from their
-// own source, so the identity-resolution tail lives in exactly one place.
+// needs. resolveNudgeTargetFromSessionInfo populates it from a session.Info
+// projection, so the identity-resolution tail lives in exactly one place.
 type nudgeTargetFields struct {
 	sessionID         string
 	sessionName       string
@@ -1162,30 +1162,11 @@ type nudgeTargetFields struct {
 	continuationEpoch string
 }
 
-func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b beads.Bead) nudgeTarget {
-	sessionName := strings.TrimSpace(b.Metadata["session_name"])
-	if sessionName == "" {
-		sessionName = sessionNameFromBeadID(b.ID)
-	}
-	return buildNudgeTarget(cityPath, cfg, nudgeTargetFields{
-		sessionID:         b.ID,
-		sessionName:       sessionName,
-		alias:             strings.TrimSpace(b.Metadata["alias"]),
-		agentName:         strings.TrimSpace(b.Metadata["agent_name"]),
-		template:          strings.TrimSpace(b.Metadata["template"]),
-		commonName:        strings.TrimSpace(b.Metadata["common_name"]),
-		aliasHistory:      session.AliasHistory(b.Metadata),
-		transport:         strings.TrimSpace(b.Metadata["transport"]),
-		provider:          strings.TrimSpace(b.Metadata["provider"]),
-		continuationEpoch: strings.TrimSpace(b.Metadata["continuation_epoch"]),
-	})
-}
-
-// resolveNudgeTargetFromSessionInfo is the typed front-door sibling of
-// resolveNudgeTargetFromSessionBead: it reads the same session attributes from a
-// session.Info projection instead of the raw bead. Note the transport source is
-// i.TransportMetadata (the RAW value), not i.Transport (which normalizeTransport
-// would make non-empty), so the found.Session fallback below fires identically.
+// resolveNudgeTargetFromSessionInfo reads the session attributes buildNudgeTarget
+// needs from a session.Info projection (the typed front door) rather than cracking
+// the raw session bead. Note the transport source is i.TransportMetadata (the RAW
+// value), not i.Transport (which normalizeTransport would make non-empty), so the
+// found.Session fallback below fires identically.
 func resolveNudgeTargetFromSessionInfo(cityPath string, cfg *config.City, i session.Info) nudgeTarget {
 	sessionName := strings.TrimSpace(i.SessionNameMetadata)
 	if sessionName == "" {
@@ -1484,14 +1465,15 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 		return target
 	}
 	for _, b := range open {
-		if b.Metadata["session_name"] != target.sessionName {
+		info := session.InfoFromPersistedBead(b)
+		if info.SessionNameMetadata != target.sessionName {
 			continue
 		}
 		if target.sessionID == "" {
 			target.sessionID = b.ID
 		}
 		if target.continuationEpoch == "" {
-			target.continuationEpoch = b.Metadata["continuation_epoch"]
+			target.continuationEpoch = info.ContinuationEpoch
 		}
 		return target
 	}

@@ -3,6 +3,7 @@ package nudgequeue
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -278,6 +279,42 @@ func (s *Store) RollbackEnqueue(beadID string) error {
 		errs = errors.Join(errs, err)
 	}
 	return errs
+}
+
+// SweepStale stamps the gc-swept terminal vocabulary on a stale nudge shadow bead
+// past the gc retention window and closes it. It is the retention-sweep sibling of
+// Terminalize/RollbackEnqueue: the gc-swept terminal-key vocabulary (state /
+// terminal_reason / commit_boundary / terminal_at / close_reason) is now confined
+// here alongside Terminalize's canonicalCloseReason vocabulary, so the cmd/gc
+// sweep no longer re-stamps these keys inline. closeReason is caller-supplied —
+// cmd/gc keeps ownership of the human message constant — and must satisfy the
+// >=20-char validation.on-close floor.
+//
+// SweepStale emits byte-identical bead writes to the prior inline stamp+close
+// block in cmd/gc/nudge_mail_sweep.go: a single SetMetadataBatch with the same
+// five keys, then Close. A SetMetadataBatch failure returns without closing,
+// matching the sweep's continue-without-close semantics, and both error strings
+// preserve the caller's prior "nudge %s: set metadata/close: %w" text so
+// joined-error assertions keep passing. Unlike Terminalize it adds no missing-bead
+// tolerance, matching the inline sweep it replaces.
+func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
+	if s == nil || s.store.Store == nil {
+		return nil
+	}
+	update := map[string]string{
+		"state":           "gc-swept",
+		"terminal_reason": "gc-swept-stale",
+		"commit_boundary": "gc-swept",
+		"terminal_at":     now.UTC().Format(time.RFC3339),
+		"close_reason":    closeReason,
+	}
+	if err := s.store.SetMetadataBatch(beadID, update); err != nil {
+		return fmt.Errorf("nudge %s: set metadata: %w", beadID, err)
+	}
+	if err := s.store.Close(beadID); err != nil {
+		return fmt.Errorf("nudge %s: close: %w", beadID, err)
+	}
+	return nil
 }
 
 // Find returns the OPEN (or terminal-but-decodable) nudge shadow for nudgeID as

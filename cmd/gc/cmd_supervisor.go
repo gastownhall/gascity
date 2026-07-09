@@ -1360,6 +1360,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// Gate city reads on a signed read grant when configured. Fail closed at boot
+	// if read-auth is required but no key is set, so the supervisor cannot
+	// silently serve reads unguarded.
+	if err := api.InstallReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same
 	// listener (same-origin), so the supervisor serves the dashboard for all

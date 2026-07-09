@@ -187,8 +187,8 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
-	mgr := session.NewManager(store, sp)
-	info, err := mgr.Create(context.Background(), "default", title, "echo test", "/tmp", "test", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(store, sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -197,7 +197,7 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 
 func suspendSessionForPermissionModeTest(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(id); err != nil {
 		t.Fatalf("suspend session: %v", err)
 	}
@@ -716,7 +716,7 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
 
 	// Suspend one.
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
@@ -925,8 +925,8 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	workDir := t.TempDir()
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Codex Chat", "codex", workDir, "codex-max", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Codex Chat", Command: "codex", WorkDir: workDir, Provider: "codex-max", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -981,8 +981,8 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	workDir := t.TempDir()
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Codex Chat", "codex", workDir, "codex-max", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Codex Chat", Command: "codex", WorkDir: workDir, Provider: "codex-max", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1118,7 +1118,7 @@ func TestHandleSessionSuspend(t *testing.T) {
 	}
 
 	// Verify the session is now suspended.
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	got, err := mgr.Get(info.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -1142,7 +1142,7 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	// Drain the session directly via the manager (the API surface for drain
 	// lives elsewhere; this test isolates the transition check).
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
 		t.Fatalf("BeginDrain: %v", err)
 	}
@@ -1202,7 +1202,7 @@ func TestHandleSessionClose(t *testing.T) {
 	}
 
 	// Session should no longer appear in default listing (excludes closed).
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -1648,7 +1648,7 @@ func TestHandleSessionWakeStartsSuspendedRuntime(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -1679,7 +1679,7 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	_ = mgr.Close(info.ID)
 
 	w := httptest.NewRecorder()
@@ -1805,18 +1805,9 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(
-		context.Background(),
-		"myrig/worker",
-		"Fork",
-		"claude",
-		t.TempDir(),
-		"claude",
-		nil,
-		session.ProviderResume{},
-		runtime.Config{},
-	)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Fork", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -3379,7 +3370,7 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 	if failure.ErrorCode != "message_delivery_failed" {
 		t.Fatalf("failure error_code = %q, want message_delivery_failed; message=%s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	mgr := session.NewManager(fs.cityBeadStore, provider)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider)
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list sessions after rollback: %v", err)
@@ -4077,7 +4068,7 @@ func TestHandleSessionPermissionModePreservesProviderCreateOptions(t *testing.T)
 		t.Fatalf("response options.effort = %q, want high from create-time provider option", got)
 	}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("Get session: %v", err)
@@ -4238,8 +4229,8 @@ func TestHandleSessionGetUsesAgentDefaultsForConfiguredNamedSession(t *testing.T
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "myrig/worker", "worker", "echo test", "/tmp", "test-agent", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "worker", Command: "echo test", WorkDir: "/tmp", Provider: "test-agent", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -4288,8 +4279,8 @@ func TestHandleSessionGetUsesLegacyProviderKindForNameCollision(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "codex", "codex", "echo", "/tmp/provider", "codex", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "codex", Title: "codex", Command: "echo", WorkDir: "/tmp/provider", Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -4560,7 +4551,7 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -4889,23 +4880,11 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateAliasedNamedWithTransport(
-		context.Background(),
-		"myrig/worker",
-		"",
-		"myrig/worker",
-		"Historic Worker",
-		"claude",
-		t.TempDir(),
-		"claude",
-		"",
-		nil,
-		session.ProviderResume{},
-		runtime.Config{},
-	)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Alias: "myrig/worker", ExplicitName: "", Template: "myrig/worker", Title: "Historic Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -5321,14 +5300,14 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5369,14 +5348,14 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5413,14 +5392,14 @@ func TestHandleSessionTranscriptAfterCursor(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5463,14 +5442,14 @@ func TestHandleSessionTranscriptAfterCursorRaw(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5508,14 +5487,14 @@ func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5541,14 +5520,14 @@ func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5867,10 +5846,10 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Sky", "claude", t.TempDir(), "claude", "", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{ExplicitName: "sky", Template: "myrig/worker", Title: "Sky", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -5921,14 +5900,14 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5965,8 +5944,8 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5989,8 +5968,8 @@ func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6012,8 +5991,8 @@ func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6038,14 +6017,14 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6090,14 +6069,14 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6143,16 +6122,16 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Chat", "claude", workDir, "claude", "", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{ExplicitName: "sky", Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Transport: "", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
+		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
@@ -6189,14 +6168,14 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6270,14 +6249,14 @@ func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6359,8 +6338,8 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6439,8 +6418,8 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6507,14 +6486,14 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6577,14 +6556,14 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6650,14 +6629,14 @@ func TestHandleSessionStreamRawStallEmitsPendingWithoutTranscriptGrowth(t *testi
 		sessionStreamPendingStallTimeout = prevStallTimeout
 	}()
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6710,14 +6689,14 @@ func TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute(t *testing.T) {
 		sessionStreamPendingStallTimeout = prevStallTimeout
 	}()
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6762,14 +6741,14 @@ func TestHandleSessionStreamRawRunningSessionWithoutTranscriptOpensImmediately(t
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6801,14 +6780,14 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6865,14 +6844,14 @@ func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6905,14 +6884,14 @@ func TestHandleSessionStreamConversationRedactsThinkingText(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6943,14 +6922,14 @@ func TestHandleSessionStreamRawUsesLatestCompactionTail(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -6986,14 +6965,14 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -7035,14 +7014,14 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -7099,14 +7078,14 @@ func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -7155,14 +7134,14 @@ func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -7200,14 +7179,14 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
 		SessionIDFlag: "--session-id",
 	}
 	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Activity Test", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Activity Test", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -7488,7 +7467,7 @@ func TestHandleSessionKillClosedSessionIsOK(t *testing.T) {
 	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "kill-closed-test")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -7532,7 +7511,7 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "queue-test")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}

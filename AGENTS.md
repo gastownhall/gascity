@@ -251,18 +251,21 @@ the canonical route, not the legacy route.
   must route through `worker.Handle` — enforced by
   `TestGCNonTestFilesStayOnWorkerBoundary` in
   `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
-  files from importing `session.NewManager(`, `worker.SessionHandle`,
-  `sessionlog`, and similar bypass paths in `cmd/gc`. The remaining
-  manager-construction/direct-create bypasses are split by category:
-  `internal/api/session_manager.go` constructs `session.Manager` values
-  for API handlers, and `internal/api/session_resolution.go` still calls
-  `mgr.CreateAliasedNamedWithTransportAndMetadata(...)` directly. This
+  files from importing `session.NewManagerWithOptions(`,
+  `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
+  `cmd/gc`. The remaining manager-construction/direct-create bypasses
+  are split by category: `internal/api/session_manager.go` constructs
+  `session.Manager` values for API handlers, and
+  `internal/api/session_resolution.go` still calls
+  `mgr.CreateSession(...)` directly. Session creation goes through the
+  single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
+  point (`NewManagerWithOptions` is the sole Manager constructor). This
   list is not a sessionlog read-site inventory; stream and transcript
   readers in `internal/api/` and `internal/session/` still read
   session logs directly. Package-internal helpers in `internal/session/`
   may construct and use `session.Manager`; tests may construct it
-  directly. Do not add new non-test direct `session.Manager.Create*` call
-  sites outside the worker boundary.
+  directly. Do not add new non-test direct `session.Manager.CreateSession`
+  call sites outside the worker boundary.
 - **Session-first (completed `dd90ac0a` on Mar 8 2026).** The former
   Agent Protocol primitive was removed; responsibilities moved to
   `internal/session/` (lifecycle) and `internal/runtime/` (providers).

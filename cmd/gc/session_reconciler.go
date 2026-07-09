@@ -1581,8 +1581,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// rollback: if a newer version writes "draining" or "archived", the
 		// older reconciler ignores those beads rather than crashing.
 		if !isKnownStateInfo(info) {
-			fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", //nolint:errcheck // best-effort stderr
-				info.SessionNameMetadata, info.MetadataState)
+			emitSessionUnknownStateDiagnostic(store, session, info, rec, clk, stderr)
 			if trace != nil {
 				trace.RecordDecision(TraceSiteReconcilerUnknownState, TraceReasonUnknownStateSkipped, TraceOutcomeSkipped, info.Template, info.SessionNameMetadata, traceRecordPayload{
 					"state": info.MetadataState,
@@ -1590,6 +1589,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			continue
 		}
+		// Back in a known state: drop any stale unknown-state throttle markers so a
+		// later recurrence of the same unrecognized value is signaled afresh rather
+		// than suppressed as "same state as last tick" (no-op when unmarked).
+		clearSessionUnknownStateMarkers(store, session, stderr)
 
 		// Orphan/suspended: bead exists but not in desired state.
 		// Handle BEFORE heal/stability to avoid false crash detection —
@@ -3831,6 +3834,150 @@ const strandedEventEmittedKey = "stranded_event_emitted_at"
 // session.stranded message body. Anything beyond that is summarized as
 // "+N more" so a runaway count doesn't produce an unbounded message.
 const strandedWorkIDListLimit = 10
+
+// Unknown-state throttle markers. unknownStateFirstSeenKey records when the
+// reconciler first observed the current unrecognized state and
+// unknownStateValueKey records the raw value it was seen with; together they
+// gate the diagnostic to first sight and state transitions (not every tick,
+// #2389) and survive reconciler restarts (#2085) so the first-seen clock and
+// its escalation are queryable off the bead (#1497). unknownStateEscalatedKey
+// guards the single past-threshold escalation emit.
+const (
+	unknownStateFirstSeenKey = "unknown_state_first_seen"
+	unknownStateValueKey     = "unknown_state_value"
+	unknownStateEscalatedKey = "unknown_state_escalated_at"
+)
+
+// unknownStateEscalationAge is how long a session bead may sit in an
+// unrecognized state before the reconciler re-emits session.unknown_state with
+// escalated=true. The forward-compat skip still defers all action; escalation
+// is a signal for operators and pack-level subscribers, never an auto-mutation.
+const unknownStateEscalationAge = 30 * time.Minute
+
+// emitSessionUnknownStateDiagnostic surfaces a session bead whose metadata
+// state the reconciler does not recognize. The caller preserves the
+// forward-compatible skip (an older reconciler ignores a newer writer's state
+// rather than crashing); this turns the previously per-tick stderr line into a
+// throttled signal. It logs and records events.SessionUnknownState only on
+// first sight or when the raw state changes to a different unrecognized value,
+// then re-records once with escalated=true after the bead has sat unrecognized
+// past unknownStateEscalationAge. Throttle markers are stamped durably via the
+// session front door so the throttle and the escalation clock survive
+// reconciler restarts. It never mutates session state — escalation is a
+// notification, not a recovery action (keep judgment out of Go).
+func emitSessionUnknownStateDiagnostic(
+	store beads.Store,
+	session *beads.Bead,
+	info sessionpkg.Info,
+	rec events.Recorder,
+	clk clock.Clock,
+	stderr io.Writer,
+) {
+	if session == nil {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, 3)
+	}
+	// Report the raw, untrimmed state: classification (isKnownStateInfo) keys off
+	// the raw value, so a known value wrapped in whitespace like " active " is
+	// skipped as unrecognized and must surface verbatim, not trimmed to "active".
+	// This matches SessionUnknownStatePayload.State's documented "raw ... value"
+	// contract and the raw comparison the transition/value markers below use.
+	state := info.MetadataState
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	now := clk.Now().UTC()
+
+	setMarker := func(key, value string) {
+		session.Metadata[key] = value
+		if err := sessionFrontDoor(store).SetMarker(session.ID, key, value); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: stamping unknown-state marker %s on %s: %v\n", key, session.ID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	emit := func(escalated bool, firstSeen time.Time) {
+		if rec == nil {
+			return
+		}
+		age := now.Sub(firstSeen).Round(time.Second)
+		msg := fmt.Sprintf("session %q has unrecognized state %q; reconciler is skipping it (forward-compatible rollback)", name, state)
+		if escalated {
+			msg = fmt.Sprintf("session %q still has unrecognized state %q after %s; reconciler continues to skip it — operator or pack recovery required", name, state, age)
+		}
+		rec.Record(events.Event{
+			Type:      events.SessionUnknownState,
+			Ts:        now,
+			Actor:     "gc",
+			Subject:   session.ID,
+			Message:   msg,
+			SessionID: session.ID,
+			Payload:   api.SessionUnknownStatePayloadJSON(session.ID, name, state, firstSeen, escalated),
+		})
+	}
+
+	firstSeenRaw := strings.TrimSpace(session.Metadata[unknownStateFirstSeenKey])
+	transition := firstSeenRaw == "" || session.Metadata[unknownStateValueKey] != info.MetadataState
+	if transition {
+		// First sight, or the unrecognized state changed to a different value:
+		// (re)stamp the first-seen clock, log once, emit, and clear any prior
+		// escalation guard so the new state gets its own escalation window.
+		fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", name, state) //nolint:errcheck // best-effort stderr
+		emit(false, now)
+		setMarker(unknownStateFirstSeenKey, now.Format(time.RFC3339))
+		setMarker(unknownStateValueKey, info.MetadataState)
+		if strings.TrimSpace(session.Metadata[unknownStateEscalatedKey]) != "" {
+			setMarker(unknownStateEscalatedKey, "")
+		}
+		return
+	}
+
+	// Same unrecognized state as a previous tick: stay silent unless it has now
+	// aged past the escalation threshold and has not escalated yet.
+	if strings.TrimSpace(session.Metadata[unknownStateEscalatedKey]) != "" {
+		return
+	}
+	firstSeen, err := time.Parse(time.RFC3339, firstSeenRaw)
+	if err != nil || now.Sub(firstSeen) < unknownStateEscalationAge {
+		return
+	}
+	emit(true, firstSeen)
+	setMarker(unknownStateEscalatedKey, now.Format(time.RFC3339))
+}
+
+// clearSessionUnknownStateMarkers removes the unknown-state throttle markers
+// once a session is observed back in a known state. The markers are durable
+// (they survive reconciler restarts by design), so without clearing them on
+// recovery a later recurrence of the *same* unrecognized value would look like
+// "same state as the last tick" to emitSessionUnknownStateDiagnostic and be
+// silently suppressed — the recurrence would never re-signal. Clearing on the
+// known-state path means a recurrence is treated as a fresh first-sight. It is
+// a no-op (no in-memory change, no store write) when the session carries no
+// unknown-state markers, so the common known-state tick pays nothing.
+func clearSessionUnknownStateMarkers(store beads.Store, session *beads.Bead, stderr io.Writer) {
+	if session == nil || session.Metadata == nil {
+		return
+	}
+	markerKeys := [...]string{unknownStateFirstSeenKey, unknownStateValueKey, unknownStateEscalatedKey}
+	hasMarker := false
+	for _, key := range markerKeys {
+		if strings.TrimSpace(session.Metadata[key]) != "" {
+			hasMarker = true
+			break
+		}
+	}
+	if !hasMarker {
+		return
+	}
+	front := sessionFrontDoor(store)
+	for _, key := range markerKeys {
+		if strings.TrimSpace(session.Metadata[key]) == "" {
+			continue
+		}
+		session.Metadata[key] = ""
+		if err := front.SetMarker(session.ID, key, ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing unknown-state marker %s on %s: %v\n", key, session.ID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+}
 
 // emitSessionStrandedDiagnostic records a session.stranded event when
 // the reconciler observes a pool-managed session bead that is no

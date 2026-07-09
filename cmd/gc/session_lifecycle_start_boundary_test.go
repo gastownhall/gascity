@@ -14,7 +14,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.CreateBeadOnly("worker", "Worker", "claude", t.TempDir(), "claude", "", nil, sessionpkg.ProviderResume{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Resume: sessionpkg.ProviderResume{}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}

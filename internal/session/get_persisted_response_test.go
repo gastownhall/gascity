@@ -27,7 +27,7 @@ func TestGetWithPersistedResponse(t *testing.T) {
 		"real_world_app_project_id": "proj-9",
 	})
 	store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
-	mgr := NewManager(store, runtime.NewFake())
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
 
 	info, pr, err := mgr.GetWithPersistedResponse("s-pr-1")
 	if err != nil {
@@ -60,7 +60,7 @@ func TestGetWithPersistedResponse(t *testing.T) {
 // error mgr.Get would return.
 func TestGetWithPersistedResponseNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := NewManager(store, runtime.NewFake())
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
 	if _, _, err := mgr.GetWithPersistedResponse("missing"); err == nil {
 		t.Fatal("GetWithPersistedResponse(missing): want error, got nil")
 	}

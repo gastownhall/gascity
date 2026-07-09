@@ -44,26 +44,20 @@ const (
 	writeAuthSkew   = 30 * time.Second
 )
 
-// cityScopedObjectMutation reports whether path targets an existing city whose
-// config the write-auth gate must cover, returning the city name. It matches the
-// per-city typed gc routes: /v0/city/{cityName} (the suspend/resume PATCH) and
+// cityScopedObjectPath is the shared path grammar for the city-scoped auth gates
+// (write-auth and read-auth), returning the city name. It matches the per-city
+// typed gc routes: /v0/city/{cityName} (the suspend/resume PATCH) and
 // /v0/city/{cityName}/<sub-resource>. It excludes:
-//   - registry creation (POST /v0/city) and the bare /v0/city/ (empty name): a
-//     grant binds a path-resident city name, so creating a city — which carries
-//     no city in its path yet — stays governed by the prior supervisor-registry
-//     guards, not this gate. Write-auth covers mutations of cities that already
-//     exist (including unregister, which does carry the city in its path).
-//   - any other non-city path,
+//   - the bare /v0/city/ (empty name) and any non-city path,
 //   - an empty sub-resource (/v0/city/{name}/),
-//   - the /svc/ workspace-service pass-through, which cannot mutate gc config
-//     objects and applies its own publication rules.
+//   - the /svc/ workspace-service pass-through, which applies its own
+//     publication rules.
 //
-// The /hook/ webhook receiver is deliberately NOT exempted (the H2 reversal): a
-// /hook/{name} POST dispatches order → sh -c authenticated by a verifier a pack
-// may author, so when write-auth is configured it stays gated on the operator's
-// signed grant. Signature verification (E4) is an ADDITIONAL gate for public
-// webhooks, never a replacement for this one. Do not add a /hook/ exemption here.
-func cityScopedObjectMutation(path string) (city string, ok bool) {
+// It matches on path only; the caller applies the method policy (write-auth
+// gates mutations; read-auth gates GET/HEAD). Registry creation (POST /v0/city)
+// carries no path-resident city and so does not match here — see the
+// method-policy callers for the carve-out rationale.
+func cityScopedObjectPath(path string) (city string, ok bool) {
 	const prefix = "/v0/city/"
 	if !strings.HasPrefix(path, prefix) {
 		return "", false
@@ -90,6 +84,25 @@ func cityScopedObjectMutation(path string) (city string, ok bool) {
 		return "", false // workspace-service pass-through is exempt
 	}
 	return city, true
+}
+
+// cityScopedObjectMutation reports whether path targets an existing city whose
+// config the write-auth gate must cover, returning the city name. It shares the
+// grammar in cityScopedObjectPath; the write gate additionally restricts by
+// method (mutations only). Notes on the write-side carve-outs:
+//   - registry creation (POST /v0/city) carries no path-resident city name, so
+//     creating a city stays governed by the prior supervisor-registry guards,
+//     not this gate. Write-auth covers mutations of cities that already exist
+//     (including unregister, which does carry the city in its path).
+//   - the /svc/ workspace-service pass-through is exempt (shared grammar).
+//
+// The /hook/ webhook receiver is deliberately NOT exempted (the H2 reversal): a
+// /hook/{name} POST dispatches order → sh -c authenticated by a verifier a pack
+// may author, so when write-auth is configured it stays gated on the operator's
+// signed grant. Signature verification (E4) is an ADDITIONAL gate for public
+// webhooks, never a replacement for this one. Do not add a /hook/ exemption here.
+func cityScopedObjectMutation(path string) (city string, ok bool) {
+	return cityScopedObjectPath(path)
 }
 
 // writeAuthMiddleware enforces a valid X-GC-City-Write grant on every
@@ -229,19 +242,19 @@ func parseVerifyKeys(s string) (map[string]ed25519.PublicKey, error) {
 		kid, b64, ok := strings.Cut(part, ":")
 		kid = strings.TrimSpace(kid)
 		if !ok || kid == "" {
-			return nil, fmt.Errorf("write-auth key %q: want kid:base64", part)
+			return nil, fmt.Errorf("verify key %q: want kid:base64", part)
 		}
 		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 		if err != nil {
-			return nil, fmt.Errorf("write-auth key %q: %w", kid, err)
+			return nil, fmt.Errorf("verify key %q: %w", kid, err)
 		}
 		if len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("write-auth key %q: wrong public-key size %d", kid, len(raw))
+			return nil, fmt.Errorf("verify key %q: wrong public-key size %d", kid, len(raw))
 		}
 		keys[kid] = ed25519.PublicKey(raw)
 	}
 	if len(keys) == 0 {
-		return nil, errors.New("write-auth: no verifying keys parsed")
+		return nil, errors.New("no verifying keys parsed")
 	}
 	return keys, nil
 }

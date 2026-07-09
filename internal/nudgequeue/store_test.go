@@ -2,7 +2,9 @@ package nudgequeue
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +210,94 @@ func TestRollbackEnqueueEmitsByteIdenticalWrites(t *testing.T) {
 	closes := rec.CallsForOp("Close")
 	if len(closes) != 1 || closes[0].ID != beadID {
 		t.Errorf("Close = %+v, want one close of %q", closes, beadID)
+	}
+}
+
+// TestSweepStaleEmitsByteIdenticalWrites proves SweepStale stamps the exact
+// five-key gc-swept terminal map and then closes the bead — the byte-identical
+// contract for the prior inline stamp+close block in cmd/gc/nudge_mail_sweep.go.
+func TestSweepStaleEmitsByteIdenticalWrites(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	beadID, _, err := st.Save(sampleNudgeItem())
+	if err != nil {
+		t.Fatalf("Save err = %v", err)
+	}
+	rec.Reset()
+
+	now := time.Date(2026, 6, 2, 9, 30, 0, 0, time.UTC)
+	const closeReason = "nudge gc-swept: stale nudge bead past gc retention window"
+	if err := st.SweepStale(beadID, closeReason, now); err != nil {
+		t.Fatalf("SweepStale err = %v", err)
+	}
+
+	batches := rec.CallsForOp("SetMetadataBatch")
+	if len(batches) != 1 {
+		t.Fatalf("SetMetadataBatch calls = %d, want 1", len(batches))
+	}
+	wantUpdate := map[string]string{
+		"state":           "gc-swept",
+		"terminal_reason": "gc-swept-stale",
+		"commit_boundary": "gc-swept",
+		"terminal_at":     "2026-06-02T09:30:00Z",
+		"close_reason":    closeReason,
+	}
+	if !reflect.DeepEqual(batches[0].Metadata, wantUpdate) {
+		t.Errorf("update map mismatch:\n got=%#v\nwant=%#v", batches[0].Metadata, wantUpdate)
+	}
+	if batches[0].ID != beadID {
+		t.Errorf("SetMetadataBatch id = %q, want %q", batches[0].ID, beadID)
+	}
+	closes := rec.CallsForOp("Close")
+	if len(closes) != 1 || closes[0].ID != beadID {
+		t.Errorf("Close calls = %+v, want one close of %q", closes, beadID)
+	}
+}
+
+// failingSetMetadataBatchStore wraps a beads.Store but fails every
+// SetMetadataBatch, so a test can prove SweepStale skips Close when the metadata
+// write fails.
+type failingSetMetadataBatchStore struct {
+	beads.Store
+	err error
+}
+
+func (f failingSetMetadataBatchStore) SetMetadataBatch(string, map[string]string) error {
+	return f.err
+}
+
+// TestSweepStaleSetMetadataFailureSkipsClose proves a failed SetMetadataBatch
+// returns a bead-ID-bearing error and never reaches Close, preserving the sweep's
+// current continue-without-close semantics.
+func TestSweepStaleSetMetadataFailureSkipsClose(t *testing.T) {
+	rec := beadstest.NewRecordingStore(beads.NewMemStore())
+	failing := failingSetMetadataBatchStore{Store: rec, err: errors.New("batch boom")}
+	st := NewStore(beads.NudgesStore{Store: failing})
+
+	err := st.SweepStale("nb-fail", "nudge gc-swept: stale nudge bead past gc retention window", time.Now().UTC())
+	if err == nil {
+		t.Fatalf("SweepStale err = nil, want non-nil on SetMetadataBatch failure")
+	}
+	if !strings.Contains(err.Error(), "nb-fail") || !strings.Contains(err.Error(), "set metadata") {
+		t.Errorf("err = %q, want it to contain the bead id and \"set metadata\"", err)
+	}
+	if n := len(rec.CallsForOp("Close")); n != 0 {
+		t.Errorf("Close calls = %d, want 0 (SetMetadataBatch failure must skip Close)", n)
+	}
+}
+
+// TestSweepStaleNilStoreIsNoOp pins the nil-safety contract shared by every Store
+// method: a nil *Store and a Store over a nil embedded store both no-op.
+func TestSweepStaleNilStoreIsNoOp(t *testing.T) {
+	const reason = "nudge gc-swept: stale nudge bead past gc retention window"
+	now := time.Now().UTC()
+
+	var s *Store // nil receiver: shadow bead store unavailable
+	if err := s.SweepStale("gc-1", reason, now); err != nil {
+		t.Errorf("SweepStale on nil store = %v, want nil no-op", err)
+	}
+	empty := NewStore(beads.NudgesStore{}) // Store over a nil embedded store
+	if err := empty.SweepStale("gc-1", reason, now); err != nil {
+		t.Errorf("SweepStale on nil embedded store = %v, want nil no-op", err)
 	}
 }
 

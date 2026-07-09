@@ -533,6 +533,41 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// SessionUnknownStatePayload carries the machine-readable context for a
+// session.unknown_state event: a session bead whose metadata state the
+// reconciler does not recognize and therefore skips (forward-compatible
+// rollback). The envelope Message renders the same facts as operator text;
+// this payload is the machine contract so subscribers can correlate the stuck
+// bead, compute how long it has been unrecognized, and distinguish the
+// first-sight emission from the past-threshold escalation.
+type SessionUnknownStatePayload struct {
+	SessionID   string `json:"session_id" doc:"Canonical session bead ID for the unrecognized-state session (also the envelope Subject)."`
+	SessionName string `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	State       string `json:"state" doc:"The raw, unrecognized metadata state value the reconciler skipped."`
+	FirstSeen   string `json:"first_seen,omitempty" doc:"RFC3339 timestamp the reconciler first observed this unrecognized state; the escalation clock counts from here."`
+	Escalated   bool   `json:"escalated" doc:"False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold."`
+}
+
+// IsEventPayload marks SessionUnknownStatePayload as an events.Payload variant.
+func (SessionUnknownStatePayload) IsEventPayload() {}
+
+// SessionUnknownStatePayloadJSON builds the JSON wire form for attachment to an
+// events.Event.Payload field. SessionName and FirstSeen are emitted only when
+// set.
+func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstSeen time.Time, escalated bool) json.RawMessage {
+	p := SessionUnknownStatePayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		State:       state,
+		Escalated:   escalated,
+	}
+	if !firstSeen.IsZero() {
+		p.FirstSeen = firstSeen.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -568,6 +603,7 @@ func init() {
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})

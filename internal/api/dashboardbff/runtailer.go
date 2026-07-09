@@ -63,7 +63,7 @@ type runTailerManager struct {
 func newRunTailerManager(deps Deps) *runTailerManager {
 	return &runTailerManager{
 		deps:          deps,
-		httpc:         &http.Client{Timeout: runSessionsFetchTimeout},
+		httpc:         &http.Client{Timeout: runSessionsFetchTimeout, Transport: deps.SelfReadTransport},
 		cities:        make(map[string]*cityRunTailer),
 		sessionsCache: newSingleFlightCache[string, cachedSessions](),
 		formulaCache:  newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
