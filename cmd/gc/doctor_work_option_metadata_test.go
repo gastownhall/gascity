@@ -207,7 +207,7 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 	// decodes the cleaned-up template_overrides off candidate.info (production keeps this
 	// coherent via prepareStartCandidateForCity's front-door refresh).
 	candidate.info = sessionpkg.InfoFromPersistedBead(session)
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}

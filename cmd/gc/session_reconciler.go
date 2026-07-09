@@ -2377,14 +2377,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			// Fold recoverRunningPendingCreate's batch onto the snapshot (Step 6d
 			// write-returns-Info). The batch carries CommitStartedPatch PLUS
-			// buildPreparedStart's persisted residue (threaded out in
-			// pendingCreateResidueFold, on the abort paths): the instance_token mint,
-			// read by the Phase-2 drain scan (info.InstanceToken via verifiedStop,
-			// Step 2b), and the stale-resume started_config_hash clear, read by the
-			// forward-pass config-drift gate below (info.StartedConfigHash, Step 5a,
-			// #127). STEP6-PREPASS-AUDIT group 7. The other two clearStaleResumeKeyMetadata
-			// keys (session_key/continuation_reset_pending) stay unthreaded — neither has
-			// a same-tick Info reader whose verdict the residue changes — and self-heal on
+			// buildPreparedStart's persisted residue. On BOTH abort paths that residue
+			// is folded via pendingCreateResidueFold from the store-coherent
+			// post-mutation Info — buildPreparedStart's success return on the
+			// commit-failure path, and its error-return partial Info on the
+			// build-failure path (WI-6 R4 threads it out so the snapshot matches the
+			// store even on a partway abort). It carries the instance_token mint, read
+			// by the Phase-2 drain scan (info.InstanceToken via verifiedStop, Step 2b),
+			// and the stale-resume started_config_hash clear, read by the forward-pass
+			// config-drift gate below (info.StartedConfigHash, Step 5a, #127).
+			// STEP6-PREPASS-AUDIT group 7. The other two clearStaleResumeKeyMetadata keys
+			// (session_key/continuation_reset_pending) stay unthreaded — neither has a
+			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
 			ok, commitBatch := recoverRunningPendingCreate(infoByID[session.ID], tp, cfg, store, clk, trace)
 			if !ok {

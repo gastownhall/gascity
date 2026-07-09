@@ -817,10 +817,13 @@ func prepareStartCandidateForCity(
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
-	// the returned prepared.candidate.info stays coherent with the raw bead WITHOUT a
+	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
 	// second re-Get. The post-prep reads (session_key at runPreparedStartCandidate;
-	// recordWakeFailure's session_key/started_config_hash) read that folded twin.
-	return buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	// recordWakeFailure's session_key/started_config_hash) read that folded twin. The
+	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
+	// abort residue; here the prepared already carries it, so it is discarded.
+	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	return prepared, err
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -861,17 +864,28 @@ func buildPreparedStart(
 	candidate startCandidate,
 	cfg *config.City,
 	store beads.Store,
-) (*preparedStart, error) {
+) (*preparedStart, sessionpkg.Info, error) {
 	return buildPreparedStartWithWorkDirResolver(candidate, "", cfg, store, nil)
 }
 
+// buildPreparedStartWithWorkDirResolver builds the prepared start for a candidate,
+// persisting a few start-prep mutations (stale-resume clear, session_key /
+// instance_token mints) through the session front door and folding each onto the
+// local candidate.info the moment it lands. It returns that (possibly partially
+// folded) Info as the SECOND value on EVERY path — success and error alike — because
+// each persisted mutation is folded immediately after the persist succeeds (an error
+// returns before its fold), so the returned Info is byte-coherent with the store even
+// on an abort partway through. recoverRunningPendingCreate's abort path folds
+// pendingCreateResidueFold from this store-coherent Info so its infoByID snapshot
+// matches the persisted state (WI-6 R4: the former raw-bead mirror carried this
+// coherence).
 func buildPreparedStartWithWorkDirResolver(
 	candidate startCandidate,
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
-) (*preparedStart, error) {
+) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
@@ -955,11 +969,11 @@ func buildPreparedStartWithWorkDirResolver(
 	if candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
 		if err != nil {
-			return nil, fmt.Errorf("generating session key: %w", err)
+			return nil, candidate.info, fmt.Errorf("generating session key: %w", err)
 		}
 		if store != nil && candidate.info.ID != "" {
 			if err := sessionFrontDoor(store).SetMarker(candidate.info.ID, "session_key", sessionKey); err != nil {
-				return nil, fmt.Errorf("storing session key: %w", err)
+				return nil, candidate.info, fmt.Errorf("storing session key: %w", err)
 			}
 		}
 		// Fold the mint onto the typed twin so the stale-key death detection at
@@ -1000,7 +1014,7 @@ func buildPreparedStartWithWorkDirResolver(
 			}
 		}
 		if err := validateForkLaunch(parentSID, tp.ResolvedProvider, firstStart, forceFresh, parentStale); err != nil {
-			return nil, err
+			return nil, candidate.info, err
 		}
 	}
 	if sk := candidate.info.SessionKey; sk != "" && tp.ResolvedProvider != nil && !tp.IsACP {
@@ -1056,7 +1070,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if instanceToken == "" {
 		instanceToken = sessionpkg.NewInstanceToken()
 		if err := sessionFrontDoor(store).SetMarker(candidate.info.ID, "instance_token", instanceToken); err != nil {
-			return nil, err
+			return nil, candidate.info, err
 		}
 		// Fold the mint onto the typed twin so runningSessionMatchesPendingCreateInfo
 		// (info.InstanceToken) matches persisted state. On the reconciler start-prep path
@@ -1091,7 +1105,7 @@ func buildPreparedStartWithWorkDirResolver(
 		liveHash:      liveHash,
 		provisionHash: provisionHash,
 		launchHash:    launchHash,
-	}, nil
+	}, candidate.info, nil
 }
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
@@ -2218,20 +2232,24 @@ func recoverRunningPendingCreate(
 	}
 	// buildPreparedStart reads template_overrides / trigger-bead env + the
 	// start-prep metadata off the candidate's typed twin, so thread the caller's
-	// coherent infoByID snapshot in.
-	prepared, err := buildPreparedStart(startCandidate{info: info, tp: tp}, cfg, store)
+	// coherent infoByID snapshot in. It returns the post-mutation Info even on error:
+	// any persisted start-prep mutation (a stale-resume started_config_hash clear
+	// before a session-key/instance-token mint error) is folded onto it the moment it
+	// lands, so the abort residue below matches the store.
+	prepared, partialInfo, err := buildPreparedStart(startCandidate{info: info, tp: tp}, cfg, store)
 	if err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRebuildFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
 				"error": err.Error(),
 			})
 		}
-		// buildPreparedStart failed before it returned a prepared twin, so the residue
-		// is folded from the pre-prep snapshot. Any partial store mutation it made
-		// (e.g. a stale-resume started_config_hash clear before a session-key mint
-		// error) self-heals on the next tick's store reload — the recovery itself
-		// failed, so the session stays pending and is re-attempted.
-		return false, pendingCreateResidueFold(info)
+		// Fold the residue from the store-coherent post-mutation Info (not the pre-prep
+		// input): buildPreparedStart may have persisted the stale-resume started_config_hash
+		// clear before erroring, and the same-tick config-drift gate + config-drift repair
+		// read infoByID.StartedConfigHash — they must see the "" the store already holds,
+		// not the stale pre-prep hash. Pre-R4 the raw-bead mirror carried this; now the
+		// threaded partialInfo does.
+		return false, pendingCreateResidueFold(partialInfo)
 	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
