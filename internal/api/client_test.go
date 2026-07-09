@@ -561,6 +561,55 @@ func TestClientBusinessErrorNoFallback(t *testing.T) {
 	}
 }
 
+// TestClientEnumeratedErrorResponseCarriesProblemDetail covers the P12 pilot
+// wire shape: bead ops enumerate their error statuses, so oapi-codegen decodes
+// the problem body into ApplicationproblemJSON<code> instead of
+// ApplicationproblemJSONDefault. pdOf must find the per-status field or the CLI
+// would lose the detail and surface a bare status. GetBead (404) and ListBeads
+// (503) exercise two different per-status fields.
+func TestClientEnumeratedErrorResponseCarriesProblemDetail(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		if r.URL.Path == "/v0/city/alpha/beads" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"type":   "urn:gascity:error:store-unavailable",
+				"code":   "store-unavailable",
+				"title":  "Store Unavailable",
+				"status": http.StatusServiceUnavailable,
+				"detail": "cache_not_live: supervisor cache is priming or reconciling; retry via fallback",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"type":   "urn:gascity:error:bead-not-found",
+			"code":   "bead-not-found",
+			"title":  "Bead Not Found",
+			"status": http.StatusNotFound,
+			"detail": "bead bd-x not found",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+
+	if _, err := c.GetBead("bd-x"); err == nil {
+		t.Fatal("GetBead: expected error, got nil")
+	} else if !strings.Contains(err.Error(), "bead bd-x not found") {
+		t.Fatalf("GetBead error dropped the problem detail (pdOf per-status extraction): %v", err)
+	}
+
+	// ListBeads returns 503 with a cache-not-live prefix, which the classifier
+	// turns into a fallbackable error — only reachable if pdOf recovered the
+	// detail from the per-status field.
+	if _, err := c.ListBeads(ListBeadsOpts{}); err == nil {
+		t.Fatal("ListBeads: expected error, got nil")
+	} else if !ShouldFallback(err) {
+		t.Fatalf("ListBeads 503 cache-not-live should be fallbackable (pdOf per-status extraction): %v", err)
+	}
+}
+
 func TestClientRestartRig(t *testing.T) {
 	var gotMethod, gotPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

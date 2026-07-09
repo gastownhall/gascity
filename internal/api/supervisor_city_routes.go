@@ -145,25 +145,31 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPut(sm, "/patches/providers", (*Server).humaHandleProviderPatchSet)
 	cityDelete(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchDelete)
 
-	// Beads.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList)
-	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph)
-	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady)
+	// Beads. The bead ops are the P12 error-contract pilot: each declares the
+	// error statuses it can return (Huma adds the auto 422/500) so its problem+json
+	// responses are enumerated in the spec and machine-branchable via the type/code
+	// the handler stamps through the apierr catalog. Mutations additionally declare
+	// 403 because the always-installed CSRF middleware (and read-only mode) reject
+	// a mutation with a 403 before the handler runs; reads never emit it.
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,
 		Path:          "/beads",
 		Summary:       "Create a bead",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleBeadCreate)
-	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet)
-	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps)
-	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose)
-	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen)
-	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate)
-	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate)
-	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign)
-	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete)
+	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps, errorStatuses(http.StatusNotFound))
+	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
 	// Mail.
 	cityGet(sm, "/mail", (*Server).humaHandleMailList)
@@ -264,8 +270,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	}, (*Server).humaHandlePackAdd)
 	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove)
 
-	// Sling.
-	cityPost(sm, "/sling", (*Server).humaHandleSling)
+	// Sling. Part of the P12 error-contract pilot (see Beads above); a mutation,
+	// so it also declares 403 for the CSRF/read-only middleware.
+	cityPost(sm, "/sling", (*Server).humaHandleSling, errorStatuses(http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
 	// Maintenance (Dolt store gc + snapshot).
 	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus)

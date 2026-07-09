@@ -845,7 +845,7 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	if resp == nil {
 		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
 	return CachedRead[[]beads.Bead]{
@@ -868,7 +868,7 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	if resp == nil {
 		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[beads.Bead]{}, err
 	}
 	if resp.JSON200 == nil {
@@ -1223,16 +1223,18 @@ func isNil(v any) bool {
 }
 
 // pdOf extracts the generated client's decoded Problem Details pointer
-// from any generated *WithResponse type. Every response wrapper has an
-// `ApplicationproblemJSONDefault *ErrorModel` field produced by
-// oapi-codegen from the spec's default `application/problem+json`
-// response. Returns nil when the field is absent (no operation without
-// the default response has been observed; the nil-safe return is
-// defensive) or unpopulated (2xx, non-JSON error).
+// from any generated *WithResponse type. An operation that keeps the spec's
+// catch-all error decodes it into `ApplicationproblemJSONDefault *ErrorModel`;
+// an operation that enumerates its error statuses (the P12 error-contract
+// pilot) decodes into `ApplicationproblemJSON<code> *ErrorModel` instead —
+// exactly one of which the generator populates, the one matching the HTTP
+// status. pdOf returns whichever ErrorModel field is set, so both spec shapes
+// are handled uniformly. Returns nil when none is populated (2xx, non-JSON
+// error, or an operation with no problem+json error at all).
 //
-// This is spec-driven: the field exists because the spec declares the
-// default error to be Problem Details, and the generator decoded it.
-// No hand-written JSON parsing happens here or downstream.
+// This is spec-driven: the fields exist because the spec declares the error
+// responses to be Problem Details, and the generator decoded them. No
+// hand-written JSON parsing happens here or downstream.
 func pdOf(resp any) *genclient.ErrorModel {
 	if resp == nil {
 		return nil
@@ -1247,12 +1249,23 @@ func pdOf(resp any) *genclient.ErrorModel {
 	if rv.Kind() != reflect.Struct {
 		return nil
 	}
-	f := rv.FieldByName("ApplicationproblemJSONDefault")
-	if !f.IsValid() {
-		return nil
+	// Prefer the catch-all field, then fall back to whichever per-status
+	// ApplicationproblemJSON<code> field the generator populated.
+	if f := rv.FieldByName("ApplicationproblemJSONDefault"); f.IsValid() {
+		if pd, _ := f.Interface().(*genclient.ErrorModel); pd != nil {
+			return pd
+		}
 	}
-	pd, _ := f.Interface().(*genclient.ErrorModel)
-	return pd
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		if !strings.HasPrefix(rt.Field(i).Name, "ApplicationproblemJSON") {
+			continue
+		}
+		if pd, _ := rv.Field(i).Interface().(*genclient.ErrorModel); pd != nil {
+			return pd
+		}
+	}
+	return nil
 }
 
 // apiErrorFromResponse returns nil for 2xx responses, a *readOnlyError
