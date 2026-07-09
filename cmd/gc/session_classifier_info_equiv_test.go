@@ -532,7 +532,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			},
 		},
 		"pending-resume-preserve": {
-			// Hits the pendingResumePreservingNamedRestart TRUE branch: creating
+			// Hits the pendingResumePreservingNamedRestartInfo TRUE branch: creating
 			// state + pending_create_claim + session_key + started_config_hash +
 			// a recent pending_create_started_at (so the lease is start-in-flight,
 			// not expired). Makes the clkBoolChecks equivalence case a real
@@ -999,10 +999,9 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	}
 
 	const leaseStartupTimeout = 90 * time.Second
-	// leaseCfg resolves template "worker" to a live (non-suspended) agent so
-	// pendingCreateSessionStillLeased's agent-resolved tail (`return !agent.Suspended`)
-	// is exercised on the worker-template fixtures rather than only the nil-agent
-	// fallthrough. Both forms take the same cfg, so byte-identity is preserved.
+	// leaseCfg resolves template "worker" to a live (non-suspended) agent so the
+	// config-agent-resolving fixtures (e.g. the crash-lane sessionExitFactsInfo
+	// check below) see a real agent rather than only the nil-agent fallthrough.
 	leaseCfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	clkBoolChecks := map[string]struct {
 		bead func(beads.Bead) bool
@@ -1015,10 +1014,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionStartRequested": {
 			func(b beads.Bead) bool { return sessionStartRequested(b, clk) },
 			func(i session.Info) bool { return sessionStartRequestedInfo(i, clk) },
-		},
-		"pendingCreateSessionStillLeased": {
-			func(b beads.Bead) bool { return pendingCreateSessionStillLeased(b, leaseCfg, clk) },
-			func(i session.Info) bool { return pendingCreateSessionStillLeasedInfo(i, leaseCfg, clk) },
 		},
 		"pendingCreateAttemptStale": {
 			func(b beads.Bead) bool { return pendingCreateAttemptStale(b, clk) },
@@ -1036,10 +1031,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) bool { return pendingCreateLeaseActive(b, clk, leaseStartupTimeout) },
 			func(i session.Info) bool { return pendingCreateLeaseActiveInfo(i, clk, leaseStartupTimeout) },
 		},
-		"pendingCreateClaimStillLeasedForSweep": {
-			func(b beads.Bead) bool { return pendingCreateClaimStillLeasedForSweep(b, leaseStartupTimeout) },
-			func(i session.Info) bool { return pendingCreateClaimStillLeasedForSweepInfo(i, leaseStartupTimeout) },
-		},
 		"pendingCreateNeverStartedExpired": {
 			func(b beads.Bead) bool { return pendingCreateNeverStartedExpired(b, clk) },
 			func(i session.Info) bool { return pendingCreateNeverStartedExpiredInfo(i, clk) },
@@ -1048,12 +1039,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) bool { return pendingCreateLeaseExpiredForRollback(b, clk, leaseStartupTimeout) },
 			func(i session.Info) bool {
 				return pendingCreateLeaseExpiredForRollbackInfo(i, clk, leaseStartupTimeout)
-			},
-		},
-		"pendingResumePreservingNamedRestart": {
-			func(b beads.Bead) bool { return pendingResumePreservingNamedRestart(b, clk, leaseStartupTimeout) },
-			func(i session.Info) bool {
-				return pendingResumePreservingNamedRestartInfo(i, clk, leaseStartupTimeout)
 			},
 		},
 	}
@@ -1075,8 +1060,8 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// leaseStartupTimeout so the equivalence case above is a real true-branch
 	// comparison (exercising the Info.StartedConfigHash gate + the lease tail),
 	// not a trivial both-false pass.
-	if !pendingResumePreservingNamedRestart(beadsByShape["pending-resume-preserve"], clk, leaseStartupTimeout) {
-		t.Fatal("pendingResumePreservingNamedRestart(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
+	if !pendingResumePreservingNamedRestartInfo(session.InfoFromPersistedBead(beadsByShape["pending-resume-preserve"]), clk, leaseStartupTimeout) {
+		t.Fatal("pendingResumePreservingNamedRestartInfo(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
 	}
 	// The drain-ack fixture must hit the true branch so isDrainAckStopPendingInfo
 	// is exercised on a real stop-pending shape, not a trivial both-false pass.

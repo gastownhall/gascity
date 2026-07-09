@@ -118,36 +118,6 @@ func (s *getErrorStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, fmt.Errorf("get failed")
 }
 
-type closedMetadataMatchStore struct {
-	*beads.MemStore
-	matches []beads.Bead
-}
-
-func (s *closedMetadataMatchStore) ListByMetadata(filters map[string]string, _ int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
-	var out []beads.Bead
-	for _, match := range s.matches {
-		ok := true
-		for key, value := range filters {
-			if match.Metadata[key] != value {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			out = append(out, match)
-		}
-	}
-	return out, nil
-}
-
-type listMetadataErrorStore struct {
-	*beads.MemStore
-}
-
-func (s *listMetadataErrorStore) ListByMetadata(map[string]string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
-	return nil, errors.New("list failed")
-}
-
 type gatedStartProvider struct {
 	*runtime.Fake
 	mu            sync.Mutex
@@ -2563,21 +2533,25 @@ func TestAllDependenciesAliveForTemplate_TreatsPendingCreateDependencyAsNotAlive
 
 func TestDependencySessionStartInFlightIgnoresClosedMetadataMatches(t *testing.T) {
 	now := time.Now().UTC()
-	store := &closedMetadataMatchStore{
-		MemStore: beads.NewMemStore(),
-		matches: []beads.Bead{{
-			ID:     "gc-db-old",
-			Title:  "db",
-			Status: "closed",
-			Type:   sessionBeadType,
-			Labels: []string{sessionBeadLabel},
-			Metadata: creatingMeta(map[string]string{
-				"session_name":         "db",
-				"template":             "db",
-				"pending_create_claim": "true",
-				"last_woke_at":         now.Format(time.RFC3339),
-			}),
-		}},
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{
+		Title:  "db",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "db",
+			"template":             "db",
+			"pending_create_claim": "true",
+			"last_woke_at":         now.Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	// Close it: a failed-create bead that never completed startup. The open-session
+	// Info union excludes closed beads, so it must not count as an in-flight start.
+	if err := store.Close(created.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
 	}
 
 	if dependencySessionStartInFlight(store, "db", &config.City{}, clock.Real{}) {
@@ -2585,10 +2559,10 @@ func TestDependencySessionStartInFlightIgnoresClosedMetadataMatches(t *testing.T
 	}
 }
 
-func TestDependencySessionStartInFlightFailsClosedOnMetadataListError(t *testing.T) {
-	store := &listMetadataErrorStore{MemStore: beads.NewMemStore()}
+func TestDependencySessionStartInFlightFailsClosedOnSessionListError(t *testing.T) {
+	store := &listErrorStore{Store: beads.NewMemStore()}
 	if !dependencySessionStartInFlight(store, "db", &config.City{}, clock.Real{}) {
-		t.Fatal("metadata query errors should block dependent starts until the store recovers")
+		t.Fatal("session list errors should block dependent starts until the store recovers")
 	}
 }
 

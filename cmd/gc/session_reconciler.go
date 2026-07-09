@@ -705,45 +705,12 @@ func allDependenciesAlive(
 	return allDependenciesAliveForTemplateWithClock(normalizedSessionTemplate(session, cfg), cfg, desiredState, sp, cityName, store, clock.Real{})
 }
 
-func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk clock.Clock) bool {
-	var startupTimeout time.Duration
-	if cfg != nil {
-		startupTimeout = cfg.Session.StartupTimeoutDuration()
-	}
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
-		if !pendingCreateLeaseActive(session, clk, startupTimeout) {
-			return false
-		}
-		template := normalizedSessionTemplate(session, cfg)
-		if template == "" {
-			template = session.Metadata["template"]
-		}
-		agent := findAgentByTemplate(cfg, template)
-		if agent != nil {
-			return !agent.Suspended
-		}
-		return true
-	}
-	if !sessionStartRequested(session, clk) {
-		return false
-	}
-	template := normalizedSessionTemplate(session, cfg)
-	if template == "" {
-		template = session.Metadata["template"]
-	}
-	agent := findAgentByTemplate(cfg, template)
-	if agent != nil {
-		return !agent.Suspended
-	}
-	return false
-}
-
-// pendingCreateSessionStillLeasedInfo is the session.Info sibling of
-// pendingCreateSessionStillLeased. Equivalence-proven. The template resolution
-// mirrors the raw form: normalizedSessionTemplateInfo with an Info.Template
+// pendingCreateSessionStillLeasedInfo reports whether a session bead's pending
+// create is still holding its lease (the raw sibling was retired in WI-6 R1).
+// Template resolution uses normalizedSessionTemplateInfo with an Info.Template
 // fallback (Info.Template is the raw metadata["template"] mirror), and
-// findAgentByTemplate keys off the same resolved template. The claim branch and
-// the sessionStartRequestedInfo fallback both compose already-proven siblings.
+// findAgentByTemplate keys off the resolved template. The claim branch and the
+// sessionStartRequestedInfo fallback both compose already-proven Info siblings.
 func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, clk clock.Clock) bool {
 	var startupTimeout time.Duration
 	if cfg != nil {
@@ -1005,37 +972,12 @@ func pendingCreateRollbackState(state string) bool {
 	return sessionpkg.State(strings.TrimSpace(state)) == sessionpkg.StateAsleep
 }
 
-func pendingResumePreservingNamedRestart(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	switch sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) {
-	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
-	default:
-		return false
-	}
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
-		return false
-	}
-	if strings.TrimSpace(session.Metadata["session_key"]) == "" {
-		return false
-	}
-	if strings.TrimSpace(session.Metadata["started_config_hash"]) == "" {
-		return false
-	}
-	if _, ok := parseRFC3339Metadata(session.Metadata["pending_create_started_at"]); !ok {
-		return false
-	}
-	if !pendingCreateLeaseActive(session, clk, startupTimeout) {
-		return false
-	}
-	return true
-}
-
-// pendingResumePreservingNamedRestartInfo is the session.Info-typed sibling of
-// pendingResumePreservingNamedRestart. It routes the asleep-named-session
+// pendingResumePreservingNamedRestartInfo routes the asleep-named-session
 // drift-repair skip decision through the typed projection: the start-pending/
 // creating state gate, the pending-create claim, session_key, started_config_hash
 // (the Info.StartedConfigHash mirror), and pending_create_started_at all read from
 // Info, with the lease-active tail delegated to pendingCreateLeaseActiveInfo.
-// Kept byte-identical to the raw form by TestSessionClassifierInfoEquivalence.
+// (The raw sibling was retired in WI-6 R1.)
 func pendingResumePreservingNamedRestartInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
 	switch sessionpkg.State(strings.TrimSpace(i.MetadataState)) {
 	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
@@ -1770,7 +1712,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// failed-create-close sites all `continue`). The trace call above takes
 			// the bead by value (cannot mutate), and Go switch cases do not fall
 			// through, so both the preserveNamed body and the
-			// pendingCreateSessionStillLeased guard/body below read the same
+			// pendingCreateSessionStillLeasedInfo guard/body below read the same
 			// post-heal snapshot. This fold is LOAD-BEARING (and newly so in this
 			// commit): the pendingCreateSessionStillLeasedInfo guard below reads the
 			// healed MetadataState off infoPostHeal, and the downstream zombie refresh
@@ -2087,7 +2029,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			infoByID[session.ID] = infoByID[session.ID].ApplyPatch(attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
 			continue
 		}
-		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
+		// Desired-branch counterpart to pendingCreateSessionStillLeasedInfo: a
 		// session bead in the desired set with pending_create_claim=true but
 		// no live runtime AND no active lease is stuck. Without this rollback,
 		// the bead lives forever holding its alias, blocking new spawn

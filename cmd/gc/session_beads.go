@@ -2001,15 +2001,19 @@ func reapStaleSessionBeads(
 	if store == nil || sp == nil {
 		return 0
 	}
-	open, err := loadSessionBeads(store)
+	// WI-6 R1: read the open session beads as typed session.Info via the front
+	// door (loadOpenSessionInfos == the same ListAll type+label union, closed
+	// excluded, that loadSessionBeads feeds). Every per-bead read below is the
+	// verbatim Info mirror of the raw metadata it replaced.
+	open, err := loadOpenSessionInfos(store)
 	if err != nil {
 		fmt.Fprintf(stderr, "reapStaleSessionBeads: %v\n", err) //nolint:errcheck
 		return 0
 	}
 	now := clk.Now()
 	reaped := 0
-	for _, b := range open {
-		sn := b.Metadata["session_name"]
+	for _, info := range open {
+		sn := info.SessionNameMetadata
 		if sn == "" {
 			continue
 		}
@@ -2027,21 +2031,21 @@ func reapStaleSessionBeads(
 		// phantom-accumulation leak (gc-5tyf5). Such beads are instead held to
 		// a longer grace window below so legitimate retries still complete
 		// first.
-		state := strings.TrimSpace(b.Metadata["state"])
+		state := strings.TrimSpace(info.MetadataState)
 		if state != "creating" {
 			continue
 		}
 		// Don't reap beads with an active drain — the drainTracker is
 		// managing their lifecycle and the tmux session may have just died
 		// as part of the drain sequence.
-		if dt != nil && dt.get(b.ID) != nil {
+		if dt != nil && dt.get(info.ID) != nil {
 			continue
 		}
 		// Configured named-session beads are controller-owned identities.
 		// They may legitimately be stopped between supervisor restarts; the
 		// named-session reconciler is responsible for preserving, waking, or
 		// retiring them after desired state is rebuilt from config.
-		if isNamedSessionBead(b) {
+		if isNamedSessionInfo(info) {
 			continue
 		}
 		// Session is alive — nothing to reap.
@@ -2052,11 +2056,11 @@ func reapStaleSessionBeads(
 		// timeout. Use the latest known start boundary, not just CreatedAt,
 		// because a long-lived bead may have been woken moments ago.
 		// Zero CreatedAt means unknown age — skip conservatively.
-		startedAt, ok := staleReapStartBoundary(b)
+		startedAt, ok := staleReapStartBoundaryInfo(info)
 		if !ok {
 			continue
 		}
-		pendingCreate := strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
+		pendingCreate := info.PendingCreateClaim
 		// Never-started pending creates (pending_create_claim=true with no
 		// last_woke_at) have not reached preWakeCommit, so their start may
 		// still be in flight behind a busy pool start queue. Defer entirely to
@@ -2066,8 +2070,8 @@ func reapStaleSessionBeads(
 		// from under an active lease and let the reconciler spawn a replacement
 		// that double-binds the same tmux session name. Once that lease
 		// expires the phantom is still reaped (gc-5tyf5), just later.
-		if pendingCreate && strings.TrimSpace(b.Metadata["last_woke_at"]) == "" {
-			if !pendingCreateNeverStartedLeaseExpired(b, clk) {
+		if pendingCreate && strings.TrimSpace(info.LastWokeAt) == "" {
+			if !pendingCreateNeverStartedLeaseExpiredInfo(info, clk) {
 				continue
 			}
 		} else {
@@ -2083,8 +2087,8 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
-		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
-			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
+		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}
 	}
