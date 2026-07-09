@@ -1093,7 +1093,9 @@ func (c *Client) postRigAction(name, action string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PostV0CityByCityNameRigByNameByActionWithResponse(context.Background(), c.cityName, name, action, nil)
+	resp, err := c.cw.PostV0CityByCityNameRigByNameByActionWithResponse(
+		context.Background(), c.cityName, name,
+		genclient.PostV0CityByCityNameRigByNameByActionParamsAction(action), nil)
 	return checkMutation(resp, err)
 }
 
