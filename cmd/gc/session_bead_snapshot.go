@@ -314,6 +314,39 @@ func (s *sessionBeadSnapshot) add(bead beads.Bead) {
 	s.replaceOpenLocked(open)
 }
 
+// addInfo appends a freshly created/reopened session's projected Info to the
+// snapshot's typed half so same-cycle selection observes it. The pool create/reuse
+// path (W-pool) inserts session.Info here now that it returns Info instead of a raw
+// bead. It rebuilds the agent/template index maps from the extended openInfos via
+// the equivalence-proven Info constructor while PRESERVING each existing row's
+// circuit cluster and appending the zero CircuitState for the new row (a fresh bead
+// carries no circuit metadata). The raw open []beads.Bead half is intentionally
+// left untouched: after W-pool no in-cycle reader consumes it — the build's own
+// reuse scans read OpenInfos, and the reconcile tick re-loads the snapshot from the
+// store (city_runtime reloads after buildDesiredState) before reading Open() — and
+// the raw half is deleted with W-delete. Under Lock; safe for the parallel
+// pool-create fan-out (gastownhall/gascity#2319).
+func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	infos := make([]sessionpkg.Info, 0, len(s.openInfos)+1)
+	infos = append(infos, s.openInfos...)
+	infos = append(infos, info)
+	circuits := make([]sessionpkg.CircuitState, 0, len(s.openCircuits)+1)
+	circuits = append(circuits, s.openCircuits...)
+	circuits = append(circuits, sessionpkg.CircuitState{})
+	rebuilt := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	s.openInfos = rebuilt.openInfos
+	s.openCircuits = rebuilt.openCircuits
+	s.beadIDByAgentName = rebuilt.beadIDByAgentName
+	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
+	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
+	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
+}
+
 // WI-6: the raw-bead half of sessionBeadSnapshot (Open / FindByID /
 // FindSessionBeadByTemplate / FindSessionBeadByNamedIdentity /
 // FindSessionNameByNamedIdentity and the raw stampedPoolQualifiedIdentity used by
