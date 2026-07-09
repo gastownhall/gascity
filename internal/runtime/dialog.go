@@ -1028,9 +1028,20 @@ func ContainsProviderRateLimitScreen(content string) bool {
 		strings.Contains(content, "/rate-limit-options") {
 		return true
 	}
+	if containsClaudeSpendLimitModal(content) {
+		return true
+	}
 	return strings.Contains(strings.ToLower(content), "rate limit") &&
 		strings.Contains(content, "Keep trying") &&
 		strings.Contains(content, "Stop")
+}
+
+func containsClaudeSpendLimitModal(content string) bool {
+	hasLimitAction := strings.Contains(content, "Adjust monthly spend limit")
+	hasCreditBalance := strings.Contains(content, "Usage credit balance")
+	hasResetOption := strings.Contains(content, "Wait for limit to reset") ||
+		strings.Contains(content, "Resets ")
+	return hasLimitAction && hasCreditBalance && hasResetOption
 }
 
 // ProviderTerminalErrorReason classifies high-confidence provider errors that

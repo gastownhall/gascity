@@ -1028,6 +1028,8 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
+		{name: "claude spend limit modal", content: "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel", want: true},
+		{name: "spend limit words without reset option", content: "notes mention Adjust monthly spend limit and Usage credit balance while documenting billing", want: false},
 		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
 		{name: "generic lower-case mention", content: "rate limit exceeded", want: false},
 		{name: "normal output", content: "Hello world", want: false},
