@@ -3053,6 +3053,60 @@ func unsetTestEnv(t *testing.T, keys ...string) {
 	}
 }
 
+// TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution is the
+// execution-level companion to TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort:
+// cross-provider review of gc-74rxa noted that a pure string-assertion test
+// can pass while the real runtime path (shellWorkQueryWithEnv running the
+// query via `sh -c`, cmd/gc/cmd_hook.go:555) stays broken, since it never
+// crosses the process boundary. This test runs the built query through a
+// fake `bd` with an OUTER env that deliberately carries no Dolt connection
+// vars at all -- reproducing the exact failure mode (mergeRuntimeEnv having
+// stripped them) -- and asserts bd still receives the ambient port via the
+// query string's own shell-prefix assignment.
+func TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf 'GC_DOLT_PORT=%s BEADS_DOLT_SERVER_PORT=%s\n' "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_PORT:-}" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	// The outer env passed to shellWorkQueryWithEnv has no GC_DOLT_*/
+	// BEADS_DOLT_SERVER_* at all -- simulating mergeRuntimeEnv/
+	// controllerWorkQueryEnv having dropped them. Without the fix, bd would
+	// see an empty port here and resolve :0.
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read bd log: %v", readErr)
+	}
+	if !strings.Contains(string(logData), "GC_DOLT_PORT=29620") || !strings.Contains(string(logData), "BEADS_DOLT_SERVER_PORT=29620") {
+		t.Fatalf("bd did not see the ambient Dolt port despite a stripped outer env; log:\n%s", string(logData))
+	}
+}
+
 func TestWorkflowServeWorkQueryRecognizesCoreControlDispatcher(t *testing.T) {
 	query := workflowServeWorkQuery(config.Agent{Name: "core.control-dispatcher", Dir: "fixture"})
 
