@@ -86,9 +86,13 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   raw forms. `cmd_stop` byte-identical (census +1, tracked). Red-team fixed a
 >   non-load-bearing reap-boundary oracle (recently-woken creating bead was silently
 >   reapable after the raw sibling's deletion).
-> - **R2** 🔨 impl: display reason lane (`cmd_session` `wakeReasons`→Info) + additive
->   sleep-read twins → deletes `sessionMetadataState` (raw). cmd_session census 2→0.
-> - **R3** (HIGH): reconciler heal + sleep-write coordinated unit; DROPS both
+> - **R2** ✅ (merge `3df383d2f`): display reason lane (`cmd_session` `wakeReasons`→Info) +
+>   additive sleep-read twins → deleted `sessionMetadataState`/`wakeReasons`/`evaluateWakeReasons`
+>   (raw). cmd_session census 2→1 (residual = `cmdSessionKill` raw Get, a WI-7 front-door flip;
+>   design's 2→0 double-counted). NOTE: `session_circuit_state` absent from `Info` →
+>   `LifecycleDisplayReasonWithLiveness` stays raw; R5 needs `Info.SessionCircuitState` + a twin
+>   before the snapshot raw `Open()` half fully retires.
+> - **R3** (HIGH) 🔨 impl: reconciler heal + sleep-write coordinated unit; DROPS both
 >   transitional mirrors; deletes the pending-create lease family +
 >   `sessionStartRequested`/`staleCreatingState`.
 > - **R4** (HIGH): start-execution cluster; DROPS the 4 coupling mirrors +
