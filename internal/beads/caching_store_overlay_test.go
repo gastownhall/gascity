@@ -24,7 +24,7 @@ type counterMemStore struct {
 }
 
 func (s counterMemStore) Count(_ context.Context, query ListQuery, excludeTypes ...string) (int, error) {
-	rows, err := s.MemStore.List(query)
+	rows, err := s.List(query)
 	if err != nil {
 		return 0, err
 	}
@@ -44,7 +44,7 @@ func (s counterMemStore) Count(_ context.Context, query ListQuery, excludeTypes 
 // faithful backing keeps the twin a valid oracle across every dirty regime.
 func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
-	all, err := s.MemStore.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth})
+	all, err := s.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth})
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
-		deps, derr := s.MemStore.DepList(b.ID, "down")
+		deps, derr := s.DepList(b.ID, "down")
 		if derr != nil {
 			return nil, derr
 		}
@@ -84,12 +84,11 @@ func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // mid-overlay mutations (the fence/race suite).
 type overlayCountingStore struct {
 	Store
-	mu       sync.Mutex
-	gets     int
-	lists    int
-	readies  int
-	depLists int
-	getHook  func(id string)
+	mu      sync.Mutex
+	gets    int
+	lists   int
+	readies int
+	getHook func(id string)
 }
 
 func (s *overlayCountingStore) Get(id string) (Bead, error) {
@@ -121,23 +120,16 @@ func (s *overlayCountingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	return s.Store.Ready(query...)
 }
 
-func (s *overlayCountingStore) DepList(id, direction string) ([]Dep, error) {
-	s.mu.Lock()
-	s.depLists++
-	s.mu.Unlock()
-	return s.Store.DepList(id, direction)
-}
-
-func (s *overlayCountingStore) counts() (gets, lists, readies, depLists int) {
+func (s *overlayCountingStore) counts() (gets, lists, readies int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.gets, s.lists, s.readies, s.depLists
+	return s.gets, s.lists, s.readies
 }
 
 func (s *overlayCountingStore) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.gets, s.lists, s.readies, s.depLists = 0, 0, 0, 0
+	s.gets, s.lists, s.readies = 0, 0, 0
 }
 
 func (s *overlayCountingStore) setGetHook(hook func(id string)) {
@@ -450,7 +442,7 @@ func TestOverlayPerfRoundTripAccounting(t *testing.T) {
 	if _, err := store.List(ListQuery{Status: "open"}); err != nil {
 		t.Fatalf("clean List: %v", err)
 	}
-	if g, l, r, _ := backing.counts(); g != 0 || l != 0 || r != 0 {
+	if g, l, r := backing.counts(); g != 0 || l != 0 || r != 0 {
 		t.Fatalf("clean List backing calls: gets=%d lists=%d readies=%d, want 0/0/0", g, l, r)
 	}
 
@@ -465,7 +457,7 @@ func TestOverlayPerfRoundTripAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dirty List: %v", err)
 	}
-	if g, l, _, _ := backing.counts(); g != 1 || l != 0 {
+	if g, l, _ := backing.counts(); g != 1 || l != 0 {
 		t.Fatalf("1 dirty List backing calls: gets=%d lists=%d, want 1/0", g, l)
 	}
 	if len(rows) != 3000 {
@@ -476,7 +468,7 @@ func TestOverlayPerfRoundTripAccounting(t *testing.T) {
 	if _, err := store.List(ListQuery{Status: "open"}); err != nil {
 		t.Fatalf("second List: %v", err)
 	}
-	if g, l, _, _ := backing.counts(); g != 0 || l != 0 {
+	if g, l, _ := backing.counts(); g != 0 || l != 0 {
 		t.Fatalf("cleared List backing calls: gets=%d lists=%d, want 0/0", g, l)
 	}
 
@@ -488,7 +480,7 @@ func TestOverlayPerfRoundTripAccounting(t *testing.T) {
 	if _, err := store.List(ListQuery{Status: "open"}); err != nil {
 		t.Fatalf("cap List: %v", err)
 	}
-	if g, l, _, _ := backing.counts(); g != dirtyOverlayMaxGets || l != 0 {
+	if g, l, _ := backing.counts(); g != dirtyOverlayMaxGets || l != 0 {
 		t.Fatalf("cap List backing calls: gets=%d lists=%d, want %d/0", g, l, dirtyOverlayMaxGets)
 	}
 
@@ -500,7 +492,7 @@ func TestOverlayPerfRoundTripAccounting(t *testing.T) {
 	if _, err := store.List(ListQuery{Status: "open"}); err != nil {
 		t.Fatalf("cap+1 List: %v", err)
 	}
-	if g, l, _, _ := backing.counts(); g != 0 || l != 1 {
+	if g, l, _ := backing.counts(); g != 0 || l != 1 {
 		t.Fatalf("cap+1 List backing calls: gets=%d lists=%d, want 0/1", g, l)
 	}
 }
@@ -531,7 +523,7 @@ func TestOverlayReadyPerfRoundTrip(t *testing.T) {
 	if _, err := store.Ready(); err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	if g, _, r, _ := backing.counts(); g != 1 || r != 0 {
+	if g, _, r := backing.counts(); g != 1 || r != 0 {
 		t.Fatalf("1 dirty Ready backing calls: gets=%d readies=%d, want 1/0", g, r)
 	}
 }
@@ -567,7 +559,7 @@ func TestOverlayNotFoundSuppressed(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != keep.ID {
 		t.Fatalf("List = %v, want only %s", sortedIDs(rows), keep.ID)
 	}
-	if g, l, _, _ := backing.counts(); g != 1 || l != 0 {
+	if g, l, _ := backing.counts(); g != 1 || l != 0 {
 		t.Fatalf("suppressed List backing calls: gets=%d lists=%d, want 1/0", g, l)
 	}
 	// The ErrNotFound mark is deliberately left set (convergence stays with the
@@ -576,7 +568,7 @@ func TestOverlayNotFoundSuppressed(t *testing.T) {
 	if _, err := store.List(ListQuery{Status: "open"}); err != nil {
 		t.Fatalf("second List: %v", err)
 	}
-	if g, l, _, _ := backing.counts(); g != 1 || l != 0 {
+	if g, l, _ := backing.counts(); g != 1 || l != 0 {
 		t.Fatalf("second suppressed List backing calls: gets=%d lists=%d, want 1/0", g, l)
 	}
 }
@@ -836,7 +828,7 @@ func (s depStrippingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
-		deps, derr := s.MemStore.DepList(b.ID, "down")
+		deps, derr := s.DepList(b.ID, "down")
 		if derr != nil {
 			return nil, derr
 		}
@@ -855,7 +847,7 @@ func (s depStrippingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // dependencySnapshotForCache mirrors DoltliteReadStore: Prime (and thus the
 // clean twin) sources complete deps here even though Get/List strip them.
 func (s depStrippingStore) dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error) {
-	deps, err := s.MemStore.DepListBatch(ids)
+	deps, err := s.DepListBatch(ids)
 	if err != nil {
 		return deps, false, err
 	}
@@ -1111,7 +1103,7 @@ func TestOverlayDeterministicPassTwoRetry(t *testing.T) {
 	if got[a.ID].Title != ta || got[b.ID].Title != tb {
 		t.Fatalf("pass-2 did not absorb both refreshed rows: a=%q b=%q", got[a.ID].Title, got[b.ID].Title)
 	}
-	if g, l, _, _ := backing.counts(); l != 0 || g != 2 {
+	if g, l, _ := backing.counts(); l != 0 || g != 2 {
 		t.Fatalf("deterministic pass-2: want gets=2 lists=0, got gets=%d lists=%d", g, l)
 	}
 }
@@ -1145,7 +1137,7 @@ func TestOverlayChurnEveryPassFallsBack(t *testing.T) {
 	markDirtyForTest(store, a.ID)
 
 	var idx atomic.Int32
-	backing.setGetHook(func(id string) {
+	backing.setGetHook(func(_ string) {
 		i := int(idx.Add(1)) - 1
 		if i < len(extras) {
 			markDirtyForTest(store, extras[i])
@@ -1157,7 +1149,7 @@ func TestOverlayChurnEveryPassFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if _, l, _, _ := backing.counts(); l == 0 {
+	if _, l, _ := backing.counts(); l == 0 {
 		t.Fatalf("expected fallback backing.List after churn on every pass, got lists=0")
 	}
 	if len(rows) != 6 {
