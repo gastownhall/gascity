@@ -755,6 +755,63 @@ func TestPollerKeyFromBeadFallbackOrder(t *testing.T) {
 	}
 }
 
+// TestPollerKeyFromInfoMatchesBead pins PollerKeyFromInfo against its raw twin:
+// for each fixture it asserts the exact key (self-sufficient — a mutated
+// fallback order or a wrong field fails directly) AND that the Info projection of
+// the same bead yields the identical key, so the two forms cannot drift. The
+// session-name fixture specifically guards that PollerKeyFromInfo reads the RAW
+// SessionNameMetadata (not the sessionNameFor-filled SessionName).
+func TestPollerKeyFromInfoMatchesBead(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{
+			name: "session id wins over metadata",
+			bead: beads.Bead{ID: "session-id", Metadata: map[string]string{"alias": "alias", "session_name": "s-test"}, Title: "title"},
+			want: "session-id",
+		},
+		{
+			name: "alias fallback",
+			bead: beads.Bead{Metadata: map[string]string{"alias": "alias", "agent_name": "agent", "template": "template", "session_name": "s-test"}, Title: "title"},
+			want: "alias",
+		},
+		{
+			name: "agent name fallback",
+			bead: beads.Bead{Metadata: map[string]string{"agent_name": "agent", "template": "template", "session_name": "s-test"}, Title: "title"},
+			want: "agent",
+		},
+		{
+			name: "template fallback",
+			bead: beads.Bead{Metadata: map[string]string{"template": "template", "session_name": "s-test"}, Title: "title"},
+			want: "template",
+		},
+		{
+			name: "raw session_name fallback",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "s-test"}, Title: "title"},
+			want: "s-test",
+		},
+		{
+			name: "title fallback",
+			bead: beads.Bead{Title: "title"},
+			want: "title",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := InfoFromPersistedBead(tc.bead)
+			got := PollerKeyFromInfo(info)
+			if got != tc.want {
+				t.Fatalf("PollerKeyFromInfo() = %q, want %q", got, tc.want)
+			}
+			if raw := PollerKeyFromBead(tc.bead); got != raw {
+				t.Fatalf("PollerKeyFromInfo() = %q diverged from PollerKeyFromBead() = %q", got, raw)
+			}
+		})
+	}
+}
+
 func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName, agentName string) *exec.Cmd {
 	t.Helper()
 	scriptPath := filepath.Join(t.TempDir(), "gc-fake")

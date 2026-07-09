@@ -338,6 +338,26 @@ func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]strin
 	return lifecycleDisplayReasonFromView(view, metadata)
 }
 
+// LifecycleDisplayReasonWithLivenessInfo is the session.Info twin of
+// LifecycleDisplayReasonWithLiveness: it reads the same status + metadata facts
+// off an already-projected session.Info instead of a raw metadata map, so
+// display callers holding a typed snapshot need not re-crack the bead. For any
+// info == InfoFromPersistedBead(bead) it is byte-identical to
+// LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now,
+// info.SessionName, isRunning) — the sessionName the display path supplies is the
+// projected Info.SessionName. TestLifecycleDisplayReasonWithLivenessInfoEquivalence
+// pins that equivalence and asserts the circuit-open / reset-pending branches
+// directly so a mutation of either fails.
+func LifecycleDisplayReasonWithLivenessInfo(info Info, now time.Time, isRunning func(string) bool) string {
+	input := LifecycleInputFromInfo(info)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	if lifecycleResetPendingReasonVisibleInfo(view, info, isRunning) {
+		return LifecycleReasonResetPending
+	}
+	return lifecycleDisplayReasonFromViewInfo(view, info)
+}
+
 // LifecycleResetPendingReasonVisible reports whether reset-pending should
 // replace other display reasons for an in-flight requested or continuation reset.
 func LifecycleResetPendingReasonVisible(status string, metadata map[string]string, now time.Time, sessionName string, isRunning func(string) bool) bool {
@@ -384,6 +404,45 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 	return ""
 }
 
+// lifecycleDisplayReasonFromViewInfo is the session.Info twin of
+// lifecycleDisplayReasonFromView: same branch order, reading the circuit /
+// sleep-reason / quarantine / hold / wait-hold facts off the projected Info
+// (SessionCircuitState, SleepReason, QuarantinedUntil, HeldUntil, WaitHold)
+// instead of the raw metadata map.
+func lifecycleDisplayReasonFromViewInfo(view LifecycleView, info Info) string {
+	if view.Terminal {
+		return ""
+	}
+	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
+		return ""
+	}
+	if strings.TrimSpace(info.SessionCircuitState) == SessionCircuitStateOpen {
+		return LifecycleReasonCircuitOpen
+	}
+	if raw := strings.TrimSpace(info.SleepReason); raw != "" {
+		reason := SleepReason(raw)
+		staleTimedQuarantine := (reason == SleepReasonQuarantine || reason == SleepReasonContextChurn || reason == SleepReasonRateLimit) &&
+			strings.TrimSpace(info.QuarantinedUntil) != "" &&
+			!view.HasBlocker(BlockerQuarantined)
+		staleTimedHold := reason == SleepReasonUserHold &&
+			strings.TrimSpace(info.HeldUntil) != "" &&
+			!view.HasBlocker(BlockerHeld)
+		if !staleTimedQuarantine && !staleTimedHold {
+			return raw
+		}
+	}
+	if view.HasBlocker(BlockerQuarantined) {
+		return string(SleepReasonQuarantine)
+	}
+	if strings.TrimSpace(info.WaitHold) != "" {
+		return string(SleepReasonWaitHold)
+	}
+	if view.HasBlocker(BlockerHeld) {
+		return string(SleepReasonUserHold)
+	}
+	return ""
+}
+
 func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]string, sessionName string, isRunning func(string) bool) bool {
 	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
 		return false
@@ -398,6 +457,32 @@ func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		sessionName = strings.TrimSpace(metadata["session_name"])
+	}
+	return sessionName != "" && isRunning(sessionName)
+}
+
+// lifecycleResetPendingReasonVisibleInfo is the session.Info twin of
+// lifecycleResetPendingReasonVisible: it reads the restart_requested /
+// continuation_reset_pending markers and the resolved session name off the
+// projected Info (RestartRequested, ContinuationResetPending, SessionName with
+// the SessionNameMetadata fallback) instead of the raw metadata map. The display
+// path passes Info.SessionName as its sessionName, so the primary read here
+// mirrors that; the SessionNameMetadata fallback mirrors the raw form's
+// metadata["session_name"] fallback.
+func lifecycleResetPendingReasonVisibleInfo(view LifecycleView, info Info, isRunning func(string) bool) bool {
+	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
+		return false
+	}
+	if isRunning == nil {
+		return false
+	}
+	if strings.TrimSpace(info.RestartRequested) != "true" &&
+		strings.TrimSpace(info.ContinuationResetPending) != "true" {
+		return false
+	}
+	sessionName := strings.TrimSpace(info.SessionName)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(info.SessionNameMetadata)
 	}
 	return sessionName != "" && isRunning(sessionName)
 }

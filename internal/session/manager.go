@@ -241,6 +241,13 @@ type Info struct {
 	// The reconciler's restart-handoff path branches on it (trimmed) == "true"
 	// via resetPendingCommittedAtInfo; the Info mirror keeps the raw value.
 	ContinuationResetPending string // continuation_reset_pending (raw)
+	// SessionCircuitState is the RAW session_circuit_state metadata, verbatim —
+	// the durable session circuit-breaker posture (SessionCircuitStateOpen /
+	// SessionCircuitStateClosed). The lifecycle display-reason projection reads it
+	// (== SessionCircuitStateOpen) to surface "circuit-open" ahead of other
+	// reasons, so LifecycleDisplayReasonWithLivenessInfo can resolve the reason off
+	// Info without the bead. Additive, internal-only (absent from the HTTP wire).
+	SessionCircuitState string // session_circuit_state (raw)
 	// ResetCommittedAt is the RAW reset_committed_at metadata (RFC3339 or empty),
 	// the durable marker for when a restart handoff committed. resetPendingCommittedAtInfo
 	// parses it; the Info mirror keeps the raw value.
