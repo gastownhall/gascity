@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -726,6 +727,86 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"wake_attempts": "999999999999999999999",
 			},
 		},
+		// --- R2 sleep/wake-reason twin fixtures (display reason lane) ---
+		"always-named": {
+			// A configured always-mode named session with a session_name (so the
+			// full sleep capability resolves). sessionWithinDesiredConfigInfo's named
+			// arm and evaluateWakeReasonsInfo's isAlwaysNamed WakeConfig arm both fire.
+			ID:     "ga-always",
+			Type:   session.BeadType,
+			Title:  "mayor",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                  "mayor",
+				"configured_named_session":  "true",
+				"configured_named_identity": "mayor",
+				"configured_named_mode":     "always",
+				"session_name":              "mayor",
+				"state":                     "active",
+			},
+		},
+		"named-mode-padded": {
+			// configured_named_mode is whitespace-padded: NamedSessionMode trims it,
+			// so namedSessionModeInfo must trim Info.ConfiguredNamedMode identically —
+			// a raw (untrimmed) read would return " always " and diverge. Load-bearing
+			// for the namedSessionMode trim.
+			ID:     "ga-modepad",
+			Type:   session.BeadType,
+			Title:  "mayor",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":                  "mayor",
+				"configured_named_session":  "true",
+				"configured_named_identity": "mayor",
+				"configured_named_mode":     "  always  ",
+				"session_name":              "mayor",
+			},
+		},
+		"dependency-only-padded": {
+			// dependency_only is whitespace-padded: sessionWithinDesiredConfig compares
+			// it == "true" WITHOUT trimming, so the padded value reads NOT
+			// dependency-only. sessionWithinDesiredConfigInfo must use the RAW
+			// DependencyOnlyMetadata (== "true"), not the trimmed DependencyOnly bool,
+			// or it would wrongly exclude this session. Load-bearing for the trap.
+			ID:     "ga-deppad",
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":        "worker",
+				"session_name":    "worker-deppad",
+				"state":           "active",
+				"dependency_only": "  true  ",
+			},
+		},
+		"idle-detached-interactive": {
+			// A live interactive session detached in the past: drives
+			// sessionIdleReference (detached_at branch), the configWakeSuppressed
+			// duration window, and sessionKeepWarmEligible.
+			ID:     "ga-idledetach",
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"session_name": "worker-idledetach",
+				"state":        "active",
+				"detached_at":  pastRFC3339,
+			},
+		},
+		"idle-timeout-latched": {
+			// sleep_reason=idle-timeout is the configWakeSuppressed early-false branch.
+			ID:     "ga-idletimeout",
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"session_name": "worker-idletimeout",
+				"state":        "asleep",
+				"sleep_reason": "idle-timeout",
+			},
+		},
 	}
 
 	const tmpl = "worker"
@@ -806,6 +887,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	}{
 		"sessionOrigin":                {sessionOrigin, sessionOriginInfo},
 		"sessionMetadataState":         {sessionMetadataState, sessionMetadataStateInfo},
+		"namedSessionMode":             {namedSessionMode, namedSessionModeInfo},
 		"sessionBeadStoredTemplate":    {sessionBeadStoredTemplate, sessionBeadStoredTemplateInfo},
 		"sessionBeadAgentName":         {sessionBeadAgentName, sessionBeadAgentNameInfo},
 		"namedSessionIdentity":         {namedSessionIdentity, namedSessionIdentityInfo},
@@ -1235,6 +1317,126 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				}
 			})
 		}
+	}
+
+	// --- R2 sleep-cluster + wake-reason twin equivalence (display reason lane) ---
+	// These twins take a resolved policy / provider / clock in addition to the
+	// session view, so they don't fit the single-bead scalar loop above. wakeCfg
+	// resolves the worker/mayor templates to live agents with an interactive-resume
+	// sleep policy so the sleep-ENABLED branches actually fire; wakeSP reports full
+	// sleep capability + activity/attachment so a session-named fixture yields an
+	// enabled policy. Raw and Info forms share the SAME provider, so the runtime
+	// probes (which stay raw in both) agree by construction — any divergence is a
+	// real metadata-read fidelity bug in a twin.
+	wakeCfg := &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Agents:        []config.Agent{{Name: "worker"}, {Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	wakeSP := routedSleepProvider{
+		Provider:     runtime.NewFake(),
+		capabilities: runtime.ProviderCapabilities{CanReportActivity: true, CanReportAttachment: true},
+		sleep:        runtime.SessionSleepCapabilityFull,
+	}
+	wakePools := []map[string]int{nil, {"worker": 1}, {"mayor": 1}}
+	for shape, b := range beadsByShape {
+		b := b
+		info := session.InfoFromPersistedBead(b)
+		t.Run("wakeTwins/"+shape, func(t *testing.T) {
+			policy := resolveSessionSleepPolicy(b, wakeCfg, wakeSP)
+			if got := resolveSessionSleepPolicyInfo(info, wakeCfg, wakeSP); got != policy {
+				t.Fatalf("resolveSessionSleepPolicyInfo = %+v, want %+v", got, policy)
+			}
+			if got, want := sessionIdleReferenceInfo(info, wakeSP), sessionIdleReference(b, wakeSP); !got.Equal(want) {
+				t.Errorf("sessionIdleReferenceInfo = %v, want %v", got, want)
+			}
+			if got, want := configWakeSuppressedInfo(info, policy, wakeSP, clk), configWakeSuppressed(b, policy, wakeSP, clk); got != want {
+				t.Errorf("configWakeSuppressedInfo = %v, want %v", got, want)
+			}
+			if got, want := sessionKeepWarmEligibleInfo(info, policy, wakeSP, clk), sessionKeepWarmEligible(b, policy, wakeSP, clk); got != want {
+				t.Errorf("sessionKeepWarmEligibleInfo = %v, want %v", got, want)
+			}
+			for _, pd := range wakePools {
+				gotA, gotOK := sessionWithinDesiredConfigInfo(info, wakeCfg, pd)
+				wantA, wantOK := sessionWithinDesiredConfig(b, wakeCfg, pd)
+				if gotA != wantA || gotOK != wantOK {
+					t.Errorf("sessionWithinDesiredConfigInfo(pd=%v) = (%v,%v), want (%v,%v)", pd, gotA, gotOK, wantA, wantOK)
+				}
+				if got, want := evaluateWakeReasonsInfo(info, wakeCfg, wakeSP, pd, nil, nil, clk), evaluateWakeReasons(b, wakeCfg, wakeSP, pd, nil, nil, clk); !reflect.DeepEqual(got, want) {
+					t.Errorf("evaluateWakeReasonsInfo(pd=%v) = %+v, want %+v", pd, got, want)
+				}
+			}
+		})
+	}
+
+	// pendingInteractionKeepsAwake keeps its runtime pending probe raw; pendSP
+	// reports a pending interaction for "worker-pending" so the readiness gate is
+	// live. The held/quarantine fixtures drive the LifecycleInputFromInfo blocker
+	// read, and the wait_hold fixture the trimmed-wait_hold gate.
+	pendSP := runtime.NewFake()
+	pendSP.SetPendingInteraction("worker-pending", &runtime.PendingInteraction{RequestID: "r"})
+	pendFixtures := map[string]beads.Bead{
+		"pending-clear":    makeBead("gp-clear", map[string]string{"template": "worker", "session_name": "worker-pending"}),
+		"pending-held":     makeBead("gp-held", map[string]string{"template": "worker", "session_name": "worker-pending", "held_until": futureRFC3339}),
+		"pending-quar":     makeBead("gp-quar", map[string]string{"template": "worker", "session_name": "worker-pending", "quarantined_until": futureRFC3339}),
+		"pending-waithold": makeBead("gp-wh", map[string]string{"template": "worker", "session_name": "worker-pending", "wait_hold": " true "}),
+		"no-pending":       makeBead("gp-none", map[string]string{"template": "worker", "session_name": "worker-none"}),
+	}
+	for shape, pb := range pendFixtures {
+		pb := pb
+		pinfo := session.InfoFromPersistedBead(pb)
+		name := pb.Metadata["session_name"]
+		if got, want := pendingInteractionKeepsAwakeInfo(pinfo, pendSP, name, clk), pendingInteractionKeepsAwake(pb, pendSP, name, clk); got != want {
+			t.Errorf("pendingInteractionKeepsAwakeInfo[%s] = %v, want %v", shape, got, want)
+		}
+	}
+	// Load-bearing: pending-clear keeps the session awake (true); pending-held does
+	// NOT (BlockerHeld), exercising the LifecycleInputFromInfo blocker read rather
+	// than a trivial both-false pass.
+	if !pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-clear"]), pendSP, "worker-pending", clk) {
+		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-clear) = false; want true — fixture no longer exercises the keep-awake true branch")
+	}
+	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-held"]), pendSP, "worker-pending", clk) {
+		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-held) = true; want false — fixture no longer exercises the held-blocker branch")
+	}
+
+	// Load-bearing: an asleep idle session whose sleep_policy_fingerprint matches
+	// the resolved policy is config-wake-suppressed via the exact fingerprint branch,
+	// on both forms. fpPolicy is computed from a template/session-name-only bead so
+	// its fingerprint is independent of the sleep_reason/fingerprint metadata below.
+	fpPolicy := resolveSessionSleepPolicy(makeBead("ga-fp0", map[string]string{"template": "worker", "session_name": "worker-fp"}), wakeCfg, wakeSP)
+	fpBead := makeBead("ga-fp", map[string]string{
+		"template":                 "worker",
+		"session_name":             "worker-fp",
+		"state":                    "asleep",
+		"sleep_reason":             "idle",
+		"sleep_policy_fingerprint": fpPolicy.Fingerprint,
+	})
+	fpInfo := session.InfoFromPersistedBead(fpBead)
+	if !configWakeSuppressedInfo(fpInfo, fpPolicy, wakeSP, clk) {
+		t.Fatal("configWakeSuppressedInfo(idle-fingerprint-match) = false; want true — fixture no longer exercises the fingerprint-match branch")
+	}
+	if configWakeSuppressedInfo(fpInfo, fpPolicy, wakeSP, clk) != configWakeSuppressed(fpBead, fpPolicy, wakeSP, clk) {
+		t.Fatal("configWakeSuppressedInfo/configWakeSuppressed diverge on the fingerprint-match fixture")
+	}
+
+	// Load-bearing: the always-named fixture must be config-eligible AND (under an
+	// enabled interactive policy with no demand) still earn WakeConfig via the
+	// isAlwaysNamed arm, so namedSessionModeInfo's "always" read is exercised.
+	alwaysInfo := session.InfoFromPersistedBead(beadsByShape["always-named"])
+	if _, ok := sessionWithinDesiredConfigInfo(alwaysInfo, wakeCfg, nil); !ok {
+		t.Fatal("sessionWithinDesiredConfigInfo(always-named, pd=nil) = false; want true — fixture no longer exercises the always-named eligible branch")
+	}
+	if !containsWakeReason(wakeReasonsInfo(alwaysInfo, wakeCfg, wakeSP, nil, nil, nil, clk), WakeConfig) {
+		t.Fatal("wakeReasonsInfo(always-named) missing WakeConfig; fixture no longer exercises the isAlwaysNamed arm")
+	}
+	// Load-bearing: the whitespace-padded dependency_only fixture must NOT read as
+	// dependency-only (raw == "true" fails on the padded value), so it stays
+	// config-eligible under demand — a trimmed DependencyOnly read would wrongly
+	// exclude it.
+	depPadInfo := session.InfoFromPersistedBead(beadsByShape["dependency-only-padded"])
+	if _, ok := sessionWithinDesiredConfigInfo(depPadInfo, wakeCfg, map[string]int{"worker": 1}); !ok {
+		t.Fatal("sessionWithinDesiredConfigInfo(dependency-only-padded) = false; want true — the untrimmed dependency_only trap regressed")
 	}
 }
 

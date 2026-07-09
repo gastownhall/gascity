@@ -148,6 +148,124 @@ func evaluateWakeReasons(
 	}
 }
 
+// wakeReasonsInfo and evaluateWakeReasonsInfo are the session.Info siblings of
+// wakeReasons / evaluateWakeReasons — the CLI `gc session` REASON-column display
+// helpers. They read the held/wait/quarantine/session-name metadata off the typed
+// Info snapshot (Info.HeldUntil, Info.QuarantinedUntil, Info.WaitHold — untrimmed,
+// matching the raw session.Metadata reads, Info.SessionNameMetadata, Info.ID) and
+// route every classifier through its Info twin, while keeping the runtime probes
+// (sessionAttachedForWakeReason, pendingInteractionReady) raw (§7 live edge).
+func wakeReasonsInfo(
+	info sessionpkg.Info,
+	cfg *config.City,
+	sp runtime.Provider,
+	poolDesired map[string]int,
+	workSet map[string]bool,
+	readyWaitSet map[string]bool,
+	clk clock.Clock,
+) []WakeReason {
+	return evaluateWakeReasonsInfo(info, cfg, sp, poolDesired, workSet, readyWaitSet, clk).Reasons
+}
+
+func evaluateWakeReasonsInfo(
+	info sessionpkg.Info,
+	cfg *config.City,
+	sp runtime.Provider,
+	poolDesired map[string]int,
+	workSet map[string]bool,
+	readyWaitSet map[string]bool,
+	clk clock.Clock,
+) wakeEvaluation {
+	policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
+
+	// User hold suppresses all reasons.
+	if held := info.HeldUntil; held != "" {
+		if t, err := time.Parse(time.RFC3339, held); err == nil && clk.Now().Before(t) {
+			return wakeEvaluation{Policy: policy}
+		}
+	}
+
+	// Quarantine suppresses all reasons.
+	if q := info.QuarantinedUntil; q != "" {
+		if t, err := time.Parse(time.RFC3339, q); err == nil && clk.Now().Before(t) {
+			return wakeEvaluation{Policy: policy}
+		}
+	}
+
+	var reasons []WakeReason
+	waitHold := info.WaitHold != ""
+	name := info.SessionNameMetadata
+
+	if readyWaitSet != nil && readyWaitSet[info.ID] {
+		reasons = append(reasons, WakeWait)
+	}
+	if sessionStartRequestedInfo(info, clk) {
+		reasons = append(reasons, WakeCreate)
+	}
+
+	template := normalizedSessionTemplateInfo(info, cfg)
+	agent, configEligible := sessionWithinDesiredConfigInfo(info, cfg, poolDesired)
+	if !waitHold && agent != nil && sessionMetadataStateInfo(info) == "active" && !policy.enabled() {
+		reasons = append(reasons, WakeSession)
+	}
+	sleepSuppressed := configWakeSuppressedInfo(info, policy, sp, clk)
+	if configEligible {
+		hasDemand := poolDesired[template] > 0
+		isAlwaysNamed := isNamedSessionInfo(info) && namedSessionModeInfo(info) == "always"
+		if !waitHold && (!sleepSuppressed || hasDemand || isAlwaysNamed) {
+			reasons = append(reasons, WakeConfig)
+		}
+	}
+	// WakeWork: the work_query reports pending work for this template.
+	if !waitHold && workSet[template] {
+		reasons = append(reasons, WakeWork)
+	}
+	if !waitHold && sessionKeepWarmEligibleInfo(info, policy, sp, clk) {
+		reasons = append(reasons, WakeKeepWarm)
+	}
+
+	if !waitHold && sessionAttachedForWakeReason(sp, name) {
+		reasons = append(reasons, WakeAttached)
+	}
+
+	if pendingInteractionReady(sp, name) {
+		reasons = append(reasons, WakePending)
+	}
+
+	return wakeEvaluation{
+		Reasons:          reasons,
+		Policy:           policy,
+		ConfigSuppressed: policy.enabled() && sleepSuppressed,
+	}
+}
+
+// sessionWithinDesiredConfigInfo is the session.Info sibling of
+// sessionWithinDesiredConfig. It routes the template resolution and the
+// drained/named/manual classifiers through their Info twins, and compares
+// dependency_only via Info.DependencyOnlyMetadata (the RAW, UNTRIMMED mirror) so
+// the == "true" check stays byte-identical to the bead form on whitespace-padded
+// input.
+func sessionWithinDesiredConfigInfo(info sessionpkg.Info, cfg *config.City, poolDesired map[string]int) (*config.Agent, bool) {
+	template := normalizedSessionTemplateInfo(info, cfg)
+	agent := findAgentByTemplate(cfg, template)
+	if agent == nil {
+		return nil, false
+	}
+	if isDrainedSessionInfo(info) {
+		return agent, false
+	}
+	if info.DependencyOnlyMetadata == "true" {
+		return agent, false
+	}
+	if isNamedSessionInfo(info) {
+		return agent, namedSessionModeInfo(info) == "always" || poolDesired[template] > 0
+	}
+	if isManualSessionInfo(info) {
+		return agent, true
+	}
+	return agent, poolDesired[template] > 0
+}
+
 func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesired map[string]int) (*config.Agent, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	agent := findAgentByTemplate(cfg, template)
