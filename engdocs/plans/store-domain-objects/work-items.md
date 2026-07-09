@@ -124,10 +124,10 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   equivalence pin proven load-bearing (mutation stranded a named session). See `/tmp/r6_finding.md`.
 >
 > **Corrected remaining endgame (= WI-7 expanded; tick-feed refactor is the KEYSTONE the user approved):**
-> - **W-tick** (HIGH — hardest wave since R3): `session.Store.ListAllForReconcile() []Info` + reshape the
->   reconciler tick to hold Info from the edge (Phase-0 heal/dedup become `ApplyPatchInfo` folds; WORK-class
->   orderedBeads stay raw; SESSION beads come as Info). → `InfoFromPersistedBead` :1342/:1419 → 0; frees
->   class (a)+(c). Design in flight (`/tmp/tickfeed_design.md`).
+> - **W-tick** ✅ (merge `1d0260f90`, the keystone): `ListAllForReconcile() []ReconcileSession{Info,Circuit}` +
+>   fold-then-build reshape; `session_reconciler` `InfoFromPersistedBead` 3→0; 0-Get budget held. Red-team
+>   (hardest of the migration): reshape byte-identical; 3 blockers fixed (dedup-stop + fold-visible pins
+>   made load-bearing; trace-recorder/cleanup/cmd_start row flips landed). Added `Info.WorkerDir`.
 > - **W-pool** (medium-HIGH): pool selection/creation/reuse path typing (class b) + `add(info)`.
 > - **W-delete** (mechanical, falls out): raw-half deletion + pure-read accessor migrations + zero
 >   `ListAllSessionBeads` (3) + `session_bead_snapshot` InfoFromPersistedBead (3→0) + `session_hash` (1→0).
