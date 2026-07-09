@@ -1382,6 +1382,47 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+// TestSessionReason_IndexMissReturnsDash pins the miss-path guards: a session
+// present in one reason-projection index but missing from the other must render
+// "-", never a zero-value session.Info fed to wakeReasonsInfo (which would silently
+// emit a wrong REASON cell). Production keeps beadIndex/infoIndex lockstep (both
+// from one snapshot), but the guard is defensive against a future single-index
+// caller (WI-6 R2 red-team nit).
+func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-miss",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-miss",
+			"state":        "asleep",
+			"sleep_reason": "user-hold",
+		},
+	}
+	s := session.Info{
+		ID:          "gc-miss",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-miss",
+	}
+	full := session.InfoFromPersistedBead(bead)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// Present in beadIndex, missing from infoIndex → "-" (the new infoIndex guard).
+	if got := sessionReason(s, map[string]beads.Bead{bead.ID: bead}, map[string]session.Info{}, cfg, nil, nil, nil); got != "-" {
+		t.Fatalf("sessionReason(missing from infoIndex) = %q, want -", got)
+	}
+	// Present in infoIndex, missing from beadIndex → "-" (the existing beadIndex guard).
+	if got := sessionReason(s, map[string]beads.Bead{}, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "-" {
+		t.Fatalf("sessionReason(missing from beadIndex) = %q, want -", got)
+	}
+	// Sanity: present in BOTH renders the real reason, so the guards above are not
+	// trivially returning "-" for a resolvable session.
+	if got := sessionReason(s, map[string]beads.Bead{bead.ID: bead}, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "user-hold" {
+		t.Fatalf("sessionReason(present in both) = %q, want user-hold", got)
+	}
+}
+
 func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 	provider := runtime.NewFake()
 	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {

@@ -1324,8 +1324,13 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, infoIndex ma
 	}
 	// info is the typed reason source of truth — the full snapshot Info projection
 	// (OpenInfos mirrors Open one-to-one, same order), not the display Info s, which
-	// callers may pass minimally populated.
-	info := infoIndex[s.ID]
+	// callers may pass minimally populated. Guard the lookup exactly like beadIndex:
+	// a miss must render "-", never a zero-value Info fed to wakeReasonsInfo (which
+	// would silently emit a wrong REASON cell).
+	info, ok := infoIndex[s.ID]
+	if !ok {
+		return "-" // no typed session data available
+	}
 
 	now := time.Now().UTC()
 	lcInput := session.LifecycleInputFromMetadata(b.Status, b.Metadata)
