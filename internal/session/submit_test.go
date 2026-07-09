@@ -121,6 +121,41 @@ func TestWaitsForIdleAfterInterrupt_WrappedClaude(t *testing.T) {
 	}
 }
 
+// TestProviderFamilyFromInfoMatchesMetadata is the byte-identical oracle for the
+// ProviderFamilyFromInfo twin: for every representative provider-vocab shape, the
+// Info form (fed InfoFromPersistedBead(b)) must agree with the metadata form on
+// the builtin_ancestor → provider_kind → provider precedence ladder. It is
+// self-sufficient (asserts the concrete family output, not only Info==metadata),
+// so mutating any precedence rung on either projection is caught here.
+func TestProviderFamilyFromInfoMatchesMetadata(t *testing.T) {
+	cases := []struct {
+		name     string
+		meta     map[string]string
+		fallback string
+		want     string
+	}{
+		{"empty-fallback-codex", map[string]string{}, "codex", "codex"},
+		{"provider-only", map[string]string{"provider": "codex"}, "", "codex"},
+		{"provider-kind-wins-over-provider", map[string]string{"provider": "claude", "provider_kind": "codex"}, "", "codex"},
+		{"builtin-ancestor-wins", map[string]string{"provider": "claude", "provider_kind": "gemini", "builtin_ancestor": "codex"}, "", "codex"},
+		{"wrapped-alias-provider", map[string]string{"provider": "my-pi"}, "", "pi"},
+		{"blank-rungs-fall-through", map[string]string{"builtin_ancestor": "   ", "provider_kind": "", "provider": "codex"}, "", "codex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := beads.Bead{ID: "s", Type: BeadType, Status: "open", Labels: []string{LabelSession}, Metadata: tc.meta}
+			fromMeta := ProviderFamilyFromMetadata(tc.meta, tc.fallback)
+			fromInfo := ProviderFamilyFromInfo(InfoFromPersistedBead(b), tc.fallback)
+			if fromInfo != fromMeta {
+				t.Errorf("ProviderFamilyFromInfo = %q, ProviderFamilyFromMetadata = %q (want equal)", fromInfo, fromMeta)
+			}
+			if fromInfo != tc.want {
+				t.Errorf("ProviderFamilyFromInfo = %q, want %q", fromInfo, tc.want)
+			}
+		})
+	}
+}
+
 func TestInterruptStrategyUsesPiProviderFamilyAlias(t *testing.T) {
 	wrappedPi := beads.Bead{Metadata: map[string]string{
 		"provider": "my-pi/tmux",

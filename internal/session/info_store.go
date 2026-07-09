@@ -126,6 +126,8 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		StartedProvisionHash:           b.Metadata["started_provision_hash"],
 		StartedLaunchHash:              b.Metadata["started_launch_hash"],
 		StartedLiveHash:                b.Metadata["started_live_hash"],
+		LiveHash:                       b.Metadata["live_hash"],
+		StartupDialogVerified:          b.Metadata["startup_dialog_verified"],
 		ConfigDriftDeferredAt:          b.Metadata["config_drift_deferred_at"],
 		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
 		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
@@ -138,6 +140,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
 		ProviderKind:                   b.Metadata["provider_kind"],
+		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
 
 		// sleep-policy cluster (raw mirrors; see Info doc). The 7 key literals
 		// match the inline keys in cmd/gc/session_sleep.go today (they are inline
