@@ -223,12 +223,18 @@ func TestReusablePoolSessionInfosMatchRawOrder(t *testing.T) {
 	if !reflect.DeepEqual(rawDep, infoDep) {
 		t.Errorf("reusableDependencyPoolSession order diverged:\n info=%v\n raw=%v", infoDep, rawDep)
 	}
-	// The canonical-singleton finder over the typed feed must match the raw finder.
+	// The canonical-singleton finders over the typed feed must match the raw finders
+	// (both the pool and dependency variants).
 	singleton := &config.Agent{Name: "claude", MaxActiveSessions: intPtr(1)}
 	rawCanon, rawOK := findReusableCanonicalNonExpandingPoolSessionBead(bp, singleton, "claude", nil)
 	infoCanon, infoOK := findReusableCanonicalNonExpandingPoolSessionInfo(bp, singleton, "claude", nil)
 	if rawOK != infoOK || rawCanon.ID != infoCanon.ID {
 		t.Errorf("findReusableCanonical: info=(%q,%v) raw=(%q,%v)", infoCanon.ID, infoOK, rawCanon.ID, rawOK)
+	}
+	rawDepCanon, rawDepOK := findReusableCanonicalNonExpandingDependencyPoolSessionBead(bp, singleton, "claude")
+	infoDepCanon, infoDepOK := findReusableCanonicalNonExpandingDependencyPoolSessionInfo(bp, singleton, "claude")
+	if rawDepOK != infoDepOK || rawDepCanon.ID != infoDepCanon.ID {
+		t.Errorf("findReusableCanonicalDependency: info=(%q,%v) raw=(%q,%v)", infoDepCanon.ID, infoDepOK, rawDepCanon.ID, rawDepOK)
 	}
 }
 

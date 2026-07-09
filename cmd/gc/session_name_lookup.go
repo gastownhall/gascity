@@ -201,7 +201,7 @@ func createPoolSessionBead(
 	template string,
 	now time.Time,
 	identity poolSessionCreateIdentity,
-) (beads.Bead, error) {
+) (sessionpkg.Info, error) {
 	var raw beads.Store
 	if sessFront != nil {
 		raw = sessFront.Store().Store
@@ -222,13 +222,13 @@ func createPoolSessionBeadWithAlias(
 	now time.Time,
 	identity poolSessionCreateIdentity,
 	resolvedTmuxAlias string,
-) (beads.Bead, error) {
+) (sessionpkg.Info, error) {
 	if store == nil {
-		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
+		return sessionpkg.Info{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
 	resolvedTmuxAlias, err := validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias)
 	if err != nil {
-		return beads.Bead{}, err
+		return sessionpkg.Info{}, err
 	}
 	instanceToken := sessionpkg.NewInstanceToken()
 	agentName := strings.TrimSpace(identity.AgentName)
@@ -269,38 +269,35 @@ func createPoolSessionBeadWithAlias(
 		}
 		meta[key] = strings.TrimSpace(value)
 	}
-	beadID, err := sessionFrontDoor(store).CreateSession(sessionpkg.CreateSpec{
+	// CreateSessionInfo projects the just-created bead (no post-create store.Get),
+	// so the returned session_name derivation + fold below run over Info directly.
+	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
 		ID:        explicitID,
 		Title:     title,
 		AgentName: agentName,
 		Metadata:  meta,
 	})
 	if err != nil {
-		return beads.Bead{}, err
+		return sessionpkg.Info{}, err
 	}
-	bead, err := store.Get(beadID)
+	sessionName, err = derivePoolSessionName(store, cfg, template, info.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
-		return beads.Bead{}, err
+		_ = sessionFrontDoor(store).CloseWithoutReason(info.ID)
+		return sessionpkg.Info{}, err
 	}
-	sessionName, err = derivePoolSessionName(store, cfg, template, bead.ID, resolvedTmuxAlias, sessionBeads)
-	if err != nil {
-		_ = sessionFrontDoor(store).CloseWithoutReason(bead.ID)
-		return beads.Bead{}, err
-	}
-	if bead.Metadata == nil {
-		bead.Metadata = map[string]string{}
-	}
-	if bead.Metadata["session_name"] != sessionName {
-		if err := sessionFrontDoor(store).SetMarker(bead.ID, "session_name", sessionName); err != nil {
-			_ = sessionFrontDoor(store).CloseWithoutReason(bead.ID)
-			return beads.Bead{}, err
+	if info.SessionNameMetadata != sessionName {
+		// Byte-identical single-key SetMetadata write (SetMarker), then fold the new
+		// session_name onto the returned Info instead of hand-mirroring a raw bead.
+		if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", sessionName); err != nil {
+			_ = sessionFrontDoor(store).CloseWithoutReason(info.ID)
+			return sessionpkg.Info{}, err
 		}
-		bead.Metadata["session_name"] = sessionName
+		info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": sessionName})
 	}
 	if sessionBeads != nil {
-		sessionBeads.add(bead)
+		sessionBeads.addInfo(info)
 	}
-	return bead, nil
+	return info, nil
 }
 
 // derivePoolSessionName picks the session_name for a fresh pool bead. When

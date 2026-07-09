@@ -2373,15 +2373,14 @@ func ensureDependencyOnlyTemplate(
 	// Bead selection keys off the configured base template, not the pool-
 	// instance form, because normalizedSessionTemplate reads the bead's
 	// "template" metadata which is always the base.
-	sessionBead, err := selectOrCreateDependencyPoolSessionBead(bp, cfgAgent, qualifiedName)
+	sbInfo, err := selectOrCreateDependencyPoolSessionBead(bp, cfgAgent, qualifiedName)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 		return
 	}
-	// selectOrCreateDependencyPoolSessionBead can freshly CREATE this bead, so it is
-	// not guaranteed to be in the typed snapshot; project it once here (the raw
-	// dependency-floor boundary) and read the identity chain through session.Info.
-	sbInfo := session.InfoFromPersistedBead(sessionBead)
+	// selectOrCreateDependencyPoolSessionBead returns the typed session.Info of the
+	// selected-or-created dependency-floor session directly (W-pool), so the identity
+	// chain below reads through Info with no raw pool-loop projection.
 	// Env/fingerprint resolution, on the other hand, must use the same
 	// canonical-or-instance identity as both the no-store dependency-floor
 	// path above and realizePoolDesiredSessions. Otherwise GC_ALIAS can
@@ -2465,14 +2464,16 @@ const poolRealizeParallelism = 8
 
 // poolRealizeWorkItem holds the per-request state threaded across the
 // three-phase realizePoolDesiredSessions pipeline. Phase A (serial) populates
-// either sessionBead+slot (reuse path) or plan+slot (create path); Phase B
-// (parallel-bounded) materializes plans into sessionBead/createErr; Phase C
-// (serial) resolves the template and installs side effects.
+// either sessionInfo+slot (reuse path) or plan+slot (create path); Phase B
+// (parallel-bounded) materializes plans into sessionInfo/createErr; Phase C
+// (serial) resolves the template and installs side effects. sessionInfo is the
+// typed session.Info the create/reuse path now returns directly (W-pool), so the
+// realize loop carries Info end to end with no raw pool-loop projection.
 type poolRealizeWorkItem struct {
 	request     SessionRequest
 	skip        bool
 	plan        *poolSessionCreatePlan
-	sessionBead beads.Bead
+	sessionInfo session.Info
 	slot        int
 	createErr   error
 }
@@ -2502,22 +2503,22 @@ func realizePoolDesiredSessions(
 		// append below keeps slice growth in one place.
 		planItem := func() poolRealizeWorkItem {
 			item := poolRealizeWorkItem{request: request}
-			var prefer *beads.Bead
+			var prefer *session.Info
 			if request.SessionBeadID != "" {
-				if bead, ok := findOpenSessionBeadByID(bp.sessionBeads, request.SessionBeadID); ok {
+				if candidate, ok := bp.sessionBeads.FindInfoByID(request.SessionBeadID); ok {
 					// Defense in depth: ComputePoolDesiredStates filters out
 					// named-session beads from pool resume requests. If one
 					// slipped through, materializing it here would create a
 					// phantom "{name}-N" sibling to the canonical named session.
-					if isNamedSessionBead(bead) {
-						fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, bead.ID, cfgAgent.Name) //nolint:errcheck
+					if isNamedSessionInfo(candidate) {
+						fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, candidate.ID, cfgAgent.Name) //nolint:errcheck
 						item.skip = true
 						return item
 					}
-					prefer = &bead
+					prefer = &candidate
 				}
 			}
-			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
+			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
 			if err != nil {
 				switch {
 				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
@@ -2538,12 +2539,12 @@ func realizePoolDesiredSessions(
 				item.slot = plan.poolSlot
 				return item
 			}
-			if used[sessionBead.ID] {
+			if used[sessionInfo.ID] {
 				item.skip = true
 				return item
 			}
-			used[sessionBead.ID] = true
-			item.sessionBead = sessionBead
+			used[sessionInfo.ID] = true
+			item.sessionInfo = sessionInfo
 			item.slot = slot
 			return item
 		}
@@ -2574,12 +2575,12 @@ func realizePoolDesiredSessions(
 				defer wg.Done()
 				for idx := range jobs {
 					plan := *items[idx].plan
-					bead, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
+					info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
 					if err != nil {
 						items[idx].createErr = err
 						continue
 					}
-					items[idx].sessionBead = bead
+					items[idx].sessionInfo = info
 				}
 			}()
 		}
@@ -2611,35 +2612,22 @@ func realizePoolDesiredSessions(
 				delete(usedSlots, item.plan.slot)
 				continue
 			}
-			if used[item.sessionBead.ID] {
+			if used[item.sessionInfo.ID] {
 				continue
 			}
-			used[item.sessionBead.ID] = true
+			used[item.sessionInfo.ID] = true
 		}
-		sessionBead := item.sessionBead
-		// bindPoolSessionTriggerBead takes/returns typed session.Info. item.sessionBead
-		// is a freshly-created-or-reused raw bead not guaranteed to be in the typed
-		// snapshot, so project it once here (the raw pool-loop boundary) and fold the
-		// returned boundInfo. The downstream resolveTemplateForSessionBeadInfo chain now
-		// takes Info, so the trigger patch flows through boundInfo — the W3 transitional
-		// raw-metadata mirror onto sessionBead is dropped, because every downstream raw
-		// read of sessionBead touches a read set DISJOINT from the bind-written keys
-		// (trigger_bead_id/store_ref, brain_parent_sid, pack, pack_workspace, work_dir,
-		// legacy work_dir):
-		//   - isManualSessionBeadForAgent → session_origin / pool_managed /
-		//     dependency_only / template / agent_name;
-		//   - poolRuntimeAliasIsDeferred → alias, the alias-conflict key,
-		//     pending_create_claim, state;
-		//   - setPoolTemplateRuntimeIdentity + the manual-alias/qualified-name reads
-		//     → alias, pool_slot, session_name.
-		sbInfo := session.InfoFromPersistedBead(sessionBead)
+		// item.sessionInfo is the typed session.Info the create/reuse path returns
+		// directly (W-pool), so the former raw pool-loop projection is gone; the
+		// bind fold and every downstream identity read flow through Info.
+		sbInfo := item.sessionInfo
 		if bound, _, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sessionBead.ID, item.request.WorkBeadID, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
 		}
 		slot := item.slot
-		manualSession := isManualSessionBeadForAgent(sessionBead, cfgAgent)
+		manualSession := isManualSessionInfoForAgent(sbInfo, cfgAgent)
 		var (
 			resolveAgent      *config.Agent
 			qualifiedInstance string
@@ -2654,12 +2642,12 @@ func realizePoolDesiredSessions(
 		fpExtra := buildFingerprintExtra(resolveAgent)
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)
 		if err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sessionBead.ID, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sbInfo.ID, err) //nolint:errcheck
 			continue
 		}
 		if manualSession {
 			tp.ManualSession = true
-			if manualAlias := strings.TrimSpace(sessionBead.Metadata["alias"]); manualAlias != "" {
+			if manualAlias := strings.TrimSpace(sbInfo.Alias); manualAlias != "" {
 				tp.Alias = manualAlias
 			}
 			if qualifiedInstance != "" {
@@ -2674,7 +2662,7 @@ func realizePoolDesiredSessions(
 			tp.Alias = qualifiedInstance
 			tp.InstanceName = qualifiedInstance
 			tp.PoolSlot = poolSlot
-			setPoolTemplateRuntimeIdentity(&tp, qualifiedInstance, sessionBead)
+			setPoolTemplateRuntimeIdentityInfo(&tp, qualifiedInstance, sbInfo)
 		}
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		desired[tp.SessionName] = tp
@@ -3600,6 +3588,20 @@ func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, in
 	return 0
 }
 
+// WI-7 W-pool: the raw pool selection/creation/reuse cluster below
+// (findOpenSessionBeadByID, reusablePoolSessionBead(s),
+// reusableDependencyPoolSessionBead(s), findReusableCanonicalNonExpanding*,
+// normalizeNonExpandingPoolSessionBead, recordDeferredNonExpandingPoolAliasConflict,
+// setPoolTemplateRuntimeIdentity, poolRuntimeAliasIsDeferred,
+// staleNonExpandingPoolSessionBead, claimDesiredPoolSlot, sessionBeadHasAssignedWork,
+// sortSessionBeadsByCreatedAtThenID) no longer has a production caller: the pool
+// path returns session.Info end to end via the *Info siblings in
+// build_desired_state_pool_info.go. These raw forms are RETAINED as the
+// load-bearing equivalence-oracle references for those siblings (the migration
+// pattern established by freshRestartSessionKey / resolvedSessionTemplate /
+// existingPoolSlotWithConfig — the raw form is the byte-identity reference the twin
+// is pinned against). They retire in W-delete together with the raw
+// sessionBeadSnapshot half and their oracles.
 func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (beads.Bead, bool) {
 	if sessionBeads == nil || id == "" {
 		return beads.Bead{}, false
@@ -3628,23 +3630,23 @@ func selectOrCreatePoolSessionBead(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
 	template string,
-	preferred *beads.Bead,
+	preferred *session.Info,
 	used map[string]bool,
 	usedSlots map[int]bool,
-) (beads.Bead, int, error) {
-	bead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, SessionRequest{}, used, usedSlots)
+) (session.Info, int, error) {
+	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, SessionRequest{}, used, usedSlots)
 	if err != nil {
-		return beads.Bead{}, 0, err
+		return session.Info{}, 0, err
 	}
 	if plan == nil {
-		return bead, slot, nil
+		return info, slot, nil
 	}
-	bead, err = executePlannedPoolSessionBeadCreate(bp, cfgAgent, template, *plan)
+	info, err = executePlannedPoolSessionBeadCreate(bp, cfgAgent, template, *plan)
 	if err != nil {
 		delete(usedSlots, plan.slot)
-		return bead, 0, err
+		return info, 0, err
 	}
-	return bead, plan.poolSlot, nil
+	return info, plan.poolSlot, nil
 }
 
 // selectOrPlanPoolSessionBead performs the in-memory selection phase of pool
@@ -3664,54 +3666,54 @@ func selectOrPlanPoolSessionBead(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
 	template string,
-	preferred *beads.Bead,
+	preferred *session.Info,
 	request SessionRequest,
 	used map[string]bool,
 	usedSlots map[int]bool,
-) (beads.Bead, int, *poolSessionCreatePlan, error) {
+) (session.Info, int, *poolSessionCreatePlan, error) {
 	if cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
 	}
 	if cfgAgent == nil {
-		return beads.Bead{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
+		return session.Info{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
-	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionBead(*preferred) {
-		slot := claimDesiredPoolSlot(bp.city, cfgAgent, *preferred, usedSlots)
+	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
+		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, *preferred, usedSlots)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-			return beads.Bead{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
+			return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
 		}
-		if isManualSessionBeadForAgent(*preferred, cfgAgent) {
+		if isManualSessionInfoForAgent(*preferred, cfgAgent) {
 			return *preferred, slot, nil, nil
 		}
-		bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, *preferred)
-		return bead, slot, nil, err
+		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, *preferred)
+		return info, slot, nil, err
 	}
-	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionBead(bp, cfgAgent, template, used); ok {
-		slot := claimDesiredPoolSlot(bp.city, cfgAgent, canonical, usedSlots)
-		bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, canonical)
-		return bead, slot, nil, err
+	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionInfo(bp, cfgAgent, template, used); ok {
+		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, canonical, usedSlots)
+		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
+		return info, slot, nil, err
 	}
 	// Reuse an existing active/creating session bead. Skip drained, closed,
 	// and asleep — asleep ephemerals are not restarted; a fresh session is
 	// created instead. The reconciler closes orphaned asleep beads.
-	for _, bead := range reusablePoolSessionBeads(bp, cfgAgent, template, used) {
-		if desiredName := strings.TrimSpace(bead.Metadata["session_name"]); desiredName != "" {
-			slot := claimDesiredPoolSlot(bp.city, cfgAgent, bead, usedSlots)
+	for _, candidate := range reusablePoolSessionInfos(bp, cfgAgent, template, used) {
+		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
+			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
 			if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 				continue
 			}
-			bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, bead)
-			return bead, slot, nil, err
+			info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, candidate)
+			return info, slot, nil, err
 		}
 	}
-	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
+	slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, session.Info{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
 	metadata := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
 
 	if bp.poolScaleCheckPartialTemplates[template] {
 		delete(usedSlots, slot)
-		return beads.Bead{}, 0, nil, errPoolSessionCreatePartial
+		return session.Info{}, 0, nil, errPoolSessionCreatePartial
 	}
 
 	// Provider-health gate: refuse new creates when the registry reports this
@@ -3728,12 +3730,12 @@ func selectOrPlanPoolSessionBead(
 	}
 	if healthy, present := bp.providerHealthSnapshot.check(provName); present && !healthy {
 		delete(usedSlots, slot)
-		return beads.Bead{}, 0, nil, errPoolSessionCreateProviderRed
+		return session.Info{}, 0, nil, errPoolSessionCreateProviderRed
 	}
 
 	if !bp.tryClaimPoolSessionCreate(template) {
 		delete(usedSlots, slot)
-		return beads.Bead{}, 0, nil, errPoolSessionCreateBudgetExhausted
+		return session.Info{}, 0, nil, errPoolSessionCreateBudgetExhausted
 	}
 
 	plan := &poolSessionCreatePlan{
@@ -3742,7 +3744,7 @@ func selectOrPlanPoolSessionBead(
 		poolSlot:          poolSlot,
 		metadata:          metadata,
 	}
-	return beads.Bead{}, 0, plan, nil
+	return session.Info{}, 0, plan, nil
 }
 
 func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) map[string]string {
@@ -3782,12 +3784,12 @@ func executePlannedPoolSessionBeadCreate(
 	cfgAgent *config.Agent,
 	template string,
 	plan poolSessionCreatePlan,
-) (beads.Bead, error) {
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot, plan.metadata)
+) (session.Info, error) {
+	info, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot, plan.metadata)
 	if err != nil {
 		bp.releasePoolSessionCreate()
 	}
-	return bead, err
+	return info, err
 }
 
 func claimDesiredPoolSlot(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
@@ -3969,20 +3971,20 @@ func createPoolSessionBeadWithGuardedAlias(
 	qualifiedInstance string,
 	slot int,
 	metadata map[string]string,
-) (beads.Bead, error) {
+) (session.Info, error) {
 	if bp == nil {
-		return beads.Bead{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
+		return session.Info{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
 	}
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedInstance); err != nil {
-		return beads.Bead{}, err
+		return session.Info{}, err
 	}
 	resolvedTmuxAlias, err := bp.resolveTmuxAliasForAgent(cfgAgent)
 	if err != nil {
-		return beads.Bead{}, err
+		return session.Info{}, err
 	}
 	resolvedTmuxAlias, err = validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias)
 	if err != nil {
-		return beads.Bead{}, err
+		return session.Info{}, err
 	}
 	identity := poolSessionCreateIdentity{
 		AgentName: qualifiedInstance,
@@ -4004,7 +4006,7 @@ func createPoolSessionBeadWithGuardedAlias(
 		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
 	}
 
-	var bead beads.Bead
+	var info session.Info
 	createdWithLock := false
 	lockErr := session.WithCitySessionIdentifierLocks(bp.cityPath, lockIDs, func() error {
 		createIdentity := identity
@@ -4014,12 +4016,12 @@ func createPoolSessionBeadWithGuardedAlias(
 			}
 		}
 		var err error
-		bead, err = createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity, resolvedTmuxAlias)
+		info, err = createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity, resolvedTmuxAlias)
 		createdWithLock = true
 		return err
 	})
 	if createdWithLock {
-		return bead, lockErr
+		return info, lockErr
 	}
 	if lockErr != nil && bp.stderr != nil {
 		fmt.Fprintf(bp.stderr, "createPoolSessionBeadWithGuardedAlias: locking alias %q for %s: %v; creating without alias\n", alias, template, lockErr) //nolint:errcheck
@@ -4060,13 +4062,12 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 // raw (ClassWork — Bead is the domain object). Byte-identical to the raw form,
 // pinned by TestSessionBeadHasAssignedWorkInfoMatchesRaw.
 //
-// WI-6: reusablePoolSessionBead (the raw-bead reuse predicate below) is the
-// production call site. reusablePoolSessionBeads returns []beads.Bead consumed by
-// the raw pool selection/creation path (selectOrPlanPoolSessionBead →
-// normalizeNonExpandingPoolSessionBeadForSelection → the raw item.sessionBead), so
-// the predicate stays raw until that whole path is typed in WI-6 — converting only
-// the predicate would force a per-bead projection (census UP) while the return type
-// must stay bead-shaped. Until then this twin's only caller is its oracle.
+// WI-7 W-pool: reusablePoolSessionInfo (the typed reuse predicate) is now the
+// production call site — the pool selection path returns session.Info, so the
+// predicate reads OpenInfos and this twin is production. The raw
+// sessionBeadHasAssignedWork survives as the equivalence-oracle reference (like the
+// rest of the raw pool-selection cluster), retiring with the raw snapshot half in
+// W-delete.
 func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -4446,18 +4447,18 @@ func selectOrCreateDependencyPoolSessionBead(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
 	template string,
-) (beads.Bead, error) {
+) (session.Info, error) {
 	if cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
 	}
 	if cfgAgent == nil {
-		return beads.Bead{}, fmt.Errorf("dependency pool template %q has no configured agent", template)
+		return session.Info{}, fmt.Errorf("dependency pool template %q has no configured agent", template)
 	}
-	if canonical, ok := findReusableCanonicalNonExpandingDependencyPoolSessionBead(bp, cfgAgent, template); ok {
-		return normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, canonical)
+	if canonical, ok := findReusableCanonicalNonExpandingDependencyPoolSessionInfo(bp, cfgAgent, template); ok {
+		return normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 	}
-	for _, bead := range reusableDependencyPoolSessionBeads(bp, template) {
-		return normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, bead)
+	for _, info := range reusableDependencyPoolSessionInfos(bp, template) {
+		return normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, info)
 	}
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, 1)
 	// Dependency floors are bounded prerequisites for already-realized roots,

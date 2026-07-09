@@ -3050,7 +3050,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ownerSessionName := owner.Metadata["session_name"]
+	ownerSessionName := owner.SessionNameMetadata
 	visible, err := loadSessionBeads(store)
 	if err != nil {
 		t.Fatal(err)

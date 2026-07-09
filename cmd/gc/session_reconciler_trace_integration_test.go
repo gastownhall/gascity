@@ -720,7 +720,11 @@ func createCanonicalPoolSession(t *testing.T, store beads.Store, cfgAgent *confi
 	if err != nil {
 		t.Fatalf("create pool session: %v", err)
 	}
-	return session
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get pool session bead: %v", err)
+	}
+	return stored
 }
 
 func traceFieldInt(v any) int {
