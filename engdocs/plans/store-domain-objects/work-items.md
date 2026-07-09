@@ -105,11 +105,21 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   residue fold carried pre-prep values → same-tick config-drift gate could kill an alive session;
 >   threaded the post-mutation Info out on error) + 3 nits. The 2 non-known integration timeouts
 >   independently confirmed as contention flakes, not R4.
-> - **R5** 🔨 impl: periphery honest holds (snapshot raw-half delete — needs
->   `Info.SessionCircuitState` + `LifecycleDisplayReasonWithLivenessInfo` twin per the R2 finding;
->   hash/template; `cmd_prime` front-door Get; `cmd_wait` PollerKeyFromBead→0). Zeroes
->   `ListAllSessionBeads` + `PollerKeyFromBead`. Leaves the `InfoFromPersistedBead` tail (3 tick
->   edges + build_desired_state + session_logs_resolve + session_resolution) for WI-7.
+> - **R5** RE-SCOPED to **R5-lite** 🔨 impl (the R5 agent honestly STOPPED: the design's premise
+>   "after R2 the snapshot raw half has no reader" is FALSE — `Open()`/`FindByID`/
+>   `newSessionBeadSnapshot(beads)` still have many consumers in `city_runtime`/`cmd_start`/
+>   `providers`/`build_desired_state`/`session_name_lookup`, several out of R5's scope). R5-lite =
+>   the in-scope wins: add `Info.SessionCircuitState` + `LifecycleDisplayReasonWithLivenessInfo`
+>   twin + migrate cmd_session's display (removes ONE raw consumer); `cmd_prime` front-door Get;
+>   `session_hash`/`session_template_start` → Info; `cmd_wait` PollerKeyFromBead→0. Net:
+>   `PollerKeyFromBead → 0` + 3 `InfoFromPersistedBead` drops. `ListAllSessionBeads` UNCHANGED.
+> - **R6** (NEW — the snapshot raw-half migration the design under-scoped as "part of R5"):
+>   migrate EVERY `Open()`/`FindByID`/`FindSessionNameByNamedIdentity`/`newSessionBeadSnapshot(beads)`/
+>   `snapshot.add(bead)` consumer across `city_runtime`/`cmd_start`/`providers`/`build_desired_state`/
+>   `session_name_lookup`/`session_beads`/`doctor`/`session_lifecycle_parallel` → typed readers
+>   (`OpenInfos`/`FindInfoByID`/`FindInfoByNamedIdentity`); then `loadSessionBeadSnapshot` builds
+>   from Info; then DELETE the raw half + zero `ListAllSessionBeads` (3 sites) +
+>   `session_bead_snapshot` `InfoFromPersistedBead` (3→0). Load-bearing (constructor-equivalence pin).
 > - **WI-7 W7a**: front-door flip (`class_store.go` + `api.State` → domain stores).
 > - **WI-7 W7b**: unexport the codecs (tick-feed refactor for `InfoFromPersistedBead`);
 >   guards → permanent zero-pins. Orders codecs gated on deferred WI-3 two-class wiring.
