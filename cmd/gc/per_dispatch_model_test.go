@@ -87,8 +87,7 @@ func newOptionSessionCandidate(t *testing.T, store beads.Store, workOptions, ses
 	}
 
 	return startCandidate{
-		session: &session,
-		info:    sessionpkg.InfoFromPersistedBead(session),
+		info: sessionpkg.InfoFromPersistedBead(session),
 		tp: TemplateParams{
 			TemplateName:     "worker",
 			SessionName:      sessionName,
@@ -145,7 +144,7 @@ func TestBuildPreparedStart_ExplicitOverrideWinsPerKey(t *testing.T) {
 		t.Fatalf("prepared command = %q, want work opt_effort high", prepared.cfg.Command)
 	}
 	wantPersisted := map[string]string{"model": "sonnet"}
-	if got := storedSessionOverrides(t, store, candidate.session.ID); !reflect.DeepEqual(got, wantPersisted) {
+	if got := storedSessionOverrides(t, store, candidate.info.ID); !reflect.DeepEqual(got, wantPersisted) {
 		t.Fatalf("persisted overrides = %v, want unchanged %v", got, wantPersisted)
 	}
 }
@@ -209,7 +208,7 @@ func TestBuildPreparedStartAppliesWorkBeadOptionsToCommand(t *testing.T) {
 	if !strings.Contains(prepared.cfg.Command, "--effort high") {
 		t.Fatalf("prepared command = %q, want --effort high", prepared.cfg.Command)
 	}
-	metadata := storedSessionMetadata(t, store, candidate.session.ID)
+	metadata := storedSessionMetadata(t, store, candidate.info.ID)
 	if got := strings.TrimSpace(metadata["template_overrides"]); got != "" {
 		t.Fatalf("template_overrides persisted from work options: %q", got)
 	}
@@ -233,12 +232,12 @@ func TestBuildPreparedStartInitialMessageOnlyMatchesDriftHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}
-	want := runtime.CoreFingerprint(sessionCoreConfigForHash(candidate.tp, *candidate.session))
+	want := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(candidate.tp, candidate.info))
 	if prepared.coreHash != want {
 		t.Fatalf("prepared coreHash = %s, want drift hash %s\nprepared command: %q\ndrift command:    %q",
 			prepared.coreHash,
 			want,
 			prepared.cfg.Command,
-			sessionCoreConfigForHash(candidate.tp, *candidate.session).Command)
+			sessionCoreConfigForHashInfo(candidate.tp, candidate.info).Command)
 	}
 }

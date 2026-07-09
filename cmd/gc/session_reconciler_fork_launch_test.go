@@ -240,7 +240,7 @@ func newForkSessionCandidate(t *testing.T, rp *config.ResolvedProvider, parentSI
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", ResolvedProvider: rp}
-	return startCandidate{session: &session, info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
+	return startCandidate{info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
 }
 
 // TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery is the

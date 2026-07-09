@@ -72,7 +72,7 @@ func TestPreWakeCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newGen, token, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
+	newGen, token, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk)
 	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestPreWakeCommitUsesSingleBatchMetadataWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if store.batchCalls != 1 {
@@ -143,7 +143,7 @@ func TestPreWakeCommit_InvalidName(t *testing.T) {
 		},
 	})
 
-	_, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
+	_, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk)
 	if err == nil {
 		t.Error("expected error for invalid session_name")
 	}
@@ -169,7 +169,7 @@ func TestPreWakeCommit_BumpsContinuationEpochForFreshWake(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -204,7 +204,8 @@ func TestPreWakeCommit_FreshModeClearsPreviousConversationMetadata(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	_, _, fold, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk)
+	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
@@ -218,8 +219,10 @@ func TestPreWakeCommit_FreshModeClearsPreviousConversationMetadata(t *testing.T)
 		if got.Metadata[key] != "" {
 			t.Errorf("%s = %q, want cleared for wake_mode=fresh", key, got.Metadata[key])
 		}
-		if b.Metadata[key] != "" {
-			t.Errorf("in-memory %s = %q, want cleared for wake_mode=fresh", key, b.Metadata[key])
+		// The returned fold is the in-memory carrier (the caller folds it onto its
+		// coherent Info snapshot); it must clear each fresh-wake conversation key.
+		if v, ok := fold[key]; !ok || v != "" {
+			t.Errorf("fold %s = %q (present=%v), want cleared for wake_mode=fresh", key, v, ok)
 		}
 	}
 	if got.Metadata["continuation_epoch"] != "4" {
@@ -254,7 +257,7 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		t.Fatal(err)
 	}
 
-	newGen, token, err := preWakeCommit(&b, sessionFrontDoor(store), clk)
+	newGen, token, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk)
 	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
@@ -324,7 +327,7 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 
@@ -374,7 +377,7 @@ func TestPreWakeCommit_FreshModeTraceSilentWhenTraceDisabled(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -413,7 +416,7 @@ func TestPreWakeCommit_FreshModeTraceSilentWhenNothingCleared(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -457,7 +460,7 @@ func TestPreWakeCommit_ResumeModeTraceSilent(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -504,7 +507,7 @@ func TestPreWakeCommit_FreshModeTraceSilentOnStoreFailure(t *testing.T) {
 		log.SetPrefix(prevPrefix)
 	})
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err == nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err == nil {
 		t.Fatal("preWakeCommit: expected error")
 	}
 	if strings.TrimSpace(logBuf.String()) != "" {
@@ -531,7 +534,7 @@ func TestPreWakeCommit_BumpsContinuationEpochForPendingReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, sessionFrontDoor(store), clk); err != nil {
+	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)

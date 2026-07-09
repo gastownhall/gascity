@@ -159,8 +159,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 			t.Fatalf("Create(session): %v", err)
 		}
 		return startCandidate{
-			session: &session,
-			info:    sessionpkg.InfoFromPersistedBead(session),
+			info: sessionpkg.InfoFromPersistedBead(session),
 			tp: TemplateParams{
 				TemplateName:     "worker",
 				SessionName:      "worker",

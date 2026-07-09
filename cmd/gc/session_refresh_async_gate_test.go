@@ -34,9 +34,8 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 		result := startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					session: &beads.Bead{ID: corrupt.ID, Metadata: map[string]string{"state": "creating"}},
-					info:    session.Info{ID: corrupt.ID},
-					tp:      TemplateParams{TemplateName: "worker"},
+					info: session.Info{ID: corrupt.ID},
+					tp:   TemplateParams{TemplateName: "worker"},
 				},
 			},
 			outcome: "success",
@@ -72,9 +71,8 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 		result := startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					session: &preparedBead,
-					info:    session.InfoFromPersistedBead(preparedBead),
-					tp:      TemplateParams{TemplateName: "worker"},
+					info: session.InfoFromPersistedBead(preparedBead),
+					tp:   TemplateParams{TemplateName: "worker"},
 				},
 			},
 			outcome: "success",

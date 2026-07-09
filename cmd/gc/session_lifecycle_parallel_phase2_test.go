@@ -179,9 +179,8 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		session: &session,
-		info:    sessionpkg.InfoFromPersistedBead(session),
-		tp:      phase2TemplateParams(t, tc, "Base worker prompt"),
+		info: sessionpkg.InfoFromPersistedBead(session),
+		tp:   phase2TemplateParams(t, tc, "Base worker prompt"),
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)
@@ -232,9 +231,8 @@ func preparePhase2ResumeRestartStart(t *testing.T, tc phase2ProviderCase, overri
 	tp := phase2TemplateParams(t, tc, "Base worker prompt")
 	tp.Hints.Nudge = ""
 	prepared, err := prepareStartCandidate(startCandidate{
-		session: &session,
-		info:    sessionpkg.InfoFromPersistedBead(session),
-		tp:      tp,
+		info: sessionpkg.InfoFromPersistedBead(session),
+		tp:   tp,
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)

@@ -20,31 +20,27 @@ import (
 // instead of jumping to a sibling assignment.
 // recordCurrentBeadIDOnWake returns the metadata patch it applied (the
 // currently_processing_bead_id write) so the reconciler can fold it onto the
-// infoByID snapshot (write-returns-Info), or nil when it was a no-op. The raw
-// mirror onto session.Metadata is kept: the freshly-mutated bead pointer is
-// appended to startCandidates and read again by the start-execution path this
-// tick.
-func recordCurrentBeadIDOnWake(session *beads.Bead, sessFront *sessionpkg.Store, beadID string, stderr io.Writer) sessionpkg.MetadataPatch {
-	if session == nil || sessFront == nil {
+// infoByID snapshot (write-returns-Info), or nil when it was a no-op. It reads
+// the session id and the currently-processing bead off the caller's coherent
+// typed Info (Info.ID / Info.CurrentlyProcessingBeadID, both verbatim raw
+// mirrors); the fold the caller applies keeps the snapshot in step.
+func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store, beadID string, stderr io.Writer) sessionpkg.MetadataPatch {
+	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
 		return nil
 	}
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
 		return nil
 	}
-	if session.Metadata[sessionpkg.CurrentBeadIDKey] == beadID {
+	if info.CurrentlyProcessingBeadID == beadID {
 		return nil
 	}
-	if err := sessFront.RecordCurrentBead(session.ID, beadID); err != nil {
+	if err := sessFront.RecordCurrentBead(info.ID, beadID); err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "session reconciler: recording %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, session.Metadata["session_name"], err) //nolint:errcheck
+			fmt.Fprintf(stderr, "session reconciler: recording %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, info.SessionNameMetadata, err) //nolint:errcheck
 		}
 		return nil
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, 1)
-	}
-	session.Metadata[sessionpkg.CurrentBeadIDKey] = beadID
 	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
 }
 

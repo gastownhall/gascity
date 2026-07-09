@@ -1,12 +1,53 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+// refRunningSessionMatchesPendingCreate is the raw-metadata reference
+// implementation of the runningSessionMatchesPendingCreate classifier whose
+// production raw form was deleted in WI-6 R4. It is inlined here so the Info twin
+// is pinned against an independent bead read (self-sufficient oracle, not a
+// tautological Info-vs-Info compare).
+func refRunningSessionMatchesPendingCreate(b beads.Bead, sessionName string, sp runtime.Provider) bool {
+	if sp == nil {
+		return false
+	}
+	liveID := ""
+	if value, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+		liveID = strings.TrimSpace(value)
+		if liveID != "" && liveID != b.ID {
+			return false
+		}
+	}
+	expectedToken := strings.TrimSpace(b.Metadata["instance_token"])
+	liveToken := ""
+	if value, err := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN"); err == nil {
+		liveToken = strings.TrimSpace(value)
+		if liveToken != "" && liveToken != expectedToken {
+			liveGeneration, _ := sp.GetMeta(sessionName, "GC_RUNTIME_EPOCH")
+			expectedGeneration := strings.TrimSpace(b.Metadata["generation"])
+			if strings.TrimSpace(liveGeneration) != "" && expectedGeneration != "" && strings.TrimSpace(liveGeneration) != expectedGeneration {
+				return false
+			}
+			if liveID == "" {
+				return false
+			}
+		}
+	}
+	if liveID != "" {
+		return liveID == b.ID
+	}
+	if expectedToken == "" {
+		return false
+	}
+	return expectedToken != "" && liveToken == expectedToken
+}
 
 // TestDrainAckClassifierInfoEquivalence is the byte-identical oracle for the
 // drain-ack runtime-meta family (WI-5 W2 §3.2). These classifiers can't ride the
@@ -121,8 +162,7 @@ func TestDrainAckClassifierInfoEquivalence(t *testing.T) {
 					t.Errorf("assignedWorkDrainCancelReason[dt]: info=%q bead=%q", got, want)
 				}
 
-				bb := b
-				if got, want := runningSessionMatchesPendingCreateInfo(info, name, sp), runningSessionMatchesPendingCreate(&bb, name, sp); got != want {
+				if got, want := runningSessionMatchesPendingCreateInfo(info, name, sp), refRunningSessionMatchesPendingCreate(b, name, sp); got != want {
 					t.Errorf("runningSessionMatchesPendingCreate: info=%v bead=%v", got, want)
 				}
 			})

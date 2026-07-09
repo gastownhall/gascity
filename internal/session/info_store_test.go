@@ -81,53 +81,6 @@ func TestStoreGetNotFound(t *testing.T) {
 	}
 }
 
-// TestStoreGetBeadWithInfo asserts the (Bead, Info) single-fetch pairing returns the
-// raw bead alongside its Info projection — both from one store read (so a
-// transitional raw consumer and the typed reads never split across two snapshots) —
-// and shares Get's validatedBead gate: a present-but-non-session bead and a missing
-// id both error, exactly like Get.
-func TestStoreGetBeadWithInfo(t *testing.T) {
-	b := sessionBeadFixture("s-gwb-1", "open", map[string]string{
-		"template":     "polecat",
-		"state":        "asleep",
-		"session_name": "s-gwb-1",
-		"session_key":  "uuid-xyz",
-	})
-	store := seedSessionStore(t, b)
-	is := NewStore(store)
-
-	gotBead, gotInfo, err := is.GetBeadWithInfo("s-gwb-1")
-	if err != nil {
-		t.Fatalf("GetBeadWithInfo: %v", err)
-	}
-	if gotBead.ID != "s-gwb-1" || gotBead.Metadata["session_key"] != "uuid-xyz" {
-		t.Fatalf("GetBeadWithInfo raw bead unexpected: id=%q session_key=%q", gotBead.ID, gotBead.Metadata["session_key"])
-	}
-	// The returned bead and Info come from the SAME fetch, so the Info is exactly the
-	// projection of the returned bead.
-	if !reflect.DeepEqual(gotInfo, InfoFromPersistedBead(gotBead)) {
-		t.Fatalf("GetBeadWithInfo Info is not the projection of its own bead")
-	}
-	wantInfo, err := is.Get("s-gwb-1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if !reflect.DeepEqual(gotInfo, wantInfo) {
-		t.Fatalf("GetBeadWithInfo Info mismatch with Get:\n got = %+v\nwant = %+v", gotInfo, wantInfo)
-	}
-
-	if _, _, err := is.GetBeadWithInfo("missing"); err == nil {
-		t.Fatal("GetBeadWithInfo(missing): want error, got nil")
-	}
-	// A present-but-non-session bead (no session type, no gc:session label) is rejected
-	// like Get — this is the gate refreshAsyncStartResult relies on.
-	nonSession := beads.Bead{ID: "s-task", Type: "task", Metadata: map[string]string{"session_name": "x"}}
-	store2 := beads.SessionStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{nonSession}, nil)}
-	if _, _, err := NewStore(store2).GetBeadWithInfo("s-task"); err == nil {
-		t.Fatal("GetBeadWithInfo(non-session): want ErrSessionNotFound, got nil")
-	}
-}
-
 // TestStoreGetNilInnerStore pins the WI-6 W4 nit-5 fix: a non-nil *Store wrapping
 // a nil inner beads.Store must NOT panic in validatedBead — it returns the wrapped
 // beads.ErrNotFound (the absence contract), mirroring ListAll's nil-inner-store

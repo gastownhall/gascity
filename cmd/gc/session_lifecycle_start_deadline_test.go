@@ -46,12 +46,6 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsDeadlineExceeded(t
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "deadline-witness",
-					"template":     "worker",
-				},
-			},
 			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
 				Metadata: map[string]string{
 					"session_name": "deadline-witness",
@@ -120,14 +114,6 @@ func TestExecutePreparedStartWave_ResumeSessionKeyStaleCheckAfterInTimeStartStay
 	sp := runtime.NewFake()
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				ID: "gc-resume",
-				Metadata: map[string]string{
-					"session_name": "resume-deadline-witness",
-					"session_key":  "resume-key",
-					"template":     "worker",
-				},
-			},
 			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
 				ID: "gc-resume",
 				Metadata: map[string]string{
@@ -190,12 +176,6 @@ func TestExecutePreparedStartWave_CanceledContextReportsCanceled(t *testing.T) {
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "cancel-witness",
-					"template":     "worker",
-				},
-			},
 			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
 				Metadata: map[string]string{
 					"session_name": "cancel-witness",
@@ -247,12 +227,6 @@ func TestExecutePreparedStartWave_InitializingAfterDeadlineBacksOffSilently(t *t
 	sp := &initializingAfterDeadlineProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "initializing-witness",
-					"template":     "worker",
-				},
-			},
 			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
 				Metadata: map[string]string{
 					"session_name": "initializing-witness",

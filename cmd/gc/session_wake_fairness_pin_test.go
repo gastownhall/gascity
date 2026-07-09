@@ -44,7 +44,7 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	// candidateFor builds a startCandidate the way the reconciler append site does:
 	// the raw bead plus the coherent Info twin projected from it.
 	candidateFor := func(bead beads.Bead) startCandidate {
-		return startCandidate{session: &bead, info: session.InfoFromPersistedBead(bead)}
+		return startCandidate{info: session.InfoFromPersistedBead(bead)}
 	}
 
 	beadWithMeta := func(id string, created time.Time, meta map[string]string) beads.Bead {
@@ -144,7 +144,7 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 
 	cands := []startCandidate{recentlyWoken, newSlept, oldSlept}
 	sortCandidatesByWakeFairness(cands)
-	gotOrder := []string{cands[0].session.ID, cands[1].session.ID, cands[2].session.ID}
+	gotOrder := []string{cands[0].info.ID, cands[1].info.ID, cands[2].info.ID}
 	wantOrder := []string{"ga-old", "ga-new", "ga-recent"}
 	for i := range wantOrder {
 		if gotOrder[i] != wantOrder[i] {

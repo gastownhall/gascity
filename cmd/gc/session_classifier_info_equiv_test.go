@@ -839,13 +839,16 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
 	}{
-		"isPoolManagedSessionBead":    {isPoolManagedSessionBead, isPoolManagedSessionInfo},
-		"isEphemeralSessionBead":      {isEphemeralSessionBead, isEphemeralSessionInfo},
-		"isManualSessionBead":         {isManualSessionBead, isManualSessionInfo},
-		"isNamedSessionBead":          {isNamedSessionBead, isNamedSessionInfo},
-		"isDrainedSessionBead":        {isDrainedSessionBead, isDrainedSessionInfo},
-		"isFailedCreateSessionBead":   {isFailedCreateSessionBead, isFailedCreateSessionInfo},
-		"shouldRollbackPendingCreate": {func(b beads.Bead) bool { return shouldRollbackPendingCreate(&b) }, shouldRollbackPendingCreateInfo},
+		"isPoolManagedSessionBead":  {isPoolManagedSessionBead, isPoolManagedSessionInfo},
+		"isEphemeralSessionBead":    {isEphemeralSessionBead, isEphemeralSessionInfo},
+		"isManualSessionBead":       {isManualSessionBead, isManualSessionInfo},
+		"isNamedSessionBead":        {isNamedSessionBead, isNamedSessionInfo},
+		"isDrainedSessionBead":      {isDrainedSessionBead, isDrainedSessionInfo},
+		"isFailedCreateSessionBead": {isFailedCreateSessionBead, isFailedCreateSessionInfo},
+		// Raw reference inlined: the production shouldRollbackPendingCreate raw form
+		// was deleted in WI-6 R4, so the Info twin is pinned against an independent
+		// bead-metadata read (self-sufficient oracle, not a side door).
+		"shouldRollbackPendingCreate": {func(b beads.Bead) bool { return strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" }, shouldRollbackPendingCreateInfo},
 		"isStaleCreating":             {isStaleCreating, isStaleCreatingInfo},
 		"isPoolSessionSlotFreeable":   {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
 		"beadOwnsPoolSessionName":     {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
@@ -1446,9 +1449,62 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		})
 	}
 
-	// Async-start commit-protocol twins (WI-6 W5). Each reads TWO session views
-	// (prepared + current), so they don't fit the single-bead loop above. Prove the
-	// Info form is byte-identical to the raw-bead form across the fixture corpus.
+	// Async-start commit-protocol twins. Each reads TWO session views (prepared +
+	// current), so they don't fit the single-bead loop above. Prove the Info form is
+	// byte-identical to an independent raw bead-metadata reference across the fixture
+	// corpus. The production raw forms were deleted in WI-6 R4, so these reference
+	// implementations are inlined here as the self-sufficient oracle (the Info
+	// projection is pinned against a direct metadata read, not a side door).
+	refShouldRollback := func(b beads.Bead) bool {
+		return strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
+	}
+	refCommandStale := func(prepared preparedStart, current beads.Bead) bool {
+		preparedCommand := strings.TrimSpace(prepared.candidate.tp.Command)
+		currentCommand := strings.TrimSpace(current.Metadata["command"])
+		return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
+	}
+	refIdentityMatches := func(prepared, current beads.Bead) bool {
+		preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
+		if preparedToken != "" {
+			return strings.TrimSpace(current.Metadata["instance_token"]) == preparedToken
+		}
+		preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
+		if preparedGeneration == "" {
+			return true
+		}
+		return strings.TrimSpace(current.Metadata["generation"]) == preparedGeneration
+	}
+	refStillCurrent := func(prepared, current beads.Bead) bool {
+		if strings.TrimSpace(current.Status) == "closed" {
+			return false
+		}
+		if !refIdentityMatches(prepared, current) {
+			return false
+		}
+		currentState := session.State(strings.TrimSpace(current.Metadata["state"]))
+		if currentState == session.StateAwake || currentState == session.StateActive {
+			return true
+		}
+		if refShouldRollback(prepared) && !refShouldRollback(current) {
+			return false
+		}
+		return confirmPendingStart(string(currentState))
+	}
+	refCleanupAllowed := func(prepared, current beads.Bead) bool {
+		if strings.TrimSpace(current.Status) == "closed" {
+			return true
+		}
+		if !refIdentityMatches(prepared, current) {
+			return true
+		}
+		currentState := session.State(strings.TrimSpace(current.Metadata["state"]))
+		if refShouldRollback(prepared) && !refShouldRollback(current) {
+			return currentState != session.StateAwake && currentState != session.StateActive
+		}
+		return !confirmPendingStart(string(currentState)) &&
+			currentState != session.StateAwake &&
+			currentState != session.StateActive
+	}
 	//
 	// asyncStartPreparedCommandStale's prepared side is the resolved template command
 	// (tp.Command), shared by both forms; only the current side switches bead↔Info
@@ -1464,7 +1520,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		t.Run("asyncCommandStale/"+currentShape, func(t *testing.T) {
 			for _, cmd := range []string{"", "claude --resume", "codex exec", "  claude --resume  "} {
 				pr := preparedWithCommand(cmd)
-				if got, want := asyncStartPreparedCommandStaleInfo(pr, currentInfo), asyncStartPreparedCommandStale(pr, currentBead); got != want {
+				if got, want := asyncStartPreparedCommandStaleInfo(pr, currentInfo), refCommandStale(pr, currentBead); got != want {
 					t.Errorf("cmd=%q info=%v bead=%v", cmd, got, want)
 				}
 			}
@@ -1483,13 +1539,13 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			curBead := curBead
 			curInfo := session.InfoFromPersistedBead(curBead)
 			t.Run("asyncPair/"+prepShape+"->"+curShape, func(t *testing.T) {
-				if got, want := asyncStartIdentityMatchesInfo(prepInfo, curInfo), asyncStartIdentityMatches(prepBead, curBead); got != want {
+				if got, want := asyncStartIdentityMatchesInfo(prepInfo, curInfo), refIdentityMatches(prepBead, curBead); got != want {
 					t.Errorf("asyncStartIdentityMatches: info=%v bead=%v", got, want)
 				}
-				if got, want := asyncStartSessionStillCurrentInfo(prepInfo, curInfo), asyncStartSessionStillCurrent(prepBead, curBead); got != want {
+				if got, want := asyncStartSessionStillCurrentInfo(prepInfo, curInfo), refStillCurrent(prepBead, curBead); got != want {
 					t.Errorf("asyncStartSessionStillCurrent: info=%v bead=%v", got, want)
 				}
-				if got, want := asyncStartStaleRuntimeCleanupAllowedInfo(prepInfo, curInfo), asyncStartStaleRuntimeCleanupAllowed(prepBead, curBead); got != want {
+				if got, want := asyncStartStaleRuntimeCleanupAllowedInfo(prepInfo, curInfo), refCleanupAllowed(prepBead, curBead); got != want {
 					t.Errorf("asyncStartStaleRuntimeCleanupAllowed: info=%v bead=%v", got, want)
 				}
 			})

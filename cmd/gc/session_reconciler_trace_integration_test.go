@@ -328,8 +328,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	cycle.syncArms(armNow, cfg)
 
 	startCand := startCandidate{
-		session: &startBead,
-		info:    sessionpkg.InfoFromPersistedBead(startBead),
+		info: sessionpkg.InfoFromPersistedBead(startBead),
 		tp: TemplateParams{
 			TemplateName: "repo/worker",
 			SessionName:  "worker-1",
