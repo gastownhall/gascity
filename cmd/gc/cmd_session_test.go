@@ -1371,6 +1371,7 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1414,6 +1415,7 @@ func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1459,6 +1461,7 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		provider,
 		nil,
@@ -1494,6 +1497,7 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		provider,
 		nil,
@@ -1529,6 +1533,7 @@ func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1563,6 +1568,7 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1684,6 +1690,7 @@ func TestSessionReason_PriorityMatrix(t *testing.T) {
 			reason := sessionReason(
 				newInfo(sessionName),
 				map[string]beads.Bead{bead.ID: bead},
+				map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 				tt.cfg,
 				provider,
 				tt.poolDesired,
@@ -1738,6 +1745,7 @@ func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1775,6 +1783,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		runtime.NewFake(),
 		nil,
@@ -1789,7 +1798,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 // comma-joined REASON cell that `gc session` emits today. It is a
 // byte-identical gate: the wake-helper cleanup (ga-6aaj6q) retires the legacy
 // drain/dependency wake path but must not change what the CLI displays, which
-// still runs through evaluateWakeReasons. If a literal ever drifts, this test
+// still runs through evaluateWakeReasonsInfo. If a literal ever drifts, this test
 // fails and forces a deliberate decision rather than a silent regression.
 func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
 	const agentName = "worker"
@@ -1886,6 +1895,7 @@ func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
 			got := sessionReason(
 				tt.info,
 				map[string]beads.Bead{tt.bead.ID: tt.bead},
+				map[string]session.Info{tt.bead.ID: session.InfoFromPersistedBead(tt.bead)},
 				cfg,
 				tt.provider,
 				tt.poolDesired,

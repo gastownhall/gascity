@@ -963,13 +963,20 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
 	}
 
-	// Build the bead index for the per-session reason projection from the
-	// snapshot's raw open beads (no duplicate query). WI-6 W4: the reason
-	// classifiers still read the raw bead here; they move onto Info in a later wave.
+	// Build the per-session reason-projection indexes from the one snapshot (no
+	// duplicate query). WI-6 R2: the wake-reason classifiers now read the typed
+	// Info snapshot (infoIndex, from OpenInfos) — see sessionReason. The raw bead
+	// index is retained ONLY for LifecycleDisplayReasonWithLiveness, which reads
+	// session-circuit-state metadata that session.Info does not (yet) carry.
 	openBeads := sessionBeads.Open()
 	beadIndex := make(map[string]beads.Bead, len(openBeads))
 	for _, b := range openBeads {
 		beadIndex[b.ID] = b
+	}
+	openInfos := sessionBeads.OpenInfos()
+	infoIndex := make(map[string]session.Info, len(openInfos))
+	for _, in := range openInfos {
+		infoIndex[in.ID] = in
 	}
 
 	waitRes := <-waitCh
@@ -998,7 +1005,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	}
 
 	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
-	// in wakeReasons.
+	// in wakeReasonsInfo.
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
@@ -1008,7 +1015,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
+		reason := sessionReason(s, beadIndex, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
@@ -1208,7 +1215,7 @@ func sessionListDisplayValue(value string) string {
 }
 
 // attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
-// results to avoid redundant tmux subprocess calls. wakeReasons calls
+// results to avoid redundant tmux subprocess calls. wakeReasonsInfo calls
 // IsAttached per session, but cmdSessionList already queried it.
 type attachmentCachingProvider struct {
 	runtime.Provider
@@ -1306,7 +1313,7 @@ const (
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
 // For asleep sessions, shows the sleep reason (e.g., "user-hold", "quarantine").
 // For closed sessions, shows "-".
-func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
+func sessionReason(s session.Info, beadIndex map[string]beads.Bead, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
 	if s.State == "" {
 		return "-" // closed
 	}
@@ -1315,6 +1322,10 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	if !ok {
 		return "-" // no bead data available
 	}
+	// info is the typed reason source of truth — the full snapshot Info projection
+	// (OpenInfos mirrors Open one-to-one, same order), not the display Info s, which
+	// callers may pass minimally populated.
+	info := infoIndex[s.ID]
 
 	now := time.Now().UTC()
 	lcInput := session.LifecycleInputFromMetadata(b.Status, b.Metadata)
@@ -1327,6 +1338,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	if sp != nil {
 		isRunning = sp.IsRunning
 	}
+	// LifecycleDisplayReasonWithLiveness reads session-circuit-state metadata that
+	// session.Info does not carry, so it stays on the raw bead until that field is
+	// added (WI-6 R5/WI-7); the census-tracked reads below route through Info.
 	if reason := session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, now, s.SessionName, isRunning); reason != "" {
 		return reason
 	}
@@ -1334,12 +1348,8 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	// If config is available and no lifecycle reason blocks display, compute
 	// full wake reasons (including WakeConfig).
 	if cfg != nil {
-		reasons := wakeReasons(b, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
-		// pin-awake is read from the reason source of truth — the persisted bead
-		// (beadIndex[s.ID]) — not the display Info s, which callers may pass minimally
-		// populated. WI-6 W4: this whole reason projection moves onto Info when the
-		// wakeReasons/lifecycle classifiers gain Info-taking twins.
-		if pinAwakeWakeReasonVisible(session.InfoFromPersistedBead(b), cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
+		reasons := wakeReasonsInfo(info, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
+		if pinAwakeWakeReasonVisible(info, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
 			reasons = append(reasons, WakePin)
 		}
 		if len(reasons) > 0 {

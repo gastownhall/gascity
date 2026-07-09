@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -885,8 +886,26 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		bead func(beads.Bead) string
 		info func(session.Info) string
 	}{
-		"sessionOrigin":                {sessionOrigin, sessionOriginInfo},
-		"sessionMetadataState":         {sessionMetadataState, sessionMetadataStateInfo},
+		"sessionOrigin": {sessionOrigin, sessionOriginInfo},
+		// sessionMetadataStateInfo's raw sibling sessionMetadataState was deleted in
+		// WI-6 R2 (its last caller, the wake-reason display lane, typed onto Info), so
+		// this row pins the Info form against a reference implementation of the same
+		// awake→active / start_pending→creating / drained→asleep normalization.
+		"sessionMetadataStateInfo": {
+			func(b beads.Bead) string {
+				switch state := strings.TrimSpace(b.Metadata["state"]); state {
+				case "awake":
+					return "active"
+				case string(session.StateStartPending):
+					return "creating"
+				case "drained":
+					return "asleep"
+				default:
+					return state
+				}
+			},
+			sessionMetadataStateInfo,
+		},
 		"namedSessionMode":             {namedSessionMode, namedSessionModeInfo},
 		"sessionBeadStoredTemplate":    {sessionBeadStoredTemplate, sessionBeadStoredTemplateInfo},
 		"sessionBeadAgentName":         {sessionBeadAgentName, sessionBeadAgentNameInfo},
@@ -1357,13 +1376,20 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				t.Errorf("sessionKeepWarmEligibleInfo = %v, want %v", got, want)
 			}
 			for _, pd := range wakePools {
+				// sessionWithinDesiredConfig (raw) survives until R3, so its Info twin
+				// stays pinned against it directly here.
 				gotA, gotOK := sessionWithinDesiredConfigInfo(info, wakeCfg, pd)
 				wantA, wantOK := sessionWithinDesiredConfig(b, wakeCfg, pd)
 				if gotA != wantA || gotOK != wantOK {
 					t.Errorf("sessionWithinDesiredConfigInfo(pd=%v) = (%v,%v), want (%v,%v)", pd, gotA, gotOK, wantA, wantOK)
 				}
-				if got, want := evaluateWakeReasonsInfo(info, wakeCfg, wakeSP, pd, nil, nil, clk), evaluateWakeReasons(b, wakeCfg, wakeSP, pd, nil, nil, clk); !reflect.DeepEqual(got, want) {
-					t.Errorf("evaluateWakeReasonsInfo(pd=%v) = %+v, want %+v", pd, got, want)
+				// evaluateWakeReasonsInfo's wrapper wakeReasonsInfo must return exactly
+				// its .Reasons; the raw evaluateWakeReasons sibling was deleted in R2, so
+				// its full behavior is pinned by the migrated wakeReasons unit tests
+				// (session_reconcile_test.go) + the sessionReason display characterization.
+				eval := evaluateWakeReasonsInfo(info, wakeCfg, wakeSP, pd, nil, nil, clk)
+				if got := wakeReasonsInfo(info, wakeCfg, wakeSP, pd, nil, nil, clk); !reflect.DeepEqual(got, eval.Reasons) {
+					t.Errorf("wakeReasonsInfo(pd=%v) = %+v, want eval.Reasons %+v", pd, got, eval.Reasons)
 				}
 			}
 		})
