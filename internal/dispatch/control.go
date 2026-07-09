@@ -1476,7 +1476,7 @@ func legacyAttemptLineageHitCount() int64 {
 // latestAttemptFromCandidatesLegacyRefSurgery recovers attempt lineage by
 // parsing dotted step refs through a four-stage cascade.
 //
-// DEPRECATED: remove after the release following S38 — serves only molecules
+// Deprecated: remove after the release following S38 — serves only molecules
 // minted before the gc.control_for stamp existed. New attempts resolve on the
 // primary equality path in latestAttemptFromCandidates.
 func latestAttemptFromCandidatesLegacyRefSurgery(control beads.Bead, candidates []beads.Bead) beads.Bead {
