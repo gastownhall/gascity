@@ -2,8 +2,8 @@ package api
 
 import (
 	"context"
+	"net/http"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -154,7 +154,7 @@ func (s *Server) humaHandleRigAction(_ context.Context, input *RigActionInput) (
 		return s.humaHandleRigRestart(name)
 
 	default:
-		return nil, huma.Error404NotFound("unknown rig action: " + action)
+		return nil, apierr.InvalidRequest.WithStatus(http.StatusNotFound, "unknown rig action: "+action)
 	}
 }
 

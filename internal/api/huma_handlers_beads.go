@@ -668,7 +668,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
 				if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
 					if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-						return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " was reparented concurrently")
+						return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
 					}
 					return nil, apierr.Internal.Msg(err.Error())
 				}

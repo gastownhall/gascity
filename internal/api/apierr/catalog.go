@@ -42,8 +42,12 @@ var (
 	// which is huma's schema-validation auto-stamp.
 	WebhookRejected = Register(ProblemType{Code: "webhook-rejected", Status: http.StatusUnprocessableEntity, Title: "Webhook Rejected"})
 
-	// Concurrency / state conflicts.
+	// Concurrency / state conflicts. concurrent-delete/concurrent-modify are
+	// retryable lost-update races (the target changed under the write); wrong-state
+	// is a terminal precondition failure (the target is in a state the request
+	// cannot proceed from).
 	ConflictConcurrentDelete = Register(ProblemType{Code: "conflict-concurrent-delete", Status: http.StatusConflict, Title: "Concurrent Delete Conflict"})
+	ConflictConcurrentModify = Register(ProblemType{Code: "conflict-concurrent-modify", Status: http.StatusConflict, Title: "Concurrent Modify Conflict"})
 	ConflictWrongState       = Register(ProblemType{Code: "conflict-wrong-state", Status: http.StatusConflict, Title: "Wrong State Conflict"})
 	// SessionConflict is the one code for the session 409s. Many carry a
 	// differentiating detail prefix the CLI already branches on
