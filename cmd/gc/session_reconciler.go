@@ -1629,9 +1629,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// destructive rollback for now.
 						fmt.Fprintf(stderr, "session reconciler: skipping pending-create rollback of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 						if trace != nil {
-							trace.recordDecision("reconciler.session.rollback_pending_create", template, name, "pending_create_lease_expired", "skipped_liveness_error", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode("pending_create_lease_expired"), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
 								"liveness_error": livenessErr.Error(),
-							}, nil, "")
+							})
 						}
 						continue
 					}
@@ -1740,9 +1740,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// destructive close for now.
 						fmt.Fprintf(stderr, "session reconciler: skipping failed-create close of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 						if trace != nil {
-							trace.recordDecision("reconciler.session.close_failed_create", template, name, string(sessionpkg.StateFailedCreate), "skipped_liveness_error", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
 								"liveness_error": livenessErr.Error(),
-							}, nil, "")
+							})
 						}
 						continue
 					}
@@ -1934,9 +1934,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// tick; skip the destructive finalize for now.
 							fmt.Fprintf(stderr, "session reconciler: skipping drain-ack finalize of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", template, name, "orphaned", "skipped_liveness_error", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
 									"liveness_error": livenessErr.Error(),
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2052,9 +2052,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// drain-ack finalize — carry the same fail-closed guard.)
 						fmt.Fprintf(stderr, "session reconciler: skipping close of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 						if trace != nil {
-							trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "skipped_liveness_error", traceRecordPayload{
+							trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
 								"liveness_error": livenessErr.Error(),
-							}, nil, "")
+							})
 						}
 						continue
 					}
