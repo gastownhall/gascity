@@ -113,16 +113,28 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   twin + migrate cmd_session's display (removes ONE raw consumer); `cmd_prime` front-door Get;
 >   `session_hash`/`session_template_start` → Info; `cmd_wait` PollerKeyFromBead→0. Net:
 >   `PollerKeyFromBead → 0` + 3 `InfoFromPersistedBead` drops. `ListAllSessionBeads` UNCHANGED.
-> - **R6** (NEW — the snapshot raw-half migration the design under-scoped as "part of R5"):
->   migrate EVERY `Open()`/`FindByID`/`FindSessionNameByNamedIdentity`/`newSessionBeadSnapshot(beads)`/
->   `snapshot.add(bead)` consumer across `city_runtime`/`cmd_start`/`providers`/`build_desired_state`/
->   `session_name_lookup`/`session_beads`/`doctor`/`session_lifecycle_parallel` → typed readers
->   (`OpenInfos`/`FindInfoByID`/`FindInfoByNamedIdentity`); then `loadSessionBeadSnapshot` builds
->   from Info; then DELETE the raw half + zero `ListAllSessionBeads` (3 sites) +
->   `session_bead_snapshot` `InfoFromPersistedBead` (3→0). Load-bearing (constructor-equivalence pin).
-> - **WI-7 W7a**: front-door flip (`class_store.go` + `api.State` → domain stores).
-> - **WI-7 W7b**: unexport the codecs (tick-feed refactor for `InfoFromPersistedBead`);
->   guards → permanent zero-pins. Orders codecs gated on deferred WI-3 two-class wiring.
+> - **R6 STOPPED + RE-SEQUENCED** (second honest design-vs-reality stop): the raw
+>   `sessionBeadSnapshot` half CANNOT be deleted in isolation — it exists to serve 3 load-bearing
+>   consumer classes the design deferred: (a) the reconciler tick MUTATES the raw `[]beads.Bead` in
+>   place (Phase-0 heal `session_reconciler.go:1187`, dedup :1208) + projects it at the tick edges
+>   (:1342/:1419); (b) the pool path REUSES/CREATES raw beads (selection/creation/`add`); (c) the
+>   sync/heal path mutates raw `openBeads` in place + rebuilds the snapshot. So the raw-half deletion is
+>   DOWNSTREAM of the tick-feed refactor + pool typing (the code's own in-line sanctions at
+>   `session_bead_snapshot.go:273-284` + `build_desired_state.go:4063-4069` say so). R6's constructor-
+>   equivalence pin proven load-bearing (mutation stranded a named session). See `/tmp/r6_finding.md`.
+>
+> **Corrected remaining endgame (= WI-7 expanded; tick-feed refactor is the KEYSTONE the user approved):**
+> - **W-tick** (HIGH — hardest wave since R3): `session.Store.ListAllForReconcile() []Info` + reshape the
+>   reconciler tick to hold Info from the edge (Phase-0 heal/dedup become `ApplyPatchInfo` folds; WORK-class
+>   orderedBeads stay raw; SESSION beads come as Info). → `InfoFromPersistedBead` :1342/:1419 → 0; frees
+>   class (a)+(c). Design in flight (`/tmp/tickfeed_design.md`).
+> - **W-pool** (medium-HIGH): pool selection/creation/reuse path typing (class b) + `add(info)`.
+> - **W-delete** (mechanical, falls out): raw-half deletion + pure-read accessor migrations + zero
+>   `ListAllSessionBeads` (3) + `session_bead_snapshot` InfoFromPersistedBead (3→0) + `session_hash` (1→0).
+> - **W-flip** (§5b): front-door flip (`class_store.go` + `api.State` → domain stores).
+> - **W-unexport** (§5e): codec unexport + guards → permanent zero-pins. Orders codecs gated on deferred
+>   WI-3 two-class wiring. InfoFromPersistedBead unexports IFF W-tick+W-delete reach true interior zero
+>   (else session_logs_resolve / session_resolution sanctioned — the design will decide).
 >
 > Every session-store wave (W2/W3/W5) tripped the SAME front-door-Get contract
 > subtlety (session.Store.Get/GetPersistedResponse returns `ErrSessionNotFound` +
