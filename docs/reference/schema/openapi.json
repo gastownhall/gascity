@@ -1024,6 +1024,27 @@
         ],
         "type": "object"
       },
+      "BeadDeadAssigneeReopenedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "ID of the reopened work bead (also the envelope Subject).",
+            "type": "string"
+          },
+          "dead_assignee": {
+            "description": "The assignee identity that resolved to no open session bead, cleared by the reopen.",
+            "type": "string"
+          },
+          "routed_to": {
+            "description": "The gc.routed_to target the bead stays routed to after the reopen, when set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id"
+        ],
+        "type": "object"
+      },
       "BeadDepsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2202,6 +2223,9 @@
           },
           {
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BeadDeadAssigneeReopenedPayload"
           },
           {
             "$ref": "#/components/schemas/BeadEventPayload"
@@ -8234,6 +8258,7 @@
             "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
+            "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
@@ -8315,6 +8340,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted"
@@ -8680,6 +8708,57 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.created",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadDeadAssigneeReopened": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadDeadAssigneeReopenedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.dead_assignee_reopened",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.dead_assignee_reopened",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadDeleted": {
@@ -9350,6 +9429,7 @@
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
+                "bead.dead_assignee_reopened",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -12332,6 +12412,7 @@
             "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
+            "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
@@ -12413,6 +12494,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted"
@@ -12790,6 +12874,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.created",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadDeadAssigneeReopenedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.dead_assignee_reopened",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.dead_assignee_reopened",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadDeleted": {
@@ -13511,6 +13650,7 @@
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
+                "bead.dead_assignee_reopened",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",

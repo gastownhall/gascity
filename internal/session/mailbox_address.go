@@ -34,6 +34,30 @@ func MailboxAddress(b beads.Bead) string {
 // is the canonical home of the logic the mail CLI previously inlined as
 // sessionMailboxAddresses.
 func MailboxAddresses(b beads.Bead) []string {
+	return mailboxAddresses(b, false)
+}
+
+// MailboxAddressesIncludingRuntimeName returns every mailbox address a session
+// bead can receive mail at, always including its runtime session_name (appended
+// last), even when other addresses already resolved. This is the API read
+// semantics introduced by bf576b04a ("fix: include runtime session mailboxes in
+// API reads"): mail persisted under a session's runtime name must stay
+// reachable via API inbox/count queries, guarded by
+// TestMailAPIQueriesAllResolvedSessionMailboxAddresses.
+//
+// It deliberately forks from MailboxAddresses, which appends session_name only
+// as a last-resort fallback. That CLI/API fork is a documented product decision
+// (the CLI inbox can miss mail persisted under a runtime session_name the API
+// finds); reconciling the two recipient views is tracked as a follow-up.
+func MailboxAddressesIncludingRuntimeName(b beads.Bead) []string {
+	return mailboxAddresses(b, true)
+}
+
+// mailboxAddresses is the shared body behind MailboxAddresses (CLI fallback-only
+// session_name) and MailboxAddressesIncludingRuntimeName (API unconditional
+// session_name). When includeRuntimeName is true the session_name is always
+// added; otherwise it is only added when nothing else resolved.
+func mailboxAddresses(b beads.Bead, includeRuntimeName bool) []string {
 	seen := map[string]bool{}
 	var addresses []string
 	add := func(value string) {
@@ -49,7 +73,9 @@ func MailboxAddresses(b beads.Bead) []string {
 	for _, alias := range AliasHistory(b.Metadata) {
 		add(alias)
 	}
-	if len(addresses) == 0 {
+	if includeRuntimeName {
+		add(b.Metadata["session_name"])
+	} else if len(addresses) == 0 {
 		add(strings.TrimSpace(b.Metadata["session_name"]))
 	}
 	return addresses

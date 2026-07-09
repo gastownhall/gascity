@@ -142,7 +142,7 @@ func validateWorkDir(dir string) error {
 }
 
 // beginSessionDrain initiates an async drain. Returns immediately.
-// The drainTracker stores in-memory state; advanceSessionDrains progresses it.
+// The drainTracker stores in-memory state; advanceSessionDrainsWithSessionsTraced progresses it.
 //
 // Returns true when this call enqueued a new drain (a state transition) and
 // false when a drain was already enqueued for this session (no-op). Callers
@@ -151,7 +151,7 @@ func validateWorkDir(dir string) error {
 // reconciler tick for the life of a stuck drain.
 //
 // The interrupt signal (Ctrl-C) is NOT sent immediately. It is deferred to
-// the next reconciler tick via advanceSessionDrains. This gives the drain
+// the next reconciler tick via advanceSessionDrainsWithSessionsTraced. This gives the drain
 // one full tick to be canceled (e.g., if the session was falsely orphaned
 // due to a transient store failure) before any signal reaches the process.
 // Without this, a single bad tick can interrupt a working agent mid-tool-call.
@@ -172,7 +172,7 @@ func beginSessionDrain(
 // form it backs.
 func beginSessionDrainInfo(
 	info sessions.Info,
-	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrains
+	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrainsWithSessionsTraced
 	dt *drainTracker,
 	reason string,
 	clk clock.Clock,
@@ -435,67 +435,6 @@ func cancelRecoveredDrainForAssignedWork(session beads.Bead, sp runtime.Provider
 	return true
 }
 
-// advanceSessionDrains checks all in-progress drains. Called once per tick.
-//
-//nolint:unparam // workSet is nil in the drain path; WakeWork flows via ComputeAwakeSet instead
-func advanceSessionDrains(
-	dt *drainTracker,
-	sp runtime.Provider,
-	store beads.Store,
-	sessionLookup func(id string) *beads.Bead,
-	cfg *config.City,
-	poolDesired map[string]int,
-	workSet map[string]bool,
-	readyWaitSet map[string]bool,
-	clk clock.Clock,
-) {
-	var sessions []beads.Bead
-	for id := range dt.all() {
-		if session := sessionLookup(id); session != nil {
-			sessions = append(sessions, *session)
-		}
-	}
-	advanceSessionDrainsWithSessions(dt, sp, store, sessionLookup, sessions, nil, cfg, poolDesired, workSet, readyWaitSet, clk)
-}
-
-func advanceSessionDrainsWithSessions(
-	dt *drainTracker,
-	sp runtime.Provider,
-	store beads.Store,
-	sessionLookup func(id string) *beads.Bead,
-	sessions []beads.Bead,
-	wakeEvals map[string]wakeEvaluation,
-	cfg *config.City,
-	poolDesired map[string]int,
-	workSet map[string]bool,
-	readyWaitSet map[string]bool,
-	clk clock.Clock,
-) {
-	// Non-reconciler drain entry points (and their tests) still carry raw beads.
-	// Derive the wake evaluations from them here when the caller supplied none —
-	// the traced core requires a non-nil wakeEvals map (Step 5d moved this fallback
-	// off the prod core; computeWakeEvaluations/evaluateWakeReasons stay for the
-	// CLI wake column and these wrappers).
-	if wakeEvals == nil {
-		wakeEvals = computeWakeEvaluations(sessions, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
-	}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(sessionLookup), wakeEvals, cfg, clk, nil)
-}
-
-// infoLookupFromBeadLookup adapts a raw *beads.Bead lookup to the typed Info
-// lookup the drain scan consumes. Used by the non-reconciler drain entry points
-// (and their tests), which still carry raw beads; the reconciler builds its Info
-// lookup directly from the coherent infoByID snapshot instead.
-func infoLookupFromBeadLookup(sessionLookup func(id string) *beads.Bead) func(id string) (sessions.Info, bool) {
-	return func(id string) (sessions.Info, bool) {
-		b := sessionLookup(id)
-		if b == nil {
-			return sessions.Info{}, false
-		}
-		return sessions.InfoFromPersistedBead(*b), true
-	}
-}
-
 func advanceSessionDrainsWithSessionsTraced(
 	dt *drainTracker,
 	sp runtime.Provider,
@@ -507,8 +446,8 @@ func advanceSessionDrainsWithSessionsTraced(
 	trace *sessionReconcilerTraceCycle,
 ) {
 	// wakeEvals is required. The reconciler builds it from the coherent infoByID
-	// snapshot; the non-reconciler wrappers derive it via computeWakeEvaluations
-	// from their raw beads before calling in. Step 5d dropped the raw-bead
+	// snapshot via ComputeAwakeSet -> awakeSetToWakeEvals; tests supply explicit
+	// wakeEvals encoding the premise they exercise. Step 5d dropped the raw-bead
 	// wakeEvals==nil fallback and its now-unused sessionBeads/poolDesired/workSet/
 	// readyWaitSet inputs from this prod core — the scan runs entirely off infoLookup.
 	// Session front door constructed once from the same store; nil when store is
@@ -621,7 +560,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// SIGTERM/SIGKILL — no Ctrl-C keystroke injection into the pane.
 		if !ds.ackSet {
 			if os.Getenv("GC_TMUX_TRACE") == "1" {
-				log.Printf("[DRAIN-TRACE] advanceSessionDrains: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
+				log.Printf("[DRAIN-TRACE] advanceSessionDrainsWithSessionsTraced: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
 			}
 			err := setReconcilerDrainAckMetadata(sp, name, ds)
 			if err == nil {
@@ -691,7 +630,7 @@ func advanceSessionDrainsWithSessionsTraced(
 // session. It reads only the typed Info (id + raw wake_mode); the raw-bead
 // mirror the reconciler used to keep is dropped. Nothing reads a drained
 // session's metadata later in the tick — the awake scan runs before
-// advanceSessionDrains, and completeDrain is always followed by dt.remove +
+// advanceSessionDrainsWithSessionsTraced, and completeDrain is always followed by dt.remove +
 // continue — so the store write is the sole observable effect (all completeDrain
 // tests assert on store.Get). With no store there is nothing to persist.
 func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState, clk clock.Clock) {

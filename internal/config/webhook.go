@@ -1,9 +1,14 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/orders"
@@ -28,13 +33,28 @@ var knownWebhookSchemes = map[string]bool{
 	"jwt-jwks":           true,
 }
 
-// hmacFamilyWebhookSchemes require a shared secret referenced via secret_env.
-// discord-ed25519 (public key) and jwt-jwks (JWKS trust anchor) do not.
-var hmacFamilyWebhookSchemes = map[string]bool{
+// secretEnvWebhookSchemes resolve secret material from an operator-owned env var
+// via secret_env: the HMAC family (shared HMAC key) and discord-ed25519 (the app
+// public key). jwt-jwks is the only scheme that carries no env secret (its trust
+// anchor is the operator [webhooks].jwt_policy), so it is absent here. Mirrors
+// the runtime SecretResolver's applicability so a missing/namespaced secret_env
+// is caught at config load rather than only on first delivery.
+var secretEnvWebhookSchemes = map[string]bool{
 	"github-hmac-sha256": true,
 	"hmac-sha256":        true,
 	"slack-v0":           true,
+	"discord-ed25519":    true,
 }
+
+// OperatorWebhookSecretEnvPrefix is the environment-variable namespace an
+// operator controls for webhook secret material (HMAC keys, Discord public keys,
+// and per-source bearer tokens). Because a pack authors [webhook.verify],
+// requiring secret_env/bearer_env to live in this namespace prevents a pack from
+// pointing secret resolution at an arbitrary ambient variable (HOME, GC_CITY,
+// AWS_SECRET_ACCESS_KEY, …) — the load-bearing half of security review R1. It is
+// the single source of truth for the prefix; webhookverify.OperatorSecretEnvPrefix
+// references this constant so the load-time and runtime checks can never diverge.
+const OperatorWebhookSecretEnvPrefix = "GC_WEBHOOK_"
 
 // Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under
 // /v0/city/{city}/hook/{name}. It mirrors the [[service]] declaration shape:
@@ -47,6 +67,12 @@ type Webhook struct {
 	// Scope selects city- or rig-scoped dispatch semantics, mirroring
 	// Order.Scope. Empty defaults to city.
 	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Rig is the authoritative rig binding for a rig-scoped webhook (Scope=="rig").
+	// It is REQUIRED when scope="rig" and forbidden otherwise: the receiver copies
+	// it into the dispatch scope so the sink constrains delivery to this rig (R4),
+	// and a rule that names any other rig is refused. Without it a rig-scoped
+	// webhook fails closed (it can target no rig). Leave unset for city scope.
+	Rig string `toml:"rig,omitempty"`
 	// Publication declares generic publication intent, reusing the service
 	// publication contract. Pack/fragment-contributed public webhooks are
 	// capped to tenant unless the city grants them via [webhooks].allow_public.
@@ -85,8 +111,17 @@ type WebhookVerify struct {
 	SignatureHeader string `toml:"signature_header,omitempty"`
 	// EventHeader names the request header carrying the provider event type.
 	EventHeader string `toml:"event_header,omitempty"`
-	// DedupHeader names the request header carrying the delivery id used for
-	// at-least-once dedup.
+	// DedupHeader names the request header whose value is surfaced as the
+	// delivery id on webhook.received events for observability. It does NOT key
+	// at-least-once dedup for the signature-only schemes (github-hmac-sha256,
+	// hmac-sha256, slack-v0, discord-ed25519): those dedup on a hash of the
+	// signed body, because an unsigned or coarse header cannot safely key dedup —
+	// a captured valid delivery could be replayed under a fresh header id to
+	// re-fire the order. Only jwt-jwks keys dedup directly, on its signed
+	// per-delivery-unique "jti". As a consequence two deliveries with
+	// byte-identical signed bodies inside the dedup window collapse to one
+	// dispatch, so a source that must resend an identical payload has to carry a
+	// unique value inside the signed body.
 	DedupHeader string `toml:"dedup_header,omitempty"`
 	// TimestampHeader optionally names a request header carrying a signed
 	// timestamp for replay defense.
@@ -258,14 +293,13 @@ type WebhookAllowPublic struct {
 	// Source is the pack/fragment provenance the grant is scoped to. Matched
 	// against the webhook's stamped SourceDir.
 	Source string `toml:"source"`
-	// Digest optionally pins the content digest of the granted webhook's
-	// security-relevant fields.
-	//
-	// TODO(R3): compute and enforce this digest over
-	// {visibility, verify scheme/secret_env/secret_key/trust-root, each rule's
-	// event/match/order/rig/target} so a content-swap upgrade auto-downgrades
-	// to tenant until the operator re-consents. E2 matches on {name, source}
-	// only; the digest field is reserved for that follow-up.
+	// Digest pins the content digest of the granted webhook's security-relevant
+	// fields (see WebhookContentDigest). It is REQUIRED for the grant to honor
+	// public exposure: applyWebhookPackGuard recomputes the digest at load and
+	// caps the webhook to tenant when the grant has no digest or the digest no
+	// longer matches (R3 content-scoped consent), so a content-swap upgrade of a
+	// public hook auto-downgrades until the operator re-consents to the new
+	// digest. The downgrade warning names the digest to pin.
 	Digest string `toml:"digest,omitempty"`
 }
 
@@ -309,49 +343,94 @@ func (r WebhookRule) TargetOrDefault() string {
 func ValidateWebhooks(webhooks []Webhook) error {
 	seen := make(map[string]bool, len(webhooks))
 	for i, w := range webhooks {
-		if w.Name == "" {
-			return fmt.Errorf("webhook[%d]: name is required", i)
-		}
-		if !validWebhookName.MatchString(w.Name) {
-			return fmt.Errorf("webhook %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]*", w.Name)
-		}
-		if seen[w.Name] {
-			if w.SourceDir != "" {
-				return fmt.Errorf("webhook %q: duplicate name (from %q)", w.Name, w.SourceDir)
-			}
-			return fmt.Errorf("webhook %q: duplicate name", w.Name)
-		}
-		seen[w.Name] = true
-
-		switch w.ScopeOrDefault() {
-		case "city", "rig":
-		default:
-			return fmt.Errorf("webhook %q: scope must be \"city\" or \"rig\", got %q", w.Name, w.Scope)
-		}
-
-		switch strings.TrimSpace(strings.ToLower(w.Publication.Visibility)) {
-		case "", "private", "public", "tenant":
-		default:
-			return fmt.Errorf("webhook %q: publication.visibility must be \"private\", \"public\", or \"tenant\", got %q", w.Name, w.Publication.Visibility)
-		}
-		if hostname := strings.TrimSpace(strings.ToLower(w.Publication.Hostname)); hostname != "" && !validPublicationLabel.MatchString(hostname) {
-			return fmt.Errorf("webhook %q: publication.hostname must be a single DNS label, got %q", w.Name, w.Publication.Hostname)
-		}
-		if w.MaxPerMinute < 0 {
-			return fmt.Errorf("webhook %q: max_per_minute must be >= 0, got %d", w.Name, w.MaxPerMinute)
-		}
-
-		if err := validateWebhookVerify(w); err != nil {
+		if err := validateWebhook(i, w, seen); err != nil {
 			return err
 		}
+	}
+	return nil
+}
 
-		if len(w.Rules) == 0 {
-			return fmt.Errorf("webhook %q: at least one [[webhook.rule]] is required", w.Name)
+// validateWebhook validates one webhook declaration. The per-webhook checks are
+// split into focused helpers so each function stays simple to read and reason
+// about (low cognitive complexity) instead of one deeply-nested loop body.
+func validateWebhook(i int, w Webhook, seen map[string]bool) error {
+	if err := validateWebhookIdentity(i, w, seen); err != nil {
+		return err
+	}
+	if err := validateWebhookScope(w); err != nil {
+		return err
+	}
+	if err := validateWebhookPublication(w); err != nil {
+		return err
+	}
+	if w.MaxPerMinute < 0 {
+		return fmt.Errorf("webhook %q: max_per_minute must be >= 0, got %d", w.Name, w.MaxPerMinute)
+	}
+	if err := validateWebhookVerify(w); err != nil {
+		return err
+	}
+	return validateWebhookRules(w)
+}
+
+// validateWebhookIdentity checks the name shape and rejects duplicates.
+func validateWebhookIdentity(i int, w Webhook, seen map[string]bool) error {
+	if w.Name == "" {
+		return fmt.Errorf("webhook[%d]: name is required", i)
+	}
+	if !validWebhookName.MatchString(w.Name) {
+		return fmt.Errorf("webhook %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]*", w.Name)
+	}
+	if seen[w.Name] {
+		if w.SourceDir != "" {
+			return fmt.Errorf("webhook %q: duplicate name (from %q)", w.Name, w.SourceDir)
 		}
-		for j, rule := range w.Rules {
-			if err := validateWebhookRule(w.Name, j, rule); err != nil {
-				return err
-			}
+		return fmt.Errorf("webhook %q: duplicate name", w.Name)
+	}
+	seen[w.Name] = true
+	return nil
+}
+
+// validateWebhookScope enforces the scope/rig pairing: a rig-scoped webhook MUST
+// declare its authoritative rig binding (so the sink can constrain dispatch to
+// that rig, R4), and a city-scoped webhook must not carry one.
+func validateWebhookScope(w Webhook) error {
+	rig := strings.TrimSpace(w.Rig)
+	switch w.ScopeOrDefault() {
+	case "city":
+		if rig != "" {
+			return fmt.Errorf("webhook %q: rig is only valid for scope=\"rig\"", w.Name)
+		}
+	case "rig":
+		if rig == "" {
+			return fmt.Errorf("webhook %q: scope=\"rig\" requires a rig binding", w.Name)
+		}
+	default:
+		return fmt.Errorf("webhook %q: scope must be \"city\" or \"rig\", got %q", w.Name, w.Scope)
+	}
+	return nil
+}
+
+// validateWebhookPublication checks the visibility enum and hostname label.
+func validateWebhookPublication(w Webhook) error {
+	switch strings.TrimSpace(strings.ToLower(w.Publication.Visibility)) {
+	case "", "private", "public", "tenant":
+	default:
+		return fmt.Errorf("webhook %q: publication.visibility must be \"private\", \"public\", or \"tenant\", got %q", w.Name, w.Publication.Visibility)
+	}
+	if hostname := strings.TrimSpace(strings.ToLower(w.Publication.Hostname)); hostname != "" && !validPublicationLabel.MatchString(hostname) {
+		return fmt.Errorf("webhook %q: publication.hostname must be a single DNS label, got %q", w.Name, w.Publication.Hostname)
+	}
+	return nil
+}
+
+// validateWebhookRules requires at least one rule and validates each.
+func validateWebhookRules(w Webhook) error {
+	if len(w.Rules) == 0 {
+		return fmt.Errorf("webhook %q: at least one [[webhook.rule]] is required", w.Name)
+	}
+	for j, rule := range w.Rules {
+		if err := validateWebhookRule(w.Name, j, rule); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -365,16 +444,101 @@ func validateWebhookVerify(w Webhook) error {
 	if !knownWebhookSchemes[scheme] {
 		return fmt.Errorf("webhook %q: verify.scheme %q is not a known scheme (github-hmac-sha256, hmac-sha256, slack-v0, discord-ed25519, jwt-jwks)", w.Name, scheme)
 	}
-	if env := strings.TrimSpace(w.Verify.SecretEnv); env != "" && !validWebhookSecretEnv.MatchString(env) {
-		return fmt.Errorf("webhook %q: verify.secret_env must be an environment variable name, got %q", w.Name, w.Verify.SecretEnv)
+	if err := validateWebhookSecretEnv(w.Name, scheme, w.Verify.SecretEnv); err != nil {
+		return err
 	}
-	if hmacFamilyWebhookSchemes[scheme] && strings.TrimSpace(w.Verify.SecretEnv) == "" {
-		return fmt.Errorf("webhook %q: verify.secret_env is required for scheme %q", w.Name, scheme)
+	if err := validateWebhookOperatorEnv(w.Name, "bearer_env", w.Verify.BearerEnv); err != nil {
+		return err
 	}
-	if env := strings.TrimSpace(w.Verify.BearerEnv); env != "" && !validWebhookSecretEnv.MatchString(env) {
-		return fmt.Errorf("webhook %q: verify.bearer_env must be an environment variable name, got %q", w.Name, w.Verify.BearerEnv)
+	return validateWebhookAllowedCIDRs(w.Name, w.Verify.AllowedCIDRs)
+}
+
+// validateWebhookSecretEnv enforces the R1 operator-namespace on secret_env at
+// load time, mirroring the runtime webhookverify.SecretResolver so a
+// missing/mis-namespaced secret fails at config load rather than only on first
+// delivery: it is required for every scheme that resolves a secret
+// (secretEnvWebhookSchemes), must be an env-var identifier, and must live in the
+// GC_WEBHOOK_* operator namespace.
+func validateWebhookSecretEnv(name, scheme, secretEnv string) error {
+	env := strings.TrimSpace(secretEnv)
+	if env == "" {
+		if secretEnvWebhookSchemes[scheme] {
+			return fmt.Errorf("webhook %q: verify.secret_env is required for scheme %q", name, scheme)
+		}
+		return nil
+	}
+	return validateWebhookOperatorEnv(name, "secret_env", secretEnv)
+}
+
+// validateWebhookOperatorEnv validates an optional operator-owned env reference
+// (secret_env / bearer_env): when set it must be an env-var identifier inside the
+// GC_WEBHOOK_* namespace so a pack cannot resolve an arbitrary ambient variable.
+func validateWebhookOperatorEnv(name, field, value string) error {
+	env := strings.TrimSpace(value)
+	if env == "" {
+		return nil
+	}
+	if !validWebhookSecretEnv.MatchString(env) {
+		return fmt.Errorf("webhook %q: verify.%s must be an environment variable name, got %q", name, field, value)
+	}
+	if !strings.HasPrefix(env, OperatorWebhookSecretEnvPrefix) {
+		return fmt.Errorf("webhook %q: verify.%s %q must be in the operator namespace %q", name, field, env, OperatorWebhookSecretEnvPrefix)
 	}
 	return nil
+}
+
+// validateWebhookAllowedCIDRs rejects malformed allowed_cidrs entries at load so
+// an unparseable allowlist can never silently fail open at request time.
+func validateWebhookAllowedCIDRs(name string, cidrs []string) error {
+	if _, err := ParseWebhookCIDRs(cidrs); err != nil {
+		return fmt.Errorf("webhook %q: %w", name, err)
+	}
+	return nil
+}
+
+// ParseWebhookCIDRs parses an allowed_cidrs list into prefixes, accepting either
+// CIDR notation ("192.30.252.0/22") or a bare address ("203.0.113.7", read as a
+// host route). An IPv4-mapped IPv6 entry — bare ("::ffff:192.0.2.1") or CIDR-form
+// ("::ffff:192.0.2.0/120") — is unmapped to its IPv4 form ("192.0.2.1",
+// "192.0.2.0/24") so it matches the request IP the source check compares against
+// — webhookRemoteIP unmaps the same way — rather than sitting as an IPv6 prefix
+// that fail-closes (403) a legitimate IPv4 caller. It backs both load-time
+// validation and the request-time source check so the two can never diverge. An
+// empty or malformed entry is an error.
+func ParseWebhookCIDRs(cidrs []string) ([]netip.Prefix, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, c := range cidrs {
+		trimmed := strings.TrimSpace(c)
+		if trimmed == "" {
+			return nil, fmt.Errorf("verify.allowed_cidrs entry is empty")
+		}
+		if p, err := netip.ParsePrefix(trimmed); err == nil {
+			// Normalize an IPv4-mapped IPv6 CIDR to its equivalent IPv4 prefix so it
+			// matches the unmapped request peer webhookRemoteIP produces; left as an
+			// IPv6 range it would silently fail-close a legitimate IPv4 caller, the
+			// same divergence the bare-address Unmap below closes. A mapped prefix
+			// shorter than /96 spans beyond the mapped range and cannot be an IPv4
+			// allowlist entry, so reject it loudly instead of letting it never match.
+			if p.Addr().Is4In6() {
+				if p.Bits() < 96 {
+					return nil, fmt.Errorf("verify.allowed_cidrs %q: IPv4-mapped prefix shorter than /96 is not a valid IPv4 range; use IPv4 CIDR notation", c)
+				}
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("verify.allowed_cidrs %q is not a valid CIDR or IP", c)
+		}
+		addr = addr.Unmap()
+		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return out, nil
 }
 
 func validateWebhookRule(webhookName string, idx int, rule WebhookRule) error {
@@ -413,13 +577,19 @@ func validateWebhookRule(webhookName string, idx int, rule WebhookRule) error {
 
 // applyWebhookPackGuard enforces the default-closed pack-guard: a public
 // webhook contributed by a pack or fragment (non-empty SourceDir) is capped to
-// tenant unless the root city.toml grants it via [webhooks].allow_public.
+// tenant unless the root city.toml grants it via [webhooks].allow_public AND the
+// grant's content digest matches the webhook's current security-relevant fields.
 // Root-authored webhooks (empty SourceDir) are operator-trusted and untouched.
 //
 // This is the load-bearing control the security review flagged (R3): it runs
 // once over the fully-composed webhook set — after every merge site has stamped
 // SourceDir — so provenance is centralized and cannot leak through an
-// unstamped path. It returns the downgrade warnings for the caller to surface.
+// unstamped path. Requiring a matching digest (not just name+source) closes the
+// content-swap hole: an upgrade that changes the verifier, rules, order, or rig
+// of a granted public hook no longer silently retains public exposure — it is
+// auto-downgraded to tenant until the operator re-consents to the new digest.
+// It returns the downgrade warnings (each carrying the digest to re-consent to)
+// for the caller to surface.
 func applyWebhookPackGuard(cfg *City, cityRoot string) []string {
 	if cfg == nil {
 		return nil
@@ -436,31 +606,123 @@ func applyWebhookPackGuard(cfg *City, cityRoot string) []string {
 		if w.SourceDir == "" {
 			continue
 		}
-		if webhookPublicGranted(w.Name, w.SourceDir, cityRoot, cfg.WebhookPolicy.AllowPublic) {
-			continue
+		if reason := webhookPublicDenyReason(w, cityRoot, cfg.WebhookPolicy.AllowPublic); reason != "" {
+			w.Publication.Visibility = "tenant"
+			warnings = append(warnings, fmt.Sprintf(
+				"webhook %q: pack/fragment-contributed publication.visibility=\"public\" capped to \"tenant\" (%s)",
+				w.Name, reason))
 		}
-		w.Publication.Visibility = "tenant"
-		warnings = append(warnings, fmt.Sprintf(
-			"webhook %q: pack/fragment-contributed publication.visibility=\"public\" capped to \"tenant\" (no matching [webhooks].allow_public grant for source %q)",
-			w.Name, w.SourceDir))
 	}
 	return warnings
 }
 
-// webhookPublicGranted reports whether an operator-authored allow_public entry
-// grants public exposure to the named webhook from the given provenance. A
-// relative grant Source is resolved against cityRoot (the directory of the root
-// city.toml).
-func webhookPublicGranted(name, sourceDir, cityRoot string, grants []WebhookAllowPublic) bool {
+// webhookPublicDenyReason returns "" when a pack/fragment public webhook is
+// authorized to keep public exposure, or a human-readable reason to cap it to
+// tenant. Authorization requires an operator-authored [webhooks].allow_public
+// grant that matches the webhook by name+provenance AND pins a digest equal to
+// the webhook's current content digest (R3 content-scoped consent). EVERY matching
+// grant is considered, so a stale duplicate grant ordered ahead of a valid
+// re-consent for the same name+source can never shadow it. A match with no digest,
+// or only a stale digest, is not authorization — the reason names the current
+// digest so the operator can re-consent by pinning it.
+func webhookPublicDenyReason(w *Webhook, cityRoot string, grants []WebhookAllowPublic) string {
+	digest := WebhookContentDigest(*w)
+	matched := false         // some grant matched name+provenance
+	sawPinnedDigest := false // a matching grant carried a (non-empty) digest
 	for _, g := range grants {
-		if !strings.EqualFold(strings.TrimSpace(g.Name), strings.TrimSpace(name)) {
+		if !strings.EqualFold(strings.TrimSpace(g.Name), strings.TrimSpace(w.Name)) {
 			continue
 		}
-		if webhookSourceMatches(sourceDir, g.Source, cityRoot) {
-			return true
+		if !webhookSourceMatches(w.SourceDir, g.Source, cityRoot) {
+			continue
+		}
+		matched = true
+		pinned := strings.TrimSpace(g.Digest)
+		if pinned == "" {
+			continue
+		}
+		sawPinnedDigest = true
+		if strings.EqualFold(pinned, digest) {
+			return "" // a matching grant consents to the current content
 		}
 	}
-	return false
+	switch {
+	case !matched:
+		return fmt.Sprintf("no matching [webhooks].allow_public grant for source %q", w.SourceDir)
+	case !sawPinnedDigest:
+		return fmt.Sprintf("[webhooks].allow_public grant has no digest; pin digest=%q to consent to the current content", digest)
+	default:
+		return fmt.Sprintf("webhook content changed since consent; re-consent by setting [webhooks].allow_public digest=%q", digest)
+	}
+}
+
+// WebhookContentDigest computes a stable digest over a webhook's
+// security-relevant content for [webhooks].allow_public content-scoped consent
+// (R3). It covers the fields whose change alters what the hook accepts, how it
+// authenticates, and what it dispatches — scope/rig, every verify field, and each
+// rule's event/match/order/rig/target/args — so a content-swap upgrade produces a
+// different digest and auto-downgrades a granted public hook to tenant until the
+// operator re-consents. It deliberately EXCLUDES name (already the grant key),
+// SourceDir (provenance, matched separately), publication.visibility (always
+// "public" at the guard check, so it carries no information), and MaxPerMinute
+// (a downward-only self-limit that cannot widen exposure). Values are Go-quoted
+// so no field value can forge the field separators.
+func WebhookContentDigest(w Webhook) string {
+	var b strings.Builder
+	kv := func(k, v string) {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(strconv.Quote(v))
+		b.WriteByte('\n')
+	}
+	kv("scope", w.ScopeOrDefault())
+	kv("rig", strings.TrimSpace(w.Rig))
+	kv("publication.hostname", strings.TrimSpace(strings.ToLower(w.Publication.Hostname)))
+	v := w.Verify
+	kv("verify.scheme", strings.TrimSpace(v.Scheme))
+	kv("verify.secret_env", strings.TrimSpace(v.SecretEnv))
+	kv("verify.secret_key", strings.TrimSpace(v.SecretKey))
+	kv("verify.signature_header", v.SignatureHeader)
+	kv("verify.event_header", v.EventHeader)
+	kv("verify.dedup_header", v.DedupHeader)
+	kv("verify.timestamp_header", v.TimestampHeader)
+	kv("verify.replay_window", v.ReplayWindow)
+	kv("verify.issuer", v.Issuer)
+	kv("verify.jwks_url", v.JWKSURL)
+	kv("verify.audience", v.Audience)
+	kv("verify.bearer_env", strings.TrimSpace(v.BearerEnv))
+	cidrs := append([]string(nil), v.AllowedCIDRs...)
+	sort.Strings(cidrs)
+	kv("verify.allowed_cidrs", strings.Join(cidrs, ","))
+	for i, r := range w.Rules {
+		p := "rule[" + strconv.Itoa(i) + "]."
+		kv(p+"event", strings.TrimSpace(r.Event))
+		kv(p+"order", strings.TrimSpace(r.Order))
+		kv(p+"rig", strings.TrimSpace(r.Rig))
+		kv(p+"target", r.TargetOrDefault())
+		kv(p+"match", canonicalStringMap(r.Match))
+		kv(p+"args", canonicalStringMap(r.Args))
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// canonicalStringMap renders a string map to a stable, injection-safe string:
+// entries sorted by key, each key and value Go-quoted, joined with commas.
+func canonicalStringMap(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, strconv.Quote(k)+":"+strconv.Quote(m[k]))
+	}
+	return strings.Join(parts, ",")
 }
 
 // webhookSourceMatches reports whether a stamped provenance directory satisfies

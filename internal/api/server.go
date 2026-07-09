@@ -123,6 +123,20 @@ type Server struct {
 	webhookVerifiersMu sync.Mutex
 	webhookVerifiers   map[string]cachedWebhookVerifier
 
+	// webhookAccessFaultLogged latches which pre-limiter access-gate operator
+	// faults (a misconfigured allowed_cidrs, or an unset/empty bearer_env on a
+	// hook that still passes config load) have already been reported, so a flood
+	// against a misconfigured public hook logs the fault ONCE, not once per
+	// request. These gates run BEFORE the delivery limiter, so — unlike the
+	// limiter-throttled verifier fault — an unbounded per-request log/event here
+	// would be the CWE-400 amplifier the receiver exists to avoid; the 503 itself
+	// is still returned per request (as cheap as the other pre-limiter rejects)
+	// and is deliberately non-evented. Keyed by (webhook name, fault detail) so a
+	// different or changed misconfiguration reports again; keys derive from
+	// operator config, never attacker input, so the set is bounded by config.
+	webhookAccessFaultMu     sync.Mutex
+	webhookAccessFaultLogged map[string]struct{}
+
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
 	webhookMaxBody int64

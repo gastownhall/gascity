@@ -64,6 +64,7 @@ func TestPinnedValues(t *testing.T) {
 		FormulaVarPrefix:             "gc.var.",
 		Namespace:                    "gc.",
 		OptionMetadataPrefix:         "opt_",
+		MoleculeFailedMetadataKey:    "molecule_failed",
 	}
 	for got, want := range pinned {
 		if got != want {

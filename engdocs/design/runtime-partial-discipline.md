@@ -29,26 +29,45 @@ exist", so a brief blip drove the reconciler to drain/close healthy pool slots.
   `staleTTL` (30s default). The wrapped error still satisfies `isNoServerError`,
   so the ~20 existing `ErrNoServer` absorbers are unaffected.
 
-### Still exposed: the `ListRunning` sites
+### Landed (arm 6): the `ListRunning` sites
 
-The `FetchState` fix shields the `StateCache.IsRunning` liveness path, but NOT
-`Provider.ListRunning` (via `Tmux.ListSessions`), which still returns
-`(nil, nil)` on `ErrNoServer` — an empty *success*, not a partial signal. Three
-reconciler-facing sites call `ListRunning` destructively on that empty result:
+`Provider.ListRunning` (`internal/runtime/tmux/adapter.go`) now reports a totally
+unreachable tmux server (`ErrNoServer`) as a `runtime.PartialListError` with a
+nil names slice, instead of the old empty *success* (`(nil, nil)`). This
+activates the `IsPartialListError` guards that already exist at every
+reconciler-facing site, with no new plumbing:
 
-- `cmd/gc/city_runtime.go:960` — pool `on_death` hooks. On a full tmux outage
-  every pool slot vanishes from the empty listing at once, so the tick fires the
-  user's `on_death` command for EVERY pool slot: a false death storm.
-- `cmd/gc/city_runtime.go:1899` — provider swap on config reload.
+Two sites had a genuine destructive-behavior change:
+
+- `cmd/gc/city_runtime.go:960` — pool `on_death` hooks. Previously a full tmux
+  outage made every pool slot vanish from the empty listing at once, firing the
+  user's `on_death` command for EVERY slot (a false death storm). The guard now
+  skips the whole death check on a partial listing.
+- `cmd/gc/city_runtime.go:1899` — provider swap on config reload. Previously the
+  absorbed `(nil, nil)` let the swap proceed with zero visible sessions, silently
+  orphaning any still-alive session from tracking; the guard now keeps the old
+  config instead.
+
+The remaining site is diagnostics-only, not a safety change:
+
 - `cmd/gc/city_runtime.go:3466` / `:3478` — shutdown (and the force-shutdown
-  late-async-start re-list) session listing.
+  late-async-start re-list). Its stop set was already empty under the old
+  absorbed-error path, so its stop behavior is unchanged; only the stderr
+  message changes (from silent to an explicit "partial listing" diagnostic).
+- Plus the pre-existing guards at `cmd/gc/adoption_barrier.go`,
+  `cmd/gc/cmd_stop.go` (stopOrphans / doStop), `cmd/gc/controller.go`
+  (runningSessionSet falls back to per-session last-known-good),
+  `cmd/gc/session_beads.go` (dead-cleanup / closed-bead reap), and
+  `internal/doctor/checks.go` (orphan check + `--fix`).
 
-All four `IsPartialListError` guards at those call sites already exist (verified
-in-tree), but none fires today because `ListRunning` returns a nil error on
-`ErrNoServer`. The clean completion path is doc-only from here: emit the
-EXISTING `PartialListError` from `Provider.ListRunning` / `Tmux.ListSessions` on
-`ErrNoServer` (arm 6 below), which activates all four guards with no new
-plumbing — the `on_death` storm is arm 4.
+Implemented at the narrowest reconciler-facing layer: `Tmux.ListSessions` still
+absorbs `ErrNoServer` into an empty result for its tmux-internal callers
+(`FindSessionByWorkDir`, `CleanupOrphanedSessions`), which treat "server down"
+and "no sessions" identically; a private `Tmux.listSessionNames` variant
+propagates the cause so only `Provider.ListRunning` upgrades it to a partial
+signal. Composite providers (`auto`, `hybrid`) already fold a backend's
+`PartialListError` through `MergeBackendListResults`, so the signal propagates
+unchanged.
 
 ### Bounded behavior change (maintainer, please confirm)
 
@@ -86,12 +105,15 @@ partial runtime observation:
    `if err != nil { running = false }`): a failed reachability probe currently
    falls open to "not running"; it should treat `ErrRuntimeUnavailable` as
    partial and defer.
-6. **`Tmux.ListSessions` / `Tmux.HasSession`** (`internal/runtime/tmux/tmux.go`
-   ~993-1018): these still return `nil,nil` / `false,nil` on `ErrNoServer` for
-   their (tmux-internal) callers. They are not on the reconciler liveness path
-   (that path is `list-panes` via `FetchState`), so they were left alone here;
-   surface `ErrRuntimeUnavailable` from them too for consistency once a consumer
-   needs it, auditing each internal caller to preserve today's absorb behavior.
+6. **`Tmux.HasSession`** (`internal/runtime/tmux/tmux.go`): still returns
+   `false,nil` on `ErrNoServer` for its (tmux-internal) callers. It is not on the
+   reconciler liveness path (that path is `list-panes` via `FetchState`), so it
+   was left alone; surface `ErrRuntimeUnavailable` from it too for consistency
+   once a consumer needs it, auditing each internal caller to preserve today's
+   absorb behavior. (`Tmux.ListSessions` was the other half of this arm and is
+   now handled: `Provider.ListRunning` emits `PartialListError` on `ErrNoServer`
+   while `ListSessions` keeps absorbing it for its internal callers — see
+   "Landed (arm 6)" above.)
 
 The plumbing to get a per-tick `runtimeQueryPartial` to the reconciler arms
 (optional provider interface via type-assert, like `LivenessObserver`, plus a

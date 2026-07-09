@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -323,11 +324,89 @@ func TestWaitJSONEncoderErrorsWriteDiagnostics(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if code := writeWaitInspectJSON(failingWriter{}, &stderr, "/city", beads.Bead{}); code != 1 {
+	if code := writeWaitInspectJSON(failingWriter{}, &stderr, "/city", sessionpkg.WaitInfo{}); code != 1 {
 		t.Fatalf("writeWaitInspectJSON = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "gc wait inspect: encode JSON: write failed") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestWaitJSONFromInfo_MatchesBeadProjection locks the schema_version-1 CLI JSON
+// contract byte-for-byte across the WaitInfo refactor: a fully-populated wait
+// bead projected through the session codec and mapped to waitJSON must equal the
+// hand-written literal the inline waitJSONFromBead previously produced.
+func TestWaitJSONFromInfo_MatchesBeadProjection(t *testing.T) {
+	created := time.Date(2026, 5, 15, 9, 30, 0, 0, time.UTC)
+	b := beads.Bead{
+		ID:          "gc-wait-1",
+		Type:        waitBeadType,
+		Status:      "closed",
+		Title:       "wait:worker",
+		Description: "Continue after review closes.",
+		CreatedAt:   created,
+		Labels:      []string{waitBeadLabel, "session:gc-session"},
+		Metadata: map[string]string{
+			"session_id":       "gc-session",
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1,gc-2",
+			"dep_mode":         "all",
+			"registered_epoch": "3",
+			"delivery_attempt": "2",
+			"nudge_id":         "wait-gc-wait-1-3-2",
+		},
+	}
+	got := waitJSONFromInfo(sessionpkg.WaitInfoFromBead(b))
+	want := waitJSON{
+		ID:              "gc-wait-1",
+		SessionID:       "gc-session",
+		SessionName:     "worker",
+		State:           waitStateReady,
+		Kind:            "deps",
+		DepIDs:          []string{"gc-1", "gc-2"},
+		DepMode:         "all",
+		RegisteredEpoch: "3",
+		DeliveryAttempt: "2",
+		NudgeID:         "wait-gc-wait-1-3-2",
+		Note:            "Continue after review closes.",
+		Status:          "closed",
+		CreatedAt:       created.UTC().Format(time.RFC3339),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("waitJSONFromInfo = %#v, want %#v", got, want)
+	}
+}
+
+// TestWriteWaitDetail_RendersWaitInfo pins the human wait-inspect render,
+// including the comma-joined DepIDs on the Deps line.
+func TestWriteWaitDetail_RendersWaitInfo(t *testing.T) {
+	w := sessionpkg.WaitInfo{
+		ID:              "gc-wait-1",
+		SessionID:       "gc-session",
+		State:           waitStateReady,
+		Kind:            "deps",
+		DepIDs:          []string{"a", "b"},
+		DepMode:         "all",
+		RegisteredEpoch: "3",
+		DeliveryAttempt: "2",
+		NudgeID:         "wait-gc-wait-1-3-2",
+		Note:            "Continue after review closes.",
+	}
+	var buf bytes.Buffer
+	writeWaitDetail(w, &buf)
+	want := "Wait:       gc-wait-1\n" +
+		"Session:    gc-session\n" +
+		"State:      ready\n" +
+		"Kind:       deps\n" +
+		"Deps:       a,b (all)\n" +
+		"Epoch:      3\n" +
+		"Attempt:    2\n" +
+		"Nudge:      wait-gc-wait-1-3-2\n" +
+		"Note:       Continue after review closes.\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("writeWaitDetail =\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -553,9 +632,9 @@ func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {
 	}
 	store := &waitListQueryCaptureStore{Store: mem}
 
-	waits, err := loadWaitBeadsByLabel(store)
+	waits, err := loadWaitsByLabel(store)
 	if err != nil {
-		t.Fatalf("loadWaitBeadsByLabel: %v", err)
+		t.Fatalf("loadWaitsByLabel: %v", err)
 	}
 	if len(waits) != 1 {
 		t.Fatalf("wait count = %d, want 1", len(waits))
@@ -583,9 +662,9 @@ func TestLoadWaitBeadsByLabelAllowsExactLookupLimit(t *testing.T) {
 		}
 	}
 
-	waits, err := loadWaitBeadsByLabel(mem)
+	waits, err := loadWaitsByLabel(mem)
 	if err != nil {
-		t.Fatalf("loadWaitBeadsByLabel: %v", err)
+		t.Fatalf("loadWaitsByLabel: %v", err)
 	}
 	if len(waits) != waitLookupLimit {
 		t.Fatalf("wait count = %d, want %d", len(waits), waitLookupLimit)
@@ -593,9 +672,9 @@ func TestLoadWaitBeadsByLabelAllowsExactLookupLimit(t *testing.T) {
 }
 
 func TestLoadWaitBeadsByLabelReportsLookupLimit(t *testing.T) {
-	_, err := loadWaitBeadsByLabel(waitLookupLimitStore{Store: beads.NewMemStore()})
+	_, err := loadWaitsByLabel(waitLookupLimitStore{Store: beads.NewMemStore()})
 	if err == nil || !strings.Contains(err.Error(), "wait lookup hit limit") {
-		t.Fatalf("loadWaitBeadsByLabel error = %v, want wait lookup limit", err)
+		t.Fatalf("loadWaitsByLabel error = %v, want wait lookup limit", err)
 	}
 }
 
@@ -1026,7 +1105,7 @@ func TestPrepareWaitWakeState_FinalizesFromNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wait bead: %v", err)
 	}
-	nudgeID := waitNudgeID(waitBead)
+	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
 	nudge, err := store.Create(beads.Bead{
 		Type:   nudgeBeadType,
 		Title:  "nudge:" + nudgeID,
@@ -1471,12 +1550,12 @@ func TestDepsWaitReady_IgnoresEmptyDependencyEntries(t *testing.T) {
 		t.Fatalf("close dep bead: %v", err)
 	}
 
-	ready := depsWaitReady(store, beads.Bead{
+	ready := depsWaitReady(store, sessionpkg.WaitInfoFromBead(beads.Bead{
 		Metadata: map[string]string{
 			"dep_ids":  dep.ID + ", ,",
 			"dep_mode": "all",
 		},
-	})
+	}))
 	if !ready {
 		t.Fatal("depsWaitReady = false, want true with only one real closed dependency")
 	}
@@ -1496,7 +1575,7 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wait bead: %v", err)
 	}
-	nudgeID := waitNudgeID(wait)
+	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(wait))
 	nudge, err := store.Create(beads.Bead{
 		Type:   nudgeBeadType,
 		Title:  "nudge:" + nudgeID,
@@ -1513,7 +1592,7 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 		t.Fatalf("close nudge bead: %v", err)
 	}
 
-	next, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), wait)
+	next, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), sessionpkg.WaitInfoFromBead(wait))
 	if err != nil {
 		t.Fatalf("nextWaitDeliveryAttempt: %v", err)
 	}
@@ -1552,7 +1631,7 @@ func TestRetryClosedWait_CreatesReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wait bead: %v", err)
 	}
-	nudgeID := waitNudgeID(wait)
+	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(wait))
 	nudge, err := store.Create(beads.Bead{
 		Type:   nudgeBeadType,
 		Title:  "nudge:" + nudgeID,
@@ -1745,7 +1824,7 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
 		t.Fatalf("pending=%d inFlight=%d dead=%d, want 1/0/0", len(pending), len(inFlight), len(dead))
 	}
-	wantID := waitNudgeID(waitBead)
+	wantID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
 	if pending[0].ID != wantID {
 		t.Fatalf("queued nudge id = %q, want %q", pending[0].ID, wantID)
 	}
@@ -1864,8 +1943,8 @@ func TestDispatchReadyWaitNudges_ProcessesOpenSessionWaitsWithoutGlobalWaitList(
 	if err != nil {
 		t.Fatalf("listQueuedNudges: %v", err)
 	}
-	if len(pending) != 1 || pending[0].ID != waitNudgeID(waitBead) {
-		t.Fatalf("pending nudges = %#v, want one wait nudge %q", pending, waitNudgeID(waitBead))
+	if len(pending) != 1 || pending[0].ID != waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead)) {
+		t.Fatalf("pending nudges = %#v, want one wait nudge %q", pending, waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead)))
 	}
 }
 
@@ -2307,26 +2386,31 @@ func TestCancelWaitsForSessionReturnsNilAfterCappedConvergence(t *testing.T) {
 func TestLoadSessionWaitBeads_IncludesLegacyWaitType(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionID := "gc-session"
-	if _, err := store.Create(beads.Bead{
+	// loadSessionWaits returns session.WaitInfo, which omits the storage-level
+	// bead Type. The legacy-type wait still flows through the lookup, so assert
+	// the created legacy bead is returned by ID (the IsWaitBead legacy-type
+	// coverage stays enforced by internal/session's IsWaitBead tests).
+	legacy, err := store.Create(beads.Bead{
 		Type:   sessionpkg.LegacyWaitBeadType,
 		Labels: []string{waitBeadLabel, "session:" + sessionID},
 		Metadata: map[string]string{
 			"session_id": sessionID,
 			"state":      waitStatePending,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create legacy wait bead: %v", err)
 	}
 
-	waits, err := loadSessionWaitBeads(store, sessionID)
+	waits, err := loadSessionWaits(store, sessionID)
 	if err != nil {
-		t.Fatalf("loadSessionWaitBeads: %v", err)
+		t.Fatalf("loadSessionWaits: %v", err)
 	}
 	if len(waits) != 1 {
-		t.Fatalf("loadSessionWaitBeads returned %d waits, want 1", len(waits))
+		t.Fatalf("loadSessionWaits returned %d waits, want 1", len(waits))
 	}
-	if waits[0].Type != sessionpkg.LegacyWaitBeadType {
-		t.Fatalf("wait type = %q, want legacy %q", waits[0].Type, sessionpkg.LegacyWaitBeadType)
+	if waits[0].ID != legacy.ID {
+		t.Fatalf("wait ID = %q, want legacy wait %q", waits[0].ID, legacy.ID)
 	}
 }
 

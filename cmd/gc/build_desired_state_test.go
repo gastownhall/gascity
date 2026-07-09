@@ -11229,7 +11229,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 
 	// Criterion #6 (ga-4qbgqf.3): fresh in-flight creates (pending_create_claim=true)
 	// are retained in desired state and in the retained count during a partial tick.
-	// poolPartialAlive is true via isPendingPoolCreate, so the narrow guard keeps them.
+	// poolPartialAlive is true via isPendingPoolCreateInfo, so the narrow guard keeps them.
 	t.Run("fresh pending_create_claim creating bead retained during partial tick", func(t *testing.T) {
 		partialStore := &controllerDemandPartialStore{MemStore: beads.NewMemStore()}
 		freshCreate := beads.Bead{

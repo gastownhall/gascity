@@ -46,27 +46,12 @@ func sessionBeadAssigneeIdentities(sb beads.Bead) []string {
 
 // sessionBeadAssigneeIdentitiesInfo is the session.Info mirror of
 // sessionBeadAssigneeIdentities. It reads the RAW session_name
-// (Info.SessionNameMetadata) and the pre-normalized Info.AliasHistory.
+// (Info.SessionNameMetadata) and the pre-normalized Info.AliasHistory. The body
+// is the confined session.AssigneeIdentities codec; the bead-form peer above
+// stays inline to avoid a per-iteration Info projection in the hot reconciler
+// loops (the classifier-equivalence oracle guards their agreement).
 func sessionBeadAssigneeIdentitiesInfo(i session.Info) []string {
-	identities := make([]string, 0, 5)
-	if id := strings.TrimSpace(i.ID); id != "" {
-		identities = append(identities, id)
-	}
-	if sn := strings.TrimSpace(i.SessionNameMetadata); sn != "" {
-		identities = append(identities, sn)
-	}
-	if ni := strings.TrimSpace(i.ConfiguredNamedIdentity); ni != "" {
-		identities = append(identities, ni)
-	}
-	if al := strings.TrimSpace(i.Alias); al != "" {
-		identities = append(identities, al)
-	}
-	for _, prior := range i.AliasHistory {
-		if prior = strings.TrimSpace(prior); prior != "" {
-			identities = append(identities, prior)
-		}
-	}
-	return identities
+	return session.AssigneeIdentities(i)
 }
 
 type releasedPoolAssignment struct {

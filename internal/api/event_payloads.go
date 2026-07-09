@@ -505,6 +505,34 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// BeadDeadAssigneeReopenedPayload is the typed payload for
+// bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
+// routed work bead whose assignee no longer maps to any open session bead —
+// the owning session closed/retired while the bead stayed assigned, so it sat
+// open+routed but unclaimable. The reconciler clears DeadAssignee (empty-string
+// clear) so the RoutedTo pool can reclaim BeadID; the payload makes the repair
+// observable for eval/audit (mirrors BeadClaimRejectedPayload).
+type BeadDeadAssigneeReopenedPayload struct {
+	BeadID       string `json:"bead_id" doc:"ID of the reopened work bead (also the envelope Subject)."`
+	DeadAssignee string `json:"dead_assignee,omitempty" doc:"The assignee identity that resolved to no open session bead, cleared by the reopen."`
+	RoutedTo     string `json:"routed_to,omitempty" doc:"The gc.routed_to target the bead stays routed to after the reopen, when set."`
+}
+
+// IsEventPayload marks BeadDeadAssigneeReopenedPayload as an events.Payload variant.
+func (BeadDeadAssigneeReopenedPayload) IsEventPayload() {}
+
+// BeadDeadAssigneeReopenedPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. DeadAssignee and RoutedTo are emitted only
+// when non-empty.
+func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) json.RawMessage {
+	b, _ := json.Marshal(BeadDeadAssigneeReopenedPayload{
+		BeadID:       beadID,
+		DeadAssignee: deadAssignee,
+		RoutedTo:     routedTo,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -520,6 +548,7 @@ func init() {
 	events.RegisterPayload(events.BeadUpdated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
+	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

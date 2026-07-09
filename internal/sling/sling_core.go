@@ -268,7 +268,10 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
 		return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}, fmt.Errorf("formula %q root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or formulas v2 before routing it to a pool", opts.BeadOrFormula)
 	}
-	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, searchPaths, molecule.Options{
+	// Compile-once (S14): the recipe compiled above for the ready-surface check
+	// is the same one instantiated here — no redundant disk compile, and the
+	// isGraph/routing decision cannot drift from what is materialized.
+	mResult, err := InstantiateCompiledSlingFormula(context.Background(), recipe, opts.BeadOrFormula, molecule.Options{
 		Title: opts.Title,
 		Vars:  formulaVars,
 	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)

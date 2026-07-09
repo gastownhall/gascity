@@ -3,12 +3,108 @@ package session
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestWaitInfoFromBead_ProjectsAllFields(t *testing.T) {
+	created := time.Date(2026, 5, 15, 9, 30, 0, 0, time.UTC)
+	b := beads.Bead{
+		ID:          "gc-wait-1",
+		Type:        WaitBeadType,
+		Status:      "closed",
+		Title:       "wait:worker",
+		Description: "Continue after review closes.",
+		CreatedAt:   created,
+		Labels:      []string{WaitBeadLabel, "session:gc-session"},
+		Metadata: map[string]string{
+			"session_id":       "gc-session",
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            "ready",
+			"dep_ids":          "gc-1,gc-2",
+			"dep_mode":         "all",
+			"registered_epoch": "3",
+			"delivery_attempt": "2",
+			"nudge_id":         "wait-gc-wait-1-3-2",
+			"expires_at":       "2026-05-16T09:30:00Z",
+		},
+	}
+	got := WaitInfoFromBead(b)
+	want := WaitInfo{
+		ID:              "gc-wait-1",
+		SessionID:       "gc-session",
+		SessionName:     "worker",
+		Kind:            "deps",
+		State:           "ready",
+		DepIDs:          []string{"gc-1", "gc-2"},
+		DepMode:         "all",
+		RegisteredEpoch: "3",
+		DeliveryAttempt: "2",
+		NudgeID:         "wait-gc-wait-1-3-2",
+		ExpiresAt:       "2026-05-16T09:30:00Z",
+		Note:            "Continue after review closes.",
+		Status:          "closed",
+		CreatedAt:       created,
+		Labels:          []string{WaitBeadLabel, "session:gc-session"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("WaitInfoFromBead = %#v, want %#v", got, want)
+	}
+}
+
+func TestWaitInfoFromBead_DepIDsSplitTrimEmpty(t *testing.T) {
+	cases := []struct {
+		name   string
+		depIDs string
+		want   []string
+	}{
+		{"trims and drops empties", " a , b ,,c ", []string{"a", "b", "c"}},
+		{"empty string", "", nil},
+		{"single id", "gc-1", []string{"gc-1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := WaitInfoFromBead(beads.Bead{Metadata: map[string]string{"dep_ids": tc.depIDs}}).DepIDs
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("DepIDs = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+	if got := WaitInfoFromBead(beads.Bead{}).DepIDs; got != nil {
+		t.Fatalf("DepIDs for absent dep_ids key = %#v, want nil", got)
+	}
+}
+
+func TestListSessionWaits_ReturnsProjectedWaitInfo(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{
+		Type:   WaitBeadType,
+		Labels: []string{WaitBeadLabel, "session:gc-session"},
+		Metadata: map[string]string{
+			"session_id": "gc-session",
+			"state":      "ready",
+			"nudge_id":   "wait-nudge",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait: %v", err)
+	}
+	waits, err := ListSessionWaits(store, "gc-session")
+	if err != nil {
+		t.Fatalf("ListSessionWaits: %v", err)
+	}
+	if len(waits) != 1 {
+		t.Fatalf("wait count = %d, want 1", len(waits))
+	}
+	if w := waits[0]; w.ID != created.ID || w.SessionID != "gc-session" || w.State != "ready" || w.NudgeID != "wait-nudge" {
+		t.Fatalf("WaitInfo = %#v, want id=%s session=gc-session state=ready nudge=wait-nudge", w, created.ID)
+	}
+}
 
 type rejectLegacyWaitTypeQueryStore struct {
 	*beads.MemStore
@@ -144,22 +240,22 @@ func TestWaitNudgeIDs_UsesBoundedDeterministicSessionLookup(t *testing.T) {
 	}
 }
 
-func TestListSessionWaitBeads_AllowsExactLookupLimit(t *testing.T) {
+func TestListSessionWaits_AllowsExactLookupLimit(t *testing.T) {
 	store := &sessionWaitExactLimitStore{Store: beads.NewMemStore()}
 
-	waits, err := ListSessionWaitBeads(store, "gc-session")
+	waits, err := ListSessionWaits(store, "gc-session")
 	if err != nil {
-		t.Fatalf("ListSessionWaitBeads: %v", err)
+		t.Fatalf("ListSessionWaits: %v", err)
 	}
 	if len(waits) != SessionWaitLookupLimit {
 		t.Fatalf("wait count = %d, want %d", len(waits), SessionWaitLookupLimit)
 	}
 }
 
-func TestListSessionWaitBeads_ReportsLimitWithFilteredPartial(t *testing.T) {
-	waits, err := ListSessionWaitBeads(sessionWaitLimitStore{Store: beads.NewMemStore()}, "gc-session")
+func TestListSessionWaits_ReportsLimitWithFilteredPartial(t *testing.T) {
+	waits, err := ListSessionWaits(sessionWaitLimitStore{Store: beads.NewMemStore()}, "gc-session")
 	if !beads.IsLookupLimitError(err) {
-		t.Fatalf("ListSessionWaitBeads error = %v, want lookup limit", err)
+		t.Fatalf("ListSessionWaits error = %v, want lookup limit", err)
 	}
 	if len(waits) != SessionWaitLookupLimit {
 		t.Fatalf("wait count = %d, want filtered partial count %d", len(waits), SessionWaitLookupLimit)

@@ -420,7 +420,7 @@ func TestRetainScaleCheckPartialPoolDesiredNormalizesLegacyBoundTemplate(t *test
 }
 
 // TestRetainScaleCheckPartialPoolDesired_InFlightCreatingBeadRetained confirms that
-// scaleCheckPartialSessionRetainable retains creating beads that hold an active
+// scaleCheckPartialSessionRetainableInfo retains creating beads that hold an active
 // pending_create_claim lease, while stale creates (lease cleared/expired) are dropped.
 // This is acceptance criterion #4 from ga-4qbgqf.1: after the retainable narrowing
 // that removes "start-pending" and "creating" from the explicit case list,

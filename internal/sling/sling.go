@@ -1261,29 +1261,69 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 // graph routing if the formula is a graph.v2 workflow.
 func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
-	if opts.PriorityOverride == nil && sourceBeadID != "" {
-		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
-	}
 	compileStart := time.Now()
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
 		return nil, err
 	}
+	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
+	return InstantiateCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, a, deps, forceGraphV2Replace...)
+}
+
+// InstantiateCompiledSlingFormula materializes an already-compiled formula
+// recipe, applying graph routing when the recipe is a graph.v2 workflow. It is
+// the single instantiation chokepoint for every sling launch shape: the caller
+// compiles the recipe exactly once (compile-once, S14 I11/I12) and hands the
+// same *formula.Recipe here, so the recipe that decides isGraph is the recipe
+// that is validated and instantiated.
+//
+// The at-most-one-live-root-per-RootKey invariant (I1) is enforced by a
+// cross-process sourceworkflow file lock on the RootKey — replacing the former
+// process-local striped mutex that two processes (CLI + API) could each pass,
+// which was the #1053 duplicate-molecule window. The RootKey lock nests inside
+// any source-bead lock the caller already holds, preserving the fixed
+// source→root acquisition order (I5); the keys never collide, so nesting is
+// deadlock-free.
+func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
+	if opts.PriorityOverride == nil && sourceBeadID != "" {
+		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
+	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
 		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
+	rootKey := ""
 	if graphWorkflow {
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
-		if key := strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey]); key != "" {
-			unlock := lockGraphV2Root(key)
-			defer unlock()
-		}
+		rootKey = strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	}
-	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
+
+	materialize := func() (*molecule.Result, error) {
+		return materializeCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, graphWorkflow, a, deps, forceGraphV2Replace...)
+	}
+	if !graphWorkflow || rootKey == "" {
+		return materialize()
+	}
+	var result *molecule.Result
+	err := sourceworkflow.WithLock(ctx, deps.CityPath, sourceWorkflowLockScope(deps), rootKey, func() error {
+		var innerErr error
+		result, innerErr = materialize()
+		return innerErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// materializeCompiledSlingFormula performs the routing, dedupe lookup, and
+// instantiation for a compiled recipe. For graph workflows the caller invokes
+// it under the RootKey file lock so the live-root lookup and creation are
+// atomic across processes.
+func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
 	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
@@ -1338,10 +1378,6 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 	}
 	SlingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
 	return result, nil
-}
-
-func lockGraphV2Root(key string) func() {
-	return graphv2.LockKey(key)
 }
 
 func closeReplacedGraphV2Root(store beads.Store, rootID string) ([]sourceworkflow.WorkflowBeadSnapshot, error) {
@@ -1449,7 +1485,7 @@ func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
 	for _, root := range matches {
-		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {

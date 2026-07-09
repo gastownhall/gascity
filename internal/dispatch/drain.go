@@ -191,7 +191,11 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		return ControlResult{}, fmt.Errorf("%s: recording expanded drain: %w", bead.ID, err)
 	}
 	if len(manifest.Rows) == 0 {
-		return completeDrain(store, mustReloadDrain(store, bead), opts)
+		reloaded, err := reloadDrain(store, bead)
+		if err != nil {
+			return ControlResult{}, err
+		}
+		return completeDrain(store, reloaded, opts)
 	}
 	return ControlResult{Processed: true, Action: "drain-expanded", Created: totalCreated}, nil
 }
@@ -1012,7 +1016,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
 	}
 	for _, candidate := range existing {
-		if candidate.Metadata["molecule_failed"] == "true" {
+		if candidate.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
 			continue
 		}
 		return candidate.ID, false, nil
@@ -1125,7 +1129,7 @@ func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string)
 		return fmt.Errorf("%s: looking up failed drain item roots for key %s: %w", controlID, itemRootKey, err)
 	}
 	for _, root := range matches {
-		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
@@ -1468,10 +1472,14 @@ func drainOnItemFailure(bead beads.Bead) string {
 	return beadmeta.DrainOnItemFailureContinue
 }
 
-func mustReloadDrain(store beads.Store, bead beads.Bead) beads.Bead {
+// reloadDrain re-reads the drain control bead so completeDrain sees the freshly
+// persisted post-expansion state. On a read error it returns the error rather
+// than the stale pre-transition bead, so the caller can retry next tick instead
+// of completing the drain against a stale snapshot.
+func reloadDrain(store beads.Store, bead beads.Bead) (beads.Bead, error) {
 	reloaded, err := store.Get(bead.ID)
 	if err != nil {
-		return bead
+		return beads.Bead{}, fmt.Errorf("%s: reloading drain before completion: %w", bead.ID, err)
 	}
-	return reloaded
+	return reloaded, nil
 }

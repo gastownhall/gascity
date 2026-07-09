@@ -44,7 +44,7 @@ The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/ga
 ## Homebrew (recommended)
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 ```
 
 This taps the `gastownhall/gascity` formula, downloads the matching `gc`

@@ -747,28 +747,42 @@ func computeExcludingKillSet(panePID string, descendants, reparented []string, e
 	return killList, !exclude[panePID]
 }
 
-// collectReparentedGroupMembers returns process group members that have been
-// reparented to init (PPID == 1) but are not in the known descendant set.
-// These are processes that were likely children in our tree but outlived their
-// parent and got reparented to init while keeping the original PGID.
-//
-// This is safer than killing the entire process group blindly with
-// syscall.Kill(-pgid, ...), which could hit unrelated processes if the PGID
-// is shared or has been reused after the group leader exited.
+// collectReparentedGroupMembers returns process group members that outlived
+// their parent inside our tree and were reparented away, but are not already in
+// the known descendant set. It shares the pane leader's PGID with every member;
+// since the leader is still alive when this runs, the PGID cannot have been
+// reused, so members carrying it descend from our tree rather than an unrelated
+// process. This is safer than killing the entire group blindly with
+// syscall.Kill(-pgid, ...).
 func collectReparentedGroupMembers(pgid string, knownPIDs map[string]bool) []string {
-	members := getProcessGroupMembers(pgid)
+	return reparentedOrphans(getProcessGroupMembers(pgid), knownPIDs, getParentPID)
+}
+
+// reparentedOrphans selects group members whose parent is outside the known
+// descendant set — the pure, IO-free core of collectReparentedGroupMembers.
+//
+// The prior test was literal PPID == 1, which only holds when init adopts the
+// orphan. Under a `user@.service` subreaper (systemd --user), an orphaned child
+// reparents to the subreaper's pid, not 1, so the PPID == 1 test missed it and
+// the tree kill left it alive next to the replacement. "Parent outside the
+// descendant set" captures both cases: init (pid 1 is never a descendant) and
+// the subreaper (its pid is never a descendant either), while a member whose
+// parent is still a live descendant is left to getAllDescendants. Members whose
+// parent cannot be read are skipped rather than killed.
+func reparentedOrphans(members []string, knownPIDs map[string]bool, parentOf func(string) string) []string {
 	var reparented []string
 	for _, member := range members {
 		if knownPIDs[member] {
-			continue // Already in descendant list, will be handled there
+			continue // Already in the descendant list; handled there.
 		}
-		// Check if reparented to init — probably was our child
-		ppid := getParentPID(member)
-		if ppid == "1" {
-			reparented = append(reparented, member)
+		ppid := strings.TrimSpace(parentOf(member))
+		if ppid == "" {
+			continue // Parent unknown (raced exit) — cannot prove it's ours.
 		}
-		// Otherwise skip — this process is not in our tree and not reparented,
-		// so it's likely unrelated and should not be killed
+		if knownPIDs[ppid] {
+			continue // Parent still a live descendant; getAllDescendants owns it.
+		}
+		reparented = append(reparented, member)
 	}
 	return reparented
 }
@@ -1001,21 +1015,38 @@ func (t *Tmux) HasSession(name string) (bool, error) {
 	return true, nil
 }
 
-// ListSessions returns all session names.
-func (t *Tmux) ListSessions() ([]string, error) {
+// listSessionNames returns all session names, propagating ErrNoServer so
+// callers that must distinguish an unreachable server from a genuinely empty
+// session list can do so. [Tmux.ListSessions] absorbs ErrNoServer into an
+// empty result for its tmux-internal callers; the reconciler-facing
+// [Provider.ListRunning] uses this variant to surface a total outage as a
+// [runtime.PartialListError] instead of "no sessions".
+func (t *Tmux) listSessionNames() ([]string, error) {
 	out, err := t.run("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// ListSessions returns all session names. An unreachable tmux server is
+// absorbed into an empty result (no server = no sessions) for tmux-internal
+// callers (FindSessionByWorkDir, CleanupOrphanedSessions) that treat "server
+// down" and "no sessions" identically. Reconciler-facing liveness listing goes
+// through [Provider.ListRunning], which instead reports the outage as a
+// [runtime.PartialListError].
+func (t *Tmux) ListSessions() ([]string, error) {
+	names, err := t.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
 			return nil, nil // No server = no sessions
 		}
 		return nil, err
 	}
-
-	if out == "" {
-		return nil, nil
-	}
-
-	return strings.Split(out, "\n"), nil
+	return names, nil
 }
 
 // SessionSet provides O(1) session existence checks by caching session names.

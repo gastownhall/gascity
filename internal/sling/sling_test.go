@@ -470,6 +470,112 @@ func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
 	}
 }
 
+// depListErrStore wraps a real store but forces DepList to fail, simulating a
+// transient store hiccup during the tracking-convoy lookup (#2987).
+type depListErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s depListErrStore) DepList(string, string) ([]beads.Dep, error) {
+	return nil, s.err
+}
+
+// TestCheckBeadStateConvoyLookupErrorFailsClosed proves the fail-closed fix:
+// when the tracking-convoy lookup errors (transient store failure), the routed
+// bead is reported Idempotent with a surfaced warning instead of re-running
+// finalize and minting a duplicate auto-convoy. Without the fix, the same
+// setup returns Idempotent=false (convoy recovery), the #2987 silent-duplicate
+// vector.
+func TestCheckBeadStateConvoyLookupErrorFailsClosed(t *testing.T) {
+	backing := beads.NewMemStore()
+	bead, err := backing.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	store := depListErrStore{Store: backing, err: errors.New("boom: store unavailable")}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true (fail closed) on convoy-lookup error, got %+v", result)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected a surfaced warning on convoy-lookup error, got %+v", result)
+	}
+}
+
+// parentGetErrStore forces q.Get(parentID) to fail with a chosen error while
+// serving every other bead from the backing store, isolating the parent-read
+// error path in needsConvoyRecovery.
+type parentGetErrStore struct {
+	beads.Store
+	parentID string
+	err      error
+}
+
+func (s parentGetErrStore) Get(id string) (beads.Bead, error) {
+	if id == s.parentID {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+// TestNeedsConvoyRecoveryDistinguishesDeletedParent proves the F3 fix: a routed
+// child whose parent is genuinely deleted (ErrNotFound) still needs finalize to
+// re-run (Idempotent=false), because a persistently-missing parent is not a
+// transient hiccup. A transient parent-read error, by contrast, fails closed
+// (Idempotent=true + warning) so a store blip never mints a duplicate
+// auto-convoy (#2987).
+func TestNeedsConvoyRecoveryDistinguishesDeletedParent(t *testing.T) {
+	newRoutedChild := func(t *testing.T, store beads.Store, parentID string) string {
+		t.Helper()
+		bead, err := store.Create(beads.Bead{
+			Title:    "routed child",
+			Type:     "task",
+			Status:   "open",
+			ParentID: parentID,
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		})
+		if err != nil {
+			t.Fatalf("store.Create(): %v", err)
+		}
+		return bead.ID
+	}
+
+	t.Run("deleted parent triggers recovery", func(t *testing.T) {
+		store := beads.NewMemStore()
+		beadID := newRoutedChild(t, store, "gcg-deleted-parent")
+
+		result := CheckBeadState(store, beadID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+		if result.Idempotent {
+			t.Fatalf("expected Idempotent=false (recovery needed) for a routed child with a deleted parent, got %+v", result)
+		}
+	})
+
+	t.Run("transient parent error fails closed", func(t *testing.T) {
+		backing := beads.NewMemStore()
+		beadID := newRoutedChild(t, backing, "gcg-parent")
+		store := parentGetErrStore{Store: backing, parentID: "gcg-parent", err: errors.New("boom: store unavailable")}
+
+		result := CheckBeadState(store, beadID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+		if !result.Idempotent {
+			t.Fatalf("expected Idempotent=true (fail closed) on a transient parent-read error, got %+v", result)
+		}
+		if len(result.Warnings) == 0 {
+			t.Fatalf("expected a surfaced warning on transient parent-read error, got %+v", result)
+		}
+	})
+}
+
 func TestCheckBeadStateRoutedWithWorkflowParentIsIdempotent(t *testing.T) {
 	tests := []struct {
 		name     string

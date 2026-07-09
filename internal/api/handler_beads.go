@@ -62,10 +62,10 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	}
 	// A work bead's stored assignee may be ANY of the resolved session's
 	// identity forms — the bead ID, session_name, alias, configured named
-	// identity, or a prior alias — so match against all of them (mirrors
-	// sessionBeadAssigneeIdentities used by the reconciler). Without this the
-	// session-name form written by assign/update (and the claim path) would be
-	// invisible to ?assignee=<alias|id> list filters.
+	// identity, or a prior alias — so match against all of them via the confined
+	// session.AssigneeIdentities codec. Without this the session-name form
+	// written by assign/update (and the claim path) would be invisible to
+	// ?assignee=<alias|id> list filters.
 	seen := map[string]bool{}
 	var terms []string
 	add := func(v string) {
@@ -79,11 +79,8 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	add(assignee)
 	add(id)
 	if b, getErr := store.Get(id); getErr == nil {
-		add(b.Metadata["session_name"])
-		add(b.Metadata["alias"])
-		add(b.Metadata[session.NamedSessionIdentityMetadata])
-		for _, prior := range session.AliasHistory(b.Metadata) {
-			add(prior)
+		for _, identity := range session.AssigneeIdentities(session.InfoFromPersistedBead(b)) {
+			add(identity)
 		}
 	}
 	return terms
@@ -116,26 +113,7 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
 	}
 	session.RepairEmptyType(store, &b)
-	return sessionBeadAssigneeIdentifier(b), nil
-}
-
-// sessionBeadAssigneeIdentifier returns the durable agent-facing identity form
-// of a session bead — its session_name, else alias, else configured named
-// identity — falling back to the bead ID when no name metadata is present so a
-// resolved assignment is never silently cleared. This is the form the agent
-// claims and verifies work with (BEADS_ACTOR / GC_SESSION_NAME), so stamping it
-// keeps assign/update consistent with the claim path (which already stores the
-// raw session-name) and with the form-agnostic session matching in the
-// reconciler (sessionBeadAssigneeIdentities). Stamping the bare bead ID here
-// instead made template-routed continuation work unclaimable by name-matching
-// agents.
-func sessionBeadAssigneeIdentifier(b beads.Bead) string {
-	for _, key := range []string{"session_name", "alias", session.NamedSessionIdentityMetadata} {
-		if v := strings.TrimSpace(b.Metadata[key]); v != "" {
-			return v
-		}
-	}
-	return b.ID
+	return session.AssigneeIdentifier(session.InfoFromPersistedBead(b)), nil
 }
 
 // findStore returns the bead store for the given rig. If rig is empty, returns

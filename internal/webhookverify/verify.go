@@ -52,9 +52,12 @@ type VerifyResult struct {
 	// OK is true only when the delivery is cryptographically authentic and all
 	// scheme-specific replay/claim checks passed.
 	OK bool
-	// EventType is the provider event type when the scheme surfaces it from a
-	// header (e.g. X-GitHub-Event). Payload-derived event typing is the rule
-	// layer's job (E5) and is left empty here.
+	// EventType is the resolved provider event type the rule layer (E5) matches
+	// on. A header-typed scheme surfaces it from the configured header (e.g.
+	// X-GitHub-Event); a body-typed scheme (slack-v0, discord-ed25519) derives it
+	// from the VERIFIED body so payload-carried event rules actually match — see
+	// slackEventType / discordEventType. Empty when the scheme carries no type or
+	// the body is not the expected shape, in which case only a "*" rule matches.
 	EventType string
 	// DedupID is a stable per-delivery identifier for at-least-once dedup when
 	// the scheme exposes one (e.g. X-GitHub-Delivery, the Slack timestamp, or
@@ -185,4 +188,22 @@ func resolveReplayWindow(raw string, def time.Duration) (time.Duration, error) {
 		w = maxReplayWindow
 	}
 	return w, nil
+}
+
+// withinReplayWindow reports whether a signed unix-second timestamp is within
+// window of now. It compares integer seconds and bounds tsSecs against
+// [now-window, now+window] rather than subtracting attacker-controlled values,
+// because time.Time.Sub clamps a far-future/past difference to
+// math.MinInt64/math.MaxInt64 — and negating math.MinInt64 stays negative, so a
+// naive `abs(skew) > window` check would silently PASS a far-future timestamp
+// (its clamped-negative "skew" never exceeds the window). now.Unix() is a real
+// wall-clock value and window is bounded by maxReplayWindow, so now±windowSecs
+// cannot overflow; tsSecs appears only in comparisons, so any int64 is safe.
+func withinReplayWindow(now time.Time, tsSecs int64, window time.Duration) bool {
+	windowSecs := int64(window / time.Second)
+	if windowSecs < 0 {
+		windowSecs = 0
+	}
+	nowSecs := now.Unix()
+	return tsSecs >= nowSecs-windowSecs && tsSecs <= nowSecs+windowSecs
 }

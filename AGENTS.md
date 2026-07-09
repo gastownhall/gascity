@@ -354,11 +354,17 @@ becoming more useful as models improve — it becomes LESS useful instead.
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`
   for city shutdown. Treat personal tmux servers as out of bounds.
 - **Adding agent config fields:** When adding a field to `config.Agent`,
-  also add it to `AgentPatch`, `AgentOverride`, their apply functions
-  (`applyAgentPatch`, `applyAgentOverride`), and the `poolAgents` deep-copy
-  in `cmd/gc/pool.go`. `TestAgentFieldSync` enforces this for the struct
-  definitions; the apply functions and pool deep-copy must be checked
-  manually.
+  also add it to `AgentPatch` and `AgentOverride`, wire it into the shared
+  merge body `applyAgentMutation` (in `internal/config/patch.go`) — and, for
+  the rig-override path, copy it in `AgentOverride.toAgentPatch` — and, if the
+  field is a slice/map/pointer, deep-copy it in `Agent.Clone`
+  (`internal/config/config.go`). All four are test-guarded, so a missed field
+  fails the build: `TestAgentFieldSync` (struct field sets),
+  `TestApplyAgentPatchCoversAllFields` / `TestApplyAgentOverrideCoversAllFields`
+  (merge + `toAgentPatch` completeness), and `TestAgentCloneIsDeep` (clone
+  deepness). Both patch and rig override share `applyAgentMutation`, and both
+  the pack-load cache (`deepCopyAgents`) and pool expansion
+  (`cmd/gc/pool.go` `deepCopyAgent`) share `Agent.Clone`.
 - **Adding rig config fields:** When adding a field to `config.Rig`, also
   add the corresponding optional field to `RigPatch` and wire the merge
   into `applyRigPatch` so layered configs (fragments, patches) can

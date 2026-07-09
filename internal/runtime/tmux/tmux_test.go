@@ -1258,8 +1258,12 @@ func TestCleanupOrphanedSessions_NoSessions(t *testing.T) {
 
 func TestCollectReparentedGroupMembers(t *testing.T) {
 	// Test that collectReparentedGroupMembers correctly filters group members.
-	// Only processes reparented to init (PPID == 1) that aren't in the known set
-	// should be returned.
+	// A returned member must not be in the known set and must have a parent
+	// outside the known descendant set (parents that reparented to init OR to a
+	// user-session subreaper both qualify). The full parent-outside-set rule is
+	// covered deterministically with an injected parentOf by
+	// TestReparentedOrphans_* in tmux_unit_test.go; this test exercises the real
+	// getProcessGroupID/getParentPID integration.
 
 	// Test with current process's PGID
 	pid := fmt.Sprintf("%d", os.Getpid())
@@ -1277,17 +1281,18 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 		if rpid == pid {
 			t.Errorf("collectReparentedGroupMembers returned known PID %s", pid)
 		}
-		// Each reparented PID should have PPID == 1.
-		// The process may have exited between collection and this check
-		// (TOCTOU race), so skip verification if getParentPID returns empty.
+		// A returned member's parent must be outside the known set (the
+		// "parent outside the known descendant set" rule). The process may
+		// exit between collection and this check (TOCTOU race), so skip
+		// verification if getParentPID returns empty for a since-exited PID.
 		ppid := getParentPID(rpid)
 		if ppid == "" && runtime.GOOS != "windows" {
 			if err := exec.Command("kill", "-0", rpid).Run(); err != nil {
 				continue
 			}
 		}
-		if ppid != "1" {
-			t.Errorf("collectReparentedGroupMembers returned PID %s with PPID %s (expected 1)", rpid, ppid)
+		if knownPIDs[ppid] {
+			t.Errorf("collectReparentedGroupMembers returned PID %s whose parent %s is in the known set", rpid, ppid)
 		}
 	}
 }

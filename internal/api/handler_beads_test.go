@@ -1800,6 +1800,45 @@ func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
 	}
 }
 
+// TestBeadListAssigneeTermsIncludesAllSessionIdentityForms pins the term SET
+// beadListAssigneeTerms enumerates for a resolved session: the input term, the
+// bead ID, session_name, alias, configured named identity, and every prior
+// alias. Order is not part of the contract (huma_handlers_beads re-sorts
+// globally when len(terms)>1); the set must stay stable across the codec swap
+// onto session.AssigneeIdentities.
+func TestBeadListAssigneeTermsIncludesAllSessionIdentityForms(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	sessionBead, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "Worker session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"alias":                     "worker",
+			"configured_named_identity": "reviewer",
+			"alias_history":             "nux,rictus",
+			"template":                  "myrig/worker",
+			"state":                     "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	srv := New(state)
+
+	terms := srv.beadListAssigneeTerms(context.Background(), "worker")
+	got := make(map[string]bool, len(terms))
+	for _, term := range terms {
+		got[term] = true
+	}
+	for _, want := range []string{"worker", sessionBead.ID, "test-city--worker", "reviewer", "nux", "rictus"} {
+		if !got[want] {
+			t.Errorf("beadListAssigneeTerms(worker) missing %q; got %v", want, terms)
+		}
+	}
+}
+
 func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()

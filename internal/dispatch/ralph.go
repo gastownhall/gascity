@@ -77,6 +77,34 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
 
+	// A hard-class subject failure is terminal: stop the loop immediately in a
+	// single attempt instead of cloning further attempts (the treadmill that
+	// abort_scope-killed molecules). This mirrors the retry dispatcher's explicit
+	// hard disposition (see processRetryEval in retry.go) but deliberately
+	// diverges on the empty class: classifyRetryAttempt maps an empty
+	// gc.failure_class to hard (retry.go: `case beadmeta.FailureClassHard, "":`),
+	// whereas this loop keeps an empty or transient class repairable and clones up
+	// to gc.max_attempts below. Only an explicit "hard" class terminates here.
+	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
+		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
+		if err := store.SetMetadataBatch(logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
+			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    retryFailureReason(subject),
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
+		}); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
+		}
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing hard-failed check: %w", bead.ID, err)
+		}
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "hard-fail"}, nil
+	}
+
 	if attempt >= maxAttempts {
 		if err := store.SetMetadataBatch(logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
@@ -412,7 +440,7 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 		}
 		return existing, nil
 	}
-	cfg := loadAttemptRouteConfig(opts.CityPath)
+	cfg, _ := opts.routeConfig()
 	if molecule.IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
 			return appendRalphRetryViaGraphApply(store, applier, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg, opts)
@@ -548,10 +576,20 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 				return nil, fmt.Errorf("remapping logical bead for retry clone %s: %w", newID, err)
 			}
 		}
+		if remapped := remappedControlForBeadID(mapping, old.Metadata[beadmeta.ControlForMetadataKey]); remapped != "" {
+			if err := store.SetMetadata(newID, beadmeta.ControlForMetadataKey, remapped); err != nil {
+				return nil, fmt.Errorf("remapping control_for for retry clone %s: %w", newID, err)
+			}
+		}
 	}
 	if remapped := remappedLogicalBeadID(mapping, prevCheck.Metadata[beadmeta.LogicalBeadIDMetadataKey]); remapped != "" {
 		if err := store.SetMetadata(newCheck.ID, beadmeta.LogicalBeadIDMetadataKey, remapped); err != nil {
 			return nil, fmt.Errorf("remapping logical bead for retry check %s: %w", newCheck.ID, err)
+		}
+	}
+	if remapped := remappedControlForBeadID(mapping, prevCheck.Metadata[beadmeta.ControlForMetadataKey]); remapped != "" {
+		if err := store.SetMetadata(newCheck.ID, beadmeta.ControlForMetadataKey, remapped); err != nil {
+			return nil, fmt.Errorf("remapping control_for for retry check %s: %w", newCheck.ID, err)
 		}
 	}
 
@@ -653,13 +691,25 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, old.ID)
 	}
 	meta[beadmeta.StepRefMetadataKey] = rewriteRetryStepRef(meta, old.Ref, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
-	if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
-		meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
-	}
 	metadataRefs := map[string]string(nil)
+	// gc.control_for: a bead-ID-valued pointer at a bead re-minted in this plan
+	// is remapped to the clone's new ID via MetadataRefs (the applier
+	// substitutes the created ID), mirroring gc.logical_bead_id below (S38 W7).
+	// Step-ref-valued pointers stay on the string rewrite.
+	if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
+		if attemptIDs[controlFor] {
+			metadataRefs = make(map[string]string, 1)
+			metadataRefs[beadmeta.ControlForMetadataKey] = controlFor
+			delete(meta, beadmeta.ControlForMetadataKey)
+		} else {
+			meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
+		}
+	}
 	if oldLogicalID := strings.TrimSpace(old.Metadata[beadmeta.LogicalBeadIDMetadataKey]); oldLogicalID != "" {
 		if attemptIDs[oldLogicalID] {
-			metadataRefs = make(map[string]string, 1)
+			if metadataRefs == nil {
+				metadataRefs = make(map[string]string, 1)
+			}
 			metadataRefs[beadmeta.LogicalBeadIDMetadataKey] = oldLogicalID
 			delete(meta, beadmeta.LogicalBeadIDMetadataKey)
 		} else {
@@ -692,10 +742,6 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		ParentKey:         parentKey,
 		ParentID:          parentID,
 	}
-}
-
-func retryPreservedAssignee(bead beads.Bead, cityPath string) string {
-	return retryPreservedAssigneeWithConfig(bead, loadAttemptRouteConfig(cityPath))
 }
 
 func retryPreservedAssigneeWithConfig(bead beads.Bead, cfg *config.City) string {
@@ -1112,6 +1158,21 @@ func remappedLogicalBeadID(mapping map[string]string, raw string) string {
 		return mapped
 	}
 	return logicalID
+}
+
+// remappedControlForBeadID returns the new bead ID for a bead-ID-valued
+// gc.control_for pointer that referenced a bead re-minted in this retry clone
+// (i.e. the old value is a mapping key). It returns "" for step-ref-valued
+// pointers and for bead IDs outside the clone set — those keep the value
+// produced by rewriteRetryControlFor at clone time. This mirrors the
+// gc.logical_bead_id remap so cloned attempt roots point at the cloned
+// nested control's NEW bead ID (S38 W6).
+func remappedControlForBeadID(mapping map[string]string, raw string) string {
+	controlFor := strings.TrimSpace(raw)
+	if controlFor == "" {
+		return ""
+	}
+	return mapping[controlFor]
 }
 
 func resolveExistingRalphRetryFromBeads(store beads.Store, all []beads.Bead, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string) (map[string]string, error) {

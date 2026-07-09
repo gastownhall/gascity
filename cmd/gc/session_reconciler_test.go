@@ -1089,7 +1089,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1130,14 +1130,14 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", firstTracker, &stderr)
+	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", firstTracker, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", secondTracker, &stderr)
+	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", secondTracker, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1163,7 +1163,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1206,7 +1206,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1243,7 +1243,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1253,6 +1253,82 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	pokeMu.Unlock()
 	if got != 0 {
 		t.Fatalf("poke count = %d, want 0 (hard error must not poke)", got)
+	}
+}
+
+// TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName verifies the async
+// drain-ack stop refuses to kill when the runtime's live GC_INSTANCE_TOKEN no
+// longer matches the token captured when the stop was queued: by kill time the
+// name has been reused by a re-woken replacement, and killing it would take out
+// a live session (mirrors verifiedStop).
+// Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
+func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
+	var pokeCalls int
+	var pokeMu sync.Mutex
+	old := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string) error {
+		pokeMu.Lock()
+		pokeCalls++
+		pokeMu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The live session belongs to a replacement with a fresh token.
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	// We queued the stop for the OLD session (stale token).
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	if !sp.IsRunning("worker") {
+		t.Fatal("token-fenced async stop killed the name-reused replacement")
+	}
+	if got := stderr.String(); !strings.Contains(got, "instance token mismatch") {
+		t.Fatalf("stderr = %q, want token mismatch diagnostic", got)
+	}
+	pokeMu.Lock()
+	got := pokeCalls
+	pokeMu.Unlock()
+	if got != 0 {
+		t.Fatalf("poke count = %d, want 0 (fenced stop must not poke)", got)
+	}
+}
+
+// TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession verifies the fence
+// lets the kill proceed when the live token matches the queued token.
+func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+	if sp.IsRunning("worker") {
+		t.Fatal("matching-token async stop did not kill the session")
+	}
+	if got := stderr.String(); strings.Contains(got, "instance token mismatch") {
+		t.Fatalf("stderr = %q, unexpected mismatch on matching token", got)
 	}
 }
 
@@ -1271,7 +1347,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", &cr.asyncStops, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", &cr.asyncStops, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -2203,6 +2279,170 @@ func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testin
 	stranded = rec.strandedEvents()
 	if len(stranded) != 1 {
 		t.Fatalf("session.stranded events after second tick = %d, want still 1 (throttled); events: %+v", len(stranded), rec.events)
+	}
+}
+
+// strandedRepairReconcileEnv builds a pool-managed session whose runtime is dead
+// while it still holds one in_progress work bead as assignee — the exact shape
+// TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic exercises,
+// so poolFreeable && hasAssignedWork holds and the diagnostic + repair path is
+// reached through the real reconcile call site.
+func strandedRepairReconcileEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead, beads.Bead, *capturingRecorder) {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false) // runtime NOT running — dead
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         "idle",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+	work, err := env.store.Create(beads.Bead{
+		Title:    "stranded implementation",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+	work, _ = env.store.Get(work.ID)
+	rec := &capturingRecorder{}
+	env.rec = rec
+	return env, session, work, rec
+}
+
+// runStrandedReconcileTick drives one full reconcile tick through the real
+// call site with the standard stranded-repair fixture arguments.
+func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []beads.Bead) {
+	t.Helper()
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		sessions,
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+}
+
+// After a genuine CONTINUOUS non-liveness window the reconciler must actually
+// REPAIR the stranded work end-to-end: unassign/reopen the work and close the
+// session bead. The existing tests only cover the defer path; this asserts the
+// fire path through the real reconcile.
+func TestReconcileSessionBeads_StrandedRepairFiresAfterContinuousWindow(t *testing.T) {
+	env, session, work, rec := strandedRepairReconcileEnv(t)
+
+	// Tick 1: diagnostic fires and stamps stranded_event_emitted_at; the repair
+	// defers because the marker is fresh (inside the confirmation window).
+	runStrandedReconcileTick(t, env, []beads.Bead{session})
+	if got := len(rec.strandedEvents()); got != 1 {
+		t.Fatalf("stranded events after tick 1 = %d, want 1; events: %+v", got, rec.events)
+	}
+	afterFirst, _ := env.store.Get(session.ID)
+	if afterFirst.Status == "closed" {
+		t.Fatal("session must not be closed inside the confirmation window")
+	}
+
+	// Advance past the confirmation window; the runtime stayed dead throughout
+	// (continuous non-liveness), so the marker is never cleared.
+	env.clk.Time = env.clk.Time.Add(strandedRepairConfirmGrace + time.Minute)
+	updated, _ := env.store.Get(session.ID)
+
+	// Tick 2: window satisfied → repair fires.
+	runStrandedReconcileTick(t, env, []beads.Bead{updated})
+
+	gotWork, _ := env.store.Get(work.ID)
+	if gotWork.Status != "open" {
+		t.Fatalf("work status = %q, want open (reopened by repair)", gotWork.Status)
+	}
+	if gotWork.Assignee != "" {
+		t.Fatalf("work assignee = %q, want empty (unassigned by repair)", gotWork.Assignee)
+	}
+	gotSession, _ := env.store.Get(session.ID)
+	if gotSession.Status != "closed" {
+		t.Fatalf("session status = %q, want closed (slot freed by repair)", gotSession.Status)
+	}
+}
+
+// Regression for the bypassable confirmation window: a worker that strands, is
+// respawned on the SAME session bead, recovers (observed alive for a tick), then
+// re-strands must NOT be repaired on the first episode's stale marker. The alive
+// tick clears stranded_event_emitted_at, so episode 2 stamps a FRESH marker and
+// the repair defers again even though wall-clock time is well past the window.
+func TestReconcileSessionBeads_StrandedRepairReArmsWindowAfterRecovery(t *testing.T) {
+	env, session, work, rec := strandedRepairReconcileEnv(t)
+
+	// Episode 1: dead runtime + assigned in_progress work → diagnostic stamps
+	// the confirmation marker.
+	runStrandedReconcileTick(t, env, []beads.Bead{session})
+	if got := len(rec.strandedEvents()); got != 1 {
+		t.Fatalf("stranded events after episode 1 = %d, want 1", got)
+	}
+	afterEp1, _ := env.store.Get(session.ID)
+	if strings.TrimSpace(afterEp1.Metadata[strandedEventEmittedKey]) == "" {
+		t.Fatal("episode 1 must stamp stranded_event_emitted_at")
+	}
+
+	// Recovery: the pool respawns the worker on the same session bead; the next
+	// tick observes it ALIVE. clearStrandedEventMarker must drop the marker.
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start (respawn): %v", err)
+	}
+	recovered, _ := env.store.Get(session.ID)
+	runStrandedReconcileTick(t, env, []beads.Bead{recovered})
+	afterRecovery, _ := env.store.Get(session.ID)
+	if got := strings.TrimSpace(afterRecovery.Metadata[strandedEventEmittedKey]); got != "" {
+		t.Fatalf("stranded marker must be cleared on an alive tick, got %q", got)
+	}
+
+	// Advance well past a window that episode 1's marker would have satisfied.
+	env.clk.Time = env.clk.Time.Add(strandedRepairConfirmGrace + time.Minute)
+
+	// Episode 2: the worker re-strands (runtime dead again) still holding the
+	// same in_progress work.
+	if err := env.sp.Stop("worker"); err != nil {
+		t.Fatalf("Stop (re-strand): %v", err)
+	}
+	restranded, _ := env.store.Get(session.ID)
+	runStrandedReconcileTick(t, env, []beads.Bead{restranded})
+
+	// The repair must DEFER: episode 2's marker was just stamped, so it is inside
+	// a fresh window. The live claim on the work must survive.
+	gotWork, _ := env.store.Get(work.ID)
+	if gotWork.Status != "in_progress" || gotWork.Assignee != session.ID {
+		t.Fatalf("work must stay claimed (repair fired on a stale window); got status=%q assignee=%q", gotWork.Status, gotWork.Assignee)
+	}
+	gotSession, _ := env.store.Get(session.ID)
+	if gotSession.Status == "closed" {
+		t.Fatal("session must stay open (repair fired on a stale window)")
+	}
+	// Per-episode observability: a distinct diagnostic fired for episode 2.
+	if got := len(rec.strandedEvents()); got != 2 {
+		t.Fatalf("stranded events = %d, want 2 (one per episode)", got)
 	}
 }
 
@@ -10219,48 +10459,6 @@ func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing
 	}
 	if !sp.IsRunning(freshBead.Metadata["session_name"]) {
 		t.Fatalf("fresh session %q is not running after stale failed-create cleanup", freshBead.Metadata["session_name"])
-	}
-}
-
-// TODO(pool-consolidation): This test validates that poolDesired gates wake
-// decisions. Needs updating when pool_slot is removed — the slot-based gate
-// will be replaced with count-based ordering.
-func TestPoolDesiredLimitsWakeWork(t *testing.T) {
-	t.Skip("blocked on pool_slot removal")
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Agents: []config.Agent{
-			{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
-		},
-	}
-	// 3 sessions exist and are running, but demand (poolDesired) is only 1.
-	// Don't add to desiredState — we're testing poolDesired gating only.
-	var sessions []beads.Bead
-	for i := 1; i <= 3; i++ {
-		name := fmt.Sprintf("claude-%d", i)
-		s := env.createSessionBead(name, "claude")
-		env.setSessionMetadata(&s, map[string]string{
-			"state":     "awake",
-			"pool_slot": fmt.Sprintf("%d", i),
-		})
-		sessions = append(sessions, s)
-	}
-
-	// poolDesired=1: only 1 session should stay awake.
-	poolDesired := map[string]int{"claude": 1}
-	evalInput := make([]beads.Bead, len(sessions))
-	copy(evalInput, sessions)
-	evals := computeWakeEvaluations(evalInput, env.cfg, env.sp, poolDesired,
-		map[string]bool{"claude": true}, nil, env.clk)
-
-	wakeCount := 0
-	for _, eval := range evals {
-		if len(eval.Reasons) > 0 {
-			wakeCount++
-		}
-	}
-	if wakeCount != 1 {
-		t.Errorf("wakeCount = %d, want 1 (only slot 1 within poolDesired=1)", wakeCount)
 	}
 }
 

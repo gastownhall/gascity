@@ -1813,21 +1813,11 @@ func retainScaleCheckPartialPoolDesired(cfg *config.City, counts map[string]int,
 	return counts
 }
 
-// Preserve dormant affected-template beads during transient scale_check
-// failures, but do not count them as awake demand. Sessions that are already
-// mid-drain or past-drain (draining/drained/archived) are not preserved so a
-// partial read cannot interrupt an in-progress drain lifecycle.
-func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
-	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined":
-		return true
-	default:
-		return isPendingPoolCreate(b)
-	}
-}
-
-// scaleCheckPartialSessionPreservableInfo is the session.Info mirror of
-// scaleCheckPartialSessionPreservable: it reads the raw state metadata
+// scaleCheckPartialSessionPreservableInfo preserves dormant affected-template
+// beads during transient scale_check failures, but does not count them as awake
+// demand. Sessions that are already mid-drain or past-drain
+// (draining/drained/archived) are not preserved so a partial read cannot
+// interrupt an in-progress drain lifecycle. It reads the raw state metadata
 // (Info.MetadataState) and delegates the in-flight-create default case to
 // isPendingPoolCreateInfo.
 func scaleCheckPartialSessionPreservableInfo(i session.Info) bool {
@@ -1839,20 +1829,11 @@ func scaleCheckPartialSessionPreservableInfo(i session.Info) bool {
 	}
 }
 
-func scaleCheckPartialSessionRetainable(b beads.Bead) bool {
-	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "active", "awake":
-		return true
-	default:
-		// A fresh in-flight create that still holds an active pending_create_claim
-		// lease counts as retained capacity. Stale creates (lease expired/cleared)
-		// return false so they stop inflating the desired count.
-		return isPendingPoolCreate(b)
-	}
-}
-
-// scaleCheckPartialSessionRetainableInfo is the session.Info mirror of
-// scaleCheckPartialSessionRetainable: it reads the raw state metadata
+// scaleCheckPartialSessionRetainableInfo counts active/awake affected-template
+// beads as retained demand during transient scale_check failures. A fresh
+// in-flight create that still holds an active pending_create_claim lease also
+// counts as retained capacity; stale creates (lease expired/cleared) do not, so
+// they stop inflating the desired count. It reads the raw state metadata
 // (Info.MetadataState) and delegates the in-flight-create case to
 // isPendingPoolCreateInfo.
 func scaleCheckPartialSessionRetainableInfo(i session.Info) bool {
@@ -2302,11 +2283,8 @@ func discoverSessionBeadsWithRoots(
 	return roots
 }
 
-func isPendingPoolCreate(b beads.Bead) bool {
-	return isPoolManagedSessionBead(b) && strings.TrimSpace(b.Metadata["pending_create_claim"]) == boolMetadata(true)
-}
-
-// isPendingPoolCreateInfo is the session.Info mirror of isPendingPoolCreate.
+// isPendingPoolCreateInfo reports whether a pool-managed session is an in-flight
+// create still holding an active pending_create_claim lease.
 func isPendingPoolCreateInfo(i session.Info) bool {
 	return isPoolManagedSessionInfo(i) && i.PendingCreateClaim
 }

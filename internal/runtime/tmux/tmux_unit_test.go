@@ -84,3 +84,44 @@ func TestComputeExcludingKillSet_ExcludedPaneLeaderSurvives(t *testing.T) {
 		t.Error("an excluded pane leader must not be killed directly")
 	}
 }
+
+// knownSet builds a descendant-set lookup from the given pids.
+func knownSet(pids ...string) map[string]bool {
+	m := make(map[string]bool, len(pids))
+	for _, p := range pids {
+		m[p] = true
+	}
+	return m
+}
+
+func TestReparentedOrphans_CollectsInitAndSubreaperOrphans(t *testing.T) {
+	// leader=100, one live descendant=200. Group also holds:
+	//   300 reparented to init (ppid 1) — classic case
+	//   400 reparented to systemd --user subreaper (ppid 900) — the case the
+	//        old PPID==1 test missed
+	//   500 still a child of a live descendant (ppid 200) — owned elsewhere
+	//   600 whose parent read failed ("") — must be skipped
+	known := knownSet("100", "200")
+	parents := map[string]string{
+		"300": "1",
+		"400": "900", // systemd --user pid, not init
+		"500": "200",
+		"600": "",
+	}
+	parentOf := func(pid string) string { return parents[pid] }
+
+	got := reparentedOrphans([]string{"200", "300", "400", "500", "600"}, known, parentOf)
+	slices.Sort(got)
+	want := []string{"300", "400"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reparentedOrphans = %v, want %v", got, want)
+	}
+}
+
+func TestReparentedOrphans_SkipsKnownDescendants(t *testing.T) {
+	known := knownSet("100", "200", "300")
+	parentOf := func(string) string { return "1" }
+	if got := reparentedOrphans([]string{"200", "300"}, known, parentOf); len(got) != 0 {
+		t.Fatalf("reparentedOrphans = %v, want empty (all are known descendants)", got)
+	}
+}

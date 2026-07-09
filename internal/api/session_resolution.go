@@ -163,7 +163,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			retired = append(retired, b)
 			continue
 		}
-		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
+		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
 				_ = handle.Kill(context.Background())
 			}
@@ -432,7 +432,9 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 		if strings.TrimSpace(b.Title) != identifier {
 			continue
 		}
-		state := session.State(b.Metadata["state"])
+		// MetadataState is the RAW state mirror; Info.State is normalizeInfoState-
+		// folded (awake->active), which would change this predicate.
+		state := session.State(session.InfoFromPersistedBead(b).MetadataState)
 		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
 			continue
 		}

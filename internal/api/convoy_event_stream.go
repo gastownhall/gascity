@@ -365,20 +365,9 @@ func projectWorkflowEvent(state State, event events.Event) *workflowEventProject
 		WorkflowSeq:     event.Seq,
 		EventTS:         event.Ts.UTC().Format(time.RFC3339),
 		EventType:       event.Type,
-		Bead: workflowBeadResponse{
-			ID:            bead.ID,
-			Title:         bead.Title,
-			Status:        workflowStatus(bead),
-			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
-			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
-			Assignee:      strings.TrimSpace(bead.Assignee),
-			Metadata:      cloneStringMap(bead.Metadata),
-		},
-		ChangedFields: changedFields,
-		LogicalNodeID: logicalNodeID,
+		Bead:            workflowBeadResponseFromBead(bead),
+		ChangedFields:   changedFields,
+		LogicalNodeID:   logicalNodeID,
 	}
 	if event.Type == events.BeadUpdated {
 		projection.RequiresResync = true

@@ -430,7 +430,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
 			return nil, huma.Error403Forbidden("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
@@ -887,7 +887,9 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
-	sessionName := b.Metadata["session_name"]
+	// RAW SessionNameMetadata (not Info.SessionName, which falls back to
+	// sessionNameFor(ID)) to preserve the skip-when-unset behavior.
+	sessionName := session.InfoFromPersistedBead(b).SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}

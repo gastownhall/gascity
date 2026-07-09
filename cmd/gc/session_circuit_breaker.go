@@ -875,7 +875,7 @@ func computeNamedSessionProgressSignatures(
 		// Read the identity/name/alias resolver keys through the typed Info
 		// projection instead of cracking sb.Metadata inline. This scan runs in
 		// Phase 0.5 before the reconciler's coherent infoByID snapshot exists, so
-		// it projects per bead (the same shape advanceSessionDrains uses); the
+		// it projects per bead (the same shape advanceSessionDrainsWithSessionsTraced uses); the
 		// projection is pure, so it is byte-identical to the raw reads.
 		info := session.InfoFromPersistedBead(sb)
 		identity := strings.TrimSpace(info.ConfiguredNamedIdentity)

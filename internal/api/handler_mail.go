@@ -92,7 +92,7 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 		if getErr != nil {
 			return "", getErr
 		}
-		address := apiSessionMailboxAddress(bead)
+		address := session.MailboxAddress(bead)
 		if address == "" {
 			return "", fmt.Errorf("session %q has no mailbox identity", recipient)
 		}
@@ -142,7 +142,7 @@ func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, reci
 		return []string{recipient}
 	}
 	if bead, getErr := store.Get(resolved); getErr == nil {
-		if recipients := apiSessionMailboxAddresses(bead); len(recipients) > 0 {
+		if recipients := session.MailboxAddressesIncludingRuntimeName(bead); len(recipients) > 0 {
 			return recipients
 		}
 	}
@@ -177,7 +177,7 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 			continue
 		}
 		seen[b.ID] = true
-		recipients = append(recipients, apiSessionMailboxAddresses(b)...)
+		recipients = append(recipients, session.MailboxAddressesIncludingRuntimeName(b)...)
 	}
 	recipients = uniqueNonEmptyMailRecipients(recipients)
 	sort.Strings(recipients)
@@ -213,36 +213,6 @@ func (s *Server) configuredNamedMailIdentities(identifier string) []string {
 type apiResolvedMailTarget struct {
 	display    string
 	recipients []string
-}
-
-func apiSessionMailboxAddress(b beads.Bead) string {
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
-		return alias
-	}
-	if b.ID != "" {
-		return b.ID
-	}
-	return strings.TrimSpace(b.Metadata["session_name"])
-}
-
-func apiSessionMailboxAddresses(b beads.Bead) []string {
-	seen := map[string]bool{}
-	var addresses []string
-	add := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			return
-		}
-		seen[value] = true
-		addresses = append(addresses, value)
-	}
-	add(apiSessionMailboxAddress(b))
-	add(b.ID)
-	for _, alias := range session.AliasHistory(b.Metadata) {
-		add(alias)
-	}
-	add(b.Metadata["session_name"])
-	return addresses
 }
 
 func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (apiResolvedMailTarget, bool, error) {
@@ -281,11 +251,11 @@ func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identif
 		if identity == "" || session.TargetBasename(identity) != identifier {
 			continue
 		}
-		addresses := apiSessionMailboxAddresses(b)
+		addresses := session.MailboxAddressesIncludingRuntimeName(b)
 		if len(addresses) == 0 {
 			continue
 		}
-		display := apiSessionMailboxAddress(b)
+		display := session.MailboxAddress(b)
 		if display == "" {
 			display = addresses[0]
 		}

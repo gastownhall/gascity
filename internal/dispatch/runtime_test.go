@@ -2533,6 +2533,137 @@ func TestProcessWorkflowFinalizeIgnoresTransientRetryDescendant(t *testing.T) {
 	}
 }
 
+// TestTerminalAbortScopeFailureSupersededHardAttemptIsNotTerminal proves FIX 2:
+// the supersession guard applies to the hard failure class too. A closed
+// abort_scope bead that carries gc.attempt + gc.logical_bead_id is one attempt
+// among many, so it must not count as a terminal abort even when it closed
+// hard; a genuinely terminal, non-superseded hard failure still counts.
+func TestTerminalAbortScopeFailureSupersededHardAttemptIsNotTerminal(t *testing.T) {
+	t.Parallel()
+
+	base := map[string]string{
+		"gc.on_fail":       "abort_scope",
+		"gc.outcome":       "fail",
+		"gc.failure_class": "hard",
+	}
+	clone := func(extra map[string]string) beads.Bead {
+		meta := map[string]string{}
+		for k, v := range base {
+			meta[k] = v
+		}
+		for k, v := range extra {
+			meta[k] = v
+		}
+		return beads.Bead{Status: "closed", Metadata: meta}
+	}
+
+	// v1 pattern: a cloned retry-run attempt of a logical bead that later passed.
+	superseded := clone(map[string]string{
+		"gc.kind":            "retry-run",
+		"gc.attempt":         "3",
+		"gc.logical_bead_id": "logical-1",
+	})
+	if terminalAbortScopeFailure(superseded) {
+		t.Fatalf("superseded (v1) hard abort_scope attempt must not be terminal")
+	}
+
+	// v2 pattern: original kind, distinguished by gc.attempt + gc.logical_bead_id.
+	supersededV2 := clone(map[string]string{
+		"gc.attempt":         "5",
+		"gc.logical_bead_id": "logical-2",
+	})
+	if terminalAbortScopeFailure(supersededV2) {
+		t.Fatalf("superseded (v2) hard abort_scope attempt must not be terminal")
+	}
+
+	// Non-superseded hard abort_scope failure is still terminal.
+	if !terminalAbortScopeFailure(clone(nil)) {
+		t.Fatalf("non-superseded hard abort_scope failure must be terminal")
+	}
+}
+
+// TestProcessWorkflowFinalizeIgnoresSupersededHardRetryDescendant is the FIX 2
+// integration guard for #4008: a review loop whose iteration.3 attempt closed
+// control_dispatch_error/hard but whose later iterations passed must finalize
+// as pass, not fail. The superseded hard attempt must not outvote the passing
+// later iterations at finalize.
+func TestProcessWorkflowFinalizeIgnoresSupersededHardRetryDescendant(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	// Logical review step that ultimately PASSED on a later iteration.
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review-codex logical",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": workflow.ID,
+			"gc.outcome":      "pass",
+		},
+	})
+	// Superseded attempt.3 that closed control_dispatch_error/hard before the
+	// later iterations recovered. Carries gc.attempt + gc.logical_bead_id.
+	_ = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review-codex attempt 3 (superseded)",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.scope_ref":       "body",
+			"gc.scope_role":      "member",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "hard",
+			"gc.failure_reason":  "control_dispatch_error",
+			"gc.on_fail":         "abort_scope",
+			"gc.attempt":         "3",
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "cleanup",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.kind":         "cleanup",
+			"gc.outcome":      "pass",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("workflow = status %q outcome %q, want closed/pass", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+	}
+}
+
 func TestProcessWorkflowFinalizeUsesCloseOperationForTerminalBeads(t *testing.T) {
 	t.Parallel()
 
