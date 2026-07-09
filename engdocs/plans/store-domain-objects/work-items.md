@@ -75,8 +75,30 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 > `dependencySessionStartInFlight`, lease helpers) that must migrate first; the sleep
 > + lifecycle clusters are same-tick coupled → migrate as a coordinated unit; then
 > drop the 2 transitional + 4 coupling mirrors, remove `startCandidate.session`/
-> `wakeTarget.session`, delete the classifiers + oracle siblings. Tracked in
-> `/tmp/remainder_design.md` (WI-6-remainder + WI-7 coordinated plan).
+> `wakeTarget.session`, delete the classifiers + oracle siblings.
+>
+> **WI-6 remainder + WI-7 coordinated plan: `remainder-design.md`** (this dir).
+> User approved the FULL endgame (R1–R5 + WI-7) with the **tick-feed refactor** for
+> the `InfoFromPersistedBead` unexport (`Store.ListAllForReconcile() []Info` reshapes
+> the reconcile tick so the 3 tick-collection edges :583/:1342/:1419 stop calling the
+> codec → full unexport). Remainder waves:
+> - **R1** ✅ (merge `7d0758f35`): leaf sweeps (roots C/D/E/F → Info) + deleted 3 dead
+>   raw forms. `cmd_stop` byte-identical (census +1, tracked). Red-team fixed a
+>   non-load-bearing reap-boundary oracle (recently-woken creating bead was silently
+>   reapable after the raw sibling's deletion).
+> - **R2** 🔨 impl: display reason lane (`cmd_session` `wakeReasons`→Info) + additive
+>   sleep-read twins → deletes `sessionMetadataState` (raw). cmd_session census 2→0.
+> - **R3** (HIGH): reconciler heal + sleep-write coordinated unit; DROPS both
+>   transitional mirrors; deletes the pending-create lease family +
+>   `sessionStartRequested`/`staleCreatingState`.
+> - **R4** (HIGH): start-execution cluster; DROPS the 4 coupling mirrors +
+>   `startCandidate.session`/`wakeTarget.session`; deletes `shouldRollbackPendingCreate`/
+>   `runningSessionMatchesPendingCreate`/`asyncStart*`.
+> - **R5**: periphery honest holds (snapshot raw-half delete, hash/template/logs,
+>   `cmd_prime` — ADD `Info.BuiltinAncestor`).
+> - **WI-7 W7a**: front-door flip (`class_store.go` + `api.State` → domain stores).
+> - **WI-7 W7b**: unexport the codecs (tick-feed refactor for `InfoFromPersistedBead`);
+>   guards → permanent zero-pins. Orders codecs gated on deferred WI-3 two-class wiring.
 >
 > Every session-store wave (W2/W3/W5) tripped the SAME front-door-Get contract
 > subtlety (session.Store.Get/GetPersistedResponse returns `ErrSessionNotFound` +
