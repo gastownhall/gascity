@@ -600,7 +600,9 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	sessFront := sessionFrontDoor(sessStore)
 	info, err := sessFront.Get(gcSessionID)
 	if err != nil {
-		warn("loading session bead %q: %v", gcSessionID, err)
+		// The front-door Get already wraps with `loading session %q`, carrying the
+		// id — don't re-prefix (that would double-wrap the stderr).
+		warn("%v", err)
 		return
 	}
 	if fromHookStdin && sessionProviderFamily(info) != "codex" {

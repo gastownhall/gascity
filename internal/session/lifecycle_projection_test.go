@@ -738,7 +738,7 @@ func TestLifecycleDisplayReasonWithLivenessSuppressesTerminalResetPending(t *tes
 // so the InfoFromPersistedBead projection the twin consumes carries the same
 // fields LifecycleDisplayReasonWithLiveness reads off the raw map.
 func livenessInfoBead(status string, meta map[string]string) beads.Bead {
-	return beads.Bead{ID: "gc-liveness", Type: "gc:session", Status: status, Labels: []string{"gc:session"}, Metadata: meta}
+	return beads.Bead{ID: "gc-liveness", Type: "session", Status: status, Labels: []string{"gc:session"}, Metadata: meta}
 }
 
 // TestLifecycleDisplayReasonWithLivenessInfoEquivalence is the load-bearing

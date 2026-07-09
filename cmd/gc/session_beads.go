@@ -469,10 +469,13 @@ func reopenClosedConfiguredNamedSessionBead(
 	if reopened.ID == "" {
 		return beads.Bead{}, "", false
 	}
-	// The reopened bead's session_name is guaranteed to equal the (non-empty,
-	// trimmed) input sessionName by the guards above; returning it as a typed
-	// string lets the caller (session_template_start) drop its InfoFromPersistedBead
-	// read while still holding the raw bead for snapshot.add.
+	// Returns the reopened bead's POST-MERGE session_name; callers must use the
+	// RETURNED value, not the input sessionName. The guards above run BEFORE the
+	// lock closure merges extraMeta into bead.Metadata, so an extraMeta session_name
+	// entry could override the input — byte-identical today (old + new caller both
+	// read this same post-merge value), but do not trust "== input". Returning it as
+	// a typed string lets the caller (session_template_start) drop its
+	// InfoFromPersistedBead read while still holding the raw bead for snapshot.add.
 	return reopened, strings.TrimSpace(reopened.Metadata["session_name"]), true
 }
 
