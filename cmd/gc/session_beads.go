@@ -2430,6 +2430,23 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 	return startedAt, true
 }
 
+// staleReapStartBoundaryInfo is the session.Info sibling of staleReapStartBoundary:
+// it computes the reap start boundary from Info.CreatedAt and the raw last_woke_at
+// mirror (Info.LastWokeAt), identical to the raw form. Equivalence is pinned by
+// TestSessionClassifierInfoEquivalence.
+func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
+	if i.CreatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	startedAt := i.CreatedAt
+	if raw := strings.TrimSpace(i.LastWokeAt); raw != "" {
+		if wokeAt, err := time.Parse(time.RFC3339, raw); err == nil && wokeAt.After(startedAt) {
+			startedAt = wokeAt
+		}
+	}
+	return startedAt, true
+}
+
 // closeBead sets final metadata on a session bead and closes it.
 // This completes the bead's lifecycle record. The close_reason distinguishes
 // why the bead was closed (e.g., "orphaned", "suspended").

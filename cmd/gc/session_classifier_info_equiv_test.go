@@ -1058,6 +1058,19 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		},
 	}
 
+	// timeBoolChecks pins the raw-vs-Info equivalence for classifiers that return a
+	// (time.Time, bool) pair rather than a scalar. Times are compared with Equal so a
+	// stripped monotonic reading never trips a false mismatch.
+	timeBoolChecks := map[string]struct {
+		bead func(beads.Bead) (time.Time, bool)
+		info func(session.Info) (time.Time, bool)
+	}{
+		"staleReapStartBoundary": {
+			func(b beads.Bead) (time.Time, bool) { return staleReapStartBoundary(b) },
+			func(i session.Info) (time.Time, bool) { return staleReapStartBoundaryInfo(i) },
+		},
+	}
+
 	// The "pending-resume-preserve" fixture must hit the true branch under
 	// leaseStartupTimeout so the equivalence case above is a real true-branch
 	// comparison (exercising the Info.StartedConfigHash gate + the lease tail),
@@ -1118,6 +1131,13 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			for name, c := range clkBoolChecks {
 				if got, want := c.info(info), c.bead(b); got != want {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
+				}
+			}
+			for name, c := range timeBoolChecks {
+				gotT, gotOK := c.info(info)
+				wantT, wantOK := c.bead(b)
+				if gotOK != wantOK || !gotT.Equal(wantT) {
+					t.Errorf("%s: info=(%v,%v) bead=(%v,%v)", name, gotT, gotOK, wantT, wantOK)
 				}
 			}
 			for name, c := range stringChecks {
