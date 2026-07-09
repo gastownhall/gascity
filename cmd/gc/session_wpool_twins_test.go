@@ -117,9 +117,9 @@ func TestPoolReusePredicateInfoTwinsMatchRaw(t *testing.T) {
 			if got, want := poolRuntimeAliasIsDeferredInfo(info), poolRuntimeAliasIsDeferred(b); got != want {
 				t.Errorf("poolRuntimeAliasIsDeferred[%s/%s]: info=%v raw=%v", agent.Name, b.ID, got, want)
 			}
-			if got, want := staleNonExpandingPoolSessionInfo(agent, info), staleNonExpandingPoolSessionBead(agent, b); got != want {
-				t.Errorf("staleNonExpandingPoolSession[%s/%s]: info=%v raw=%v", agent.Name, b.ID, got, want)
-			}
+			// staleNonExpandingPoolSessionBeadInfo (the shared staleness projection the
+			// reuse finders use) is already pinned vs its raw form by
+			// TestSessionClassifierInfoEquivalence.
 			if got, want := reusablePoolSessionInfo(bp, agent, "claude", info, nil), reusablePoolSessionBead(bp, agent, "claude", b, nil); got != want {
 				t.Errorf("reusablePoolSession[%s/%s]: info=%v raw=%v", agent.Name, b.ID, got, want)
 			}

@@ -48,6 +48,14 @@ type CreateSpec struct {
 // the created bead is always reported as Info; a caller must never receive a
 // created-but-unreported bead. CreateSession is the id-only sibling for callers
 // that need only the id.
+//
+// Backend parity: because this projects the Create ECHO instead of re-Getting, the
+// guarantee that the returned Info equals a subsequent Get's projection rests on the
+// store backend faithfully echoing the created bead's fields on Create (memstore
+// clones the stored bead; the CachingStore Get-refreshes write-through; BdStore and
+// the Dolt stores reconstruct the bead from bd's create response). That parity is
+// pinned across every backend by the beadstest conformance case
+// CreateEchoMatchesGetOnMetadata, not just by the memstore-backed oracle here.
 func (s *Store) CreateSessionInfo(spec CreateSpec) (Info, error) {
 	created, err := s.store.Create(beads.Bead{
 		ID:       spec.ID,

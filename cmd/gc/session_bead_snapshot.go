@@ -320,12 +320,18 @@ func (s *sessionBeadSnapshot) add(bead beads.Bead) {
 // bead. It rebuilds the agent/template index maps from the extended openInfos via
 // the equivalence-proven Info constructor while PRESERVING each existing row's
 // circuit cluster and appending the zero CircuitState for the new row (a fresh bead
-// carries no circuit metadata). The raw open []beads.Bead half is intentionally
-// left untouched: after W-pool no in-cycle reader consumes it — the build's own
-// reuse scans read OpenInfos, and the reconcile tick re-loads the snapshot from the
-// store (city_runtime reloads after buildDesiredState) before reading Open() — and
-// the raw half is deleted with W-delete. Under Lock; safe for the parallel
-// pool-create fan-out (gastownhall/gascity#2319).
+// carries no circuit metadata).
+//
+// The raw open []beads.Bead half is intentionally left untouched (addInfo holds no
+// raw bead). Consumers that read the typed half — the build's own reuse scans
+// (OpenInfos) and the reconcile tick (which re-loads the snapshot from the store
+// after buildDesiredState) — observe the new session directly. The one same-cycle
+// reader of the RAW half, the sync path via snapshotOrLoadSessionBeads, reconciles
+// the resulting skew by reloading from the store whenever len(OpenInfos()) >
+// len(Open()) (which holds iff addInfo ran this cycle), so sync never treats a
+// just-created session_name as absent and mints a duplicate. The raw half is deleted
+// with W-delete. Under Lock; safe for the parallel pool-create fan-out
+// (gastownhall/gascity#2319).
 func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
 	if s == nil {
 		return

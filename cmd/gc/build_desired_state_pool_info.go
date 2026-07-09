@@ -72,33 +72,6 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 	setTemplateEnvIdentity(tp, desiredAlias)
 }
 
-// staleNonExpandingPoolSessionInfo is the session.Info sibling of
-// staleNonExpandingPoolSessionBead.
-func staleNonExpandingPoolSessionInfo(cfgAgent *config.Agent, info session.Info) bool {
-	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return false
-	}
-	if isManualSessionInfoForAgent(info, cfgAgent) {
-		return false
-	}
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBeadAgentNameInfo(info)) > 0 {
-		return true
-	}
-	if nonExpandingPoolIdentitySlot(cfgAgent, info.Alias) > 0 {
-		return true
-	}
-	if nonExpandingPoolIdentitySlot(cfgAgent, info.Title) > 0 {
-		return true
-	}
-	for _, label := range info.Labels {
-		label = strings.TrimSpace(label)
-		if strings.HasPrefix(label, "agent:") && nonExpandingPoolIdentitySlot(cfgAgent, strings.TrimPrefix(label, "agent:")) > 0 {
-			return true
-		}
-	}
-	return strings.TrimSpace(info.PoolSlot) != ""
-}
-
 // claimPoolSlotWithConfigInfo is the session.Info sibling of
 // claimPoolSlotWithConfig.
 func claimPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info, used map[int]bool) int {
@@ -191,7 +164,7 @@ func findReusableCanonicalNonExpandingPoolSessionInfo(
 		if strings.TrimSpace(info.SessionNameMetadata) == "" {
 			continue
 		}
-		if staleNonExpandingPoolSessionInfo(cfgAgent, info) {
+		if staleNonExpandingPoolSessionBeadInfo(cfgAgent, info) {
 			continue
 		}
 		if infoIdentifiesAsCanonical(info, canonical) {
@@ -256,7 +229,7 @@ func findReusableCanonicalNonExpandingDependencyPoolSessionInfo(
 	}
 	canonical := cfgAgent.QualifiedName()
 	for _, info := range reusableDependencyPoolSessionInfos(bp, template) {
-		if staleNonExpandingPoolSessionInfo(cfgAgent, info) {
+		if staleNonExpandingPoolSessionBeadInfo(cfgAgent, info) {
 			continue
 		}
 		if infoIdentifiesAsCanonical(info, canonical) {

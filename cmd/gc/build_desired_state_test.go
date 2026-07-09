@@ -4877,6 +4877,86 @@ func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testi
 	}
 }
 
+// TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate is the load-bearing
+// regression for the W-pool addInfo raw-half skew. buildDesiredState creates a
+// canonical-singleton pool session (poolSlot 0) through the Info create front door,
+// which appends to the snapshot's typed half only (addInfo) and leaves the raw open
+// half stale. When sync runs on that SAME snapshot in a no-reload window (the
+// controlDispatcherTick / startup-refresh / steady-refresh windows), a raw-half read
+// would miss the just-created session_name; because poolSlot-0 identities skip the
+// store-recovery fallback, sync would MINT A DUPLICATE open bead. snapshotOrLoadSessionBeads
+// reconciles the skew (OpenInfos > Open ⟹ reload from the store), so sync sees the
+// created bead and takes the clean update path. Reverting that skew reload re-mints
+// the duplicate and fails this test.
+func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1), // canonical singleton pool => poolSlot 0
+		}},
+	}
+	sessionBeads := newSessionBeadSnapshot(nil)
+	var buildStderr bytes.Buffer
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		store, nil, sessionBeads, nil, &buildStderr,
+	)
+
+	// The create must have skewed the snapshot: the typed half grew (addInfo) while
+	// the raw open half stayed stale.
+	if len(sessionBeads.OpenInfos()) <= len(sessionBeads.Open()) {
+		t.Fatalf("expected same-cycle create skew (OpenInfos>Open); OpenInfos=%d Open=%d stderr=%q",
+			len(sessionBeads.OpenInfos()), len(sessionBeads.Open()), buildStderr.String())
+	}
+	infos := sessionBeads.OpenInfos()
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 created singleton session, got %d; stderr=%q", len(infos), buildStderr.String())
+	}
+	sessionName := infos[0].SessionNameMetadata
+	if sessionName == "" {
+		t.Fatalf("created singleton has empty session_name")
+	}
+	if got := infos[0].PoolSlot; got != "" {
+		t.Fatalf("singleton pool session pool_slot = %q, want empty (the un-recovered poolSlot-0 case)", got)
+	}
+
+	// Sync on the SAME snapshot (the production no-reload window).
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
+	var syncStderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
+		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads,
+	)
+
+	// No duplicate was minted: exactly one open bead carries the created session_name.
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	count := 0
+	for _, b := range open {
+		if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("open beads for session_name %q = %d, want 1 (sync minted a duplicate); sync stderr=%q", sessionName, count, syncStderr.String())
+	}
+	// The created bead's pending_create_claim survives (a duplicate mint would orphan it).
+	createdStored, err := store.Get(infos[0].ID)
+	if err != nil {
+		t.Fatalf("Get(created %s): %v", infos[0].ID, err)
+	}
+	if strings.TrimSpace(createdStored.Metadata["pending_create_claim"]) != "true" {
+		t.Fatalf("created singleton pending_create_claim = %q, want true (orphaned by a duplicate mint?)", createdStored.Metadata["pending_create_claim"])
+	}
+}
+
 func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
