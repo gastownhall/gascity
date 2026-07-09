@@ -3113,23 +3113,10 @@ func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapsho
 	return sessionBeads, false
 }
 
-func filterSessionBeadsByName(snapshot *sessionBeadSnapshot, names map[string]bool) []beads.Bead {
-	if snapshot == nil || len(names) == 0 {
-		return nil
-	}
-	var filtered []beads.Bead
-	for _, bead := range snapshot.Open() {
-		if names[bead.Metadata["session_name"]] {
-			filtered = append(filtered, bead)
-		}
-	}
-	return filtered
-}
-
-// filterSessionInfosByName is the session.Info mirror of filterSessionBeadsByName:
-// it selects the same open sessions (matched on the RAW session_name metadata,
-// SessionNameMetadata) in the same order, for the pool-demand path that reads
-// typed Info fields.
+// filterSessionInfosByName selects the open sessions matched on the RAW
+// session_name metadata (SessionNameMetadata), for the pool-demand path that reads
+// typed Info fields. filterReconcileRowsByName is the ReconcileSession sibling the
+// reconciler tick feed uses.
 func filterSessionInfosByName(snapshot *sessionBeadSnapshot, names map[string]bool) []sessionpkg.Info {
 	if snapshot == nil || len(names) == 0 {
 		return nil
