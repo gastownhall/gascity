@@ -46,6 +46,12 @@ type Section struct {
 	// and full semantics.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	WriteAuthRequired  bool   `toml:"write_auth_required,omitempty"`
+	// ReadAuthVerifyKey / ReadAuthRequired require a signed read grant on every
+	// read (GET/HEAD) of an already-registered city (the per-city routes under
+	// /v0/city/{cityName}); supervisor-scope reads (/v0/cities, /health) stay
+	// open. See config.APIConfig for the key format and full semantics.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace

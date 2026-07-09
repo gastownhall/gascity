@@ -116,6 +116,7 @@ type SupervisorMux struct {
 	allowedHosts   []string
 	allowAnyHost   bool
 	writeAuth      *citywriteauth.Verifier
+	readAuth       *citywriteauth.Verifier
 	server         *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
@@ -231,6 +232,13 @@ func (sm *SupervisorMux) Handler() http.Handler {
 	if sm.writeAuth != nil {
 		root = writeAuthMiddleware(sm.writeAuth, sm.readOnly, root)
 	}
+	// When a verifying key is configured, gate city-scoped reads on a signed
+	// grant. Disjoint from the write gate by method (GET/HEAD vs mutations), so
+	// the relative wrap order is correctness-irrelevant; both stay innermost
+	// (after host/CORS) so preflight and host rejection never need a grant.
+	if sm.readAuth != nil {
+		root = readAuthMiddleware(sm.readAuth, root)
+	}
 	audit := requestAuditConfig{
 		recorder:       sm.supervisorEventRecorder(),
 		allowedOrigins: sm.allowedOrigins,
@@ -291,6 +299,15 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 // verifier leaves write-auth disabled. Must be called before Serve.
 func (sm *SupervisorMux) WithWriteAuth(v *citywriteauth.Verifier) *SupervisorMux {
 	sm.writeAuth = v
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithReadAuth installs the read-auth verifier so city-scoped reads (GET/HEAD)
+// are gated on a signed grant, and rebuilds the internal http.Server handler. A
+// nil verifier leaves read-auth disabled. Must be called before Serve.
+func (sm *SupervisorMux) WithReadAuth(v *citywriteauth.Verifier) *SupervisorMux {
+	sm.readAuth = v
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }

@@ -2053,6 +2053,41 @@ type APIConfig struct {
 	// gate writes fails closed if the key is ever dropped. The
 	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
 	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
+	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
+	// already-registered city on the typed per-city API — the routes under
+	// /v0/city/{cityName} — to carry a signed read grant from a configured
+	// trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding
+	// in-process, grant-based admission control to the typed city read surface
+	// (beads, mail, sessions, agent transcripts) instead of trusting network
+	// position.
+	//
+	// Scope boundary: this gate covers ONLY the typed /v0/city/{cityName} read
+	// routes. It does NOT cover other surfaces on the same listener that can also
+	// expose per-city data: the supervisor-scope aggregate event feed (/v0/events
+	// and /v0/events/stream, which multiplex every running city's events), the
+	// default-on dashboard host plane (/api/*, including its /api/city/{cityName}/*
+	// samplers, run detail, run diff, and config reads), and the supervisor-scope
+	// routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the
+	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind,
+	// enable this gate only behind the grant-minting authority/edge that fronts
+	// the whole listener (the intended deployment), and/or disable the dashboard
+	// host plane with GC_SUPERVISOR_DASHBOARD=0; otherwise those surfaces remain
+	// readable by network position. Gating them is tracked as follow-up work
+	// under the supervisor-scope grant.
+	//
+	// Built-in callers (the bundled gc API client and dashboard SPA) mint no
+	// grant, so enabling this gate turns their direct /v0/city reads away with a
+	// clear 401; such deployments front reads through the authority that mints
+	// grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma
+	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
+	// via an epoch floor is an ops-plane control set only through the
+	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
+	// instead of silently disabling the gate, so a config that intends to gate
+	// reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1
+	// env var has the same effect.
+	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
