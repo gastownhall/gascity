@@ -14,10 +14,13 @@ var (
 	// Resource resolution. Codes are per-resource (city-not-found, not a generic
 	// not-found) so a client branches on which resource was missing; rig-not-found
 	// is shared across the domains that resolve a rig.
-	CityNotFound = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
-	BeadNotFound = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
-	MailNotFound = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
-	RigNotFound  = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
+	CityNotFound     = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
+	BeadNotFound     = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
+	MailNotFound     = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
+	RigNotFound      = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
+	SessionNotFound  = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
+	AgentNotFound    = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
+	ProviderNotFound = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
 
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
@@ -26,14 +29,29 @@ var (
 	// Concurrency / state conflicts.
 	ConflictConcurrentDelete = Register(ProblemType{Code: "conflict-concurrent-delete", Status: http.StatusConflict, Title: "Concurrent Delete Conflict"})
 	ConflictWrongState       = Register(ProblemType{Code: "conflict-wrong-state", Status: http.StatusConflict, Title: "Wrong State Conflict"})
+	// SessionConflict is the one code for the session 409s. Many carry a
+	// differentiating detail prefix the CLI already branches on
+	// (ambiguous:/pending_interaction:/no_pending:/invalid_interaction:/
+	// illegal_transition:), mirroring sling-source-workflow-conflict; the rest
+	// share a generic "conflict:" (or no) prefix. A later slice may split the
+	// create-time name/alias-uniqueness conflicts into their own code, since a
+	// client cannot today distinguish "pick a different name" from "resume/stop
+	// first" by code or prefix.
+	SessionConflict = Register(ProblemType{Code: "session-conflict", Status: http.StatusConflict, Title: "Session State Conflict"})
+
+	// Authorization / capability.
+	Forbidden      = Register(ProblemType{Code: "forbidden", Status: http.StatusForbidden, Title: "Forbidden"})
+	NotImplemented = Register(ProblemType{Code: "not-implemented", Status: http.StatusNotImplemented, Title: "Not Implemented"})
 
 	// Idempotency (two-phase reserve/complete).
 	IdempotencyInFlight = Register(ProblemType{Code: "idempotency-in-flight", Status: http.StatusConflict, Title: "Idempotency Key In Flight"})
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
 
-	// Backend availability. store-unavailable is the bead-store-not-live case;
-	// service-unavailable is the generic 503 (its title matches http.StatusText so
-	// converting a plain 503 preserves the wire title).
+	// Backend availability. store-unavailable is reserved for the bead-store-not-
+	// live 503 emitted by the shared cacheLiveOr503 helper, whose conversion is
+	// tracked separately (still legacy today); service-unavailable is the generic
+	// 503 that every converted plain 503 uses — its title matches http.StatusText
+	// so the wire title is preserved.
 	StoreUnavailable   = Register(ProblemType{Code: "store-unavailable", Status: http.StatusServiceUnavailable, Title: "Store Unavailable"})
 	ServiceUnavailable = Register(ProblemType{Code: "service-unavailable", Status: http.StatusServiceUnavailable, Title: "Service Unavailable"})
 	Internal           = Register(ProblemType{Code: "internal", Status: http.StatusInternalServerError, Title: "Internal Server Error"})
