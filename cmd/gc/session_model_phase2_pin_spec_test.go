@@ -433,7 +433,7 @@ func TestPhase2SessionListReason_ShowsWakeEligiblePin(t *testing.T) {
 		SessionName: "test-city--worker",
 	}
 
-	reason := sessionReason(info, map[string]beads.Bead{bead.ID: bead}, map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)}, cfg, nil, nil, nil)
+	reason := sessionReason(info, map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)}, cfg, nil, nil, nil)
 	if reason != string(WakePin) {
 		t.Fatalf("sessionReason = %q, want %q", reason, WakePin)
 	}
@@ -469,7 +469,7 @@ func TestPhase2SessionListReason_PinnedHoldStillShowsBlocker(t *testing.T) {
 		SessionName: "test-city--worker",
 	}
 
-	reason := sessionReason(info, map[string]beads.Bead{bead.ID: bead}, map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)}, cfg, nil, nil, nil)
+	reason := sessionReason(info, map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)}, cfg, nil, nil, nil)
 	if reason != "user-hold" {
 		t.Fatalf("sessionReason = %q, want user-hold", reason)
 	}

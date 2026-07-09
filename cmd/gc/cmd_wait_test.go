@@ -111,7 +111,7 @@ func TestWaitNudgePollerKeyFallbackOrder(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := waitNudgePollerKey(tc.bead); got != tc.want {
+			if got := waitNudgePollerKey(sessionpkg.InfoFromPersistedBead(tc.bead)); got != tc.want {
 				t.Fatalf("waitNudgePollerKey() = %q, want %q", got, tc.want)
 			}
 		})

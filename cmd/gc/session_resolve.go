@@ -67,7 +67,7 @@ func resolveConfiguredNamedSessionID(
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
-		if bead, ok := reopenClosedConfiguredNamedSessionBead(
+		if bead, _, ok := reopenClosedConfiguredNamedSessionBead(
 			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, io.Discard,
 		); ok {
 			return bead.ID, true, nil

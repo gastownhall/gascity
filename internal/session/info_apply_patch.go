@@ -142,6 +142,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.CreationCompleteAt = v
 		case "continuation_reset_pending":
 			info.ContinuationResetPending = v
+		case SessionCircuitStateMetadataKey:
+			info.SessionCircuitState = v
 		case ResetCommittedAtKey:
 			info.ResetCommittedAt = v
 		case "generation":

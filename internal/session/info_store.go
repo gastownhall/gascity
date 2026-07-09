@@ -103,6 +103,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		StateReason:                b.Metadata["state_reason"],
 		CreationCompleteAt:         b.Metadata["creation_complete_at"],
 		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],
+		SessionCircuitState:        b.Metadata[SessionCircuitStateMetadataKey],
 		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
 		Generation:                 b.Metadata["generation"],
 		StartedConfigHash:          b.Metadata["started_config_hash"],

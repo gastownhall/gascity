@@ -1074,11 +1074,11 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if sessionID == "" {
 			continue
 		}
-		sessionBead, ok := sessionBeads.FindByID(sessionID)
+		sessionInfo, ok := sessionBeads.FindInfoByID(sessionID)
 		if !ok {
 			continue
 		}
-		if !cachedSessionCanReceiveWaitNudge(sessionBead) {
+		if !cachedSessionCanReceiveWaitNudge(sessionInfo) {
 			continue
 		}
 		nudgeID := waitNudgeID(wait)
@@ -1101,7 +1101,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			message = "Wait satisfied."
 		}
 		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
-		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionBead), message, "wait", now, queuedNudgeOptions{
+		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
 			ID:                nudgeID,
 			SessionID:         sessionID,
 			ContinuationEpoch: wait.RegisteredEpoch,
@@ -1117,8 +1117,8 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
-		if waitNudgeProviderNeedsPoller(sessionBead) && !nudgeDispatcherIsSupervisor(cfg) {
-			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
+			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}
 		}
@@ -1126,8 +1126,8 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 	return nil
 }
 
-func waitNudgeProviderNeedsPoller(sessionBead beads.Bead) bool {
-	switch sessionProviderFamily(sessionBead) {
+func waitNudgeProviderNeedsPoller(info sessionpkg.Info) bool {
+	switch sessionProviderFamily(info) {
 	case "codex", "pi":
 		return true
 	default:
@@ -1135,8 +1135,8 @@ func waitNudgeProviderNeedsPoller(sessionBead beads.Bead) bool {
 	}
 }
 
-func cachedSessionCanReceiveWaitNudge(sessionBead beads.Bead) bool {
-	switch sessionpkg.State(strings.TrimSpace(sessionBead.Metadata["state"])) {
+func cachedSessionCanReceiveWaitNudge(info sessionpkg.Info) bool {
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case "", sessionpkg.StateActive, sessionpkg.StateAwake:
 		return true
 	default:
@@ -1256,20 +1256,22 @@ func waitNudgeID(wait sessionpkg.WaitInfo) string {
 	return "wait-" + strings.ReplaceAll(wait.ID, "/", "-") + "-" + epoch + "-" + attempt
 }
 
-func waitNudgeAgent(sessionBead beads.Bead) string {
-	if agent := sessionBead.Metadata["agent_name"]; agent != "" {
-		return agent
+func waitNudgeAgent(info sessionpkg.Info) string {
+	if info.AgentName != "" {
+		return info.AgentName
 	}
-	return sessionBead.Metadata["template"]
+	return info.Template
 }
 
-func waitNudgePollerKey(sessionBead beads.Bead) string {
-	return sessionpkg.PollerKeyFromBead(sessionBead)
+func waitNudgePollerKey(info sessionpkg.Info) string {
+	return sessionpkg.PollerKeyFromInfo(info)
 }
 
-// sessionProviderFamily returns the built-in provider family for a session bead.
-func sessionProviderFamily(sessionBead beads.Bead) string {
-	return sessionpkg.ProviderFamilyFromMetadata(sessionBead.Metadata, "")
+// sessionProviderFamily returns the built-in provider family for a session,
+// resolving the precedence ladder (builtin_ancestor → provider_kind → provider)
+// off the typed Info.
+func sessionProviderFamily(info sessionpkg.Info) string {
+	return sessionpkg.ProviderFamilyFromInfo(info, "")
 }
 
 func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) (string, error) {

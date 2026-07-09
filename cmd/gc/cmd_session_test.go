@@ -1370,7 +1370,6 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		wrapped,
@@ -1382,12 +1381,12 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
-// TestSessionReason_IndexMissReturnsDash pins the miss-path guards: a session
-// present in one reason-projection index but missing from the other must render
-// "-", never a zero-value session.Info fed to wakeReasonsInfo (which would silently
-// emit a wrong REASON cell). Production keeps beadIndex/infoIndex lockstep (both
-// from one snapshot), but the guard is defensive against a future single-index
-// caller (WI-6 R2 red-team nit).
+// TestSessionReason_IndexMissReturnsDash pins the miss-path guard: a session
+// missing from the reason-projection index (infoIndex) must render "-", never a
+// zero-value session.Info fed to wakeReasonsInfo (which would silently emit a
+// wrong REASON cell). WI-6 R5: the projection reads only the typed Info snapshot
+// (the raw beadIndex is gone — Info.SessionCircuitState carries the last field
+// the display reason needed), so infoIndex is the single guarded index.
 func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
 	bead := beads.Bead{
 		ID:     "gc-miss",
@@ -1408,18 +1407,14 @@ func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
 	full := session.InfoFromPersistedBead(bead)
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
-	// Present in beadIndex, missing from infoIndex → "-" (the new infoIndex guard).
-	if got := sessionReason(s, map[string]beads.Bead{bead.ID: bead}, map[string]session.Info{}, cfg, nil, nil, nil); got != "-" {
+	// Missing from infoIndex → "-".
+	if got := sessionReason(s, map[string]session.Info{}, cfg, nil, nil, nil); got != "-" {
 		t.Fatalf("sessionReason(missing from infoIndex) = %q, want -", got)
 	}
-	// Present in infoIndex, missing from beadIndex → "-" (the existing beadIndex guard).
-	if got := sessionReason(s, map[string]beads.Bead{}, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "-" {
-		t.Fatalf("sessionReason(missing from beadIndex) = %q, want -", got)
-	}
-	// Sanity: present in BOTH renders the real reason, so the guards above are not
-	// trivially returning "-" for a resolvable session.
-	if got := sessionReason(s, map[string]beads.Bead{bead.ID: bead}, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "user-hold" {
-		t.Fatalf("sessionReason(present in both) = %q, want user-hold", got)
+	// Sanity: present renders the real reason, so the guard above is not trivially
+	// returning "-" for a resolvable session.
+	if got := sessionReason(s, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "user-hold" {
+		t.Fatalf("sessionReason(present) = %q, want user-hold", got)
 	}
 }
 
@@ -1455,7 +1450,6 @@ func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		wrapped,
@@ -1501,7 +1495,6 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		provider,
@@ -1537,7 +1530,6 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		provider,
@@ -1573,7 +1565,6 @@ func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		runtime.NewFake(),
@@ -1608,7 +1599,6 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		runtime.NewFake(),
@@ -1730,7 +1720,6 @@ func TestSessionReason_PriorityMatrix(t *testing.T) {
 
 			reason := sessionReason(
 				newInfo(sessionName),
-				map[string]beads.Bead{bead.ID: bead},
 				map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 				tt.cfg,
 				provider,
@@ -1785,7 +1774,6 @@ func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		nil,
 		runtime.NewFake(),
@@ -1823,7 +1811,6 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
 		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
 		cfg,
 		runtime.NewFake(),
@@ -1935,7 +1922,6 @@ func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
 			before := cloneSessionReasonMetadata(tt.bead.Metadata)
 			got := sessionReason(
 				tt.info,
-				map[string]beads.Bead{tt.bead.ID: tt.bead},
 				map[string]session.Info{tt.bead.ID: session.InfoFromPersistedBead(tt.bead)},
 				cfg,
 				tt.provider,

@@ -963,16 +963,11 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
 	}
 
-	// Build the per-session reason-projection indexes from the one snapshot (no
-	// duplicate query). WI-6 R2: the wake-reason classifiers now read the typed
-	// Info snapshot (infoIndex, from OpenInfos) — see sessionReason. The raw bead
-	// index is retained ONLY for LifecycleDisplayReasonWithLiveness, which reads
-	// session-circuit-state metadata that session.Info does not (yet) carry.
-	openBeads := sessionBeads.Open()
-	beadIndex := make(map[string]beads.Bead, len(openBeads))
-	for _, b := range openBeads {
-		beadIndex[b.ID] = b
-	}
+	// Build the per-session reason-projection index from the one snapshot (no
+	// duplicate query). WI-6 R5: the whole reason projection — the wake-reason
+	// classifiers AND LifecycleDisplayReasonWithLivenessInfo — now reads the typed
+	// Info snapshot (infoIndex, from OpenInfos), so the raw bead index is gone
+	// (Info.SessionCircuitState carries the last field the display reason needed).
 	openInfos := sessionBeads.OpenInfos()
 	infoIndex := make(map[string]session.Info, len(openInfos))
 	for _, in := range openInfos {
@@ -1015,7 +1010,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, beadIndex, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
+		reason := sessionReason(s, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
@@ -1313,27 +1308,23 @@ const (
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
 // For asleep sessions, shows the sleep reason (e.g., "user-hold", "quarantine").
 // For closed sessions, shows "-".
-func sessionReason(s session.Info, beadIndex map[string]beads.Bead, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
+func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
 	if s.State == "" {
 		return "-" // closed
 	}
 
-	b, ok := beadIndex[s.ID]
-	if !ok {
-		return "-" // no bead data available
-	}
 	// info is the typed reason source of truth — the full snapshot Info projection
 	// (OpenInfos mirrors Open one-to-one, same order), not the display Info s, which
-	// callers may pass minimally populated. Guard the lookup exactly like beadIndex:
-	// a miss must render "-", never a zero-value Info fed to wakeReasonsInfo (which
-	// would silently emit a wrong REASON cell).
+	// callers may pass minimally populated. A miss must render "-", never a
+	// zero-value Info fed to the reason projection (which would silently emit a
+	// wrong REASON cell).
 	info, ok := infoIndex[s.ID]
 	if !ok {
 		return "-" // no typed session data available
 	}
 
 	now := time.Now().UTC()
-	lcInput := session.LifecycleInputFromMetadata(b.Status, b.Metadata)
+	lcInput := session.LifecycleInputFromInfo(info)
 	lcInput.Now = now
 	lifecycle := session.ProjectLifecycle(lcInput)
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
@@ -1343,10 +1334,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, infoIndex ma
 	if sp != nil {
 		isRunning = sp.IsRunning
 	}
-	// LifecycleDisplayReasonWithLiveness reads session-circuit-state metadata that
-	// session.Info does not carry, so it stays on the raw bead until that field is
-	// added (WI-6 R5/WI-7); the census-tracked reads below route through Info.
-	if reason := session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, now, s.SessionName, isRunning); reason != "" {
+	// WI-6 R5: the display reason now reads Info.SessionCircuitState (added this
+	// wave) and the other lifecycle markers off the typed snapshot Info.
+	if reason := session.LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning); reason != "" {
 		return reason
 	}
 
