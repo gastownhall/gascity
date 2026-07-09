@@ -485,6 +485,146 @@ func (c *CachingStore) clearStalenessMarksLocked(id string) {
 	delete(c.deletedSeq, id)
 }
 
+// dirtyOverlayMaxGets bounds the inline per-ID refresh a cached read will do
+// before it declines the overlay and falls back to today's full backing scan.
+// Above the cap the read degrades to prior behavior — never worse.
+const dirtyOverlayMaxGets = 8
+
+// errDirtyOverlayFallback signals that a cached read must take its existing
+// fallback path (backing.List / backing.Ready / ErrCacheUnavailable / ok=false,
+// each unchanged per site). It never escapes the read site.
+var errDirtyOverlayFallback = errors.New("beads cache: dirty overlay fallback")
+
+// cacheServableLocked reports whether the active read model can answer from
+// cache: the cache is live or partial and the prime was not a partial error.
+// Dirty is no longer a serve-blocker — it is handled by readCacheWithOverlay.
+// Caller must hold c.mu (read or write).
+func (c *CachingStore) cacheServableLocked() bool {
+	return (c.state == cacheLive || c.state == cachePartial) && c.primePartialErr == nil
+}
+
+// readCacheWithOverlay serves a cached read after refreshing only the dirty
+// rows, replacing the old "one dirty bead declines the whole cache" tripwire.
+//
+// gate reports, under the lock, whether the cache is servable for this read
+// shape (cacheServableLocked for most sites; Ready adds depsComplete). collect
+// materializes the read from the cache and is invoked exactly once, while the
+// lock is held, only after every dirty row has been refreshed or confirmed
+// absent — so no dirty row is ever served (I1) and no new mark can slip between
+// the servability re-check and the serve (I7). suppressed holds IDs that
+// backing.Get reported ErrNotFound this pass; collect must omit them, matching
+// what the old full backing.List would have returned for deleted rows (I6).
+//
+// A non-nil error means the caller must take its existing fallback path (I5):
+// the dirty set exceeds dirtyOverlayMaxGets, a backing.Get failed with a
+// non-NotFound error, the cache is not servable, or residual dirty churn
+// survived the bounded retry. No backing I/O happens under c.mu (I7).
+func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
+	suppressed := make(map[string]struct{})
+	for pass := 0; pass < 2; pass++ {
+		c.mu.RLock()
+		if !gate() {
+			c.mu.RUnlock()
+			return errDirtyOverlayFallback
+		}
+		todo := c.dirtyToRefreshLocked(suppressed)
+		if len(todo) == 0 {
+			// Cache is clean, or every remaining dirty row is a confirmed
+			// absence: serve from cache under this same lock hold.
+			collect(suppressed)
+			c.mu.RUnlock()
+			return nil
+		}
+		if len(c.dirty) > dirtyOverlayMaxGets {
+			c.mu.RUnlock()
+			return errDirtyOverlayFallback
+		}
+		startSeq := c.mutationSeq
+		c.mu.RUnlock()
+
+		fetched, err := c.fetchDirtyOverlay(todo, suppressed)
+		if err != nil {
+			return errDirtyOverlayFallback
+		}
+
+		c.mu.Lock()
+		if !gate() {
+			c.mu.Unlock()
+			return errDirtyOverlayFallback
+		}
+		now := time.Now()
+		absorbed := 0
+		for _, f := range fetched {
+			// Fence discipline (I3): never overwrite a mutation that landed
+			// after the snapshot. A skipped-but-still-dirty row is caught by
+			// the re-check below and handled by the retry-or-fallback.
+			if c.deletedSeq[f.id] > startSeq || c.beadSeq[f.id] > startSeq {
+				continue
+			}
+			c.absorbFreshLocked(f.id, f.bead, now, absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqClearBeadSeqOnly,
+				clearDirty: true,
+			})
+			absorbed++
+		}
+		if absorbed > 0 {
+			c.markFreshLocked(now)
+			c.updateStatsLocked()
+		}
+		if len(c.dirtyToRefreshLocked(suppressed)) == 0 {
+			collect(suppressed)
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+	}
+	return errDirtyOverlayFallback
+}
+
+// dirtyToRefreshLocked returns the dirty IDs still needing a backing refresh:
+// every dirty mark not already confirmed absent this pass. Caller must hold
+// c.mu (read or write).
+func (c *CachingStore) dirtyToRefreshLocked(suppressed map[string]struct{}) []string {
+	if len(c.dirty) == 0 {
+		return nil
+	}
+	var todo []string
+	for id := range c.dirty {
+		if _, ok := suppressed[id]; ok {
+			continue
+		}
+		todo = append(todo, id)
+	}
+	return todo
+}
+
+type overlayFetched struct {
+	id   string
+	bead Bead
+}
+
+// fetchDirtyOverlay fetches each dirty ID via backing.Get with no lock held
+// (I7). Successful Gets are queued for absorb; ErrNotFound IDs are added to
+// suppressed (their dirty mark is deliberately left set, mirroring Get's dirty
+// path — convergence stays with the reconciler). Any other error returns
+// non-nil so the caller falls back.
+func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]struct{}) ([]overlayFetched, error) {
+	fetched := make([]overlayFetched, 0, len(todo))
+	for _, id := range todo {
+		fresh, err := c.backing.Get(id)
+		switch {
+		case err == nil:
+			fetched = append(fetched, overlayFetched{id: id, bead: fresh})
+		case errors.Is(err, ErrNotFound):
+			suppressed[id] = struct{}{}
+		default:
+			return nil, err
+		}
+	}
+	return fetched, nil
+}
+
 // PrimeActive loads the common active bead statuses (open + in_progress) across
 // both persistent issues and ephemeral wisps into the cache. These are fast indexed
 // queries that populate enough data for
