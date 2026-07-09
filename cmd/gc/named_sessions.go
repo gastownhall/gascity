@@ -92,6 +92,13 @@ func namedSessionMode(b beads.Bead) string {
 	return session.NamedSessionMode(b)
 }
 
+// namedSessionModeInfo is the session.Info mirror of namedSessionMode:
+// session.NamedSessionModeInfo trims the raw configured_named_mode
+// (Info.ConfiguredNamedMode), identical to the bead form.
+func namedSessionModeInfo(i session.Info) string {
+	return session.NamedSessionModeInfo(i)
+}
+
 func namedSessionContinuityEligible(b beads.Bead) bool {
 	return session.NamedSessionContinuityEligible(b)
 }

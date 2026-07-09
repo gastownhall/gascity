@@ -54,15 +54,19 @@ const (
 	sessionProviderTerminalErrorAtKey       = "provider_terminal_error_at"
 )
 
-// wakeReasons and evaluateWakeReasons are the CLI `gc session` REASON-column
-// display helpers ONLY. They compute the multi-reason, comma-joined cell shown
-// to operators; their sole production caller is sessionReason in cmd_session.go.
-// Production wake/sleep decisions come exclusively from ComputeAwakeSet
-// (compute_awake_set.go) via awakeSetToWakeEvals — do NOT add wake logic here,
-// it has no effect on reconciler behavior.
-
-func wakeReasons(
-	session beads.Bead,
+// wakeReasonsInfo and evaluateWakeReasonsInfo are the CLI `gc session`
+// REASON-column display helpers ONLY. They compute the multi-reason, comma-joined
+// cell shown to operators; their sole production caller is sessionReason in
+// cmd_session.go. Production wake/sleep decisions come exclusively from
+// ComputeAwakeSet (compute_awake_set.go) via awakeSetToWakeEvals — do NOT add wake
+// logic here, it has no effect on reconciler behavior. They read the
+// held/wait/quarantine/session-name metadata off the typed Info snapshot
+// (Info.HeldUntil, Info.QuarantinedUntil, Info.WaitHold — untrimmed, matching the
+// raw session.Metadata reads, Info.SessionNameMetadata, Info.ID) and route every
+// classifier through its Info twin, while keeping the runtime probes
+// (sessionAttachedForWakeReason, pendingInteractionReady) raw (§7 live edge).
+func wakeReasonsInfo(
+	info sessionpkg.Info,
 	cfg *config.City,
 	sp runtime.Provider,
 	poolDesired map[string]int,
@@ -70,11 +74,11 @@ func wakeReasons(
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) []WakeReason {
-	return evaluateWakeReasons(session, cfg, sp, poolDesired, workSet, readyWaitSet, clk).Reasons
+	return evaluateWakeReasonsInfo(info, cfg, sp, poolDesired, workSet, readyWaitSet, clk).Reasons
 }
 
-func evaluateWakeReasons(
-	session beads.Bead,
+func evaluateWakeReasonsInfo(
+	info sessionpkg.Info,
 	cfg *config.City,
 	sp runtime.Provider,
 	poolDesired map[string]int,
@@ -82,54 +86,51 @@ func evaluateWakeReasons(
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) wakeEvaluation {
-	policy := resolveSessionSleepPolicy(session, cfg, sp)
+	policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
 
 	// User hold suppresses all reasons.
-	if held := session.Metadata["held_until"]; held != "" {
+	if held := info.HeldUntil; held != "" {
 		if t, err := time.Parse(time.RFC3339, held); err == nil && clk.Now().Before(t) {
 			return wakeEvaluation{Policy: policy}
 		}
 	}
 
 	// Quarantine suppresses all reasons.
-	if q := session.Metadata["quarantined_until"]; q != "" {
+	if q := info.QuarantinedUntil; q != "" {
 		if t, err := time.Parse(time.RFC3339, q); err == nil && clk.Now().Before(t) {
 			return wakeEvaluation{Policy: policy}
 		}
 	}
 
 	var reasons []WakeReason
-	waitHold := session.Metadata["wait_hold"] != ""
-	name := session.Metadata["session_name"]
+	waitHold := info.WaitHold != ""
+	name := info.SessionNameMetadata
 
-	if readyWaitSet != nil && readyWaitSet[session.ID] {
+	if readyWaitSet != nil && readyWaitSet[info.ID] {
 		reasons = append(reasons, WakeWait)
 	}
-	if sessionStartRequested(session, clk) {
+	if sessionStartRequestedInfo(info, clk) {
 		reasons = append(reasons, WakeCreate)
 	}
 
-	template := normalizedSessionTemplate(session, cfg)
-	agent, configEligible := sessionWithinDesiredConfig(session, cfg, poolDesired)
-	if !waitHold && agent != nil && sessionMetadataState(session) == "active" && !policy.enabled() {
+	template := normalizedSessionTemplateInfo(info, cfg)
+	agent, configEligible := sessionWithinDesiredConfigInfo(info, cfg, poolDesired)
+	if !waitHold && agent != nil && sessionMetadataStateInfo(info) == "active" && !policy.enabled() {
 		reasons = append(reasons, WakeSession)
 	}
-	sleepSuppressed := configWakeSuppressed(session, policy, sp, clk)
+	sleepSuppressed := configWakeSuppressedInfo(info, policy, sp, clk)
 	if configEligible {
 		hasDemand := poolDesired[template] > 0
-		isAlwaysNamed := isNamedSessionBead(session) && namedSessionMode(session) == "always"
+		isAlwaysNamed := isNamedSessionInfo(info) && namedSessionModeInfo(info) == "always"
 		if !waitHold && (!sleepSuppressed || hasDemand || isAlwaysNamed) {
 			reasons = append(reasons, WakeConfig)
 		}
 	}
 	// WakeWork: the work_query reports pending work for this template.
-	// This fires independently of poolDesired — if scale_check hasn't
-	// caught up yet but work_query already sees routed beads, WakeWork
-	// ensures the session wakes without waiting for the next tick.
 	if !waitHold && workSet[template] {
 		reasons = append(reasons, WakeWork)
 	}
-	if !waitHold && sessionKeepWarmEligible(session, policy, sp, clk) {
+	if !waitHold && sessionKeepWarmEligibleInfo(info, policy, sp, clk) {
 		reasons = append(reasons, WakeKeepWarm)
 	}
 
@@ -146,6 +147,33 @@ func evaluateWakeReasons(
 		Policy:           policy,
 		ConfigSuppressed: policy.enabled() && sleepSuppressed,
 	}
+}
+
+// sessionWithinDesiredConfigInfo is the session.Info sibling of
+// sessionWithinDesiredConfig. It routes the template resolution and the
+// drained/named/manual classifiers through their Info twins, and compares
+// dependency_only via Info.DependencyOnlyMetadata (the RAW, UNTRIMMED mirror) so
+// the == "true" check stays byte-identical to the bead form on whitespace-padded
+// input.
+func sessionWithinDesiredConfigInfo(info sessionpkg.Info, cfg *config.City, poolDesired map[string]int) (*config.Agent, bool) {
+	template := normalizedSessionTemplateInfo(info, cfg)
+	agent := findAgentByTemplate(cfg, template)
+	if agent == nil {
+		return nil, false
+	}
+	if isDrainedSessionInfo(info) {
+		return agent, false
+	}
+	if info.DependencyOnlyMetadata == "true" {
+		return agent, false
+	}
+	if isNamedSessionInfo(info) {
+		return agent, namedSessionModeInfo(info) == "always" || poolDesired[template] > 0
+	}
+	if isManualSessionInfo(info) {
+		return agent, true
+	}
+	return agent, poolDesired[template] > 0
 }
 
 func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesired map[string]int) (*config.Agent, bool) {
@@ -230,25 +258,13 @@ const staleCreatingStateTimeout = time.Minute
 // out from under the reconciler's still-active never-started lease.
 const stalePendingCreateTimeout = 5 * time.Minute
 
-// WI-6: raw form retained — after R1 migrated cmd_stop.go, its sole non-oracle
-// caller is the wakeReasons display lane below (root A, session_reconcile.go);
-// the sessionMetadataStateInfo twin is oracle-pinned. Deleted in R2 when that
-// lane types onto Info.
-func sessionMetadataState(session beads.Bead) string {
-	switch state := strings.TrimSpace(session.Metadata["state"]); state {
-	case "awake":
-		return "active"
-	case string(sessionpkg.StateStartPending):
-		return "creating"
-	case "drained":
-		return "asleep"
-	default:
-		return state
-	}
-}
-
-// sessionMetadataStateInfo is the session.Info mirror of sessionMetadataState. It
-// reads the RAW metadata state (Info.MetadataState), not the normalized Info.State.
+// sessionMetadataStateInfo normalizes the RAW persisted state metadata
+// (Info.MetadataState, not the normalized Info.State) onto the display/decision
+// vocabulary: awake→active, start_pending→creating, drained→asleep, everything
+// else verbatim. The raw sessionMetadataState(beads.Bead) sibling was deleted in
+// WI-6 R2 once its last caller (the wake-reason display lane) typed onto Info;
+// the reference-implementation oracle in session_classifier_info_equiv_test.go
+// pins this normalization.
 func sessionMetadataStateInfo(i sessionpkg.Info) string {
 	switch state := strings.TrimSpace(i.MetadataState); state {
 	case "awake":

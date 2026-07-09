@@ -21,6 +21,14 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
+// wakeReasonsForBead projects a session bead to session.Info and evaluates the
+// display wake reasons via the typed wakeReasonsInfo twin. It is the Info-form
+// stand-in for the raw wakeReasons helper deleted in WI-6 R2, keeping these
+// characterization tests exercising the exact same REASON-column output.
+func wakeReasonsForBead(b beads.Bead, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, workSet, readyWaitSet map[string]bool, clk clock.Clock) []WakeReason {
+	return wakeReasonsInfo(sessionpkg.InfoFromPersistedBead(b), cfg, sp, poolDesired, workSet, readyWaitSet, clk)
+}
+
 // testStore wraps a bead slice for SetMetadata tracking in tests.
 type testStore struct {
 	beads.Store
@@ -110,7 +118,7 @@ func TestWakeReasons_SingletonTemplateDoesNotWakeFromConfigAlone(t *testing.T) {
 		"session_name": "test-worker",
 	})
 
-	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, nil, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("expected no reasons, got %v", reasons)
 	}
@@ -131,7 +139,7 @@ func TestWakeReasons_NoConfig(t *testing.T) {
 		"session_name": "test-worker",
 	})
 
-	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, nil, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("expected no reasons, got %v", reasons)
 	}
@@ -154,7 +162,7 @@ func TestWakeReasons_HeldUntil(t *testing.T) {
 		"held_until":   now.Add(1 * time.Hour).Format(time.RFC3339),
 	})
 
-	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, nil, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("held session should have no reasons, got %v", reasons)
 	}
@@ -177,7 +185,7 @@ func TestWakeReasons_HoldExpiredDoesNotRestoreSingletonConfigWake(t *testing.T) 
 		"held_until":   now.Add(-1 * time.Hour).Format(time.RFC3339),
 	})
 
-	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, nil, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("expired hold should not restore singleton config wake, got %v", reasons)
 	}
@@ -199,7 +207,7 @@ func TestWakeReasons_Quarantined(t *testing.T) {
 		"quarantined_until": now.Add(5 * time.Minute).Format(time.RFC3339),
 	})
 
-	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, nil, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("quarantined session should have no reasons, got %v", reasons)
 	}
@@ -223,7 +231,7 @@ func TestWakeReasons_PoolWithinDesired(t *testing.T) {
 
 	poolDesired := map[string]int{"worker": 3}
 
-	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, poolDesired, nil, nil, clk)
 	if len(reasons) != 1 || reasons[0] != WakeConfig {
 		t.Errorf("pool slot within desired should wake, got %v", reasons)
 	}
@@ -246,14 +254,14 @@ func TestWakeReasons_DemandExistsSessionWakes(t *testing.T) {
 
 	// With demand > 0, all sessions for the template are eligible to wake.
 	poolDesired := map[string]int{"worker": 3}
-	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, poolDesired, nil, nil, clk)
 	if !containsWakeReason(reasons, WakeConfig) {
 		t.Errorf("session should wake when demand exists, got %v", reasons)
 	}
 
 	// With demand = 0, no sessions wake.
 	poolDesired = map[string]int{"worker": 0}
-	reasons = wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	reasons = wakeReasonsForBead(session, cfg, nil, poolDesired, nil, nil, clk)
 	if containsWakeReason(reasons, WakeConfig) {
 		t.Errorf("session should not wake when demand is 0, got %v", reasons)
 	}
@@ -271,7 +279,7 @@ func TestWakeReasons_StaleCreatingWithoutPendingClaimDoesNotWakeCreate(t *testin
 	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = now.Add(-2 * time.Minute)
 
-	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, &config.City{}, nil, nil, nil, nil, clk)
 	if containsWakeReason(reasons, WakeCreate) {
 		t.Fatalf("stale creating session should not wake for create, got %v", reasons)
 	}
@@ -288,7 +296,7 @@ func TestWakeReasons_FreshCreatingWithoutPendingClaimStillWakesCreate(t *testing
 	})
 	session.CreatedAt = now.Add(-30 * time.Second)
 
-	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, &config.City{}, nil, nil, nil, nil, clk)
 	if !containsWakeReason(reasons, WakeCreate) {
 		t.Fatalf("fresh creating session should wake for create, got %v", reasons)
 	}
@@ -307,7 +315,7 @@ func TestWakeReasons_PendingCreateClaimKeepsWakeCreateAfterCreatingGoesStale(t *
 	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = now.Add(-2 * time.Minute)
 
-	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, &config.City{}, nil, nil, nil, nil, clk)
 	if !containsWakeReason(reasons, WakeCreate) {
 		t.Fatalf("session with pending_create_claim should wake for create even when stale, got %v", reasons)
 	}
@@ -392,7 +400,7 @@ func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
 		"sleep_reason": "drained",
 	})
 
-	reasons := wakeReasons(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
 	for _, reason := range reasons {
 		if reason == WakeConfig {
 			t.Fatalf("drained sleep session should not get WakeConfig, got %v", reasons)
@@ -415,7 +423,7 @@ func TestWakeReasons_Attached(t *testing.T) {
 		"session_name": "test-worker",
 	})
 
-	reasons := wakeReasons(session, cfg, sp, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, sp, nil, nil, nil, clk)
 	if len(reasons) != 1 || reasons[0] != WakeAttached {
 		t.Errorf("attached session should get WakeAttached, got %v", reasons)
 	}
@@ -435,7 +443,7 @@ func TestWakeReasons_IgnoresAttachedNonRunningSession(t *testing.T) {
 		"session_name": "test-worker",
 	})
 
-	reasons := wakeReasons(session, cfg, sp, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, sp, nil, nil, nil, clk)
 	if containsWakeReason(reasons, WakeAttached) {
 		t.Fatalf("non-running attached session should not get WakeAttached, got %v", reasons)
 	}
@@ -459,7 +467,7 @@ func TestWakeReasons_DemandWakesSession(t *testing.T) {
 
 	// Demand exists: poolDesired=1 → session within desired → WakeConfig.
 	poolDesired := map[string]int{"worker": 1}
-	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, poolDesired, nil, nil, clk)
 	if len(reasons) != 1 || reasons[0] != WakeConfig {
 		t.Errorf("session with demand should get WakeConfig, got %v", reasons)
 	}
@@ -479,7 +487,7 @@ func TestWakeReasons_WorkSetEmpty(t *testing.T) {
 	// No work for this template.
 	workSet := map[string]bool{"other": true}
 
-	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, workSet, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("session without work should have no reasons, got %v", reasons)
 	}
@@ -498,7 +506,7 @@ func TestWakeReasons_WorkSetEmitsWakeWork(t *testing.T) {
 
 	// workSet includes the template — should produce WakeWork.
 	workSet := map[string]bool{"worker": true}
-	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, workSet, nil, clk)
 	if !containsWakeReason(reasons, WakeWork) {
 		t.Errorf("session with work should get WakeWork, got %v", reasons)
 	}
@@ -517,7 +525,7 @@ func TestWakeReasons_WakeWorkSuppressedByWaitHold(t *testing.T) {
 	})
 
 	workSet := map[string]bool{"worker": true}
-	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, workSet, nil, clk)
 	if containsWakeReason(reasons, WakeWork) {
 		t.Errorf("wait-hold should suppress WakeWork, got %v", reasons)
 	}
@@ -537,7 +545,7 @@ func TestWakeReasons_WorkSetHeldSuppressed(t *testing.T) {
 
 	workSet := map[string]bool{"worker": true}
 
-	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, workSet, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("held session should have no reasons even with work, got %v", reasons)
 	}
@@ -561,7 +569,7 @@ func TestWakeReasons_WaitHoldSuppressesConfigAndAttached(t *testing.T) {
 		"wait_hold":    "true",
 	})
 
-	reasons := wakeReasons(session, cfg, sp, nil, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, sp, nil, nil, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("wait-hold should suppress config/attached wake reasons, got %v", reasons)
 	}
@@ -581,7 +589,7 @@ func TestWakeReasons_WaitHoldPreservesWaitOnly(t *testing.T) {
 		"wait_hold":    "true",
 	})
 
-	reasons := wakeReasons(session, cfg, nil, nil, workSet, readyWaitSet, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, nil, workSet, readyWaitSet, clk)
 	if len(reasons) != 1 || reasons[0] != WakeWait {
 		t.Errorf("wait-hold should preserve wait only, got %v", reasons)
 	}
@@ -605,14 +613,14 @@ func TestWakeReasons_WorkSetPoolSlotGated(t *testing.T) {
 		"template":     "pooled",
 		"session_name": "test-pooled-1",
 	})
-	reasons := wakeReasons(s1, cfg, nil, poolDesired, workSet, nil, clk)
+	reasons := wakeReasonsForBead(s1, cfg, nil, poolDesired, workSet, nil, clk)
 	if !containsWakeReason(reasons, WakeConfig) {
 		t.Errorf("session should get WakeConfig when demand exists, got %v", reasons)
 	}
 
 	// With demand = 0, no sessions get WakeConfig.
 	poolDesiredZero := map[string]int{"pooled": 0}
-	reasons = wakeReasons(s1, cfg, nil, poolDesiredZero, workSet, nil, clk)
+	reasons = wakeReasonsForBead(s1, cfg, nil, poolDesiredZero, workSet, nil, clk)
 	if containsWakeReason(reasons, WakeConfig) {
 		t.Errorf("session should NOT get WakeConfig when demand is 0, got %v", reasons)
 	}
@@ -628,7 +636,7 @@ func TestWakeReasons_DependencyOnlyPoolSlotDoesNotWakeOnWork(t *testing.T) {
 		},
 	}
 
-	reasons := wakeReasons(makeBead("b1", map[string]string{
+	reasons := wakeReasonsForBead(makeBead("b1", map[string]string{
 		"template":        "pooled",
 		"session_name":    "test-pooled-1",
 		"pool_slot":       "1",
@@ -652,7 +660,7 @@ func TestWakeReasons_ManualPoolSessionGetsWakeConfigOnImplicitAgent(t *testing.T
 		},
 	}
 
-	reasons := wakeReasons(makeBead("b1", map[string]string{
+	reasons := wakeReasonsForBead(makeBead("b1", map[string]string{
 		"template":       "pooled",
 		"session_name":   "manual-pooled",
 		"manual_session": "true",
@@ -682,7 +690,7 @@ func TestWakeReasons_SessionOriginManualPoolSessionGetsWakeConfigOnImplicitAgent
 		},
 	}
 
-	reasons := wakeReasons(makeBead("b1", map[string]string{
+	reasons := wakeReasonsForBead(makeBead("b1", map[string]string{
 		"template":       "pooled",
 		"session_name":   "manual-pooled",
 		"session_origin": "manual",
@@ -710,7 +718,7 @@ func TestWakeReasons_ManualFixedTemplateSessionGetsWakeConfig(t *testing.T) {
 		},
 	}
 
-	reasons := wakeReasons(makeBead("b1", map[string]string{
+	reasons := wakeReasonsForBead(makeBead("b1", map[string]string{
 		"template":       "worker",
 		"session_name":   "manual-worker",
 		"session_origin": "manual",
@@ -740,7 +748,7 @@ func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 
 	poolDesired := map[string]int{"frontend/worker": 1}
 
-	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	reasons := wakeReasonsForBead(session, cfg, nil, poolDesired, nil, nil, clk)
 	if len(reasons) != 1 || reasons[0] != WakeConfig {
 		t.Fatalf("wakeReasons(legacy labeled pool worker) = %v, want [WakeConfig]", reasons)
 	}

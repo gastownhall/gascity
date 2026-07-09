@@ -135,10 +135,14 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// cmd_prime reads builtin_ancestor (absent from session.Info) off a bead in hand;
 		// session_logs_resolve feeds ResolveCodexTranscriptBySessionOrder([]beads.Bead);
 		// session_bead_snapshot/session_hash hold the bead legitimately (rebaseline lane /
-		// snapshot.add); cmd_session's reason projection is a later wave.
+		// snapshot.add). WI-6 R2: cmd_session's REASON-column reason projection now
+		// reads the typed Info snapshot (wakeReasonsInfo, fed by OpenInfos), retiring
+		// its display-lane codec hit; the one remaining cmd_session hit is
+		// cmdSessionKill's raw store.Get + codec, a CLI front-door-Get flip deferred to
+		// the WI-7 front-door migration (§5b/§6 — not an R2 moved-Get).
 		"cmd/gc/build_desired_state.go": 2,
 		"cmd/gc/cmd_prime.go":           1,
-		"cmd/gc/cmd_session.go":         2,
+		"cmd/gc/cmd_session.go":         1,
 		// WI-6 R1: markCityStopSessionSleepReason keeps the byte-identical label-only
 		// ListByLabel("gc:session") sweep (widening to the ListAll type+label union
 		// would also mark label-lost type-only beads — a behavior delta), so the
@@ -168,10 +172,13 @@ var typedClassCodecCensus = map[string]map[string]int{
 		"internal/api/session_resolution.go": 1,
 	},
 	"ListAllSessionBeads(": {
-		// WI-6 W4 residuals: all three feed the RAW sessionBeadSnapshot half (Open())
-		// that cmd_session.go's reason projection still consumes (LifecycleInputFromMetadata/
-		// wakeReasons(bead)) — the raw half is kept until that projection types in a later
-		// wave; deleting it now would break cmd_session, so recorded honestly.
+		// WI-6 W4 residuals: all three feed the RAW sessionBeadSnapshot half (Open()).
+		// WI-6 R2 moved cmd_session's wake-reason projection onto the typed OpenInfos
+		// feed (wakeReasonsInfo), but cmd_session still consumes Open() for
+		// LifecycleInputFromMetadata + LifecycleDisplayReasonWithLiveness, which read
+		// session_circuit_state (absent from session.Info). The raw half is kept until
+		// those type in R5/WI-7 (needs Info.SessionCircuitState); deleting it now would
+		// break cmd_session, so recorded honestly.
 		"cmd/gc/doctor_session_model.go":  1,
 		"cmd/gc/session_bead_snapshot.go": 1,
 		"cmd/gc/session_beads.go":         1,

@@ -58,6 +58,43 @@ func resolveSessionSleepPolicy(session beads.Bead, cfg *config.City, sp runtime.
 	return policy
 }
 
+// resolveSessionSleepPolicyInfo is the session.Info sibling of
+// resolveSessionSleepPolicy. It reads the session template and session name off
+// Info (normalizedSessionTemplateInfo, Info.SessionNameMetadata — the RAW
+// session_name, matching the raw form's session.Metadata["session_name"] read)
+// and keeps the runtime capability probe (resolveSleepCapability) exactly as-is
+// (§7 live edge). Everything else — the config policy resolution, the
+// capability-downgrade switch, and the fingerprint — is computed from
+// cfg/agent/sp and is byte-identical to the bead form.
+func resolveSessionSleepPolicyInfo(info sessionpkg.Info, cfg *config.City, sp runtime.Provider) resolvedSessionSleepPolicy {
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))
+	resolved := config.ResolveSessionSleepPolicy(cfg, agent)
+	policy := resolvedSessionSleepPolicy{
+		Class:      resolved.Class,
+		Requested:  resolved.Value,
+		Effective:  resolved.Value,
+		Source:     resolved.Source,
+		Capability: resolveSleepCapability(sp, info.SessionNameMetadata),
+	}
+	switch {
+	case policy.Capability == runtime.SessionSleepCapabilityDisabled:
+		policy.Effective = config.SessionSleepOff
+		if resolved.Value != config.SessionSleepOff {
+			policy.AdjustmentReason = "capability_disabled"
+		}
+	case policy.Class != config.SessionSleepNonInteractive && policy.Capability != runtime.SessionSleepCapabilityFull:
+		policy.Effective = config.SessionSleepOff
+		if resolved.Value != config.SessionSleepOff {
+			policy.AdjustmentReason = "interactive_capability_insufficient"
+		}
+	}
+	if duration, off, err := config.ParseSleepAfterIdle(policy.Effective); err == nil && !off {
+		policy.Duration = duration
+	}
+	policy.Fingerprint = sessionSleepFingerprint(agent, policy)
+	return policy
+}
+
 func resolveSleepCapability(sp runtime.Provider, name string) runtime.SessionSleepCapability {
 	if sp == nil || name == "" {
 		return runtime.SessionSleepCapabilityDisabled
@@ -128,6 +165,37 @@ func pendingInteractionKeepsAwake(session beads.Bead, sp runtime.Provider, name 
 		now = clk.Now()
 	}
 	lcInput := sessionpkg.LifecycleInputFromMetadata(session.Status, session.Metadata)
+	lcInput.Runtime = sessionpkg.RuntimeFacts{
+		Observed: true,
+		Alive:    true,
+		Pending:  true,
+	}
+	lcInput.Now = now
+	view := sessionpkg.ProjectLifecycle(lcInput)
+	return !view.HasBlocker(sessionpkg.BlockerHeld) && !view.HasBlocker(sessionpkg.BlockerQuarantined)
+}
+
+// pendingInteractionKeepsAwakeInfo is the session.Info sibling of
+// pendingInteractionKeepsAwake. It keeps the runtime probe
+// (pendingInteractionReady) raw (§7 live edge), reads wait_hold off
+// Info.WaitHold (trimmed, exactly as the raw form trims
+// session.Metadata["wait_hold"]), and feeds the lifecycle projection from
+// LifecycleInputFromInfo instead of LifecycleInputFromMetadata — the projection
+// only consults the held/quarantine timers here, which are identical across both
+// input builders. Added additively in R2 for the sleep-cluster read side; the
+// reconciler migrates onto it in R3.
+func pendingInteractionKeepsAwakeInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) bool {
+	if !pendingInteractionReady(sp, name) {
+		return false
+	}
+	if strings.TrimSpace(info.WaitHold) != "" {
+		return false
+	}
+	var now time.Time
+	if clk != nil {
+		now = clk.Now()
+	}
+	lcInput := sessionpkg.LifecycleInputFromInfo(info)
 	lcInput.Runtime = sessionpkg.RuntimeFacts{
 		Observed: true,
 		Alive:    true,
@@ -215,6 +283,65 @@ func sessionIdleReference(session beads.Bead, sp runtime.Provider) time.Time {
 	}
 }
 
+// sessionIdleReferenceInfo is the session.Info sibling of sessionIdleReference.
+// It reads detached_at off Info.DetachedAt (raw RFC3339) and the session name
+// off Info.SessionNameMetadata (raw), and keeps the runtime last-activity probe
+// (workerSessionTargetLastActivityWithConfig) exactly as-is (§7 live edge).
+func sessionIdleReferenceInfo(info sessionpkg.Info, sp runtime.Provider) time.Time {
+	var detachedAt time.Time
+	if raw := info.DetachedAt; raw != "" {
+		detachedAt, _ = time.Parse(time.RFC3339, raw)
+	}
+	lastActivity := time.Time{}
+	if sp != nil {
+		if activity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, info.SessionNameMetadata); err == nil {
+			lastActivity = activity
+		}
+	}
+	switch {
+	case detachedAt.IsZero():
+		return lastActivity
+	case lastActivity.IsZero():
+		return detachedAt
+	case lastActivity.After(detachedAt):
+		return lastActivity
+	default:
+		return detachedAt
+	}
+}
+
+// configWakeSuppressedInfo is the session.Info sibling of configWakeSuppressed.
+// It reads sleep_reason and sleep_policy_fingerprint off Info (the raw mirrors
+// Info.SleepReason / Info.SleepPolicyFingerprint) and routes the idle reference
+// through sessionIdleReferenceInfo. The fingerprint compare is exact against the
+// freshly-resolved policy.Fingerprint, identical to the bead form.
+func configWakeSuppressedInfo(
+	info sessionpkg.Info,
+	policy resolvedSessionSleepPolicy,
+	sp runtime.Provider,
+	clk clock.Clock,
+) bool {
+	if !policy.enabled() {
+		return false
+	}
+	if info.SleepReason == "idle-timeout" {
+		return false
+	}
+	if info.SleepReason == "idle" &&
+		info.SleepPolicyFingerprint != "" &&
+		info.SleepPolicyFingerprint == policy.Fingerprint {
+		return true
+	}
+	if policy.Duration == 0 {
+		return true
+	}
+	idleReference := sessionIdleReferenceInfo(info, sp)
+	if idleReference.IsZero() {
+		return false
+	}
+	return !clk.Now().Before(idleReference.Add(policy.Duration))
+}
+
 func configWakeSuppressed(
 	session beads.Bead,
 	policy resolvedSessionSleepPolicy,
@@ -258,6 +385,28 @@ func sessionKeepWarmEligible(
 		return false
 	}
 	return !configWakeSuppressed(session, policy, sp, clk)
+}
+
+// sessionKeepWarmEligibleInfo is the session.Info sibling of
+// sessionKeepWarmEligible. It routes the idle-reference read through
+// sessionIdleReferenceInfo and the suppression check through
+// configWakeSuppressedInfo; the policy gates are byte-identical to the bead form.
+func sessionKeepWarmEligibleInfo(
+	info sessionpkg.Info,
+	policy resolvedSessionSleepPolicy,
+	sp runtime.Provider,
+	clk clock.Clock,
+) bool {
+	if !policy.enabled() || policy.Class == config.SessionSleepNonInteractive {
+		return false
+	}
+	if policy.Duration == 0 {
+		return false
+	}
+	if sessionIdleReferenceInfo(info, sp).IsZero() {
+		return false
+	}
+	return !configWakeSuppressedInfo(info, policy, sp, clk)
 }
 
 func persistSleepPolicyMetadata(
