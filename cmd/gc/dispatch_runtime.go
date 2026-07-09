@@ -844,8 +844,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 // the outer subprocess's cmd.Env resolved to) rather than depending on that
 // re-resolution succeeding on every poll.
 func ambientDoltConnectionQueryPrefix() string {
-	host := strings.TrimSpace(firstNonEmptyGCString(os.Getenv("GC_DOLT_HOST"), os.Getenv("BEADS_DOLT_SERVER_HOST")))
-	port := strings.TrimSpace(firstNonEmptyGCString(os.Getenv("GC_DOLT_PORT"), os.Getenv("BEADS_DOLT_SERVER_PORT")))
+	host, port := ambientDoltHostPort()
 	var pairs []string
 	if host != "" {
 		quotedHost := shellquote.Quote(host)
@@ -856,9 +855,26 @@ func ambientDoltConnectionQueryPrefix() string {
 		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
 	}
 	if len(pairs) == 0 {
+		workflowTracef("ambient dolt env unset; ready-query passthrough disabled")
 		return ""
 	}
 	return " " + strings.Join(pairs, " ")
+}
+
+// ambientDoltHostPort resolves the ambient Dolt host and port as a matched
+// pair from a single env-var namespace instead of choosing each field
+// independently. GC_DOLT_* is authoritative when present (even partially);
+// BEADS_DOLT_SERVER_* is only consulted as a whole-pair fallback when
+// GC_DOLT_* carries neither value. Resolving fields independently risked
+// pairing a host from one namespace with a port from the other -- a
+// combination that may never have described the same server.
+func ambientDoltHostPort() (host, port string) {
+	host = strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+	port = strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
+	if host != "" || port != "" {
+		return host, port
+	}
+	return strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_HOST")), strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT"))
 }
 
 func workflowServeLegacyControlRoute(target string) string {
