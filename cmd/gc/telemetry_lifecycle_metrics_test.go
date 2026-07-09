@@ -285,13 +285,18 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		}
 		session.Metadata = patch.Apply(session.Metadata)
 
-		finalizeDrainAckStoppedSession(
-			"", env.cfg, env.store, nil, &session, sessionpkg.InfoFromPersistedBead(session), identity, true,
+		result := finalizeDrainAckStoppedSession(
+			"", env.cfg, env.store, nil, sessionpkg.InfoFromPersistedBead(session), identity, true,
 			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr,
 		)
 
-		if session.Status != "closed" {
-			t.Fatalf("session status = %q, want closed (fixture must reach the recordStopped path)", session.Status)
+		// W-tick dropped the raw session.Status="closed" mirror; the close is now
+		// carried by the store write AND the result's MarkClosed fold (result.closed).
+		if got, err := env.store.Get(session.ID); err != nil || got.Status != "closed" {
+			t.Fatalf("store session status = %q (err %v), want closed (fixture must reach the recordStopped path)", got.Status, err)
+		}
+		if !result.applyTo(sessionpkg.InfoFromPersistedBead(session)).Closed {
+			t.Fatalf("drain-ack result fold not Closed; the recordStopped path must MarkClosed the snapshot")
 		}
 		return reader
 	}
@@ -863,13 +868,15 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 		t.Fatalf("pre-closing the bead to force the witness branch: %v", err)
 	}
 
-	finalizeDrainAckStoppedSession(
-		"", env.cfg, env.store, nil, &session, sessionpkg.InfoFromPersistedBead(session), identity, true,
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, env.store, nil, sessionpkg.InfoFromPersistedBead(session), identity, true,
 		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr,
 	)
 
-	if session.Status != "closed" {
-		t.Fatalf("session status = %q, want closed (fixture must reach the witness branch)", session.Status)
+	// W-tick dropped the raw session.Status="closed" mirror; the witness close is
+	// carried by result.witnessInfo (Closed), which applyTo folds onto the snapshot.
+	if !result.applyTo(sessionpkg.InfoFromPersistedBead(session)).Closed {
+		t.Fatalf("witness-branch result fold not Closed; the witness path must fold the authoritative closed Info")
 	}
 	if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 		t.Fatalf("gc.agent.stops.total datapoints = %+v, want none on the witness branch", points)

@@ -86,6 +86,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		Pack:                b.Metadata[beadmeta.PackMetadataKey],
 		PackWorkspace:       b.Metadata[beadmeta.PackWorkspaceMetadataKey],
 		WorkDirCanonical:    b.Metadata[beadmeta.WorkDirMetadataKey],
+		WorkerDir:           b.Metadata[beadmeta.WorkerDirMetadataKey],
 
 		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
 		// kept verbatim so the reconciler classifiers read the same value the

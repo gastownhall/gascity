@@ -1059,6 +1059,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		info func(session.Info) []string
 	}{
 		"sessionBeadAssigneeIdentities": {sessionBeadAssigneeIdentities, sessionBeadAssigneeIdentitiesInfo},
+		"sessionAssignmentIdentifiers":  {sessionAssignmentIdentifiers, sessionAssignmentIdentifiersInfo},
 	}
 
 	// namedSpecCfg declares a singleton named session "mayor" backed by an agent

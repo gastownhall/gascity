@@ -123,6 +123,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.PackWorkspace = v
 		case beadmeta.WorkDirMetadataKey:
 			info.WorkDirCanonical = v
+		case beadmeta.WorkerDirMetadataKey:
+			info.WorkerDir = v
 		case "pending_create_claim":
 			info.PendingCreateClaim = strings.TrimSpace(v) == "true"
 			info.PendingCreateClaimMetadata = v

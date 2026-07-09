@@ -1311,7 +1311,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []beads.Bead{session},
+		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{sessionpkg.InfoFromPersistedBead(session)},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
@@ -2060,7 +2060,8 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 		nil,
 		store,
 		nil,
-		session,
+		sessionpkg.InfoFromPersistedBead(*session),
+		nil, // snapshot carrier not exercised here; ApplyOpenInfoPatch is nil-safe
 		"worker",
 		rec,
 		&clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)},
@@ -2250,17 +2251,19 @@ func (s *throttleKeySetMetadataFailStore) SetMetadata(id, key, value string) err
 }
 
 // TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailure
-// is the regression test for the throttle write-ordering bug: the
-// in-memory marker on session.Metadata must be set before the durable
-// SetMetadata write, so a transient store-write failure cannot cause
-// the next tick to re-emit the event and produce a duplicate-emission
-// storm under sustained disk pressure / store partition.
+// is the regression test for the throttle write-ordering bug: the in-memory
+// marker must be folded onto the tick's carrier snapshot BEFORE the durable
+// SetMarker write, so a transient store-write failure cannot cause a reused
+// snapshot to re-emit the event and produce a duplicate-emission storm. W-tick
+// replaced the accidental shared-metadata-map aliasing with the explicit
+// snapshot.ApplyOpenInfoPatch carrier (§2.5n): this test exercises it directly,
+// including the added assertion that a REUSED snapshot's OpenForReconcile row
+// carries the marker even after SetMarker fails.
 func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailure(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
-	env.addDesired("worker", "worker", false) // runtime not running
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
 		"state":                "asleep",
@@ -2283,92 +2286,168 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 	}
 
 	rec := &capturingRecorder{}
-	env.rec = rec
-	// Swap in the failing-SetMetadata wrapper.
+	// Fail every durable SetMetadata write on the throttle key.
 	failingStore := &throttleKeySetMetadataFailStore{Store: env.store}
 
-	// First tick — diagnostic must fire AND SetMetadata fails on the
-	// throttle key. The in-memory marker on the *Bead value passed in
-	// must still be set so subsequent ticks see it.
-	reconcileSessionBeadsAtPath(
-		context.Background(),
-		"",
-		[]beads.Bead{session},
-		env.desiredState,
-		map[string]bool{"worker": true},
-		env.cfg,
-		env.sp,
-		failingStore,
-		newFakeDrainOps(),
-		nil,
-		nil,
-		nil,
-		env.dt,
-		nil,
-		false,
-		nil,
-		"",
-		nil,
-		env.clk,
-		env.rec,
-		0,
-		0,
-		&env.stdout,
-		&env.stderr,
-	)
-
-	stranded := rec.strandedEvents()
-	if len(stranded) != 1 {
-		t.Fatalf("session.stranded events after first tick (SetMetadata failing) = %d, want 1; events: %+v", len(stranded), rec.events)
+	// The tick's carrier snapshot, reused across both emit calls (mirroring a
+	// same-controller-lifetime reuse). emit reads the CURRENT snapshot row so the
+	// second call observes the fold the first applied.
+	snap := newSessionBeadSnapshot([]beads.Bead{session})
+	emit := func() {
+		row := snap.OpenForReconcile()[0]
+		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, &env.stderr)
 	}
 
-	// Crucially: the durable store write failed, so the session bead
-	// on disk does NOT have the throttle marker. Re-fetching it
-	// returns the unmarked bead. The reconciler must still suppress
-	// re-emission — this is what the in-memory-marker-first ordering
-	// is protecting against. Production wouldn't necessarily re-fetch
-	// here (it carries the same *Bead forward across ticks within a
-	// controller lifetime); we test the worst-case explicitly.
+	// First emit — diagnostic fires AND the durable SetMarker fails on the throttle key.
+	emit()
+	if got := len(rec.strandedEvents()); got != 1 {
+		t.Fatalf("stranded events after first emit (SetMetadata failing) = %d, want 1; events: %+v", got, rec.events)
+	}
+
+	// The durable store write failed, so the bead on disk has NO throttle marker.
 	unmarked, err := env.store.Get(session.ID)
 	if err != nil {
-		t.Fatalf("Get(session) before second tick: %v", err)
+		t.Fatalf("Get(session): %v", err)
 	}
 	if strings.TrimSpace(unmarked.Metadata[strandedEventEmittedKey]) != "" {
 		t.Fatalf("durable throttle marker should be absent after SetMetadata failure; got %q", unmarked.Metadata[strandedEventEmittedKey])
 	}
 
-	// Second tick with the same in-memory *Bead the controller would
-	// carry forward — the marker on it should suppress re-emission.
-	reconcileSessionBeadsAtPath(
-		context.Background(),
-		"",
-		[]beads.Bead{session}, // SAME *Bead, with the in-memory marker the first tick set on it
-		env.desiredState,
-		map[string]bool{"worker": true},
-		env.cfg,
-		env.sp,
-		failingStore,
-		newFakeDrainOps(),
-		nil,
-		nil,
-		nil,
-		env.dt,
-		nil,
-		false,
-		nil,
-		"",
-		nil,
-		env.clk,
-		env.rec,
-		0,
-		0,
-		&env.stdout,
-		&env.stderr,
+	// The added §5.2.4 assertion: the REUSED snapshot's OpenForReconcile row DOES
+	// carry the in-memory marker (the ApplyOpenInfoPatch carrier), even though the
+	// durable write failed — this is what prevents the duplicate-emission storm.
+	if got := strings.TrimSpace(snap.OpenForReconcile()[0].Info.StrandedEventEmittedAt); got == "" {
+		t.Fatalf("reused snapshot row must carry the throttle marker after a failed SetMarker (the emit-once carrier)")
+	}
+
+	// Second emit off the SAME snapshot — the carried marker suppresses re-emission.
+	emit()
+	if got := len(rec.strandedEvents()); got != 1 {
+		t.Fatalf("stranded events after second emit = %d, want still 1 (snapshot carrier throttle must hold); events: %+v", got, rec.events)
+	}
+}
+
+// TestReconcileSessionBeads_StrandedCarrierThreadedThroughTick proves the MAIN
+// tick actually threads a non-nil carrier snapshot into the emit site (Nit 1):
+// driving the reconciler ROOT twice over the SAME reused snapshot with SetMarker
+// failing emits the stranded diagnostic exactly ONCE (the carrier — folded via
+// emit's ApplyOpenInfoPatch and the end-of-tick WriteBackReconcileInfos — suppresses
+// the second tick). The NIL-carrier contrast re-emits: with no threaded snapshot and
+// a failed durable write, nothing can carry the emit-once marker across ticks. If a
+// regression passed nil at the emit call site AND the writeback were absent, the
+// non-nil case would re-emit and fail.
+func TestReconcileSessionBeads_StrandedCarrierThreadedThroughTick(t *testing.T) {
+	buildStrandedSnapshot := func(t *testing.T) (*reconcilerTestEnv, *sessionBeadSnapshot, *throttleKeySetMetadataFailStore, *capturingRecorder) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		env.addDesired("worker", "worker", false) // runtime not running
+		session := env.createSessionBead("worker", "worker")
+		env.setSessionMetadata(&session, map[string]string{
+			"state":                "asleep",
+			"sleep_reason":         "drained",
+			poolManagedMetadataKey: boolMetadata(true),
+		})
+		work, err := env.store.Create(beads.Bead{Title: "stranded", Type: "task", Status: "open", Assignee: session.ID})
+		if err != nil {
+			t.Fatalf("create work: %v", err)
+		}
+		inProgress := "in_progress"
+		if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatalf("update work: %v", err)
+		}
+		rec := &capturingRecorder{}
+		env.rec = rec
+		return env, newSessionBeadSnapshot([]beads.Bead{session}), &throttleKeySetMetadataFailStore{Store: env.store}, rec
+	}
+
+	driveTwice := func(env *reconcilerTestEnv, snap *sessionBeadSnapshot, failing *throttleKeySetMetadataFailStore, carrier *sessionBeadSnapshot) {
+		for i := 0; i < 2; i++ {
+			reconcileSessionBeadsTracedWithNamedDemand(
+				context.Background(), "", snap.OpenForReconcile(), carrier, env.desiredState, map[string]bool{"worker": true},
+				env.cfg, env.sp, beads.SessionStore{Store: failing}, newFakeDrainOps(), nil, nil, nil,
+				env.dt, nil, map[string]int{"worker": 1}, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
+				&env.stdout, &env.stderr, nil,
+			)
+		}
+	}
+
+	t.Run("threaded-carrier-suppresses-second-tick", func(t *testing.T) {
+		env, snap, failing, rec := buildStrandedSnapshot(t)
+		driveTwice(env, snap, failing, snap) // carrier == snap (threaded)
+		if got := len(rec.strandedEvents()); got != 1 {
+			t.Fatalf("stranded events = %d, want 1 (the threaded carrier must suppress the second tick after a failed SetMarker); events: %+v", got, rec.events)
+		}
+	})
+
+	t.Run("nil-carrier-re-emits", func(t *testing.T) {
+		env, snap, failing, rec := buildStrandedSnapshot(t)
+		driveTwice(env, snap, failing, nil) // no carrier: nothing can carry the marker cross-tick
+		if got := len(rec.strandedEvents()); got != 2 {
+			t.Fatalf("stranded events = %d, want 2 (a nil carrier + failed SetMarker cannot suppress cross-tick — this contrast proves the threaded carrier is load-bearing); events: %+v", got, rec.events)
+		}
+	})
+}
+
+// TestReconcileSessionBeads_Phase0HealVisibleOnSnapshot is the fold-then-build
+// pin (§5.2.1): the W-tick reshape heals expired held_until / quarantined_until in
+// Phase 0a onto the typed row feed BEFORE the infoByID snapshot is built, folding
+// each clear onto rows[i].Info (the ordering fixture: the expired hold's clear
+// blanks sleep_reason, which the expired quarantine then reads). It asserts the
+// POST-TICK CARRIER (snapshot.OpenInfos() after WriteBackReconcileInfos, which
+// mirrors the tick's infoByID) reflects the cleared values — so a mutant that
+// DROPS the fold return (`_ = healExpiredTimersInfo(...)`) or builds infoByID
+// BEFORE the Phase-0a heal leaves infoByID/orderedInfos STALE and FAILS here, even
+// though the store bytes stay clean (the ApplyPatch persists regardless of the
+// fold). A store-only assertion would miss both mutants; this pins the tick-visible
+// fold.
+func TestReconcileSessionBeads_Phase0HealVisibleOnSnapshot(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true) // desired + running, so nothing else recycles it
+	session := env.createSessionBead("worker", "worker")
+	past := env.clk.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":             "active",
+		"held_until":        past,
+		"quarantined_until": past,
+		"sleep_reason":      "user-hold", // ClearExpiredHoldPatch blanks this
+		"wake_attempts":     "5",
+		"churn_count":       "3",
+		"last_woke_at":      env.clk.Now().UTC().Format(time.RFC3339), // avoid crash detection
+	})
+
+	// Drive the ROOT with a snapshot we control so we can read its post-tick carrier.
+	snap := newSessionBeadSnapshot([]beads.Bead{session})
+	poolDesired := map[string]int{"worker": 1}
+	reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(), "", snap.OpenForReconcile(), snap, env.desiredState, map[string]bool{"worker": true},
+		env.cfg, env.sp, beads.SessionStore{Store: env.store}, newFakeDrainOps(), nil, nil, nil,
+		env.dt, nil, poolDesired, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
+		&env.stdout, &env.stderr, nil,
 	)
 
-	stranded = rec.strandedEvents()
-	if len(stranded) != 1 {
-		t.Fatalf("session.stranded events after second tick (durable marker still missing) = %d, want still 1 (in-memory throttle should hold); events: %+v", len(stranded), rec.events)
+	// The POST-TICK carrier (via WriteBackReconcileInfos ← infoByID) must show the
+	// healed values. If the Phase-0a fold was dropped, infoByID (hence every Phase-1/
+	// awake-scan decision AND this carrier) carries the stale timers.
+	post := snap.OpenInfos()
+	if len(post) != 1 {
+		t.Fatalf("expected 1 open row post-tick, got %d", len(post))
+	}
+	got := post[0]
+	for _, tc := range []struct{ field, val, want string }{
+		{"HeldUntil", got.HeldUntil, ""},
+		{"QuarantinedUntil", got.QuarantinedUntil, ""},
+		{"SleepReason", got.SleepReason, ""},
+		{"WakeAttemptsMetadata", got.WakeAttemptsMetadata, "0"},
+		{"ChurnCount", got.ChurnCount, "0"},
+	} {
+		if tc.val != tc.want {
+			t.Errorf("post-tick carrier Info.%s = %q, want %q (Phase-0 heal fold must reach infoByID/the snapshot, not just the store)", tc.field, tc.val, tc.want)
+		}
+	}
+	// Sanity: the store also persisted the clear (the heal ran end-to-end).
+	if storeBead, err := env.store.Get(session.ID); err != nil || storeBead.Metadata["held_until"] != "" {
+		t.Errorf("store held_until = %q (err %v), want cleared", storeBead.Metadata["held_until"], err)
 	}
 }
 
@@ -2443,7 +2522,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, &session, sessionpkg.InfoFromPersistedBead(session), "worker", false,
+		"", env.cfg, failingStore, nil, sessionpkg.InfoFromPersistedBead(session), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -2470,7 +2549,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, &session, sessionpkg.InfoFromPersistedBead(session), "worker", true,
+		"", env.cfg, racingStore, nil, sessionpkg.InfoFromPersistedBead(session), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -3929,8 +4008,9 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 
+	snap := newSessionBeadSnapshot(sessions)
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
-		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
+		context.Background(), cityPath, snap.OpenForReconcile(), snap, dsResult.State, cfgNames, cfg, sp,
 		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,

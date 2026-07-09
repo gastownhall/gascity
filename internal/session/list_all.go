@@ -187,6 +187,45 @@ func (s *Store) ListAll(opts ListAllOptions) ([]Info, error) {
 	return out, err
 }
 
+// ReconcileSession is one row of the reconciler tick feed: the session's domain
+// projection paired with its persisted circuit-breaker cluster. The pair exists
+// because the breaker cluster (the session_circuit_* keys) is deliberately NOT
+// on Info (a separate concern from lifecycle-decision facts); the reconciler is
+// the one consumer that needs both, read once per tick from the same bead. A
+// per-id Store.CircuitState Get would break the pinned 0-Get tick budget, and a
+// parallel map[id]CircuitState would break the row-lockstep the dedup pass needs
+// (a retired row must carry its circuit with it), so the row carries both. This
+// mirrors the ListedSession{Info, Response} precedent.
+type ReconcileSession struct {
+	Info    Info
+	Circuit CircuitState
+}
+
+// ListAllForReconcile returns every session bead projected to a ReconcileSession,
+// using the identical type+label union, dedupe, IsSessionBeadOrRepairable filter,
+// global re-sort, post-union Limit, and PartialResultError fold-through as
+// ListAllSessionBeads / ListAll — it wraps the shared listAllBeads body and
+// projects each surviving row via InfoFromPersistedBead + CircuitStateFromMetadata.
+// Both projections are pure and in-package; no bead escapes.
+//
+// TestListAllForReconcileMatchesListAllSessionBeads is the row-set/order/error
+// equivalence oracle. Error semantics match ListAll (hard error → nil rows +
+// wrapped error; partial → projected partial rows + PartialResultError).
+func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, error) {
+	rows, err := s.listAllBeads(opts)
+	if rows == nil {
+		return nil, err
+	}
+	out := make([]ReconcileSession, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, ReconcileSession{
+			Info:    InfoFromPersistedBead(b),
+			Circuit: CircuitStateFromMetadata(b.Metadata),
+		})
+	}
+	return out, err
+}
+
 // ListAllWithResponses is ListAll paired with the persisted-response projection:
 // each row is read once and projected to both Info and PersistedResponse. It is
 // the API read model's typed feed. Error semantics match ListAll (hard error →

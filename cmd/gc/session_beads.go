@@ -562,6 +562,84 @@ func retireDuplicateConfiguredNamedSessionBeads(
 	return openBeads
 }
 
+// retireDuplicateConfiguredNamedSessionRows is the ReconcileSession form of
+// retireDuplicateConfiguredNamedSessionBeads: it retires all-but-the-winner
+// duplicate configured-named-session rows, expressed on the tick's row feed. The
+// grouping predicate, winner rule, runtime-stop-before-mutation, front-door
+// retire writes, and work/state reassignment are byte-identical to the raw form
+// (via the equivalence-proven Info twins); only the working set differs (rows in
+// place of raw beads, with the circuit carried through untouched) and the dead
+// bySessionName/indexBySessionName maps — used only by the raw form's sync caller
+// — are dropped. The retired loser's row Info is advanced by the RetireNamedSessionPatch
+// fold (Closed stays false: the raw form re-asserts Status="open"). The raw form
+// survives for the class-(c) sync path. TestRetireDuplicateRowsMatchesBeads pins
+// the both-ways equivalence.
+func retireDuplicateConfiguredNamedSessionRows(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	cityName string,
+	rows []session.ReconcileSession,
+	now time.Time,
+	stderr io.Writer,
+) []session.ReconcileSession {
+	if store == nil || cfg == nil {
+		return rows
+	}
+	byIdentity := make(map[string][]int)
+	for i := range rows {
+		info := rows[i].Info
+		if info.Closed || !isNamedSessionInfo(info) || !session.NamedSessionInfoContinuityEligible(info) {
+			continue
+		}
+		identity := namedSessionIdentityInfo(info)
+		if identity == "" {
+			continue
+		}
+		if _, ok := findNamedSessionSpec(cfg, cityName, identity); !ok {
+			continue
+		}
+		byIdentity[identity] = append(byIdentity[identity], i)
+	}
+	for identity, indexes := range byIdentity {
+		if len(indexes) < 2 {
+			continue
+		}
+		spec, _ := findNamedSessionSpec(cfg, cityName, identity)
+		winner := indexes[0]
+		for _, idx := range indexes[1:] {
+			if namedSessionWinsCanonicalRepairInfo(rows[idx].Info, rows[winner].Info, spec.SessionName) {
+				winner = idx
+			}
+		}
+		winnerSessionName := strings.TrimSpace(rows[winner].Info.SessionNameMetadata)
+		for _, idx := range indexes {
+			if idx == winner {
+				continue
+			}
+			info := rows[idx].Info
+			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
+			if oldSessionName != "" && oldSessionName != winnerSessionName &&
+				!stopRuntimeBeforeSessionBeadMutationInfo(store, sp, cfg, info, "duplicate named session", stderr) {
+				continue
+			}
+			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
+			if setMetaBatch(sessionFrontDoor(store), info.ID, batch, stderr) != nil {
+				continue
+			}
+			if err := sessionFrontDoor(store).SetStatusOpen(info.ID); err != nil {
+				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", info.ID, err) //nolint:errcheck
+				continue
+			}
+			reassignWorkAssignedToRetiredSessionInfo(store, rigStores, info, rows[winner].Info.ID, stderr)
+			reassignStateAssignedToRetiredSessionBead(store, info.ID, rows[winner].Info.ID, now, stderr)
+			rows[idx].Info = rows[idx].Info.ApplyPatch(batch)
+		}
+	}
+	return rows
+}
+
 func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canonicalSessionName string) bool {
 	cg, cOK := strconv.Atoi(strings.TrimSpace(candidate.Metadata["generation"]))
 	ig, iOK := strconv.Atoi(strings.TrimSpace(incumbent.Metadata["generation"]))
@@ -576,6 +654,34 @@ func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canoni
 	}
 	cCanonical := strings.TrimSpace(candidate.Metadata["session_name"]) == canonicalSessionName
 	iCanonical := strings.TrimSpace(incumbent.Metadata["session_name"]) == canonicalSessionName
+	if cCanonical != iCanonical {
+		return cCanonical
+	}
+	if !candidate.CreatedAt.Equal(incumbent.CreatedAt) {
+		return candidate.CreatedAt.After(incumbent.CreatedAt)
+	}
+	return candidate.ID > incumbent.ID
+}
+
+// namedSessionWinsCanonicalRepairInfo is the session.Info form of
+// namedSessionBeadWinsCanonicalRepair: generation int-compare (Info.Generation,
+// the verbatim raw mirror), canonical-session-name tiebreak (SessionNameMetadata),
+// CreatedAt, then ID — byte-identical to the raw form. Pinned by the classifier
+// equivalence oracle.
+func namedSessionWinsCanonicalRepairInfo(candidate, incumbent session.Info, canonicalSessionName string) bool {
+	cg, cErr := strconv.Atoi(strings.TrimSpace(candidate.Generation))
+	ig, iErr := strconv.Atoi(strings.TrimSpace(incumbent.Generation))
+	if cErr == nil && iErr == nil && cg != ig {
+		return cg > ig
+	}
+	if cErr == nil && iErr != nil {
+		return true
+	}
+	if cErr != nil && iErr == nil {
+		return false
+	}
+	cCanonical := strings.TrimSpace(candidate.SessionNameMetadata) == canonicalSessionName
+	iCanonical := strings.TrimSpace(incumbent.SessionNameMetadata) == canonicalSessionName
 	if cCanonical != iCanonical {
 		return cCanonical
 	}
@@ -714,6 +820,14 @@ func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
 		strings.TrimSpace(info.SessionNameMetadata),
 		strings.TrimSpace(info.ConfiguredNamedIdentity),
 	}
+}
+
+// sessionAssignmentIdentifiersInfo is the session.Info form of
+// sessionAssignmentIdentifiers (no configured-named fallback): the deduped
+// {ID, session_name, configured_named_identity} identifier set read off Info,
+// byte-identical to the raw form. Pinned by the classifier equivalence oracle.
+func sessionAssignmentIdentifiersInfo(info session.Info) []string {
+	return compactSessionAssignmentIdentifiers(sessionAssignmentIdentifierRawInfo(info))
 }
 
 func compactSessionAssignmentIdentifiers(raw []string) []string {
@@ -862,6 +976,53 @@ func reassignWorkAssignedToRetiredSessionBead(
 		stderr = io.Discard
 	}
 	identifiers := sessionAssignmentIdentifiers(retiredSession)
+	seen := make(map[string]struct{})
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
+		for _, status := range []string{"open", "in_progress"} {
+			for _, assignee := range identifiers {
+				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
+				if err != nil {
+					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", retiredSession.ID, assignee, err) //nolint:errcheck
+					continue
+				}
+				for _, item := range work {
+					if session.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+					if err := wa.ReassignWorkBead(item.ID, newSessionID); err != nil {
+						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
+					}
+				}
+			}
+		}
+	}
+}
+
+// reassignWorkAssignedToRetiredSessionInfo is the session.Info form of
+// reassignWorkAssignedToRetiredSessionBead: the session-side identity read routes
+// through sessionAssignmentIdentifiersInfo (equivalence-proven), while the
+// work-store fan-out and per-bead reassignment stay bead-shaped (ClassWork). It
+// is byte-identical to the raw form; the raw form survives for the sync path.
+func reassignWorkAssignedToRetiredSessionInfo(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	retiredSession session.Info,
+	newSessionID string,
+	stderr io.Writer,
+) {
+	if store == nil || strings.TrimSpace(retiredSession.ID) == "" || strings.TrimSpace(newSessionID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
 	seen := make(map[string]struct{})
 	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
@@ -2153,12 +2314,11 @@ func cleanupDeadRuntimeSessionCorpses(
 
 	cleaned := 0
 	seen := make(map[string]bool)
-	for _, b := range sessionBeads.Open() {
-		pendingCreate := strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
-		if pendingCreate || (dt != nil && dt.get(b.ID) != nil) || isNamedSessionBead(b) {
+	for _, info := range sessionBeads.OpenInfos() {
+		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) {
 			continue
 		}
-		name := strings.TrimSpace(b.Metadata["session_name"])
+		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" || seen[name] || !visibleSet[name] {
 			continue
 		}
@@ -2196,7 +2356,7 @@ func cleanupDeadRuntimeSessionCorpses(
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
 		if store != nil {
-			closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
+			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
 	}
@@ -2429,6 +2589,39 @@ func stopRuntimeBeforeSessionBeadMutation(
 	}
 	if sp.IsRunning(sessionName) {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, b.ID) //nolint:errcheck
+		return false
+	}
+	return true
+}
+
+// stopRuntimeBeforeSessionBeadMutationInfo is the session.Info form of
+// stopRuntimeBeforeSessionBeadMutation: it reads the session_name and id off Info
+// (SessionNameMetadata / ID) and drives the identical stop-and-verify sequence, so
+// it is byte-identical to the raw form. The raw form survives for the sync path.
+func stopRuntimeBeforeSessionBeadMutationInfo(
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	info session.Info,
+	reason string,
+	stderr io.Writer,
+) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	sessionName := strings.TrimSpace(info.SessionNameMetadata)
+	if sessionName == "" || sp == nil {
+		return true
+	}
+	if !sp.IsRunning(sessionName) {
+		return true
+	}
+	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, info.ID, err) //nolint:errcheck
+		return false
+	}
+	if sp.IsRunning(sessionName) {
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, info.ID) //nolint:errcheck
 		return false
 	}
 	return true
