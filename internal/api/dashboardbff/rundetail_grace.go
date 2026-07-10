@@ -6,15 +6,28 @@ import (
 )
 
 // unknownRunWarmingGrace is how long the run-detail endpoints keep answering
-// 503 "run view is warming" — instead of 404 — for a runId the WARM projection
-// does not know, measured from the FIRST request for that runId. A run slung
-// from the CLI is invisible to this projection until the controller's
-// cache-reconcile emits its bead events onto the city's event log, a 30-120s
-// cadence, and the SPA treats a 404 as terminal (no retry) while it retries
-// the warming 503 — so the window must exceed that cadence for a just-slung
-// run's dashboard deep link to survive the gap. Once the window expires the
-// endpoints restore the plain 404.
+// the retryable 503 "run view is warming" — instead of 404 — for a runId the
+// WARM projection does not know, measured from the FIRST request for that
+// runId. A run slung from the CLI is invisible to this projection until the
+// controller's cache-reconcile emits its bead events onto the city's event
+// log, a 30-120s cadence, so the window must exceed that cadence for a
+// just-slung run's dashboard deep link to survive the gap. The contract is
+// server-held: the server keeps answering "warming" (with reason unknown_run)
+// for the whole window, the graced response's Retry-After header tells
+// clients how often to poll, and the SPA's run-detail loader polls within its
+// own retry budget (being extended in a sibling change) while treating a 404
+// as terminal. Once the window expires the endpoints restore the plain 404.
 const unknownRunWarmingGrace = 180 * time.Second
+
+// unknownRunGraceMaxIDLen bounds the runId length inGrace will track. The
+// entry cap (unknownRunGraceCap) bounds ENTRIES, not bytes: the map stores
+// each runId verbatim, and the id arrives straight from the request path on
+// the unauthenticated /api plane, so without a length bound a scanner
+// spraying maximum-length URIs could pin ~cap x URI-length bytes of
+// attacker-chosen data per city (~1 GiB with 1 MiB URIs). Real run roots are
+// short bead IDs (tens of bytes), so 128 is generous headroom, never a
+// functional limit.
+const unknownRunGraceMaxIDLen = 128
 
 // unknownRunGraceCap bounds how many unknown runIds one city's tracker holds
 // at once, so a scanner spraying random runIds cannot grow the first-seen map
@@ -53,6 +66,14 @@ func newUnknownRunGrace() *unknownRunGrace {
 // (pruned lazily when the map needs room) so repeat polls for a dead runId
 // keep getting the 404 instead of restarting the window.
 func (g *unknownRunGrace) inGrace(runID string) bool {
+	// Refuse to track oversized runIds at all: an id longer than any real run
+	// root is never a legitimate just-slung run, and inserting it verbatim
+	// would let the unauthenticated /api plane fill the map with megabytes of
+	// attacker-chosen bytes per entry (see unknownRunGraceMaxIDLen). It
+	// degrades to the immediate 404.
+	if len(runID) > unknownRunGraceMaxIDLen {
+		return false
+	}
 	now := g.now()
 	g.mu.Lock()
 	defer g.mu.Unlock()

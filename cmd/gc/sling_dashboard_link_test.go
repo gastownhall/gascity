@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -22,13 +24,13 @@ import (
 // discovery for the resolver tests. Restored on cleanup.
 func stubSlingDashboardSupervisor(t *testing.T, alivePID int, baseURL string, baseErr error) {
 	t.Helper()
-	oldAlive := supervisorAliveHook
+	oldAlive := slingSupervisorAliveHook
 	oldBase := supervisorAPIBaseURLHook
 	t.Cleanup(func() {
-		supervisorAliveHook = oldAlive
+		slingSupervisorAliveHook = oldAlive
 		supervisorAPIBaseURLHook = oldBase
 	})
-	supervisorAliveHook = func() int { return alivePID }
+	slingSupervisorAliveHook = func(time.Time) int { return alivePID }
 	supervisorAPIBaseURLHook = func() (string, error) { return baseURL, baseErr }
 }
 
@@ -70,10 +72,13 @@ func TestSlingDashboardURLWorkflowRunDetail(t *testing.T) {
 	srv := slingDashboardHealthServer(t, http.StatusOK)
 	stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
 
-	got := slingDashboardURL(cityPath, sling.SlingResult{WorkflowID: "gcg-run-1", BeadID: "gcg-run-1"})
+	got, runsList := slingDashboardURL(cityPath, sling.SlingResult{WorkflowID: "gcg-run-1", BeadID: "gcg-run-1"})
 	want := srv.URL + "/city/bright-lights/runs/gcg-run-1"
 	if got != want {
 		t.Fatalf("slingDashboardURL = %q, want %q", got, want)
+	}
+	if runsList {
+		t.Fatal("slingDashboardURL runsList = true, want false for run detail")
 	}
 }
 
@@ -104,8 +109,12 @@ func TestSlingDashboardURLRunsListVariants(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := slingDashboardURL(cityPath, tt.result); got != want {
+			got, runsList := slingDashboardURL(cityPath, tt.result)
+			if got != want {
 				t.Fatalf("slingDashboardURL = %q, want %q", got, want)
+			}
+			if !runsList {
+				t.Fatal("slingDashboardURL runsList = false, want true for runs list")
 			}
 		})
 	}
@@ -118,7 +127,7 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 		cityPath := registerSlingDashboardCity(t, "bright-lights")
 		srv := slingDashboardHealthServer(t, http.StatusOK)
 		stubSlingDashboardSupervisor(t, 0, srv.URL, nil)
-		if got := slingDashboardURL(cityPath, workflowResult); got != "" {
+		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {
 			t.Fatalf("slingDashboardURL = %q, want empty when supervisor is down", got)
 		}
 	})
@@ -126,7 +135,7 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 	t.Run("base url error", func(t *testing.T) {
 		cityPath := registerSlingDashboardCity(t, "bright-lights")
 		stubSlingDashboardSupervisor(t, 4242, "", fmt.Errorf("no supervisor config"))
-		if got := slingDashboardURL(cityPath, workflowResult); got != "" {
+		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {
 			t.Fatalf("slingDashboardURL = %q, want empty on base URL failure", got)
 		}
 	})
@@ -139,7 +148,7 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 		if err := os.MkdirAll(other, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := slingDashboardURL(other, workflowResult); got != "" {
+		if got, _ := slingDashboardURL(other, workflowResult); got != "" {
 			t.Fatalf("slingDashboardURL = %q, want empty for unregistered city", got)
 		}
 	})
@@ -150,7 +159,7 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 		cityPath := registerSlingDashboardCity(t, "bright.lights")
 		srv := slingDashboardHealthServer(t, http.StatusOK)
 		stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
-		if got := slingDashboardURL(cityPath, workflowResult); got != "" {
+		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {
 			t.Fatalf("slingDashboardURL = %q, want empty for BFF-invalid name", got)
 		}
 	})
@@ -159,7 +168,7 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 		cityPath := registerSlingDashboardCity(t, "bright-lights")
 		srv := slingDashboardHealthServer(t, http.StatusNotFound)
 		stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
-		if got := slingDashboardURL(cityPath, workflowResult); got != "" {
+		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {
 			t.Fatalf("slingDashboardURL = %q, want empty when dashboard is not mounted", got)
 		}
 	})
@@ -170,8 +179,81 @@ func TestSlingDashboardURLSuppressed(t *testing.T) {
 		base := srv.URL
 		srv.Close()
 		stubSlingDashboardSupervisor(t, 4242, base, nil)
-		if got := slingDashboardURL(cityPath, workflowResult); got != "" {
+		if got, _ := slingDashboardURL(cityPath, workflowResult); got != "" {
 			t.Fatalf("slingDashboardURL = %q, want empty when probe cannot connect", got)
+		}
+	})
+}
+
+func TestSlingDashboardURLWedgedLivenessBounded(t *testing.T) {
+	cityPath := registerSlingDashboardCity(t, "bright-lights")
+	srv := slingDashboardHealthServer(t, http.StatusOK)
+	stubSlingDashboardSupervisor(t, 4242, srv.URL, nil)
+
+	// Simulate a fully wedged control socket: the liveness probe returns
+	// only when the caller's deadline expires. The resolver must hand it a
+	// tight budget so a hung supervisor cannot stall a successful sling.
+	var budget time.Duration
+	slingSupervisorAliveHook = func(deadline time.Time) int {
+		budget = time.Until(deadline)
+		time.Sleep(time.Until(deadline))
+		return 0
+	}
+
+	start := time.Now()
+	got, _ := slingDashboardURL(cityPath, sling.SlingResult{WorkflowID: "gcg-run-1", BeadID: "gcg-run-1"})
+	elapsed := time.Since(start)
+
+	if got != "" {
+		t.Fatalf("slingDashboardURL = %q, want empty when liveness times out", got)
+	}
+	if budget > slingDashboardLivenessTimeout {
+		t.Fatalf("liveness budget = %v, want <= %v", budget, slingDashboardLivenessTimeout)
+	}
+	// Generous CI-safe bound on the ~500ms budget.
+	if elapsed >= 3*time.Second {
+		t.Fatalf("resolver took %v with a wedged liveness probe, want well under 3s", elapsed)
+	}
+}
+
+func TestSlingSupervisorAliveUntil(t *testing.T) {
+	t.Run("hung socket bounded by deadline", func(t *testing.T) {
+		// shortTempDir keeps the socket path under the unix sun_path limit.
+		t.Setenv("GC_HOME", shortTempDir(t, "gc-home-"))
+		sockPath := supervisorSocketPathCandidates()[0]
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() }) //nolint:errcheck
+		// Accept connections but never answer the ping, like a wedged
+		// supervisor whose control loop has stalled.
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close() //nolint:errcheck
+			}
+		}()
+
+		start := time.Now()
+		pid := slingSupervisorAliveUntil(time.Now().Add(200 * time.Millisecond))
+		elapsed := time.Since(start)
+
+		if pid != 0 {
+			t.Fatalf("slingSupervisorAliveUntil = %d, want 0 for a hung socket", pid)
+		}
+		if elapsed >= 3*time.Second {
+			t.Fatalf("probe took %v against a hung socket, want bounded by the deadline", elapsed)
+		}
+	})
+
+	t.Run("expired deadline", func(t *testing.T) {
+		t.Setenv("GC_HOME", t.TempDir())
+		if pid := slingSupervisorAliveUntil(time.Now().Add(-time.Second)); pid != 0 {
+			t.Fatalf("slingSupervisorAliveUntil = %d, want 0 for an expired deadline", pid)
 		}
 	})
 }
@@ -201,21 +283,21 @@ func TestDashboardHealthOK(t *testing.T) {
 
 // stubSlingDashboardLink replaces the wiring hook and records the city path
 // it was invoked with.
-func stubSlingDashboardLink(t *testing.T, url string) *string {
+func stubSlingDashboardLink(t *testing.T, url string, runsList bool) *string {
 	t.Helper()
 	old := slingDashboardURLHook
 	t.Cleanup(func() { slingDashboardURLHook = old })
 	var gotCityPath string
-	slingDashboardURLHook = func(cityPath string, _ sling.SlingResult) string {
+	slingDashboardURLHook = func(cityPath string, _ sling.SlingResult) (string, bool) {
 		gotCityPath = cityPath
-		return url
+		return url, runsList
 	}
 	return &gotCityPath
 }
 
 func TestDoSlingBatchPrintsDashboardLine(t *testing.T) {
 	link := "http://127.0.0.1:8372/city/test-city/runs"
-	gotCityPath := stubSlingDashboardLink(t, link)
+	gotCityPath := stubSlingDashboardLink(t, link, true)
 
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -231,9 +313,11 @@ func TestDoSlingBatchPrintsDashboardLine(t *testing.T) {
 	}
 	out := stdout.String()
 	slungIdx := strings.Index(out, "Slung BL-42")
-	dashIdx := strings.Index(out, "Dashboard: "+link)
+	// Runs-list landings lag cache-reconcile, so the human line sets that
+	// expectation inline.
+	dashIdx := strings.Index(out, "Dashboard: "+link+" (new work can take a minute or two to appear)")
 	if slungIdx == -1 || dashIdx == -1 {
-		t.Fatalf("stdout = %q, want sling confirmation followed by dashboard line", out)
+		t.Fatalf("stdout = %q, want sling confirmation followed by suffixed runs-list dashboard line", out)
 	}
 	if dashIdx < slungIdx {
 		t.Fatalf("stdout = %q, want dashboard line after confirmation", out)
@@ -243,8 +327,33 @@ func TestDoSlingBatchPrintsDashboardLine(t *testing.T) {
 	}
 }
 
+func TestDoSlingBatchPrintsBareDashboardLineForRunDetail(t *testing.T) {
+	link := "http://127.0.0.1:8372/city/test-city/runs/gcg-run-1"
+	stubSlingDashboardLink(t, link, false)
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	code := doSlingBatch(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Dashboard: "+link+"\n") {
+		t.Fatalf("stdout = %q, want bare dashboard line for run detail", out)
+	}
+	if strings.Contains(out, "(new work can take a minute or two to appear)") {
+		t.Fatalf("stdout = %q, want no runs-list suffix on a run-detail link", out)
+	}
+}
+
 func TestDoSlingBatchOmitsDashboardLineWhenUnresolved(t *testing.T) {
-	stubSlingDashboardLink(t, "")
+	stubSlingDashboardLink(t, "", false)
 
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -267,9 +376,9 @@ func TestDoSlingBatchSkipsDashboardLinkOnDryRun(t *testing.T) {
 	old := slingDashboardURLHook
 	t.Cleanup(func() { slingDashboardURLHook = old })
 	called := false
-	slingDashboardURLHook = func(string, sling.SlingResult) string {
+	slingDashboardURLHook = func(string, sling.SlingResult) (string, bool) {
 		called = true
-		return "http://127.0.0.1:8372/city/test-city/runs"
+		return "http://127.0.0.1:8372/city/test-city/runs", true
 	}
 
 	runner := newFakeRunner()
@@ -299,9 +408,9 @@ func TestDoSlingBatchSkipsDashboardLinkOnError(t *testing.T) {
 	old := slingDashboardURLHook
 	t.Cleanup(func() { slingDashboardURLHook = old })
 	called := false
-	slingDashboardURLHook = func(string, sling.SlingResult) string {
+	slingDashboardURLHook = func(string, sling.SlingResult) (string, bool) {
 		called = true
-		return "http://127.0.0.1:8372/city/test-city/runs"
+		return "http://127.0.0.1:8372/city/test-city/runs", true
 	}
 
 	runner := newFakeRunner()
@@ -329,7 +438,7 @@ func TestDoSlingBatchSkipsDashboardLinkOnError(t *testing.T) {
 
 func TestDoSlingBatchJSONIncludesDashboardURL(t *testing.T) {
 	link := "http://127.0.0.1:8372/city/test-city/runs/gcg-run-1"
-	stubSlingDashboardLink(t, link)
+	stubSlingDashboardLink(t, link, false)
 
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -356,8 +465,38 @@ func TestDoSlingBatchJSONIncludesDashboardURL(t *testing.T) {
 	validateJSONAgainstResultSchema(t, []string{"sling"}, jsonStdout.Bytes())
 }
 
+func TestDoSlingBatchJSONRunsListURLStaysBare(t *testing.T) {
+	link := "http://127.0.0.1:8372/city/test-city/runs"
+	stubSlingDashboardLink(t, link, true)
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var jsonStdout, stderr bytes.Buffer
+	deps, _, _ := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	code := doSlingBatchWithJSON(opts, deps, nil, true, io.Discard, &jsonStdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatchWithJSON returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var payload struct {
+		DashboardURL string `json:"dashboard_url"`
+	}
+	if err := json.Unmarshal(jsonStdout.Bytes(), &payload); err != nil {
+		t.Fatalf("parsing JSON output: %v\n%s", err, jsonStdout.String())
+	}
+	// The runs-list latency suffix is human copy only; JSON stays a bare URL.
+	if payload.DashboardURL != link {
+		t.Fatalf("dashboard_url = %q, want bare %q", payload.DashboardURL, link)
+	}
+	validateJSONAgainstResultSchema(t, []string{"sling"}, jsonStdout.Bytes())
+}
+
 func TestDoSlingBatchJSONOmitsDashboardURLWhenUnresolved(t *testing.T) {
-	stubSlingDashboardLink(t, "")
+	stubSlingDashboardLink(t, "", false)
 
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

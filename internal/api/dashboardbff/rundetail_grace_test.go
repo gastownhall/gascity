@@ -1,9 +1,11 @@
 package dashboardbff
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +92,30 @@ func TestUnknownRunGraceForget(t *testing.T) {
 	}
 }
 
+// TestUnknownRunGraceRefusesOversizedRunID proves an oversized runId is never
+// tracked. The cap bounds ENTRIES, not bytes, so storing attacker-chosen ids
+// verbatim would let a scanner spraying huge URIs at the unauthenticated /api
+// plane pin ~cap x URI-length bytes per city. An oversized id must degrade to
+// the immediate 404 (inGrace false) and leave the map untouched.
+func TestUnknownRunGraceRefusesOversizedRunID(t *testing.T) {
+	g, _ := newTestGrace(unknownRunGraceCap)
+
+	if g.inGrace(strings.Repeat("x", unknownRunGraceMaxIDLen+1)) {
+		t.Fatal("an oversized runId must not be graced")
+	}
+	g.mu.Lock()
+	n := len(g.firstSeen)
+	g.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("map has %d entries after an oversized runId, want 0 (not tracked)", n)
+	}
+	// The bound is a security valve, not a functional limit: a runId at exactly
+	// the bound is still tracked normally.
+	if !g.inGrace(strings.Repeat("x", unknownRunGraceMaxIDLen)) {
+		t.Fatal("a runId at exactly the length bound must still be graced")
+	}
+}
+
 // TestUnknownRunGraceCapEviction proves the first-seen map is bounded: a full
 // map of live windows refuses new entries (they degrade to the plain 404, no
 // live window is evicted), and expired entries are pruned to make room.
@@ -152,18 +178,118 @@ func graceTestPlane(t *testing.T) (*Plane, string, *time.Time) {
 	return p, dir, clock
 }
 
+// expectGracedWarming asserts rec carries the graced unknown-run 503 wire
+// contract: HTTP 503, Retry-After: 5, and the runDetailErrorBody
+// {"error":"run view is warming","reason":"unknown_run"} — distinguishable from
+// the cold-replay warming 503, which stays a plain {error} body with no
+// Retry-After header.
+func expectGracedWarming(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	expectRunDetailStatus(t, rec, http.StatusServiceUnavailable)
+	if got := rec.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want %q", got, "5")
+	}
+	var body runDetailErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode graced 503 body: %v; body=%s", err, rec.Body.String())
+	}
+	if body.Error != "run view is warming" || body.Reason != "unknown_run" {
+		t.Fatalf("graced 503 body = %+v, want error=%q reason=%q", body, "run view is warming", "unknown_run")
+	}
+}
+
 // TestRunDetailEndpointUnknownRunWarmingGrace drives the JSON detail endpoint
-// through the whole grace lifecycle for a truly-unknown run: 503 warming on the
-// first request, still 503 within the window, and the plain 404 restored once
-// the window expires.
+// through the whole grace lifecycle for a truly-unknown run: the graced 503
+// (Retry-After + unknown_run reason) on the first request, still graced within
+// the window, and the plain 404 restored once the window expires.
 func TestRunDetailEndpointUnknownRunWarmingGrace(t *testing.T) {
 	p, _, clock := graceTestPlane(t)
 
-	expectRunDetailStatus(t, getRunDetailRaw(t, p, "alpha", "missing"), http.StatusServiceUnavailable)
+	expectGracedWarming(t, getRunDetailRaw(t, p, "alpha", "missing"))
 	*clock = clock.Add(unknownRunWarmingGrace - time.Second)
-	expectRunDetailStatus(t, getRunDetailRaw(t, p, "alpha", "missing"), http.StatusServiceUnavailable)
+	expectGracedWarming(t, getRunDetailRaw(t, p, "alpha", "missing"))
 	*clock = clock.Add(2 * time.Second)
 	expectRunDetailStatus(t, getRunDetailRaw(t, p, "alpha", "missing"), http.StatusNotFound)
+}
+
+// TestRunDetailEndpointOversizedRunIDGets404 drives the oversized-id refusal
+// through the JSON endpoint: the very first request answers the plain 404 (no
+// grace window ever starts) and the tracker's map stays empty.
+func TestRunDetailEndpointOversizedRunIDGets404(t *testing.T) {
+	p, dir, _ := graceTestPlane(t)
+	tl := p.runTailers.ensure("alpha", cityEventsPath(dir))
+
+	huge := strings.Repeat("z", unknownRunGraceMaxIDLen+1)
+	expectRunDetailStatus(t, getRunDetailRaw(t, p, "alpha", huge), http.StatusNotFound)
+	tl.unknownRuns.mu.Lock()
+	n := len(tl.unknownRuns.firstSeen)
+	tl.unknownRuns.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("grace map has %d entries after an oversized runId request, want 0", n)
+	}
+}
+
+// TestRunDetailWarmingDoesNotStartGraceClock pins the check ORDER inside
+// writeRunDetailReadError: the cold-replay warming answer (!ready) must win
+// over — and must not consume — the unknown-run grace window. A not-found
+// request during warming gets the PLAIN warming 503 (no Retry-After, no
+// reason) and must not start the grace clock; the window is measured from the
+// first POST-warm request, so even after a whole grace duration elapses during
+// warming, the first warm request is still graced. A mutant that consults the
+// grace tracker before the ready check starts (and here expires) the window
+// during warming and answers 404 after warm-up, failing this test.
+func TestRunDetailWarmingDoesNotStartGraceClock(t *testing.T) {
+	prevPoll := runTailPollInterval
+	prevWait := runColdLoadWait
+	runTailPollInterval = 20 * time.Millisecond
+	runColdLoadWait = 20 * time.Millisecond
+	t.Cleanup(func() {
+		runTailPollInterval = prevPoll
+		runColdLoadWait = prevWait
+	})
+	dir := t.TempDir()
+	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"), runDetailRootEvent())
+
+	// Build the plane WITHOUT Start: the tailer exists but its fold loop is not
+	// running, so the projection stays in the warming (!ready) state.
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	tl := p.runTailers.ensure("alpha", cityEventsPath(dir))
+	cur := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	clock := &cur
+	tl.unknownRuns.now = func() time.Time { return *clock }
+
+	rec := getRunDetailRaw(t, p, "alpha", "missing")
+	expectRunDetailStatus(t, rec, http.StatusServiceUnavailable)
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("cold-replay warming 503 must not set Retry-After, got %q", got)
+	}
+	var body runDetailErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode warming 503 body: %v; body=%s", err, rec.Body.String())
+	}
+	if body.Reason != "" {
+		t.Fatalf("cold-replay warming 503 must carry no reason, got %q", body.Reason)
+	}
+	tl.unknownRuns.mu.Lock()
+	_, tracked := tl.unknownRuns.firstSeen["missing"]
+	tl.unknownRuns.mu.Unlock()
+	if tracked {
+		t.Fatal("a warming-phase request must not start the unknown-run grace clock")
+	}
+
+	// The warming phase outlives an entire grace window...
+	*clock = clock.Add(unknownRunWarmingGrace + time.Second)
+
+	// ...then the projection warms. The first post-warm request must STILL be
+	// graced — its window starts now, not during warming.
+	p.Start(t.Context())
+	t.Cleanup(p.Stop)
+	select {
+	case <-tl.readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tailer never finished its cold replay")
+	}
+	expectGracedWarming(t, getRunDetailRaw(t, p, "alpha", "missing"))
 }
 
 // TestRunDetailEndpointKnownRunBypassesGrace proves a run the warm projection
@@ -236,16 +362,14 @@ func TestRunDetailEndpointNotRunViewUnaffectedByGrace(t *testing.T) {
 }
 
 // TestRunDetailStreamUnknownRunWarmingGrace mirrors the GET lifecycle on the
-// SSE precheck: 503 warming inside the grace window (before any stream body),
-// plain 404 after it expires.
+// SSE precheck: the graced 503 (Retry-After + unknown_run reason) inside the
+// grace window, before any stream body — plain 404 after it expires.
 func TestRunDetailStreamUnknownRunWarmingGrace(t *testing.T) {
 	p, _, clock := graceTestPlane(t)
 
 	rec := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/city/alpha/runs/missing/detail/stream", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 inside the grace window; body=%s", rec.Code, rec.Body.String())
-	}
+	expectGracedWarming(t, rec)
 
 	*clock = clock.Add(unknownRunWarmingGrace + time.Second)
 	rec = httptest.NewRecorder()

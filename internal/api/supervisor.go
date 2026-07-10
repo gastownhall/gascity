@@ -301,7 +301,11 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 // listener (scheme://host:port; a trailing slash is tolerated), or "" when no
 // link should be emitted. Leave unset on API-only processes — the standalone
 // controller's [api] port serves /v0 without the SPA — so responses omit
-// dashboard links. Must be called before Serve. Passing nil is a no-op.
+// dashboard links. Callers must also leave it unset on wildcard binds
+// (0.0.0.0, ::): there is no single static origin that is browser-reachable
+// for every /v0 caller, and deriving one from request Host headers would
+// trust a spoofable value, so responses omit dashboard_url instead. Must be
+// called before Serve. Passing nil is a no-op.
 func (sm *SupervisorMux) WithDashboardBase(provider func() string) *SupervisorMux {
 	if provider == nil {
 		return sm

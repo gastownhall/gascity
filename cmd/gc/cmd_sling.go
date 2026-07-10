@@ -956,12 +956,19 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	}
 	// Success only (never dry-run or error): surface a dashboard deep link
 	// when one resolves. Resolution failure degrades silently to no link.
-	dashboardURL := slingDashboardURLHook(deps.CityPath, result)
+	dashboardURL, dashboardRunsList := slingDashboardURLHook(deps.CityPath, result)
 	if jsonOutput {
 		return writeSlingJSONResult(result, dashboardURL, jsonStdout, stderr)
 	}
 	if dashboardURL != "" {
-		fmt.Fprintf(humanStdout, "Dashboard: %s\n", dashboardURL) //nolint:errcheck // best-effort stdout
+		// Runs-list landings lag the dashboard's cache-reconcile cycle by
+		// up to a couple of minutes, so set that expectation inline;
+		// run-detail links render immediately and stay bare.
+		suffix := ""
+		if dashboardRunsList {
+			suffix = " (new work can take a minute or two to appear)"
+		}
+		fmt.Fprintf(humanStdout, "Dashboard: %s%s\n", dashboardURL, suffix) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }

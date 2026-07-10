@@ -860,11 +860,23 @@ func (p *Plane) registerRunDetail() {
 	})
 }
 
+// runDetailReasonUnknownRun is the runDetailErrorBody reason carried by the
+// graced unknown-run 503, so clients can tell "the server is holding a grace
+// window for a run it has never seen" apart from the cold-replay warming 503
+// (a plain {error} body with no reason and no Retry-After).
+const runDetailReasonUnknownRun = "unknown_run"
+
+// unknownRunRetryAfter is the graced 503's Retry-After header value (seconds):
+// the poll cadence the server suggests while it holds an unknown run's grace
+// window open.
+const unknownRunRetryAfter = "5"
+
 // writeRunDetailReadError maps a failed detail() read to the HTTP response —
 // shared by the JSON GET and the SSE stream precheck so both endpoints answer
 // identically: 422 for an unsupported (v1/wisp) run, 503 while the projection
 // is still warming or while a truly-unknown run is inside its warming-grace
-// window, 404 otherwise.
+// window (the graced variant carries Retry-After and reason unknown_run), 404
+// otherwise.
 func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID string, err error, ready bool) {
 	var unsupported *runproj.UnsupportedRunError
 	if errors.As(err, &unsupported) {
@@ -878,28 +890,37 @@ func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID str
 		return
 	}
 	// The run root is absent from the warm projection. While the cold replay
-	// is still in flight the fold may be incomplete, so report warming
-	// rather than a hard 404 for a run that may yet appear. This 503 is a
-	// retry signal, not a terminal error: the SPA loader
-	// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) already
-	// retries any 5xx — including this warming 503 — with bounded backoff
-	// before surfacing it, so the client re-polls until the replay finishes
-	// (covered by runDetail.test.ts "retries while the projection is
-	// warming").
+	// is still in flight the fold may be incomplete, so report warming rather
+	// than a hard 404 for a run that may yet appear. Checked BEFORE the grace
+	// window below: a warming-phase request must not start (or consume) an
+	// unknown run's grace clock — the window is measured from the first
+	// POST-warm request (TestRunDetailWarmingDoesNotStartGraceClock). This
+	// plain 503 is a retry signal for the short replay, and the SPA loader
+	// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) retries 5xx
+	// within its own bounded backoff budget before surfacing it (covered by
+	// runDetail.test.ts "retries while the projection is warming").
 	if !ready {
 		writeError(w, http.StatusServiceUnavailable, "run view is warming")
 		return
 	}
 	// The projection is warm but has never seen this run. A run slung from the
-	// CLI stays invisible here until the controller's cache-reconcile emits its
-	// bead events (30-120s), and the SPA treats a 404 as terminal while it
-	// retries the warming 503 — so a truly-unknown run gets the SAME warming
-	// 503 for a grace window measured from its first request
-	// (rundetail_grace.go); once the window expires the plain 404 below is
-	// restored. Only the not-found case is graced: every other failure keeps
-	// its existing mapping.
+	// CLI stays invisible here until the controller's cache-reconcile emits
+	// its bead events (30-120s), and the SPA treats a 404 as terminal — so a
+	// truly-unknown run gets a retryable warming 503 for a grace window
+	// measured from its first request (rundetail_grace.go). The contract is
+	// server-held: the server holds the warming answer for the whole window,
+	// Retry-After tells clients how often to poll, and the SPA's run-detail
+	// loader polls within its own budget (being extended in a sibling change).
+	// The reason unknown_run makes this graced answer distinguishable from the
+	// cold-replay warming 503 above. Once the window expires the plain 404
+	// below is restored. Only the not-found case is graced: every other
+	// failure keeps its existing mapping.
 	if errors.Is(err, runproj.ErrRunNotFound) && t.unknownRuns.inGrace(runID) {
-		writeError(w, http.StatusServiceUnavailable, "run view is warming")
+		w.Header().Set("Retry-After", unknownRunRetryAfter)
+		writeJSON(w, http.StatusServiceUnavailable, runDetailErrorBody{
+			Error:  "run view is warming",
+			Reason: runDetailReasonUnknownRun,
+		})
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown run")
