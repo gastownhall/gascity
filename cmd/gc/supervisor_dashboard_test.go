@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/dashboardbff"
@@ -144,6 +145,47 @@ func TestDashboardCityResolverCitiesEmpty(t *testing.T) {
 	if got := res.Cities(); len(got) != 0 {
 		t.Errorf("Cities() = %+v, want empty", got)
 	}
+}
+
+// TestAttachDashboardInstallsDashboardBase guards the sling dashboard_url
+// wiring: when attachDashboard mounts the SPA it must also install the
+// listener's link base on the mux, or per-city handlers can never mint
+// dashboard deep links even though the dashboard is served.
+func TestAttachDashboardInstallsDashboardBase(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_DASHBOARD", "")
+	mux := newTestSupervisorMuxForDashboard()
+	plane, err := attachDashboard(mux, fakeDashResolver{}, false, "0.0.0.0", 8372)
+	if err != nil {
+		t.Fatalf("attachDashboard: %v", err)
+	}
+	if plane == nil {
+		t.Fatal("attachDashboard returned nil plane with dashboard enabled")
+	}
+	if got := mux.DashboardBaseURL(); got != "http://127.0.0.1:8372" {
+		t.Fatalf("DashboardBaseURL = %q, want http://127.0.0.1:8372", got)
+	}
+}
+
+// TestAttachDashboardDisabledLeavesNoDashboardBase pins the standalone shape:
+// with the dashboard disabled the mux must report no link base, so sling
+// responses omit dashboard_url instead of minting dead links.
+func TestAttachDashboardDisabledLeavesNoDashboardBase(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_DASHBOARD", "0")
+	mux := newTestSupervisorMuxForDashboard()
+	plane, err := attachDashboard(mux, fakeDashResolver{}, false, "127.0.0.1", 8372)
+	if err != nil {
+		t.Fatalf("attachDashboard: %v", err)
+	}
+	if plane != nil {
+		t.Fatal("attachDashboard returned a plane with the dashboard disabled")
+	}
+	if got := mux.DashboardBaseURL(); got != "" {
+		t.Fatalf("DashboardBaseURL = %q, want empty when the dashboard is disabled", got)
+	}
+}
+
+func newTestSupervisorMuxForDashboard() *api.SupervisorMux {
+	return api.NewSupervisorMux(fakeDashResolver{}, nil, false, "vtest", "btest", time.Now())
 }
 
 func TestDashboardEnabledToggle(t *testing.T) {

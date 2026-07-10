@@ -66,7 +66,12 @@ func attachDashboard(mux *api.SupervisorMux, resolver api.CityResolver, readOnly
 		return nil, err
 	}
 	plane := dashboardbff.New(dashboardDeps(resolver, readOnly, bind, port, mux.LoopbackTransport()))
-	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
+	// Install the listener's link base alongside the SPA so per-city handlers
+	// can mint dashboard deep links (the sling response's dashboard_url).
+	// Standalone controller processes never call attachDashboard, so their
+	// /v0 responses omit the link instead of pointing at a dead origin.
+	base := dashboardLoopbackBaseURL(bind, port)
+	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa).WithDashboardBase(func() string { return base })
 	return plane, nil
 }
 

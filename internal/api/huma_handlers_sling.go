@@ -7,6 +7,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/api/dashboardbff"
 )
 
 // SlingOutput is the Huma response for POST /v0/sling.
@@ -124,8 +125,45 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		return nil, apierr.InvalidRequest.Msg(message)
 	}
 
+	// Successful sling: surface a dashboard deep link when this process also
+	// hosts the dashboard. This endpoint never produces batch shapes (no
+	// DoSlingBatch call), so resp.WorkflowID alone discriminates the single
+	// graph-workflow launch (run detail) from every other successful shape
+	// (wisps, plain bead routes, idempotent skips → runs list), matching the
+	// CLI's link policy.
+	resp.DashboardURL = s.slingDashboardURL(input.CityName, resp.WorkflowID)
 	return &SlingOutput{
 		Status: status,
 		Body:   *resp,
 	}, nil
+}
+
+// slingDashboardURL returns the dashboard deep link surfaced on a successful
+// sling response, or "" when no link should be emitted. The dashboard SPA is
+// mounted only on the supervisor listener (same-origin with this /v0 API);
+// the standalone controller's [api] port serves /v0 without the SPA, so the
+// link resolves only when the serving process installed a base via
+// SupervisorMux.WithDashboardBase. Any resolution failure degrades silently
+// to no link — the link is a convenience and must never fail the sling.
+//
+// cityName is the cityName path parameter (on the supervisor it is the
+// registry name the dashboard routes by); a name outside the BFF grammar is
+// dashboard-unreachable, so no link is minted for it. A non-empty workflowID
+// (a graph.v2 run root) links to that run's detail view; every other
+// successful shape links to the runs list.
+func (s *Server) slingDashboardURL(cityName, workflowID string) string {
+	if s.dashboardBase == nil {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(s.dashboardBase()), "/")
+	if base == "" {
+		return ""
+	}
+	if !dashboardbff.ValidCityName(cityName) {
+		return ""
+	}
+	if workflowID != "" {
+		return base + dashboardbff.RunDetailPath(cityName, workflowID)
+	}
+	return base + dashboardbff.RunsListPath(cityName)
 }

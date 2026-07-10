@@ -94,6 +94,14 @@ type Server struct {
 	componentVersionsValue componentVersions
 	componentVersionsProbe func() componentVersions
 
+	// dashboardBase reports the browser-reachable base URL of the dashboard
+	// mounted on the process serving this city's API, or "" when unmounted.
+	// Nil (the default) also means unmounted — the standalone controller
+	// [api] port serves /v0 without the SPA — so handlers omit dashboard
+	// deep links. Populated from SupervisorMux.WithDashboardBase when the
+	// supervisor builds per-city servers.
+	dashboardBase func() string
+
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
 

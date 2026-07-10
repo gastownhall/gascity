@@ -46,6 +46,7 @@ type slingResponse struct {
 	AttachedBeadID string   `json:"attached_bead_id,omitempty"`
 	Mode           string   `json:"mode,omitempty"`
 	Warnings       []string `json:"warnings,omitempty"`
+	DashboardURL   string   `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
 }
 
 var apiSlingStderr = func() io.Writer { return os.Stderr }
