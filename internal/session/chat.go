@@ -347,6 +347,32 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 		return nil
 	}
+	// The runtime is not running. If a controller-driven reset is already
+	// in flight for this session (durable continuation_reset_pending
+	// marker, cleared by PreWakePatch only immediately before the
+	// reconciler's own fresh Start), wait for it instead of independently
+	// starting a second, uncoordinated runtime — the reconciler runs in a
+	// separate long-lived controller process, so withSessionMutationLock
+	// (in-process only) cannot serialize against it (#4079).
+	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" {
+		landed, fresh, err := m.waitForInFlightReset(ctx, id, sessName)
+		if err != nil {
+			return err
+		}
+		if landed {
+			b = fresh
+			if b.Metadata["transport"] == "" && transportVerified {
+				m.persistTransport(id, b.Metadata["provider"], transport)
+			}
+			if err := m.confirmLiveSessionState(id, &b); err != nil {
+				return err
+			}
+			return nil
+		}
+		// Timed out — the controller-driven reset itself appears stalled.
+		// Fall through to the existing independent-start behavior below
+		// rather than hang gc session attach indefinitely.
+	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
@@ -458,6 +484,39 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		return err
 	}
 	return nil
+}
+
+// inFlightResetPollInterval and inFlightResetWaitTimeout bound how long
+// waitForInFlightReset polls for a controller-driven reset to land before
+// giving up and letting the caller start the runtime itself. Declared as
+// vars (not consts) so tests can shrink them.
+var (
+	inFlightResetPollInterval = 200 * time.Millisecond
+	inFlightResetWaitTimeout  = 5 * time.Second
+)
+
+// waitForInFlightReset polls for a controller-driven reset already in
+// flight for id (continuation_reset_pending=="true") to complete, instead
+// of racing it with an independent Start (#4079). Returns landed=true and
+// the refreshed bead once continuation_reset_pending clears and the
+// runtime is live; landed=false if inFlightResetWaitTimeout elapses first
+// (e.g. the reconciler itself is stalled), so the caller can fall back to
+// starting the runtime itself rather than hang indefinitely.
+func (m *Manager) waitForInFlightReset(ctx context.Context, id, sessName string) (landed bool, fresh beads.Bead, err error) {
+	deadline := time.Now().Add(inFlightResetWaitTimeout)
+	for time.Now().Before(deadline) {
+		if err := sleepWithContext(ctx, inFlightResetPollInterval); err != nil {
+			return false, beads.Bead{}, err
+		}
+		fresh, err := m.store.Get(id)
+		if err != nil {
+			return false, beads.Bead{}, fmt.Errorf("polling in-flight reset for %s: %w", id, err)
+		}
+		if strings.TrimSpace(fresh.Metadata["continuation_reset_pending"]) != "true" && m.sp.IsRunning(sessName) {
+			return true, fresh, nil
+		}
+	}
+	return false, beads.Bead{}, nil
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
