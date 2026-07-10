@@ -187,7 +187,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 // transport) still go through session.Manager. The API/response-building layer
 // reads persisted state through this type's GetPersistedResponse and pairs it
 // with Manager.EnrichInfo for the runtime overlay (see the api sessionGetEnriched
-// composition and worker.SessionCatalog.GetWithPersistedResponse). The reconciler
+// composition and worker.sessionRecordViaManager). The reconciler
 // already routes its writes through this type.
 type Store struct {
 	store beads.SessionStore
@@ -218,7 +218,7 @@ func (s *Store) Get(id string) (Info, error) {
 // persisted-response projection (status + metadata) for id, in a single store
 // fetch. It is the persisted-read half of the session Get read model — pair it
 // with Manager.EnrichInfo for the runtime overlay (the api sessionGetEnriched
-// composition and worker.SessionCatalog.GetWithPersistedResponse do exactly
+// composition and worker.sessionRecordViaManager do exactly
 // that): the caller gets both projections without a raw *beads.Bead crossing the
 // boundary and without a second store.Get. It shares Get's exact
 // error contract (both route through validatedBead): ErrSessionNotFound for a

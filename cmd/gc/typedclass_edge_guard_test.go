@@ -80,7 +80,13 @@ var typedClassCodecNeedles = []codecNeedle{
 	{"sessions", "ListSessionWaitBeads(", "session.Store.ListWaits (internal/session)"},
 	{"sessions", "PersistedResponseFromBead(", "session.Store.GetPersistedResponse (internal/session/persisted_response.go)"},
 	{"sessions", "ListFullFromBeads(", "session.Store.ListAll + Manager.ListFromInfos (internal/session)"},
-	{"sessions", "GetWithPersistedResponse(", "session.Store.GetPersistedResponse + Manager.EnrichInfo (internal/session)"},
+	// GetWithPersistedResponse( needle RETIRED in WI-7 W-unexport: the
+	// raw-cracking Manager.GetWithPersistedResponse was retired long ago, and the
+	// surviving same-named worker method (a clean Store.GetPersistedResponse +
+	// EnrichInfo composition, NOT a codec crack) was DELETED as dead code — its
+	// only reader was gone, and the canonical worker read is
+	// worker.sessionRecordViaManager. No interior GetWithPersistedResponse(
+	// call site remains, so the tripwire has nothing left to police.
 	{"sessions", "GetBeadWithInfo(", "session.Store.GetPersistedResponse (internal/session; the transitional raw+Info single-fetch escape, retired + deleted in WI-6 R4 — all-zero tripwire)"},
 	{"sessions", "GetWithBead(", "session.Store.GetPersistedResponse / worker.Factory.SessionByHandle (internal/session, internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
 	{"sessions", "SessionByLoadedBead(", "worker.Factory.SessionByRecord (internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
@@ -153,9 +159,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// typing is a separate out-of-budget W-sync wave (see tickfeed-design §3
 		// W-unexport).
 		"cmd/gc/session_beads.go": 1,
-	},
-	"GetWithPersistedResponse(": {
-		"internal/worker/catalog.go": 1,
 	},
 	// ResolveSessionBeadByExactID( is now all-zero in the interior: the
 	// worker-boundary resolve+construct site moved to ResolveSessionRecordByExactID
