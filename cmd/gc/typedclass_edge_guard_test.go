@@ -145,10 +145,14 @@ var typedClassCodecCensus = map[string]map[string]int{
 	// NamedSessionInfoContinuityEligible / LifecycleIdentityReleasedInfo, reading
 	// info.SessionNameMetadata directly — no b.Metadata key inlined). The needle stays
 	// policed as a permanent zero-pin tripwire. The codec is NOT yet unexported: it is
-	// referenced as a fixture constructor by ~444 external test call sites across ~51
-	// _test.go files (cmd/gc, internal/api, internal/worker, internal/beads), which the
-	// interior-only census (non-test scan) does not police; migrating those off the
-	// exported codec is a separate out-of-budget wave (see the endgame report).
+	// referenced as a fixture constructor by 444 external CALL sites across 51 external
+	// _test.go files (cmd/gc: 49, internal/api: 1, internal/worker: 1) that cannot see
+	// the unexported name. Repo-wide the codec appears in ~537 _test.go occurrences
+	// across 70 files; the extra ~58 are internal/session's own in-package tests (they
+	// rename trivially WITH the codec, so they do not block), plus comment-only mentions
+	// (e.g. internal/beads). The interior-only census (non-test scan) does not police any
+	// of these; migrating the 51 external files off the exported codec is a separate
+	// out-of-budget wave (see the endgame report).
 	"ListAllSessionBeads(": {
 		// WI-7 W-delete zeroed session_bead_snapshot (1→0, the raw-half load edge flipped
 		// to ListAllForReconcile) and doctor_session_model (1→0, doctor issues its own two
