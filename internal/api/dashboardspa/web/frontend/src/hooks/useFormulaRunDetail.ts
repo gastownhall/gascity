@@ -1,8 +1,12 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormulaRunDetail, RunScopeKind } from 'gas-city-dashboard-shared';
 import { errorMessage } from 'gas-city-dashboard-shared';
 import { reportClientError } from '../lib/clientErrorReporting';
-import { loadSupervisorFormulaRunDetail } from '../supervisor/runDetail';
+import {
+  loadSupervisorFormulaRunDetail,
+  type LoadRunDetailOptions,
+  type RunDetailWarming,
+} from '../supervisor/runDetail';
 import { ApiClientError } from '../api/client';
 import { useCachedData } from './useCachedData';
 import { useFormulaRunDetailStream } from './useFormulaRunDetailStream';
@@ -52,7 +56,12 @@ type FormulaRunDetailPayload =
 
 export type FormulaRunDetailLoadState =
   | (FormulaRunDetailState & { kind: 'idle' })
-  | (FormulaRunDetailState & { kind: 'loading' })
+  // F4: while the initial load polls the BFF's warming 503s (the just-slung
+  // deep-link case, up to ~180s), `warming` carries the loader's signal — with
+  // reason 'unknown_run' when the projection is warm but has not seen the run
+  // yet — so the route can render honest "may still be being recorded" copy
+  // instead of an anonymous spinner. Null while no warming 503 has been seen.
+  | (FormulaRunDetailState & { kind: 'loading'; warming: RunDetailWarming | null })
   | (FormulaRunDetailState & {
       kind: 'ready';
       detail: FormulaRunDetail;
@@ -68,16 +77,47 @@ export function useFormulaRunDetail(
   scopeRef?: string,
 ): FormulaRunDetailLoadState {
   const key = formulaRunDetailCacheKey(runId, scopeKind, scopeRef);
+  // F4: the loader polls warming 503s for up to ~180s (the just-slung
+  // deep-link grace window). Each fetcher invocation gets a generation; a
+  // newer invocation (key change, manual refresh, nudge) or unmount
+  // supersedes older polls via keepPolling, so a superseded poll stops
+  // issuing GETs and its warming signal can never overwrite the current
+  // load's state. The settled poll clears its own warming signal so the
+  // failed/ready states never carry stale interim copy.
+  const [warming, setWarming] = useState<RunDetailWarming | null>(null);
+  const pollGenRef = useRef(0);
+  useEffect(
+    () => () => {
+      pollGenRef.current += 1;
+    },
+    [],
+  );
   const {
     data,
     loading,
     error,
     refresh: cachedRefresh,
-  } = useCachedData(key, () => loadFormulaRunDetail(runId), {
-    onError: (err) => {
-      if (runId !== undefined) reportRunDetailError('load detail', runId, err);
+  } = useCachedData(
+    key,
+    () => {
+      const gen = ++pollGenRef.current;
+      const isCurrent = () => pollGenRef.current === gen;
+      const load = loadFormulaRunDetail(runId, {
+        onWarming: (next) => {
+          if (isCurrent()) setWarming(next);
+        },
+        keepPolling: isCurrent,
+      });
+      return load.finally(() => {
+        if (isCurrent()) setWarming(null);
+      });
     },
-  });
+    {
+      onError: (err) => {
+        if (runId !== undefined) reportRunDetailError('load detail', runId, err);
+      },
+    },
+  );
 
   // P4: the per-run SSE stream pushes the whole DTO, so a pushed frame becomes
   // the rendered detail with ZERO refetch. The stream hook warms the SWR cache
@@ -148,13 +188,16 @@ export function useFormulaRunDetail(
   if (data?.kind === 'unsupported') return { kind: 'unsupported', refresh, streamActive };
   if (data?.kind === 'not_found') return { kind: 'not_found', refresh, streamActive };
   if (error !== null) return { kind: 'failed', error, refresh, streamActive };
-  return { kind: 'loading', refresh, streamActive };
+  return { kind: 'loading', warming, refresh, streamActive };
 }
 
-async function loadFormulaRunDetail(runId: string | undefined): Promise<FormulaRunDetailPayload> {
+async function loadFormulaRunDetail(
+  runId: string | undefined,
+  options?: LoadRunDetailOptions,
+): Promise<FormulaRunDetailPayload> {
   if (!runId) return { kind: 'unrequested' };
   try {
-    const detail = await loadSupervisorFormulaRunDetail(runId);
+    const detail = await loadSupervisorFormulaRunDetail(runId, options);
     return { kind: 'loaded', detail };
   } catch (err) {
     // gascity-dashboard-9w3k: a v1 / wisp run (not graph.v2) loads but has no
