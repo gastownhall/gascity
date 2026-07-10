@@ -122,21 +122,25 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 // SessionByID rebuilds a session-backed worker handle from persisted session
 // metadata and the factory's optional resolved-runtime hook.
 func (f *Factory) SessionByID(id string) (Handle, error) {
+	return f.sessionByIDWithProcessNames(id, nil)
+}
+
+func (f *Factory) sessionByIDWithProcessNames(id string, processNames []string) (Handle, error) {
 	info, bead, err := f.manager.GetWithBead(id)
 	if err != nil {
 		return nil, err
 	}
-	return f.sessionFromInfoAndBead(info, bead)
+	return f.sessionFromInfoAndBead(info, bead, processNames)
 }
 
 // SessionByLoadedBead is like SessionByID but uses an already-loaded bead,
 // avoiding a redundant store.Get for callers that just resolved it (e.g.
 // via session.ResolveSessionBeadByExactID).
 func (f *Factory) SessionByLoadedBead(bead beads.Bead) (Handle, error) {
-	return f.sessionFromInfoAndBead(f.manager.SessionInfoFromBead(bead), bead)
+	return f.sessionFromInfoAndBead(f.manager.SessionInfoFromBead(bead), bead, nil)
 }
 
-func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) (Handle, error) {
+func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead, processNames []string) (Handle, error) {
 	spec := SessionSpec{
 		ID:       info.ID,
 		Template: info.Template,
@@ -163,6 +167,9 @@ func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) 
 		}
 		applyResolvedRuntimeToSessionSpec(&spec, resolved)
 	}
+	if len(processNames) > 0 {
+		spec.Hints.ProcessNames = append([]string(nil), processNames...)
+	}
 	return f.Session(spec)
 }
 
@@ -173,21 +180,28 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 	if target == "" {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
+	if f.provider != nil {
+		if sessionID, err := f.provider.GetMeta(target, "GC_SESSION_ID"); err == nil && strings.TrimSpace(sessionID) != "" {
+			return f.sessionByIDWithProcessNames(strings.TrimSpace(sessionID), processNames)
+		}
+		if f.provider.IsRunning(target) {
+			providerName := strings.TrimSpace(target)
+			if liveProvider, err := f.provider.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+				providerName = strings.TrimSpace(liveProvider)
+			}
+			return f.RuntimeHandle(target, providerName, "", processNames)
+		}
+	}
 	if f.store != nil {
 		if id, err := sessionpkg.ResolveSessionIDByExactID(f.store, target); err == nil {
-			return f.SessionByID(id)
+			return f.sessionByIDWithProcessNames(id, processNames)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err
 		}
 		if id, err := sessionpkg.ResolveSessionID(f.store, target); err == nil {
-			return f.SessionByID(id)
+			return f.sessionByIDWithProcessNames(id, processNames)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err
-		}
-		if f.provider != nil {
-			if sessionID, err := f.provider.GetMeta(target, "GC_SESSION_ID"); err == nil && strings.TrimSpace(sessionID) != "" {
-				return f.SessionByID(strings.TrimSpace(sessionID))
-			}
 		}
 	}
 	if f.provider == nil {

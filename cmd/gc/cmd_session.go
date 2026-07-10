@@ -1209,6 +1209,13 @@ func (p *attachmentCachingProvider) IsAttached(name string) bool {
 	return p.Provider.IsAttached(name)
 }
 
+func (p *attachmentCachingProvider) IsRunning(name string) bool {
+	if p.Provider == nil {
+		return false
+	}
+	return p.Provider.IsRunning(name)
+}
+
 func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	if scp, ok := p.Provider.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)

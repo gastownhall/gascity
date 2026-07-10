@@ -20,12 +20,28 @@ type failingSessionLookupStore struct {
 	err error
 }
 
+type countingSessionLookupStore struct {
+	beads.Store
+	getCalls  int
+	listCalls int
+}
+
 func (s *failingSessionLookupStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, s.err
 }
 
 func (s *failingSessionLookupStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, s.err
+}
+
+func (s *countingSessionLookupStore) Get(string) (beads.Bead, error) {
+	s.getCalls++
+	return beads.Bead{}, beads.ErrNotFound
+}
+
+func (s *countingSessionLookupStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return nil, nil
 }
 
 func TestWorkerHandleForSessionWithConfigUsesResolvedProviderOnFirstStart(t *testing.T) {
@@ -1431,6 +1447,62 @@ func TestWorkerObserveSessionTargetWithConfigIgnoresStoreLookupFailuresForRuntim
 	}
 	if !obs.Running {
 		t.Fatalf("obs.Running = false, want true for %q when runtime session is live", target)
+	}
+}
+
+func TestWorkerObserveSessionTargetWithConfigIgnoresRuntimeSessionIDWithoutStore(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("mayor", "GC_SESSION_ID", "ga-r"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", nil, sp, cfg, target)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true for %q when runtime session is live", target)
+	}
+}
+
+func TestWorkerObserveSessionTargetWithConfigSkipsSessionListForLiveRuntimeTarget(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	store := &countingSessionLookupStore{}
+	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", store, sp, cfg, target)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true for %q", target)
+	}
+	if store.getCalls != 0 {
+		t.Fatalf("store.Get calls = %d, want 0", store.getCalls)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("store.List calls = %d, want 0", store.listCalls)
 	}
 }
 

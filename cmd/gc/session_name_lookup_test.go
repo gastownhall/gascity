@@ -11,6 +11,16 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+type countingSessionNameListStore struct {
+	beads.Store
+	listCalls int
+}
+
+func (s *countingSessionNameListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.Store.List(query)
+}
+
 func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
@@ -521,5 +531,25 @@ func TestDerivePoolSessionNameRejectsInvalidCollisionSuffix(t *testing.T) {
 	_, err := derivePoolSessionName(nil, nil, "crew", "gc-1", strings.Repeat("a", 64), snapshot)
 	if err == nil {
 		t.Fatal("derivePoolSessionName: want error when collision suffix would exceed explicit session name length")
+	}
+}
+
+func TestSessionNameLookupResolverReusesLoadedSnapshotAcrossLookups(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &countingSessionNameListStore{Store: base}
+
+	resolver := newSessionNameLookupResolver(store, "city", "")
+	loadCalls := store.listCalls
+	if loadCalls == 0 {
+		t.Fatal("newSessionNameLookupResolver did not load a session snapshot")
+	}
+	if got := resolver.Resolve("mayor"); got != "mayor" {
+		t.Fatalf("Resolve(mayor) = %q, want mayor", got)
+	}
+	if got := resolver.Resolve("worker"); got != "worker" {
+		t.Fatalf("Resolve(worker) = %q, want worker", got)
+	}
+	if store.listCalls != loadCalls {
+		t.Fatalf("store.List calls after Resolve = %d, want unchanged from initial load %d", store.listCalls, loadCalls)
 	}
 }

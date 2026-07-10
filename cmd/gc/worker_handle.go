@@ -391,17 +391,26 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 	if err != nil {
 		return nil, err
 	}
+	if sp != nil {
+		if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
+			if store != nil {
+				return factory.HandleForTarget(strings.TrimSpace(sessionID), processNames)
+			}
+		}
+		if sp.IsRunning(target) {
+			providerName := target
+			if liveProvider, err := sp.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+				providerName = strings.TrimSpace(liveProvider)
+			}
+			return factory.RuntimeHandle(target, providerName, "", processNames)
+		}
+	}
 	if store != nil {
 		if bead, _, err := session.ResolveSessionBeadByExactID(store, target); err == nil {
 			return factory.SessionByLoadedBead(bead)
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
-			return factory.SessionByID(id)
-		}
-		if sp != nil {
-			if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
-				return factory.SessionByID(strings.TrimSpace(sessionID))
-			}
+			return factory.HandleForTarget(id, processNames)
 		}
 	}
 	if sp == nil {

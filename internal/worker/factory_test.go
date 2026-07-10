@@ -349,6 +349,54 @@ func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
 	}
 }
 
+func TestFactoryHandleForTargetPropagatesProcessNamesThroughResolvedSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+	sp := &falseNegativeRuntimeProvider{
+		Fake:       base,
+		falseNames: map[string]bool{"legacy-runtime-name": true},
+	}
+	manager := sessionpkg.NewManager(store, sp)
+
+	info, err := manager.Create(
+		context.Background(),
+		"worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"stub",
+		nil,
+		sessionpkg.ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.SetMeta("legacy-runtime-name", "GC_SESSION_ID", info.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.HandleForTarget("legacy-runtime-name", []string{"stub"})
+	if err != nil {
+		t.Fatalf("HandleForTarget: %v", err)
+	}
+	sessionHandle, ok := handle.(*SessionHandle)
+	if !ok {
+		t.Fatalf("HandleForTarget returned %T, want *SessionHandle", handle)
+	}
+	if got, want := sessionHandle.session.Hints.ProcessNames, []string{"stub"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("session.Hints.ProcessNames = %v, want %v", got, want)
+	}
+}
+
 func TestFactoryHandleForTargetRuntimeFallbackPreservesRecorder(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -401,8 +449,24 @@ type failingGetStore struct {
 	err error
 }
 
+type countingTargetLookupStore struct {
+	beads.Store
+	getCalls  int
+	listCalls int
+}
+
 func (s failingGetStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, s.err
+}
+
+func (s *countingTargetLookupStore) Get(string) (beads.Bead, error) {
+	s.getCalls++
+	return beads.Bead{}, beads.ErrNotFound
+}
+
+func (s *countingTargetLookupStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return nil, nil
 }
 
 func TestFactoryHandleForTargetPropagatesSessionResolutionError(t *testing.T) {
@@ -420,6 +484,63 @@ func TestFactoryHandleForTargetPropagatesSessionResolutionError(t *testing.T) {
 	_, err = factory.HandleForTarget("sess-1", nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("HandleForTarget error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestFactoryHandleForTargetSkipsExactIDLookupForRuntimeNames(t *testing.T) {
+	wantErr := errors.New("store boom")
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-runtime-name", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store: failingGetStore{
+			Store: beads.NewMemStore(),
+			err:   wantErr,
+		},
+		Provider: sp,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.HandleForTarget("legacy-runtime-name", nil)
+	if err != nil {
+		t.Fatalf("HandleForTarget: %v", err)
+	}
+	if _, ok := handle.(*RuntimeHandle); !ok {
+		t.Fatalf("HandleForTarget returned %T, want *RuntimeHandle", handle)
+	}
+}
+
+func TestFactoryHandleForTargetSkipsSessionListForLiveRuntimeTarget(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-runtime-name", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	store := &countingTargetLookupStore{}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.HandleForTarget("legacy-runtime-name", nil)
+	if err != nil {
+		t.Fatalf("HandleForTarget: %v", err)
+	}
+	if _, ok := handle.(*RuntimeHandle); !ok {
+		t.Fatalf("HandleForTarget returned %T, want *RuntimeHandle", handle)
+	}
+	if store.getCalls != 0 {
+		t.Fatalf("store.Get calls = %d, want 0", store.getCalls)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("store.List calls = %d, want 0", store.listCalls)
 	}
 }
 
