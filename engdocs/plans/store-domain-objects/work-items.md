@@ -140,8 +140,16 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   `TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate` (fail-then-pass verified). Nits:
 >   collapsed a duplicated staleness twin; pinned create-echo==Get across backends
 >   (beadstest `CreateEchoMatchesGetOnMetadata`). Commits a62f1b6b8/abb79e1fb/db9b3e4ac.
-> - **W-delete** (mechanical, falls out): raw-half deletion + pure-read accessor migrations + zero
->   `ListAllSessionBeads` (3) + `session_bead_snapshot` InfoFromPersistedBead (3→0) + `session_hash` (1→0).
+> - **W-delete** ✅ (merge `e0c186205`, net −378): deleted the `sessionBeadSnapshot` raw half
+>   (`loadSessionBeadSnapshot`→`ListAllForReconcile`, its first production consumer; the W-pool skew
+>   reload retired with the raw half). Census zeros: `session_bead_snapshot` IFP 3→0 + LASB 1→0,
+>   `session_hash` 1→0, `session_logs_resolve` 2→0, `cmd_stop` 1→0, `doctor_session_model` LASB 1→0.
+>   `session_beads` LASB STAYS 1 (honest sync/beadmail floor). Config-change fingerprint computed
+>   edge-side (`SessionSetFingerprint`+`ListAllForReconcileWithFingerprint`), byte-parity-pinned;
+>   sync-tail = fresh re-list (NDI delta, pinned). Field-adds `Info.AwakeStartedAt`+`Info.UsageComputeEmittedAt`;
+>   deleted the dead 16-fn raw pool cluster + re-pointed oracles. Red-team approve-with-nits (0 blockers);
+>   6 nits fixed in commit C incl. 2 mandatory oracle-regression restorations (fail-then-pass verified).
+>   Commits cfdc94e30/b7ef1af77/bec1a2be3. **Interior IFP now = cmd_session 1 + session_resolution 1 (W-flip).**
 > - **W-flip** (§5b): front-door flip (`class_store.go` + `api.State` → domain stores).
 > - **W-unexport** (§5e): codec unexport + guards → permanent zero-pins. Orders codecs gated on deferred
 >   WI-3 two-class wiring. InfoFromPersistedBead unexports IFF W-tick+W-delete reach true interior zero

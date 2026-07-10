@@ -1,8 +1,8 @@
 # Store-domain-objects migration — HANDOFF (resume here)
 
-**As of:** migration branch `refactor/store-domain-objects`, tip **`507f7bf4a`**
-(W-tick keystone `1d0260f90`; **W-pool merged `507f7bf4a`**). Local branch, **UNPUSHED**.
-Gascity Dolt is local-only — **`git push` only**, never `bd dolt push`.
+**As of:** migration branch `refactor/store-domain-objects`, tip **`e0c186205`**
+(W-tick `1d0260f90`; W-pool `507f7bf4a`; **W-delete merged `e0c186205`**). Local branch,
+**UNPUSHED**. Gascity Dolt is local-only — **`git push` only**, never `bd dolt push`.
 
 ## The goal (one paragraph)
 Stores return typed **domain objects**; raw `beads.Bead` must not flow through business
@@ -28,38 +28,31 @@ Full wave-by-wave status + every merge SHA is in **`work-items.md`** (WI-6 secti
 "Corrected remaining endgame" block). Designs: **`tickfeed-design.md`** (the remaining
 W-pool→W-unexport plan — AUTHORITATIVE), `remainder-design.md` (R1–R5), `r6-finding-tickfeed-keystone.md`.
 
-## What REMAINS — 3 waves (see `tickfeed-design.md` §3 for the spec)
-0. ~~**W-pool**~~ ✅ DONE (merge `507f7bf4a`): typed create front door `session.Store.CreateSessionInfo`
-   + flipped selection/normalize/reuse cluster + `snapshot.add`→`addInfo`; `build_desired_state`
-   `InfoFromPersistedBead` 2→0. Red-team fix: `snapshotOrLoadSessionBeads` skew reload (raw half
-   stale after same-cycle `addInfo` → poolSlot-0 duplicate mint), pinned load-bearing. **New gotcha
-   for W-delete:** the raw `open` half is now kept coherent for sync ONLY via that skew reload — when
-   W-delete deletes the raw half, the skew check + `snapshotOrLoadSessionBeads`'s raw-half branch
-   retire with it (sync reads the store/typed feed directly).
-1. **W-delete** (MED, falls out) — delete the raw `sessionBeadSnapshot` half (`Open()`/`FindByID`/
-   `newSessionBeadSnapshot(beads)`/the raw `open` slice) after W-pool frees it; flip
-   `loadSessionBeadSnapshot` to build from Info; zero `session_bead_snapshot` `InfoFromPersistedBead`
-   (3→0), `session_hash` (1→0), `session_logs_resolve` (2→0 via an `Info.AwakeStartedAt` field-add +
-   ResolveCodexTranscriptBySessionOrder→[]Info). `sessionBeadSnapshotFingerprint` is NOT Info-projectable
-   (hashes ALL metadata keys) — compute it at snapshot construction (edge). One flagged behavior delta:
-   sync-tail re-list.
-3. **W-flip** (§5b) — front-door flip: `cmd/gc/class_store.go` + `internal/api` State accessors flip from
-   `beads.XStore` wrappers to domain-store front doors, built from the `resolve*Store` outputs (preserve
-   the #4017 capability assertions). Migrates `cmd_session.go:cmdSessionKill` + `internal/api/session_resolution.go`
-   + the permission-mode raw lane. **Every moved read must bridge the front-door-Get contract (below).**
-4. **W-unexport** (§5e) — unexport `InfoFromPersistedBead` → `infoFromPersistedBead` (compiler boundary;
-   reachable after W-tick+W-delete+W-flip drive it to true interior zero) + the all-zero tripwires; reimplement
-   `catalog.GetWithPersistedResponse` over `Store.GetPersistedResponse`+`EnrichInfo` so its needle zeroes;
-   convert the WI-0 ratchet rows to permanent zero-pins.
+## What REMAINS — 2 waves (see `tickfeed-design.md` §3 for the spec)
+✅ DONE: **W-pool** (`507f7bf4a`, `build_desired_state` IFP 2→0 + skew-reload fix) · **W-delete**
+(`e0c186205`, raw-half deleted; `session_bead_snapshot`/`session_hash`/`session_logs_resolve`/`cmd_stop`/
+`doctor` census zeros; edge-side fingerprint; `Info.AwakeStartedAt`+`Info.UsageComputeEmittedAt`).
+1. **W-flip** (§5b, §4 residual table) — front-door flip: `cmd/gc/class_store.go` + `internal/api` State
+   accessors flip from `beads.XStore` wrappers to domain-store front doors, built from the `resolve*Store`
+   outputs (preserve the #4017 capability assertions). Zeros the **last two interior `InfoFromPersistedBead`
+   sites**: `cmd_session.go:cmdSessionKill` (raw `sessStore.Get`+codec → session front-door Get→Info; its
+   own census comment defers it here) and `internal/api/session_resolution.go` (raw retire lane over
+   `ExactMetadataSessionCandidates` → an Info-returning sibling; the lane needs only `SessionNameMetadata`).
+   Also the WI-6 W2 permission-mode raw lane (`huma_handlers_sessions_command.go:updateSessionPermissionMode`).
+   **Every moved read MUST bridge the front-door-Get contract (below).** After W-flip: interior
+   `InfoFromPersistedBead` = **0 across all scan dirs**.
+2. **W-unexport** (§5e) — unexport `InfoFromPersistedBead` → `infoFromPersistedBead` (compiler boundary;
+   reachable after W-flip drives it to true interior zero) + the all-zero tripwires (`PollerKeyFromBead`,
+   `PersistedResponseFromBead`, etc.); reimplement `catalog.GetWithPersistedResponse` over
+   `Store.GetPersistedResponse`+`EnrichInfo` so its needle zeroes; convert the WI-0 ratchet rows to
+   permanent zero-pins. **STAYS exported (honest):** `ListAllSessionBeads` (`session_beads.go:1` sync/beadmail
+   floor — W-sync, out of budget); orders codecs `RunFromTrackingBead`/`MaxSeqFromLabels` (WI-3).
 
-## Current census (green at `23a0e2d43`) — the remaining tail
+## Current census (green at `e0c186205`) — the remaining tail
 ```
-InfoFromPersistedBead(:  cmd_session 1, cmd_stop 1,
-                         session_bead_snapshot 3, session_hash 1,
-                         session_logs_resolve 2, internal/api/session_resolution 1   (= 9, → 0 after W-delete+W-flip;
-                         build_desired_state 2→0 DONE in W-pool)
-ListAllSessionBeads(:    doctor_session_model 1, session_bead_snapshot 1, session_beads 1
-                         (→ stays PINNED at ~1: sync internals + internal/mail/beadmail compile dep;
+InfoFromPersistedBead(:  cmd_session 1, internal/api/session_resolution 1   (= 2, → 0 after W-flip; W-pool+W-delete DONE)
+ListAllSessionBeads(:    session_beads 1
+                         (→ stays PINNED at 1: sync internals + internal/mail/beadmail compile dep;
                           full sync-typing is a separate out-of-budget "W-sync" wave — HONEST, documented)
 GetWithPersistedResponse(: internal/worker/catalog 1   (→ 0 in W-unexport)
 RunFromTrackingBead( 1 / MaxSeqFromLabels( 2:  ORDERS residuals, gated on deferred WI-3 two-class graph wiring — NOT this endgame.
