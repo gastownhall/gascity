@@ -3,8 +3,6 @@ package main
 import (
 	"testing"
 	"time"
-
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterval
@@ -19,35 +17,28 @@ import (
 // fails on parent and passes after the fix.
 func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterval(t *testing.T) {
 	env := newReconcilerTestEnv()
-	session := env.createSessionBead("worker", "worker")
+	sess := env.createSessionInfo("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	first, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after first: %v", err)
-	}
-	firstStamp := first.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]
+	first := env.sessionInfo(sess.ID)
+	firstStamp := first.AttachedConfigDriftDeferredAt
 	if firstStamp == "" {
 		t.Fatal("first call must stamp deferred_at")
 	}
-	if first.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
-		t.Fatalf("first key = %q, want %q", first.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata], driftKey)
+	if first.AttachedConfigDriftDeferredKey != driftKey {
+		t.Fatalf("first key = %q, want %q", first.AttachedConfigDriftDeferredKey, driftKey)
 	}
 
 	// Advance the clock well within the refresh interval (2m; advance 5s).
 	env.clk.Time = env.clk.Time.Add(5 * time.Second)
 
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(first), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(first, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
-	second, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after second: %v", err)
-	}
-	secondStamp := second.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]
+	secondStamp := env.sessionInfo(sess.ID).AttachedConfigDriftDeferredAt
 	if secondStamp != firstStamp {
 		t.Fatalf("deferred_at must not be re-stamped within the refresh interval; got %q want unchanged %q",
 			secondStamp, firstStamp)
@@ -60,31 +51,24 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterva
 // genuinely new drift.
 func TestRecordSessionAttachedConfigDriftDeferral_RewritesWhenKeyChanges(t *testing.T) {
 	env := newReconcilerTestEnv()
-	session := env.createSessionBead("worker", "worker")
+	sess := env.createSessionInfo("worker", "worker")
 
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, "key-A"); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, "key-A"); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	first, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after first: %v", err)
-	}
-	firstStamp := first.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]
+	first := env.sessionInfo(sess.ID)
+	firstStamp := first.AttachedConfigDriftDeferredAt
 
 	env.clk.Time = env.clk.Time.Add(5 * time.Second)
 
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(first), sessionFrontDoor(env.store), env.clk, "key-B"); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(first, sessionFrontDoor(env.store), env.clk, "key-B"); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
-	second, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after second: %v", err)
+	second := env.sessionInfo(sess.ID)
+	if second.AttachedConfigDriftDeferredKey != "key-B" {
+		t.Fatalf("key after key-change call = %q, want key-B", second.AttachedConfigDriftDeferredKey)
 	}
-	if second.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] != "key-B" {
-		t.Fatalf("key after key-change call = %q, want key-B",
-			second.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata])
-	}
-	if second.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == firstStamp {
+	if second.AttachedConfigDriftDeferredAt == firstStamp {
 		t.Fatalf("deferred_at must be re-stamped on key change; got unchanged %q", firstStamp)
 	}
 }
@@ -102,17 +86,14 @@ func TestRecordSessionAttachedConfigDriftDeferral_RewritesWhenKeyChanges(t *test
 // after the fix.
 func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *testing.T) {
 	env := newReconcilerTestEnv()
-	session := env.createSessionBead("worker", "worker")
+	sess := env.createSessionInfo("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	first, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after first: %v", err)
-	}
-	firstStamp := first.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]
+	first := env.sessionInfo(sess.ID)
+	firstStamp := first.AttachedConfigDriftDeferredAt
 
 	// Simulate many reconciler ticks at the default 30s patrol interval, all
 	// well within the refresh interval. None of them may rewrite the stamp.
@@ -120,14 +101,11 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *t
 	cur := first
 	for elapsed := patrol; elapsed < sessionAttachedConfigDriftRefreshInterval; elapsed += patrol {
 		env.clk.Time = env.clk.Time.Add(patrol)
-		if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(cur), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+		if err := recordSessionAttachedConfigDriftDeferral(cur, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("record at +%s: %v", elapsed, err)
 		}
-		cur, err = env.store.Get(session.ID)
-		if err != nil {
-			t.Fatalf("get at +%s: %v", elapsed, err)
-		}
-		if got := cur.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]; got != firstStamp {
+		cur = env.sessionInfo(sess.ID)
+		if got := cur.AttachedConfigDriftDeferredAt; got != firstStamp {
 			t.Fatalf("deferred_at re-stamped at +%s (got %q, want unchanged %q) — per-tick churn not eliminated",
 				elapsed, got, firstStamp)
 		}
@@ -136,14 +114,10 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *t
 	// Once the existing stamp is older than the refresh interval, the next call
 	// refreshes it so the deferral cannot age out of the false-negative window.
 	env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftRefreshInterval + time.Second)
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(cur), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(cur, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("refresh record: %v", err)
 	}
-	refreshed, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after refresh: %v", err)
-	}
-	if refreshed.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == firstStamp {
+	if env.sessionInfo(sess.ID).AttachedConfigDriftDeferredAt == firstStamp {
 		t.Fatalf("deferred_at must be refreshed past the refresh interval; got unchanged %q", firstStamp)
 	}
 }
@@ -164,29 +138,23 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 	}
 
 	env := newReconcilerTestEnv()
-	session := env.createSessionBead("worker", "worker")
+	sess := env.createSessionInfo("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	stamped, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	stamped := env.sessionInfo(sess.ID)
 
 	// Just below the refresh interval: record() skips the rewrite. The reader
 	// must still consider the deferral valid (this is the whole point of the
 	// decoupling — a skipped refresh cannot create a false-negative gap).
 	env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftRefreshInterval - time.Second)
-	if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(stamped), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+	if err := recordSessionAttachedConfigDriftDeferral(stamped, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 		t.Fatalf("record near refresh boundary: %v", err)
 	}
-	afterSkip, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get after skip: %v", err)
-	}
-	if !recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(afterSkip), env.clk, driftKey) {
+	afterSkip := env.sessionInfo(sess.ID)
+	if !recentlyDeferredSessionAttachedConfigDrift(afterSkip, env.clk, driftKey) {
 		t.Fatal("deferral must read as valid just below the refresh interval (un-refreshed stamp)")
 	}
 
@@ -194,22 +162,14 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 	// original stamp): the reader must still treat it as valid — proving the
 	// window the reader uses really is the 5m limit, not the old 30s value.
 	env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftFalseNegativeLimit - sessionAttachedConfigDriftRefreshInterval - time.Second)
-	stillValid, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get near validity boundary: %v", err)
-	}
-	if !recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(stillValid), env.clk, driftKey) {
+	if !recentlyDeferredSessionAttachedConfigDrift(env.sessionInfo(sess.ID), env.clk, driftKey) {
 		t.Fatal("deferral must read as valid just below the false-negative limit")
 	}
 
 	// Past the validity limit with no refresh: the reader must now treat it as
 	// lapsed (so genuine post-detach drift can proceed).
 	env.clk.Time = env.clk.Time.Add(2 * time.Second)
-	lapsed, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("get past validity: %v", err)
-	}
-	if recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(lapsed), env.clk, driftKey) {
+	if recentlyDeferredSessionAttachedConfigDrift(env.sessionInfo(sess.ID), env.clk, driftKey) {
 		t.Fatal("deferral must read as lapsed past the false-negative limit")
 	}
 }
@@ -248,33 +208,27 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 
 		// Behavioral guard: drive the real reader at exactly the worst-case age.
 		env := newReconcilerTestEnv()
-		session := env.createSessionBead("worker", "worker")
-		if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+		sess := env.createSessionInfo("worker", "worker")
+		if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("patrol=%s: record: %v", patrol, err)
 		}
-		stamped, err := env.store.Get(session.ID)
-		if err != nil {
-			t.Fatalf("patrol=%s: get: %v", patrol, err)
-		}
-		stamp0 := stamped.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]
+		stamped := env.sessionInfo(sess.ID)
+		stamp0 := stamped.AttachedConfigDriftDeferredAt
 
 		// Tick at age just under the refresh interval: record() must SKIP (stamp unchanged).
 		env.clk.Time = env.clk.Time.Add(sessionAttachedConfigDriftRefreshInterval - time.Second)
-		if err := recordSessionAttachedConfigDriftDeferral(sessionpkg.InfoFromPersistedBead(stamped), sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
+		if err := recordSessionAttachedConfigDriftDeferral(stamped, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("patrol=%s: record near refresh boundary: %v", patrol, err)
 		}
-		afterSkip, err := env.store.Get(session.ID)
-		if err != nil {
-			t.Fatalf("patrol=%s: get after skip: %v", patrol, err)
-		}
-		if afterSkip.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] != stamp0 {
+		afterSkip := env.sessionInfo(sess.ID)
+		if afterSkip.AttachedConfigDriftDeferredAt != stamp0 {
 			t.Fatalf("patrol=%s: stamp must be unchanged just under the refresh interval", patrol)
 		}
 
 		// One patrol tick later attachment flickers detached: total age is now
 		// (refreshInterval - 1s) + patrol < worst. The reader must still hold.
 		env.clk.Time = env.clk.Time.Add(patrol)
-		if !recentlyDeferredSessionAttachedConfigDrift(sessionpkg.InfoFromPersistedBead(afterSkip), env.clk, driftKey) {
+		if !recentlyDeferredSessionAttachedConfigDrift(afterSkip, env.clk, driftKey) {
 			t.Fatalf("patrol=%s: deferral must read as valid at age refreshInterval+patrol "+
 				"(skipped refresh then flicker) or a still-attached session is drained", patrol)
 		}
