@@ -80,7 +80,13 @@ var typedClassCodecNeedles = []codecNeedle{
 	{"sessions", "ListSessionWaitBeads(", "session.Store.ListWaits (internal/session)"},
 	{"sessions", "PersistedResponseFromBead(", "session.Store.GetPersistedResponse (internal/session/persisted_response.go)"},
 	{"sessions", "ListFullFromBeads(", "session.Store.ListAll + Manager.ListFromInfos (internal/session)"},
-	{"sessions", "GetWithPersistedResponse(", "session.Store.GetPersistedResponse + Manager.EnrichInfo (internal/session)"},
+	// GetWithPersistedResponse( needle RETIRED in WI-7 W-unexport: the
+	// raw-cracking Manager.GetWithPersistedResponse was retired long ago, and the
+	// surviving same-named worker method (a clean Store.GetPersistedResponse +
+	// EnrichInfo composition, NOT a codec crack) was DELETED as dead code — its
+	// only reader was gone, and the canonical worker read is
+	// worker.sessionRecordViaManager. No interior GetWithPersistedResponse(
+	// call site remains, so the tripwire has nothing left to police.
 	{"sessions", "GetBeadWithInfo(", "session.Store.GetPersistedResponse (internal/session; the transitional raw+Info single-fetch escape, retired + deleted in WI-6 R4 — all-zero tripwire)"},
 	{"sessions", "GetWithBead(", "session.Store.GetPersistedResponse / worker.Factory.SessionByHandle (internal/session, internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
 	{"sessions", "SessionByLoadedBead(", "worker.Factory.SessionByRecord (internal/worker; retired in WI-6 W3 — all-zero tripwire)"},
@@ -130,28 +136,23 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // carry no entry. Regenerate by running this test with the map empty and pasting
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
-	"InfoFromPersistedBead(": {
-		// WI-7 W-delete zeroed four periphery rows: session_bead_snapshot (3→0, the
-		// raw-half deletion — loadSessionBeadSnapshot builds from the typed
-		// ReconcileSession feed via ListAllForReconcileWithFingerprint), cmd_stop (1→0,
-		// markCityStopSessionSleepReason → Store.ListLabeledSessionInfosUnfiltered),
-		// session_hash (1→0, the alias-change rebaseline lane takes a bridged front-door
-		// Get → sessionCoreConfigForHashInfo), and session_logs_resolve (2→0, the
-		// transcript resolver + fallback siblings took []Info via the Info.AwakeStartedAt
-		// field-add + Store.ListByMetadataInfos). The two survivors are the WI-7 W-flip
-		// front-door sites:
-		//
-		// cmd_session is cmdSessionKill's raw store.Get + codec, a CLI front-door-Get flip
-		// deferred to the WI-7 front-door migration (W-flip / §5b/§6).
-		"cmd/gc/cmd_session.go": 1,
-		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop is a
-		// genuine WI-7-era raw retire lane (bead already in hand from the raw
-		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and
-		// confined to that edge — recorded here rather than gamed to zero by inlining the
-		// b.Metadata["session_name"] key. Retires with the named_config raw surfaces in
-		// WI-7 W-flip.
-		"internal/api/session_resolution.go": 1,
-	},
+	// InfoFromPersistedBead( is now a PERMANENT INTERIOR ZERO across all four scan
+	// dirs (no census entry). WI-7 W-flip zeroed the last two interior sites:
+	// cmd_session (cmdSessionKill's raw store.Get + codec → sessionFrontDoor(sessStore).Get
+	// with the best-effort front-door-Get bridge), and internal/api/session_resolution
+	// (the retire lane → session.ExactMetadataSessionCandidatesInfo + the exported Info
+	// classifiers IsNamedSessionInfo / NamedSessionIdentityInfo /
+	// NamedSessionInfoContinuityEligible / LifecycleIdentityReleasedInfo, reading
+	// info.SessionNameMetadata directly — no b.Metadata key inlined). The needle stays
+	// policed as a permanent zero-pin tripwire. The codec is NOT yet unexported: it is
+	// referenced as a fixture constructor by 444 external CALL sites across 51 external
+	// _test.go files (cmd/gc: 49, internal/api: 1, internal/worker: 1) that cannot see
+	// the unexported name. Repo-wide the codec appears in ~537 _test.go occurrences
+	// across 70 files; the extra ~58 are internal/session's own in-package tests (they
+	// rename trivially WITH the codec, so they do not block), plus comment-only mentions
+	// (e.g. internal/beads). The interior-only census (non-test scan) does not police any
+	// of these; migrating the 51 external files off the exported codec is a separate
+	// out-of-budget wave (see the endgame report).
 	"ListAllSessionBeads(": {
 		// WI-7 W-delete zeroed session_bead_snapshot (1→0, the raw-half load edge flipped
 		// to ListAllForReconcile) and doctor_session_model (1→0, doctor issues its own two
@@ -162,9 +163,6 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// typing is a separate out-of-budget W-sync wave (see tickfeed-design §3
 		// W-unexport).
 		"cmd/gc/session_beads.go": 1,
-	},
-	"GetWithPersistedResponse(": {
-		"internal/worker/catalog.go": 1,
 	},
 	// ResolveSessionBeadByExactID( is now all-zero in the interior: the
 	// worker-boundary resolve+construct site moved to ResolveSessionRecordByExactID

@@ -17,9 +17,6 @@ type (
 	SessionPruneResult = sessionpkg.PruneResult
 	// SessionSubmissionCapabilities describes submit/nudge support for a session.
 	SessionSubmissionCapabilities = sessionpkg.SubmissionCapabilities
-	// SessionPersistedResponse carries the persisted half of a session's API
-	// response (status + metadata) projected from the session bead.
-	SessionPersistedResponse = sessionpkg.PersistedResponse
 )
 
 // SessionCatalog exposes worker-owned session discovery and maintenance
@@ -44,19 +41,6 @@ func (c *SessionCatalog) List(stateFilter, templateFilter string) ([]SessionInfo
 // Get loads one session by ID.
 func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 	return c.manager.Get(id)
-}
-
-// GetWithPersistedResponse loads one session by ID, returning the
-// runtime-enriched Info plus the persisted-response projection (status +
-// metadata) in a single fetch. It composes the persisted read
-// (session.Store.GetPersistedResponse) with the runtime overlay
-// (Manager.EnrichInfo) — the read-model shape — rather than cracking the raw
-// bead, preserving the read-path empty-type heal (RepairType writes only when
-// the type is empty). Errors surface in the session.Store form
-// (ErrSessionNotFound / "loading session %q"); callers that need the HTTP error
-// contract bridge them at their boundary.
-func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, SessionPersistedResponse, error) {
-	return sessionRecordViaManager(c.manager, id)
 }
 
 // sessionRecordViaManager is the canonical worker-boundary session read: it

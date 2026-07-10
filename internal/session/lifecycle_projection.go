@@ -527,6 +527,32 @@ func LifecycleIdentifiersReleased(metadata map[string]string) bool {
 		strings.TrimSpace(metadata["session_name_explicit"]) == ""
 }
 
+// LifecycleIdentityReleasedInfo is the session.Info twin of
+// LifecycleIdentityReleased: it projects the lifecycle off an already-projected
+// session.Info (via LifecycleInputFromInfo) and reads the identifier markers off
+// Info, so the retire lane can run over the typed candidate feed without
+// re-cracking the raw bead. For any info == InfoFromPersistedBead(b) it equals
+// LifecycleIdentityReleased(b.Status, b.Metadata) — LifecycleInputFromInfo
+// reconstructs the only status fact the projection consumes (closed) from
+// Info.Closed, and LifecycleIdentifiersReleasedInfo mirrors the three identifier
+// keys. TestLifecycleIdentityReleasedInfoEquivalence pins that equivalence and
+// asserts both gates directly so a mutation of either fails.
+func LifecycleIdentityReleasedInfo(info Info) bool {
+	view := ProjectLifecycle(LifecycleInputFromInfo(info))
+	return !view.ContinuityEligible && LifecycleIdentifiersReleasedInfo(info)
+}
+
+// LifecycleIdentifiersReleasedInfo is the session.Info twin of
+// LifecycleIdentifiersReleased: it reads the same three user-facing identity
+// markers (alias, session_name, session_name_explicit) off Info (Info.Alias,
+// Info.SessionNameMetadata, Info.SessionNameExplicit) instead of a raw metadata
+// map. TestLifecycleIdentifiersReleasedInfoEquivalence pins the byte-identity.
+func LifecycleIdentifiersReleasedInfo(info Info) bool {
+	return strings.TrimSpace(info.Alias) == "" &&
+		strings.TrimSpace(info.SessionNameMetadata) == "" &&
+		strings.TrimSpace(info.SessionNameExplicit) == ""
+}
+
 // ProjectLifecycle projects raw session metadata plus external facts into the
 // lifecycle vocabulary from the session model design.
 func ProjectLifecycle(input LifecycleInput) LifecycleView {
