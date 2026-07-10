@@ -132,19 +132,7 @@ func (c *Client) Whoami(ctx context.Context, token string) (User, error) {
 		return User{}, fmt.Errorf("checking login: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var payload struct {
-		User struct {
-			ID          string `json:"id"`
-			Handle      string `json:"handle"`
-			DisplayName string `json:"display_name"`
-		} `json:"user"`
-		Message string            `json:"message"`
-		Links   map[string]string `json:"links"`
-		Error   struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
+	var payload meResponse
 	if err := decodeJSONResponse(resp, &payload); err != nil {
 		return User{}, fmt.Errorf("checking login: %w", err)
 	}
@@ -164,12 +152,6 @@ func (c *Client) Whoami(ctx context.Context, token string) (User, error) {
 		Message:     payload.Message,
 		Links:       payload.Links,
 	}, nil
-}
-
-type browserLoginResult struct {
-	Token   string `json:"token"`
-	Service string `json:"service"`
-	State   string `json:"state"`
 }
 
 func (c *Client) browserLogin(ctx context.Context, label string, openBrowser bool) (string, error) {
@@ -310,18 +292,7 @@ func (c *Client) deviceLogin(ctx context.Context, label string) (string, error) 
 		return "", fmt.Errorf("requesting device login: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var code struct {
-		DeviceCode              string `json:"device_code"`
-		UserCode                string `json:"user_code"`
-		VerificationURI         string `json:"verification_uri"`
-		VerificationURIComplete string `json:"verification_uri_complete"`
-		ExpiresIn               int    `json:"expires_in"`
-		Interval                int    `json:"interval"`
-		Error                   struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
+	var code deviceCodeResponse
 	if err := decodeJSONResponse(resp, &code); err != nil {
 		return "", fmt.Errorf("requesting device login: %w", err)
 	}
@@ -385,12 +356,7 @@ func (c *Client) pollDeviceToken(ctx context.Context, deviceCode string) (token 
 		return "", 0, false, fmt.Errorf("polling device login: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var payload struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		Error       string `json:"error"`
-		Interval    int    `json:"interval"`
-	}
+	var payload deviceTokenResponse
 	if err := decodeJSONResponse(resp, &payload); err != nil {
 		return "", 0, false, fmt.Errorf("polling device login: %w", err)
 	}
