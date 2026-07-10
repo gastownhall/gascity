@@ -50,6 +50,7 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
+| [gc login](#gc-login) | Log in to a hosted Gas City service |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
@@ -78,6 +79,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
 
 ## gc agent
 
@@ -2023,6 +2025,28 @@ gc lint <pack> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit structured JSON report |
+
+## gc login
+
+Log in to a hosted Gas City service and store a local API token.
+
+By default this targets https://gascity.com; pass --at &lt;url&gt; to log in to
+any server that implements the Gas City Service Protocol v0. It opens a browser
+to sign in; use --device for headless shells, or --token to store an existing
+token. The token is stored per service under ~/.gc/credentials.json.
+
+```
+gc login [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
+| `--device` | bool |  | use device-code login instead of browser callback login |
+| `--label` | string | `ubuntu@cherry` | label for the minted token |
+| `--no-browser` | bool |  | print the browser login URL instead of opening it |
+| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
+| `--token` | string |  | existing API token to store; defaults to GC_SERVICE_TOKEN |
 
 ## gc mail
 
@@ -4427,3 +4451,16 @@ gc wait ready <wait-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc whoami
+
+Show the authenticated hosted Gas City account
+
+```
+gc whoami [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
+| `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |
