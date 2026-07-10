@@ -62,7 +62,7 @@ func BenchmarkLoadSessionBeadSnapshot_LargeStore(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if got := len(snap.Open()); got != 50 {
+		if got := len(snap.OpenInfos()); got != 50 {
 			b.Fatalf("Open()=%d, want 50", got)
 		}
 	}
@@ -80,7 +80,7 @@ func BenchmarkLoadSessionBeadSnapshot_OpenOnlyBaseline(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if got := len(snap.Open()); got != 50 {
+		if got := len(snap.OpenInfos()); got != 50 {
 			b.Fatalf("Open()=%d, want 50", got)
 		}
 	}
@@ -132,7 +132,7 @@ func TestLoadSessionBeadSnapshot_IncludesTypedBeadsWithoutLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
-	if got := len(snap.Open()); got != 2 {
+	if got := len(snap.OpenInfos()); got != 2 {
 		t.Fatalf("Open()=%d, want 2 (labelless + labeled session beads)", got)
 	}
 	if got := snap.FindSessionNameByTemplate("beads/reviewer"); got != "beads--reviewer" {
@@ -162,20 +162,22 @@ func TestLoadSessionBeadSnapshot_DeduplicatesAcrossQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
-	if got := len(snap.Open()); got != 1 {
+	if got := len(snap.OpenInfos()); got != 1 {
 		t.Fatalf("Open()=%d, want 1 — bead matching both queries must dedup", got)
 	}
 }
 
-// TestSessionBeadSnapshotConstructorInfoEquivalence is the LOAD-BEARING pin for
-// WI-6 W4: newSessionBeadSnapshotFromInfos (the typed front-door constructor)
-// must build byte-identical index maps to newSessionBeadSnapshot (the raw-bead
-// constructor whose precedence is the reference) across a corpus that exercises
-// every precedence branch. An index-map precedence bug strands named sessions
-// invisibly — a leaked pool bead beats the canonical named bead, or a label-lost
-// typed bead never indexes — so this comparison, not a downstream behavior test,
-// is where such a divergence is caught.
-func TestSessionBeadSnapshotConstructorInfoEquivalence(t *testing.T) {
+// TestSessionBeadSnapshotFromReconcileRowsIndexPrecedence is the LOAD-BEARING,
+// PERMANENT index-precedence characterization of newSessionBeadSnapshotFromReconcileRows
+// — the reconciler-tick constructor and (via the test helper) the reference for every
+// snapshot built from beads. It is the WI-7 W-delete successor to the raw-vs-Info
+// constructor-equivalence pin: the raw constructor retired with the snapshot's raw
+// half, so instead of comparing two constructors this asserts the exact index maps
+// directly. An index-map precedence bug strands named sessions invisibly — a leaked
+// pool bead beats the canonical named bead, or a label-lost typed bead never indexes —
+// so this is where such a divergence is caught. The 12-branch corpus is preserved from
+// the retired pin; only the reference constructor changed.
+func TestSessionBeadSnapshotFromReconcileRowsIndexPrecedence(t *testing.T) {
 	corpus := []beads.Bead{
 		// Canonical configured_named bead for template "mayor": must win the
 		// agent AND template index over the leaked pool bead below.
@@ -305,57 +307,77 @@ func TestSessionBeadSnapshotConstructorInfoEquivalence(t *testing.T) {
 		},
 	}
 
-	beadSnap := newSessionBeadSnapshot(corpus)
+	snap := newSessionBeadSnapshotFromReconcileRows(session.ReconcileRowsFromBeads(corpus))
 
-	infos := make([]session.Info, 0, len(corpus))
-	for _, b := range corpus {
-		infos = append(infos, session.InfoFromPersistedBead(b))
+	// The EXACT index maps every precedence branch of the corpus must produce.
+	// Hand-derived from the documented rules: canonical named beats leaked pool at
+	// the agent+template index (ga-named-mayor over ga-leaked-mayor, which clears its
+	// agentName and indexes nothing); a slotted pool bead's agentName is rewritten to
+	// its stamped qualified instance (frontend/worker-2) and it skips the template
+	// index; agent: label fallback (labeled/one); a label-lost typed bead still
+	// indexes by template (beads/reviewer -> ga-labellost); no-session_name indexes
+	// nothing; the later canonical bead overrides the earlier non-canonical one at
+	// both indices (dup-agent/dup -> ga-dup-canonical); the closed bead is excluded.
+	wantBeadIDByAgentName := map[string]string{
+		"mayor":             "ga-named-mayor",
+		"frontend/worker-2": "ga-pool-slot",
+		"recon/scout":       "ga-scout",
+		"labeled/one":       "ga-labelagent",
+		"dup-agent":         "ga-dup-canonical",
 	}
-	infoSnap := newSessionBeadSnapshotFromInfos(infos)
+	wantSessionNameByAgentName := map[string]string{
+		"mayor":             "mayor",
+		"frontend/worker-2": "s-worker-2",
+		"recon/scout":       "s-scout",
+		"labeled/one":       "s-labeled",
+		"dup-agent":         "s-dup-canonical",
+	}
+	wantBeadIDByTemplateHint := map[string]string{
+		"mayor":          "ga-named-mayor",
+		"scout":          "ga-scout",
+		"scout-common":   "ga-scout",
+		"labeled":        "ga-labelagent",
+		"beads/reviewer": "ga-labellost",
+		"dup":            "ga-dup-canonical",
+	}
+	wantSessionNameByTemplateHint := map[string]string{
+		"mayor":          "mayor",
+		"scout":          "s-scout",
+		"scout-common":   "s-scout",
+		"labeled":        "s-labeled",
+		"beads/reviewer": "beads--reviewer",
+		"dup":            "s-dup-canonical",
+	}
 
-	if !reflect.DeepEqual(infoSnap.beadIDByAgentName, beadSnap.beadIDByAgentName) {
-		t.Errorf("beadIDByAgentName mismatch:\ninfo=%v\nbead=%v", infoSnap.beadIDByAgentName, beadSnap.beadIDByAgentName)
+	if !reflect.DeepEqual(snap.beadIDByAgentName, wantBeadIDByAgentName) {
+		t.Errorf("beadIDByAgentName:\n got=%v\nwant=%v", snap.beadIDByAgentName, wantBeadIDByAgentName)
 	}
-	if !reflect.DeepEqual(infoSnap.beadIDByTemplateHint, beadSnap.beadIDByTemplateHint) {
-		t.Errorf("beadIDByTemplateHint mismatch:\ninfo=%v\nbead=%v", infoSnap.beadIDByTemplateHint, beadSnap.beadIDByTemplateHint)
+	if !reflect.DeepEqual(snap.sessionNameByAgentName, wantSessionNameByAgentName) {
+		t.Errorf("sessionNameByAgentName:\n got=%v\nwant=%v", snap.sessionNameByAgentName, wantSessionNameByAgentName)
 	}
-	if !reflect.DeepEqual(infoSnap.sessionNameByAgentName, beadSnap.sessionNameByAgentName) {
-		t.Errorf("sessionNameByAgentName mismatch:\ninfo=%v\nbead=%v", infoSnap.sessionNameByAgentName, beadSnap.sessionNameByAgentName)
+	if !reflect.DeepEqual(snap.beadIDByTemplateHint, wantBeadIDByTemplateHint) {
+		t.Errorf("beadIDByTemplateHint:\n got=%v\nwant=%v", snap.beadIDByTemplateHint, wantBeadIDByTemplateHint)
 	}
-	if !reflect.DeepEqual(infoSnap.sessionNameByTemplateHint, beadSnap.sessionNameByTemplateHint) {
-		t.Errorf("sessionNameByTemplateHint mismatch:\ninfo=%v\nbead=%v", infoSnap.sessionNameByTemplateHint, beadSnap.sessionNameByTemplateHint)
+	if !reflect.DeepEqual(snap.sessionNameByTemplateHint, wantSessionNameByTemplateHint) {
+		t.Errorf("sessionNameByTemplateHint:\n got=%v\nwant=%v", snap.sessionNameByTemplateHint, wantSessionNameByTemplateHint)
 	}
-	if len(infoSnap.openInfos) != len(beadSnap.openInfos) {
-		t.Fatalf("openInfos length: info=%d bead=%d", len(infoSnap.openInfos), len(beadSnap.openInfos))
-	}
-	for i := range infoSnap.openInfos {
-		if !reflect.DeepEqual(infoSnap.openInfos[i], beadSnap.openInfos[i]) {
-			t.Errorf("openInfos[%d] mismatch:\ninfo=%+v\nbead=%+v", i, infoSnap.openInfos[i], beadSnap.openInfos[i])
-		}
+	// The closed bead (ga-closed) is excluded; the 9 open beads remain in openInfos.
+	if got := len(snap.openInfos); got != 9 {
+		t.Fatalf("openInfos length = %d, want 9 (10 beads minus the closed one)", got)
 	}
 
-	// Guard the corpus actually exercises the canonical-override precedence: the
-	// canonical bead (ga-dup-canonical) must win over the earlier non-canonical
-	// bead (ga-dup-first) at BOTH the agent and template index. If it ever stops
-	// (both constructors would agree on the wrong answer, still matching above),
-	// this fails loudly.
-	if got := beadSnap.sessionNameByAgentName["dup-agent"]; got != "s-dup-canonical" {
-		t.Fatalf("corpus no longer exercises agent canonical-override: sessionNameByAgentName[dup-agent]=%q, want s-dup-canonical", got)
-	}
-	if got := beadSnap.sessionNameByTemplateHint["dup"]; got != "s-dup-canonical" {
-		t.Fatalf("corpus no longer exercises template canonical-override: sessionNameByTemplateHint[dup]=%q, want s-dup-canonical", got)
-	}
-	if got := beadSnap.FindSessionNameByTemplate("mayor"); got != "mayor" {
-		t.Fatalf("corpus no longer exercises canonical-wins precedence: FindSessionNameByTemplate(mayor)=%q, want mayor", got)
+	// The canonical-wins precedence is the headline invariant: the leaked pool bead
+	// must NOT strand the canonical named session.
+	if got := snap.FindSessionNameByTemplate("mayor"); got != "mayor" {
+		t.Fatalf("FindSessionNameByTemplate(mayor)=%q, want mayor (canonical must win over the leaked pool bead)", got)
 	}
 }
 
-// TestSessionBeadSnapshotFromInfosTypedLookups pins the WI-6 W4 nit-1 fix: an
-// Info-built snapshot (raw open slice nil) must still answer the typed FindInfo*
-// lookups from openInfos + the index maps. Against the pre-fix code — where
-// findInfoByIDLocked / FindInfoByNamedIdentity scanned the nil open slice — every
-// assertion below returned (Info{}, false), silently stranding a future
-// Get-projection sweep built on this constructor.
+// TestSessionBeadSnapshotFromInfosTypedLookups pins that an Info-built snapshot
+// answers the typed FindInfo* lookups from openInfos + the index maps. Against the
+// pre-fix code — where findInfoByIDLocked / FindInfoByNamedIdentity scanned a
+// then-existing raw slice — every assertion below returned (Info{}, false), silently
+// stranding a Get-projection sweep built on this constructor.
 func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
 	seed := session.InfoFromPersistedBead(beads.Bead{
 		ID:     "ga-named-reviewer",
@@ -369,11 +391,6 @@ func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
 		},
 	})
 	snap := newSessionBeadSnapshotFromInfos([]session.Info{seed})
-
-	// Precondition: this is genuinely the nil-open (Info-built) shape the fix targets.
-	if snap.open != nil {
-		t.Fatalf("Info-built snapshot must leave open nil, got %d beads", len(snap.open))
-	}
 
 	if got, ok := snap.FindInfoByID("ga-named-reviewer"); !ok || got.ID != "ga-named-reviewer" {
 		t.Errorf("FindInfoByID = (%+v, %v), want the seeded info", got, ok)
@@ -404,11 +421,56 @@ func TestSessionBeadSnapshotIndexesCanonicalSingletonPoolManagedBead(t *testing.
 	if got := snapshot.FindSessionNameByTemplate("cashmaster/refinery"); got != "s-canonical-refinery" {
 		t.Fatalf("FindSessionNameByTemplate(canonical singleton pool bead) = %q, want s-canonical-refinery", got)
 	}
-	bead, ok := snapshot.FindSessionBeadByTemplate("cashmaster/refinery")
+	info, ok := snapshot.FindInfoByTemplate("cashmaster/refinery")
 	if !ok {
-		t.Fatal("FindSessionBeadByTemplate(canonical singleton pool bead) = false")
+		t.Fatal("FindInfoByTemplate(canonical singleton pool bead) = false")
 	}
-	if bead.ID != "refinery-session" {
-		t.Fatalf("FindSessionBeadByTemplate ID = %q, want refinery-session", bead.ID)
+	if info.ID != "refinery-session" {
+		t.Fatalf("FindInfoByTemplate ID = %q, want refinery-session", info.ID)
+	}
+}
+
+// TestSessionBeadSnapshotFingerprintReflectsRawMetadata pins the config-change cache
+// key across the W-delete raw-half deletion: sessionBeadSnapshotFingerprint returns the
+// snapshot's stored field, computed at construction from the raw beads via
+// session.SessionSetFingerprint over the OPEN set — so it reflects EVERY metadata key,
+// including ones session.Info drops. This is what makes the fingerprint survivable when
+// the raw half is gone: it is a field, not a recomputation. A regression that dropped
+// the field (empty string) or recomputed from Info (dropping unprojected keys) fails
+// the change-detection assertion below.
+func TestSessionBeadSnapshotFingerprintReflectsRawMetadata(t *testing.T) {
+	beadWith := func(tag string) beads.Bead {
+		return beads.Bead{
+			ID:     "ga-fp",
+			Type:   session.BeadType,
+			Status: "open",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name":            "fp",
+				"state":                   "active",
+				"bespoke_unprojected_tag": tag, // a key session.Info does NOT project
+			},
+		}
+	}
+
+	snapV1 := newSessionBeadSnapshot([]beads.Bead{beadWith("v1")})
+	// The getter returns exactly SessionSetFingerprint over the open beads.
+	if got, want := sessionBeadSnapshotFingerprint(snapV1), session.SessionSetFingerprint([]beads.Bead{beadWith("v1")}); got != want {
+		t.Fatalf("fingerprint = %q, want SessionSetFingerprint(open) %q", got, want)
+	}
+	if sessionBeadSnapshotFingerprint(snapV1) == "" {
+		t.Fatal("fingerprint is empty on a non-empty snapshot")
+	}
+
+	// Changing ONLY an unprojected metadata key must change the fingerprint — proof it
+	// reflects raw metadata, not the (lossy) Info projection.
+	snapV2 := newSessionBeadSnapshot([]beads.Bead{beadWith("v2")})
+	if sessionBeadSnapshotFingerprint(snapV1) == sessionBeadSnapshotFingerprint(snapV2) {
+		t.Fatal("fingerprint ignored an unprojected metadata change; config-change detection would miss it")
+	}
+
+	// nil snapshot is empty, not a panic.
+	if got := sessionBeadSnapshotFingerprint(nil); got != "" {
+		t.Fatalf("nil snapshot fingerprint = %q, want empty", got)
 	}
 }

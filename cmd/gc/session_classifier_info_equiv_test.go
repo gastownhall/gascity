@@ -874,30 +874,8 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) bool { return isManualSessionBeadForAgent(b, agentFixture) },
 			func(i session.Info) bool { return isManualSessionInfoForAgent(i, agentFixture) },
 		},
-		// A non-canonical-singleton agent exercises the identical
-		// UsesCanonicalSingletonPoolIdentity() short-circuit (both forms → false)
-		// on every shape.
-		"staleNonExpandingPoolSessionBead": {
-			func(b beads.Bead) bool { return staleNonExpandingPoolSessionBead(agentFixture, b) },
-			func(i session.Info) bool { return staleNonExpandingPoolSessionBeadInfo(agentFixture, i) },
-		},
 	}
 
-	// singletonAgent is a canonical-singleton pool agent (max=1, no namepool);
-	// UsesCanonicalSingletonPoolIdentity() returns true for it, so it drives the
-	// non-short-circuit branches of staleNonExpandingPoolSessionBead: the
-	// agent_name/label/alias/title identity-slot matches, the pool_slot fallback,
-	// and the manual-session exclusion.
-	singletonAgent := &config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	singletonAgentBoolChecks := map[string]struct {
-		bead func(beads.Bead) bool
-		info func(session.Info) bool
-	}{
-		"staleNonExpandingPoolSessionBead[singleton]": {
-			func(b beads.Bead) bool { return staleNonExpandingPoolSessionBead(singletonAgent, b) },
-			func(i session.Info) bool { return staleNonExpandingPoolSessionBeadInfo(singletonAgent, i) },
-		},
-	}
 	agentIntChecks := map[string]struct {
 		bead func(beads.Bead) int
 		info func(session.Info) int
@@ -932,12 +910,11 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			},
 			sessionMetadataStateInfo,
 		},
-		"namedSessionMode":             {namedSessionMode, namedSessionModeInfo},
-		"sessionBeadStoredTemplate":    {sessionBeadStoredTemplate, sessionBeadStoredTemplateInfo},
-		"sessionBeadAgentName":         {sessionBeadAgentName, sessionBeadAgentNameInfo},
-		"namedSessionIdentity":         {namedSessionIdentity, namedSessionIdentityInfo},
-		"stampedPoolQualifiedIdentity": {stampedPoolQualifiedIdentity, stampedPoolQualifiedIdentityInfo},
-		"sessionBeadIdentifier":        {sessionBeadIdentifier, sessionBeadIdentifierInfo},
+		"namedSessionMode":          {namedSessionMode, namedSessionModeInfo},
+		"sessionBeadStoredTemplate": {sessionBeadStoredTemplate, sessionBeadStoredTemplateInfo},
+		"sessionBeadAgentName":      {sessionBeadAgentName, sessionBeadAgentNameInfo},
+		"namedSessionIdentity":      {namedSessionIdentity, namedSessionIdentityInfo},
+		"sessionBeadIdentifier":     {sessionBeadIdentifier, sessionBeadIdentifierInfo},
 		// generation has no named classifier — it is read inline via Atoi/TrimSpace
 		// in the drain/wake path — so this pins the raw codec mirror directly.
 		"sessionGeneration": {
@@ -1395,11 +1372,6 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 					t.Errorf("%s: info=%v bead=%v", name, got, want)
 				}
 			}
-			for name, c := range singletonAgentBoolChecks {
-				if got, want := c.info(info), c.bead(b); got != want {
-					t.Errorf("%s: info=%v bead=%v", name, got, want)
-				}
-			}
 			for name, c := range agentIntChecks {
 				if got, want := c.info(info), c.bead(b); got != want {
 					t.Errorf("%s: info=%d bead=%d", name, got, want)
@@ -1689,6 +1661,34 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		t.Fatal("sessionWithinDesiredConfigInfo(dependency-only-padded) = false; want true — the untrimmed dependency_only trap regressed")
 	}
 }
+
+// TestStaleNonExpandingPoolSessionBeadInfo characterizes staleNonExpandingPoolSessionBeadInfo
+// (the singleton pool-reuse staleness predicate) over both a canonical-singleton agent
+// — which drives the real identity-slot / pool_slot / manual-exclusion branches — and a
+// non-canonical-singleton agent, which short-circuits to false. It replaced the two
+// raw-vs-Info equivalence rows removed when the raw staleNonExpandingPoolSessionBead
+// retired with the snapshot raw half in WI-7 W-delete, pinning the Info branches against
+// a golden.
+func TestStaleNonExpandingPoolSessionBeadInfo(t *testing.T) {
+	singletonAgent := &config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	nonSingleton := &config.Agent{Name: "worker", MaxActiveSessions: intPtr(5)}
+
+	gotSingleton := map[string]bool{}
+	for _, sb := range oracleSessionBeadShapes() {
+		info := session.InfoFromPersistedBead(sb)
+		gotSingleton[sb.ID] = staleNonExpandingPoolSessionBeadInfo(singletonAgent, info)
+		// A non-canonical-singleton agent short-circuits to false on every shape.
+		if staleNonExpandingPoolSessionBeadInfo(nonSingleton, info) {
+			t.Errorf("staleNonExpandingPoolSessionBeadInfo(nonSingleton, %s) = true, want false (short-circuit)", sb.ID)
+		}
+	}
+	if len(staleSingletonGolden) == 0 || !reflect.DeepEqual(gotSingleton, staleSingletonGolden) {
+		t.Errorf("stale-singleton characterization drift; got=%#v", gotSingleton)
+	}
+}
+
+// staleSingletonGolden is the captured golden for TestStaleNonExpandingPoolSessionBeadInfo.
+var staleSingletonGolden = map[string]bool{"ga-bare": false, "ga-named": false, "ga-named-fallback": false, "ga-noname": false, "ga-pool": true}
 
 // The four tests below give the Info twins whose raw sibling (and its equivalence
 // row) was deleted in WI-5 W5 direct table coverage, so their logic is pinned even

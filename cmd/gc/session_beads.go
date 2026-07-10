@@ -52,28 +52,6 @@ func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 	return result, nil
 }
 
-func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
-	if sessionBeads != nil {
-		// A same-cycle create/reopen appends to the snapshot's typed half via addInfo
-		// but NOT the raw half — the W-pool create front door returns session.Info, not
-		// a raw bead. When the typed half has outgrown the raw half, Open() is stale for
-		// exactly those new sessions, so a raw-half read here would miss them and sync
-		// would treat an already-created session_name as absent (minting a duplicate for
-		// poolSlot-0 identities, or a store-recovery reload for slot>0). Reload from the
-		// store instead — CreateSessionInfo persists the bead before projecting it, so
-		// the store durably holds every same-cycle creation and sync takes the clean
-		// update path. Byte-identical on the common no-create path (lengths equal → the
-		// fast raw-half return); the reload-on-create-cycle delta is the same
-		// NDI-tolerated concurrent-writer visibility W-delete's sync-tail re-list already
-		// sanctions. This skew check retires with the raw half in W-delete.
-		if len(sessionBeads.OpenInfos()) > len(sessionBeads.Open()) {
-			return loadSessionBeads(store)
-		}
-		return sessionBeads.Open(), nil
-	}
-	return loadSessionBeads(store)
-}
-
 // loadOpenSessionInfos is the typed front-door twin of loadSessionBeads: it
 // returns the open session beads projected to session.Info via the session
 // store's default direct union (type+label, closed excluded — the same tier as
@@ -1189,7 +1167,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		stderr = io.Discard
 	}
 
-	existing, err := snapshotOrLoadSessionBeads(store, sessionBeads)
+	// Sync operates on raw beads (it mutates openBeads in place and reads raw
+	// metadata), so it re-lists from the store every cycle now that the snapshot no
+	// longer holds a raw half. Byte-identical to the old snapshot-reuse on the common
+	// path; the reload-always delta is the same NDI-tolerated concurrent-writer
+	// visibility the W-pool skew reload already introduced (the retired
+	// snapshotOrLoadSessionBeads only re-listed on a same-cycle create skew).
+	existing, err := loadSessionBeads(store)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
 		return nil, sessionBeads
@@ -1851,7 +1835,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
 							queueMeta(key, value)
 						}
-						queueAliasChangeDriftRebaseline(b, tp, queueMeta, stderr)
+						queueAliasChangeDriftRebaseline(sessFront, b, tp, queueMeta, stderr)
 					}
 					mergeAliasGuardedBatch()
 				}
@@ -1941,7 +1925,21 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 	}
 
-	return openIndex, newSessionBeadSnapshot(openBeads)
+	// Re-list the snapshot from the store rather than rebuilding it from the local
+	// openBeads slice. FLAGGED BEHAVIOR DELTA (the one W-delete sanctions): the old
+	// build reflected sync's local slice; a fresh union list reflects the store. Every
+	// sync mutation is persisted before it is locally mirrored, so on the single-writer
+	// path the two are identical; the only difference is that a concurrent writer's
+	// beads now become visible in the returned snapshot — the same NDI-tolerated
+	// convergence class the reload-always at the head of this function already accepts.
+	// On a re-list error (never on the old path, which could not fail) fall back to the
+	// in-memory set via the in-package row projection so the return stays non-nil.
+	snap, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: reloading snapshot after sync (using in-memory set): %v\n", err) //nolint:errcheck
+		snap = newSessionBeadSnapshotFromReconcileRows(session.ReconcileRowsFromBeads(openBeads))
+	}
+	return openIndex, snap
 }
 
 // queueAliasChangeDriftRebaseline moves a started pool session's config-drift
@@ -1950,11 +1948,22 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 // CoreFingerprint drift check and drain the session. Unstarted sessions (no
 // started_config_hash) are skipped — the start path baselines them.
 // See gastownhall/gascity#2234.
-func queueAliasChangeDriftRebaseline(b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
+func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
 	if strings.TrimSpace(b.Metadata["started_config_hash"]) == "" {
 		return
 	}
-	rebaseline, err := sessionHashRebaselineMetadata(sessionCoreConfigForHash(tp, b))
+	// Rare alias-CHANGE lane (only when a started pool session's alias is renamed):
+	// re-read the session through the front door for its typed Info. The Get contract
+	// (ErrSessionNotFound / "loading session %q" wrap / non-IsSessionBeadOrRepairable
+	// rejection) is bridged as a best-effort skip — a vanished or damaged bead simply
+	// forgoes the rebaseline, matching this lane's existing best-effort stderr
+	// semantics. Off the pinned tick fast path.
+	info, err := sessFront.Get(b.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: loading session %s for alias-change drift rebaseline: %v\n", b.ID, err) //nolint:errcheck
+		return
+	}
+	rebaseline, err := sessionHashRebaselineMetadata(sessionCoreConfigForHashInfo(tp, info))
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: rebaselining drift baseline after alias change for %s: %v\n", b.ID, err) //nolint:errcheck
 		return

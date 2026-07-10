@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -2156,7 +2155,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	// Emit any due compute usage facts by reusing the open-session snapshot this
 	// tick already loaded, rather than issuing a second redundant store scan.
-	cr.emitDueComputeFacts(ctx, sessionBeads.Open())
+	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos())
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
@@ -2249,7 +2248,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		}
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_undesired_pool_sessions", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
-	open := sessionBeads.Open()
 	openInfos := sessionBeads.OpenInfos()
 
 	// Use cr.cityName consistently — it's the authoritative runtime name.
@@ -2311,7 +2309,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		reconcileStartOptions...,
 	)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.reconcile_sessions", phaseStart, map[string]any{
-		"open_session_count":             len(open),
+		"open_session_count":             len(openInfos),
 		"desired_session_count":          len(desiredState),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
@@ -2351,7 +2349,15 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// this. See nudgeStalledPoolClaims for the churn-free state machine.
 	if !cr.sp.Capabilities().CanReportActivity {
 		phaseStart = time.Now()
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, open, assignedWorkBeads, time.Now(), cr.stdout)
+		// The idle-claim nudge lane reads idle-claim marker keys that session.Info does
+		// not project, so it needs raw beads. Now that the snapshot no longer holds a
+		// raw half, this fallback branch (only runs for runtimes that cannot report
+		// activity) does its own edge read rather than a snapshot raw-half read.
+		if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
+		} else {
+			nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
+		}
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 	}
 }
@@ -3279,35 +3285,20 @@ func (cr *CityRuntime) installDemandSnapshotSideEffects(result DesiredStateResul
 	}
 }
 
+// sessionBeadSnapshotFingerprint returns the snapshot's config-change cache key,
+// computed from the raw beads at the store edge (session.SessionSetFingerprint) and
+// carried on the snapshot as a field. It hashes every open bead's ID + Status +
+// Assignee + ALL metadata keys — a shape session.Info deliberately drops, which is
+// why it must be computed at construction, not reconstructed here. An empty string is
+// returned for a nil snapshot or one built without raw beads (which never reaches this
+// getter — only store-loaded snapshots feed loadDemandSnapshot).
 func sessionBeadSnapshotFingerprint(snapshot *sessionBeadSnapshot) string {
 	if snapshot == nil {
 		return ""
 	}
-	open := snapshot.Open()
-	sort.Slice(open, func(i, j int) bool {
-		return open[i].ID < open[j].ID
-	})
-	h := fnv.New64a()
-	for _, bead := range open {
-		_, _ = io.WriteString(h, bead.ID)
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, bead.Status)
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, bead.Assignee)
-		_, _ = io.WriteString(h, "\x00")
-		keys := make([]string, 0, len(bead.Metadata))
-		for key := range bead.Metadata {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			_, _ = io.WriteString(h, key)
-			_, _ = io.WriteString(h, "\x00")
-			_, _ = io.WriteString(h, bead.Metadata[key])
-			_, _ = io.WriteString(h, "\x00")
-		}
-	}
-	return fmt.Sprintf("%x", h.Sum64())
+	snapshot.mu.RLock()
+	defer snapshot.mu.RUnlock()
+	return snapshot.fingerprint
 }
 
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {

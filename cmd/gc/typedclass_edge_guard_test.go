@@ -131,81 +131,37 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
 	"InfoFromPersistedBead(": {
-		// WI-7 W-pool: build_desired_state.go reaches interior zero (was 2). The pool
-		// select/create/reuse path now returns session.Info end to end — the typed
-		// create front door (Store.CreateSessionInfo) projects the just-created bead,
-		// the reuse predicates read OpenInfos, and the normalize lane folds its
-		// bp.beadStore.Update onto Info — so the two former raw pool-loop projections
-		// (the :2384 dependency-floor boundary and the :2635 pool realize loop) are
-		// gone. session_logs_resolve feeds ResolveCodexTranscriptBySessionOrder(
-		// []beads.Bead); session_bead_snapshot holds the bead legitimately
-		// (snapshot.add). WI-6 R2: cmd_session's REASON-column reason projection now
-		// reads the typed Info snapshot (wakeReasonsInfo, fed by OpenInfos); WI-6 R5
-		// folded the rest of the reason projection (LifecycleDisplayReasonWithLivenessInfo,
-		// off the new Info.SessionCircuitState) onto Info too, so the one remaining
-		// cmd_session hit is cmdSessionKill's raw store.Get + codec, a CLI
-		// front-door-Get flip deferred to the WI-7 front-door migration (§5b/§6 — not
-		// an R2/R5 moved-Get). WI-6 R5 also retired cmd_prime (routed through
-		// sessionFrontDoor().Get → Info + ProviderFamilyFromInfo, was 1).
+		// WI-7 W-delete zeroed four periphery rows: session_bead_snapshot (3→0, the
+		// raw-half deletion — loadSessionBeadSnapshot builds from the typed
+		// ReconcileSession feed via ListAllForReconcileWithFingerprint), cmd_stop (1→0,
+		// markCityStopSessionSleepReason → Store.ListLabeledSessionInfosUnfiltered),
+		// session_hash (1→0, the alias-change rebaseline lane takes a bridged front-door
+		// Get → sessionCoreConfigForHashInfo), and session_logs_resolve (2→0, the
+		// transcript resolver + fallback siblings took []Info via the Info.AwakeStartedAt
+		// field-add + Store.ListByMetadataInfos). The two survivors are the WI-7 W-flip
+		// front-door sites:
+		//
+		// cmd_session is cmdSessionKill's raw store.Get + codec, a CLI front-door-Get flip
+		// deferred to the WI-7 front-door migration (W-flip / §5b/§6).
 		"cmd/gc/cmd_session.go": 1,
-		// WI-6 R1: markCityStopSessionSleepReason keeps the byte-identical label-only
-		// ListByLabel("gc:session") sweep (widening to the ListAll type+label union
-		// would also mark label-lost type-only beads — a behavior delta), so the
-		// label-listed beads are projected to session.Info at this edge to read the
-		// typed sessionMetadataStateInfo twin + Info.SleepReason. session.Store.List
-		// (the existing label-scoped Info lister) does NOT qualify: it narrows via
-		// IsSessionBeadOrRepairable (drops non-"session"-typed gc:session beads this
-		// sweep marks) and queries IncludeClosed:true (a different query shape / a
-		// CachingStore history read). Retires only when a label-only, closed-excluded,
-		// unfiltered Info lister — or the widen decision — lands in a later wave.
-		"cmd/gc/cmd_stop.go":              1,
-		"cmd/gc/session_bead_snapshot.go": 3,
-		// WI-6 R5 (re-scoped R5-lite): session_hash's raw sessionCoreConfigForHash
-		// survives because its sole caller (queueAliasChangeDriftRebaseline) sits
-		// inside syncSessionBeadsWithSnapshotAndRigStores' raw openBeads loop that
-		// builds newSessionBeadSnapshot(openBeads) — supplying Info there requires the
-		// R6 raw-half migration (or an InfoFromPersistedBead call in session_beads.go,
-		// a census increase). Deferred to R6 with the snapshot raw half.
-		"cmd/gc/session_hash.go": 1,
-		// WI-6 R4: session_lifecycle_parallel.go reaches interior zero. The former
-		// in-lock re-projection at prepareStartCandidateForCity now re-reads through
-		// the session front door (GetPersistedResponse → Info directly), and
-		// refreshAsyncStartResult moved off GetBeadWithInfo to the same Info-only
-		// re-read, so the file no longer calls the codec (was 1). GetBeadWithInfo is
-		// now fully retired (deleted from internal/session). WI-6 R5 retired
-		// session_template_start (reopenClosedConfiguredNamedSessionBead now returns
-		// the resolved session name, dropping the caller's codec read, was 1).
-		"cmd/gc/session_logs_resolve.go": 2,
-		// WI-7 W-tick: session_reconciler.go reaches interior zero (was 3). The tick
-		// entry now consumes the typed ReconcileSession row feed
-		// (Store.ListAllForReconcile / sessionBeadSnapshot.OpenForReconcile) and the
-		// Phase-0 heal/dedup fold onto rows BEFORE the infoByID snapshot is built
-		// (fold-then-build), so the three codec calls — the :582 finalize projection,
-		// the :1187 Phase-0 heal, and the :1272 snapshot build — are all gone. The
-		// finalize pass takes []Info (OpenInfos), the circuit cluster rides the row's
-		// Circuit field, and the last three whole-bead consumers (cycleAlive/
-		// stranded/prune) took Info twins. No Get added (the 0-Get tick budget test
-		// still reads 0).
-		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop
-		// is a genuine WI-7-era raw retire lane (bead already in hand from the raw
+		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop is a
+		// genuine WI-7-era raw retire lane (bead already in hand from the raw
 		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and
-		// confined to that edge — recorded here rather than gamed to zero by inlining
-		// the b.Metadata["session_name"] key. Retires with the named_config raw
-		// surfaces in WI-7.
+		// confined to that edge — recorded here rather than gamed to zero by inlining the
+		// b.Metadata["session_name"] key. Retires with the named_config raw surfaces in
+		// WI-7 W-flip.
 		"internal/api/session_resolution.go": 1,
 	},
 	"ListAllSessionBeads(": {
-		// WI-6 W4 residuals: all three feed the RAW sessionBeadSnapshot half (Open()).
-		// WI-6 R5 (re-scoped R5-lite) migrated cmd_session's last raw Open() consumer
-		// (the display reason now reads Info.SessionCircuitState), but the snapshot raw
-		// half is still consumed by out-of-R5-scope files (build_desired_state,
-		// city_runtime, cmd_start, providers, session_name_lookup) plus loadSessionBeads'
-		// raw callers (session_lifecycle_parallel, doctor_work_option_metadata). Deleting
-		// the raw half — and doctor's mixed session+work raw union — is the R6 raw-half
-		// migration; recorded honestly here.
-		"cmd/gc/doctor_session_model.go":  1,
-		"cmd/gc/session_bead_snapshot.go": 1,
-		"cmd/gc/session_beads.go":         1,
+		// WI-7 W-delete zeroed session_bead_snapshot (1→0, the raw-half load edge flipped
+		// to ListAllForReconcile) and doctor_session_model (1→0, doctor issues its own two
+		// raw store.List legs inline rather than calling the policed helper — its §5
+		// exemption covers HOLDING raw beads, not calling the codec). session_beads STAYS
+		// at 1 — the honest endgame floor: loadSessionBeads feeds the still-raw sync
+		// internals + internal/mail/beadmail's same-module compile dependency. Full sync
+		// typing is a separate out-of-budget W-sync wave (see tickfeed-design §3
+		// W-unexport).
+		"cmd/gc/session_beads.go": 1,
 	},
 	"GetWithPersistedResponse(": {
 		"internal/worker/catalog.go": 1,

@@ -172,7 +172,7 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	if snapshot == nil {
 		t.Fatal("loadStatusSessionSnapshot returned nil, want empty snapshot")
 	}
-	if got := len(snapshot.Open()); got != 0 {
+	if got := len(snapshot.OpenInfos()); got != 0 {
 		t.Fatalf("snapshot.Open len = %d, want 0 after timeout", got)
 	}
 	if !strings.Contains(stderr.String(), "loading session snapshot timed out") {

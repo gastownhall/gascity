@@ -1034,7 +1034,7 @@ func reconcileSessionBeadsAtPath(
 	startOptions ...startExecutionOption,
 ) int {
 	// Compat wrapper (tests): build the row feed + carrier snapshot from raw beads.
-	snap := newSessionBeadSnapshot(sessions)
+	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	return reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
@@ -1111,9 +1111,9 @@ func reconcileSessionBeadsTraced(
 ) int {
 	// Compat wrapper: build the tick's row feed + carrier snapshot from the raw
 	// session beads the test/helper caller supplies (production callers pass
-	// sessionBeads.OpenForReconcile() directly). The snapshot filters closed beads
-	// exactly like Open()/OpenForReconcile() do in production.
-	snap := newSessionBeadSnapshot(sessions)
+	// sessionBeads.OpenForReconcile() directly). The snapshot constructor drops closed
+	// beads, exactly as the production store-load feed does.
+	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,

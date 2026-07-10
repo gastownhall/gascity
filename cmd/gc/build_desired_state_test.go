@@ -3713,141 +3713,6 @@ func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWo
 	}
 }
 
-func TestNormalizeNonExpandingPoolSessionBeadDoesNotMutateSnapshotLabels(t *testing.T) {
-	store := beads.NewMemStore()
-	stale, err := store.Create(beads.Bead{
-		Title:  "cashmaster/refinery-1",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
-		Metadata: map[string]string{
-			"template":             "cashmaster/refinery",
-			"agent_name":           "cashmaster/refinery-1",
-			"alias":                "cashmaster/refinery-1",
-			"session_name":         "s-refinery-stale",
-			"state":                "awake",
-			poolManagedMetadataKey: boolMetadata(true),
-			"pool_slot":            "1",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
-	cfgAgent := config.Agent{
-		Name:              "refinery",
-		Dir:               "cashmaster",
-		StartCommand:      "true",
-		MaxActiveSessions: intPtr(1),
-		ScaleCheck:        "printf 1",
-	}
-	bp := &agentBuildParams{
-		cityPath:     t.TempDir(),
-		beadStore:    store,
-		sessionBeads: snapshot,
-		agents:       []config.Agent{cfgAgent},
-		stderr:       io.Discard,
-	}
-
-	if _, _, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "cashmaster/refinery", nil, map[string]bool{}, map[int]bool{}); err != nil {
-		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
-	}
-
-	snapshotBeads := snapshot.Open()
-	if len(snapshotBeads) != 1 {
-		t.Fatalf("snapshot beads = %d, want 1", len(snapshotBeads))
-	}
-	if !containsString(snapshotBeads[0].Labels, "agent:cashmaster/refinery-1") {
-		t.Fatalf("snapshot labels = %#v, want original stale agent label preserved", snapshotBeads[0].Labels)
-	}
-	if containsString(snapshotBeads[0].Labels, "agent:cashmaster/refinery") {
-		t.Fatalf("snapshot labels = %#v, must not be mutated to canonical label", snapshotBeads[0].Labels)
-	}
-	if got := snapshotBeads[0].Metadata["agent_name"]; got != "cashmaster/refinery-1" {
-		t.Fatalf("snapshot agent_name = %q, want original stale identity preserved", got)
-	}
-	if got := snapshotBeads[0].Metadata["alias"]; got != "cashmaster/refinery-1" {
-		t.Fatalf("snapshot alias = %q, want original stale identity preserved", got)
-	}
-	if got := snapshotBeads[0].Metadata["pool_slot"]; got != "1" {
-		t.Fatalf("snapshot pool_slot = %q, want original stale slot preserved", got)
-	}
-	got, err := store.Get(stale.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", stale.ID, err)
-	}
-	if !containsString(got.Labels, "agent:cashmaster/refinery") {
-		t.Fatalf("stored labels = %#v, want canonical label after normalization", got.Labels)
-	}
-	if containsString(got.Labels, "agent:cashmaster/refinery-1") {
-		t.Fatalf("stored labels = %#v, must not include stale label after normalization", got.Labels)
-	}
-}
-
-func TestNormalizeNonExpandingPoolSessionBeadCopiesSnapshotLabelsBeforeAddOnlyAppend(t *testing.T) {
-	store := beads.NewMemStore()
-	stale, err := store.Create(beads.Bead{
-		Title:  "cashmaster/refinery-1",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel, "template:cashmaster/refinery"},
-		Metadata: map[string]string{
-			"template":             "cashmaster/refinery",
-			"agent_name":           "cashmaster/refinery-1",
-			"alias":                "cashmaster/refinery-1",
-			"session_name":         "s-refinery-stale",
-			"state":                "awake",
-			poolManagedMetadataKey: boolMetadata(true),
-			"pool_slot":            "1",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	labels := make([]string, 2, 4)
-	labels[0] = sessionBeadLabel
-	labels[1] = "template:cashmaster/refinery"
-	stale.Labels = labels
-	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
-	cfgAgent := config.Agent{
-		Name:              "refinery",
-		Dir:               "cashmaster",
-		StartCommand:      "true",
-		MaxActiveSessions: intPtr(1),
-		ScaleCheck:        "printf 1",
-	}
-	bp := &agentBuildParams{
-		cityPath:     t.TempDir(),
-		beadStore:    store,
-		sessionBeads: snapshot,
-		agents:       []config.Agent{cfgAgent},
-		stderr:       io.Discard,
-	}
-
-	if _, _, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "cashmaster/refinery", nil, map[string]bool{}, map[int]bool{}); err != nil {
-		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
-	}
-
-	snapshotBeads := snapshot.Open()
-	if len(snapshotBeads) != 1 {
-		t.Fatalf("snapshot beads = %d, want 1", len(snapshotBeads))
-	}
-	if cap(snapshotBeads[0].Labels) <= len(snapshotBeads[0].Labels) {
-		t.Fatalf("snapshot labels capacity = %d, want spare capacity to exercise add-only append", cap(snapshotBeads[0].Labels))
-	}
-	expanded := snapshotBeads[0].Labels[:cap(snapshotBeads[0].Labels)]
-	if got := expanded[len(snapshotBeads[0].Labels)]; got != "" {
-		t.Fatalf("snapshot labels backing array was mutated at append slot: %q", got)
-	}
-	got, err := store.Get(stale.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", stale.ID, err)
-	}
-	if !containsString(got.Labels, "agent:cashmaster/refinery") {
-		t.Fatalf("stored labels = %#v, want canonical label after normalization", got.Labels)
-	}
-}
-
 func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -3895,8 +3760,8 @@ func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testi
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
-	snapshot.add(canonical)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(canonical))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -3982,7 +3847,7 @@ func TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName(t *test
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(adopted)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(adopted))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -4205,7 +4070,7 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(reusable)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(reusable))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -4276,7 +4141,7 @@ func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *test
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(reusable)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(reusable))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -4648,8 +4513,8 @@ func TestSyncSessionBeads_ReclaimsDeferredSingletonAliasAfterConflictClears(t *t
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
-	snapshot.add(canonical)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(canonical))
 	var buildStderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &buildStderr)
 	bp.sessionBeads = snapshot
@@ -4742,14 +4607,14 @@ func TestNormalizeNonExpandingPoolSessionBeadReclaimsDeferredAlias(t *testing.T)
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 
-	result, err := normalizeNonExpandingPoolSessionBead(bp, &cfg.Agents[0], stale)
+	result, err := normalizeNonExpandingPoolSessionInfo(bp, &cfg.Agents[0], sessionpkg.InfoFromPersistedBead(stale))
 	if err != nil {
-		t.Fatalf("normalizeNonExpandingPoolSessionBead: %v", err)
+		t.Fatalf("normalizeNonExpandingPoolSessionInfo: %v", err)
 	}
-	if got := result.Metadata["alias"]; got != "cashmaster/refinery" {
+	if got := result.Alias; got != "cashmaster/refinery" {
 		t.Fatalf("result alias = %q, want canonical alias", got)
 	}
-	if got := result.Metadata[poolAliasConflictMetadataKey]; got != "" {
+	if got := result.PoolAliasConflict; got != "" {
 		t.Fatalf("result pool_alias_conflict = %q, want cleared", got)
 	}
 	stored, err := store.Get(stale.ID)
@@ -4878,16 +4743,15 @@ func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testi
 }
 
 // TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate is the load-bearing
-// regression for the W-pool addInfo raw-half skew. buildDesiredState creates a
-// canonical-singleton pool session (poolSlot 0) through the Info create front door,
-// which appends to the snapshot's typed half only (addInfo) and leaves the raw open
-// half stale. When sync runs on that SAME snapshot in a no-reload window (the
-// controlDispatcherTick / startup-refresh / steady-refresh windows), a raw-half read
-// would miss the just-created session_name; because poolSlot-0 identities skip the
-// store-recovery fallback, sync would MINT A DUPLICATE open bead. snapshotOrLoadSessionBeads
-// reconciles the skew (OpenInfos > Open ⟹ reload from the store), so sync sees the
-// created bead and takes the clean update path. Reverting that skew reload re-mints
-// the duplicate and fails this test.
+// no-duplicate-mint regression across the W-delete raw-half deletion. buildDesiredState
+// creates a canonical-singleton pool session (poolSlot 0) through the Info create front
+// door, which persists the bead and appends its Info to the snapshot via addInfo. When
+// sync runs on that SAME snapshot it must observe the just-created session_name — else,
+// because poolSlot-0 identities skip the store-recovery fallback, it would MINT A
+// DUPLICATE open bead. Now that the snapshot holds no raw half, sync always re-lists the
+// raw beads from the store, which durably holds the created bead, so it takes the clean
+// update path. Reverting sync to reuse a stale in-memory raw slice re-mints the
+// duplicate and fails this test.
 func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := t.TempDir()
@@ -4907,12 +4771,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 		store, nil, sessionBeads, nil, &buildStderr,
 	)
 
-	// The create must have skewed the snapshot: the typed half grew (addInfo) while
-	// the raw open half stayed stale.
-	if len(sessionBeads.OpenInfos()) <= len(sessionBeads.Open()) {
-		t.Fatalf("expected same-cycle create skew (OpenInfos>Open); OpenInfos=%d Open=%d stderr=%q",
-			len(sessionBeads.OpenInfos()), len(sessionBeads.Open()), buildStderr.String())
-	}
+	// The create appended the new session to the snapshot's typed half (addInfo).
 	infos := sessionBeads.OpenInfos()
 	if len(infos) != 1 {
 		t.Fatalf("expected 1 created singleton session, got %d; stderr=%q", len(infos), buildStderr.String())
@@ -5026,7 +4885,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 	}
 
 	var firstSyncStderr bytes.Buffer
-	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
+	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath,
 		beads.SessionStore{Store: store},
 		nil,
@@ -5050,7 +4909,10 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		t.Fatalf("first sync pool_alias_conflict = %q, want canonical alias; sync stderr=%q", got, firstSyncStderr.String())
 	}
 
-	open := updated.Open()
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
 	var reconcileStdout, reconcileStderr bytes.Buffer
 	reconcileSessionBeads(
 		context.Background(), open, firstTick.State, configuredSessionNames(cfg, "", store), cfg, sp,
@@ -5122,7 +4984,7 @@ func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testi
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -9496,7 +9358,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(drained)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(drained))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -9689,7 +9551,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesPreferredDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(drained)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(drained))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -9730,7 +9592,7 @@ func TestSelectOrCreateDependencyPoolSessionBead_SkipsDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(drained)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(drained))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -9825,7 +9687,7 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOneNormalizesExistingStaleId
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
 	cfgAgent := config.Agent{
 		Name:              "refinery",
 		Dir:               "cashmaster",
@@ -9920,8 +9782,8 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOnePrefersCanonicalDependenc
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(stale)
-	snapshot.add(canonical)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(canonical))
 	cfgAgent := config.Agent{
 		Name:              "refinery",
 		Dir:               "cashmaster",
@@ -10044,8 +9906,8 @@ func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t 
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(later)
-	snapshot.add(earliest)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(later))
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(earliest))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -10127,7 +9989,7 @@ func TestSelectOrCreateDependencyPoolSessionBead_ReusesLegacyUnqualifiedTemplate
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(legacy)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(legacy))
 	cfg := &config.City{Agents: []config.Agent{{
 		Name:              "db",
 		Dir:               "gascity",
@@ -10173,7 +10035,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesAvailableForNewTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(awake)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(awake))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -10210,7 +10072,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesLegacyUnqualifiedTemplateWithFullCo
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(legacy)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(legacy))
 	cfg := &config.City{Agents: []config.Agent{{
 		Name:              "refinery",
 		Dir:               "cashmaster",
@@ -10251,7 +10113,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsAssignedForNewTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.add(assigned)
+	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(assigned))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,

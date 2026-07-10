@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -73,10 +74,74 @@ func oracleSessionBeadShapes() []beads.Bead {
 	}
 }
 
-// TestSessionBeadHasAssignedWorkInfoMatchesRaw proves the session-side split of
-// sessionBeadHasAssignedWork: for a fixed set of work beads, the Info form and
-// the raw form agree across every session-bead shape.
-func TestSessionBeadHasAssignedWorkInfoMatchesRaw(t *testing.T) {
+// assignedWorkGolden is the captured golden for TestSessionBeadHasAssignedWorkInfo.
+var assignedWorkGolden = map[string]bool{"ga-bare": false, "ga-named": true, "ga-named-fallback": true, "ga-noname": false, "ga-pool": true}
+
+// coreConfigHashGolden is the captured golden for TestSessionCoreConfigForHashInfoGolden.
+var coreConfigHashGolden = map[string]string{"empty/ga-bare": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-effort-override": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named-fallback": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-noname": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-pool": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker-cmd/ga-bare": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-effort-override": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named-fallback": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-noname": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-pool": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-provider/ga-bare": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-effort-override": "v4:f4922fa899cca0571515e4568d09101f08aa5ae3b737a050ded89bb0b56ca11f", "worker-provider/ga-named": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-named-fallback": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-noname": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-pool": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker/ga-bare": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-effort-override": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named-fallback": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-noname": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-pool": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34"}
+
+// TestSessionCoreConfigForHashInfoGolden is the DEDICATED pin for
+// sessionCoreConfigForHashInfo — the config-drift core-hash input builder. Its retired
+// raw-vs-Info equivalence oracle was self-consistent (the raw form was a thin projection
+// wrapper), so this replaces it with a CoreFingerprint golden over the corpus × three
+// TemplateParams shapes, INCLUDING a template_overrides shape that exercises the Info
+// override-application branch. A silent change to how the core config is assembled (or to
+// applyTemplateOverridesToConfigInfo) repartitions drift keys fleet-wide; perturbing any
+// hashed field changes a fingerprint and fails this golden.
+func TestSessionCoreConfigForHashInfoGolden(t *testing.T) {
+	shapes := oracleSessionBeadShapes()
+	// A shape carrying template_overrides that resolve against the provider schema below,
+	// so the Info override-application branch (not just the pass-through tp fields)
+	// participates in the hash: under the worker-provider tp its --effort flag flips
+	// low→high, producing a DISTINCT fingerprint from the non-override shapes.
+	shapes = append(shapes, beads.Bead{
+		ID: "ga-effort-override", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"template": "worker", "template_overrides": `{"effort":"high"}`},
+	})
+	effortProvider := &config.ResolvedProvider{
+		OptionsSchema: []config.ProviderOption{{
+			Key:  "effort",
+			Type: "select",
+			Choices: []config.OptionChoice{
+				{Value: "low", FlagArgs: []string{"--effort", "low"}},
+				{Value: "high", FlagArgs: []string{"--effort", "high"}},
+			},
+		}},
+		EffectiveDefaults: map[string]string{"effort": "low"},
+	}
+	tps := []struct {
+		name string
+		tp   TemplateParams
+	}{
+		{"empty", TemplateParams{}},
+		{"worker", TemplateParams{TemplateName: "worker"}},
+		{"worker-cmd", TemplateParams{TemplateName: "worker", Command: "claude --model x"}},
+		{"worker-provider", TemplateParams{TemplateName: "worker", Command: "agent --effort low", ResolvedProvider: effortProvider}},
+	}
+
+	got := map[string]string{}
+	for _, tc := range tps {
+		for _, sb := range shapes {
+			info := session.InfoFromPersistedBead(sb)
+			got[tc.name+"/"+sb.ID] = runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tc.tp, info))
+		}
+	}
+	// The override path must actually fire: under worker-provider the override shape
+	// differs from a non-override shape (guards against a vacuous, override-inert golden).
+	if got["worker-provider/ga-effort-override"] == got["worker-provider/ga-bare"] {
+		t.Fatal("template_overrides did not affect the core hash; the override branch is not exercised")
+	}
+	if len(coreConfigHashGolden) == 0 || !reflect.DeepEqual(got, coreConfigHashGolden) {
+		t.Errorf("core-config hash characterization drift; got=%#v", got)
+	}
+}
+
+// TestSessionBeadHasAssignedWorkInfo characterizes the session-side split of the
+// assigned-work check over a fixed work set and every session-bead shape, pinned
+// against a golden. It replaced the raw-vs-Info equivalence oracle (the raw form
+// sessionBeadHasAssignedWork retired with the snapshot raw half in WI-7 W-delete). A
+// mutation of the Info form's identity/name/id matching flips a golden entry and fails.
+func TestSessionBeadHasAssignedWorkInfo(t *testing.T) {
 	work := []beads.Bead{
 		{ID: "wb-open-id", Status: "open", Assignee: "ga-pool"},
 		{ID: "wb-name", Status: "in_progress", Assignee: "worker-ga-pool"},
@@ -85,41 +150,18 @@ func TestSessionBeadHasAssignedWorkInfoMatchesRaw(t *testing.T) {
 		{ID: "wb-blank", Status: "open", Assignee: ""},
 		{ID: "wb-unmatched", Status: "in_progress", Assignee: "nobody"},
 	}
+	got := map[string]bool{}
 	for _, sb := range oracleSessionBeadShapes() {
 		info := session.InfoFromPersistedBead(sb)
-		if got, want := sessionBeadHasAssignedWorkInfo(work, info), sessionBeadHasAssignedWork(work, sb); got != want {
-			t.Errorf("sessionBeadHasAssignedWork(%s): info=%v raw=%v", sb.ID, got, want)
+		got[sb.ID] = sessionBeadHasAssignedWorkInfo(work, info)
+		// The empty work set is false for every shape (guards the has-work path is
+		// gated on the work set, not the session alone).
+		if sessionBeadHasAssignedWorkInfo(nil, info) {
+			t.Errorf("sessionBeadHasAssignedWorkInfo(nil, %s) = true, want false", sb.ID)
 		}
 	}
-	// Empty work slice must be false on both forms.
-	for _, sb := range oracleSessionBeadShapes() {
-		info := session.InfoFromPersistedBead(sb)
-		if got, want := sessionBeadHasAssignedWorkInfo(nil, info), sessionBeadHasAssignedWork(nil, sb); got != want {
-			t.Errorf("sessionBeadHasAssignedWork(nil, %s): info=%v raw=%v", sb.ID, got, want)
-		}
-	}
-}
-
-// TestSessionCoreConfigForHashInfoMatchesRaw pins the config-drift fingerprint
-// helper: the Info form must equal the raw wrapper for every session-bead shape.
-// The wrapper feeds the drift key, so any divergence would silently repartition
-// which sessions the reconciler treats as drifted (W2 deferred this for lack of
-// an oracle row; here it is pinned hard).
-func TestSessionCoreConfigForHashInfoMatchesRaw(t *testing.T) {
-	tps := []TemplateParams{
-		{},
-		{TemplateName: "worker"},
-		{TemplateName: "worker", Command: "claude --model x"},
-	}
-	for _, tp := range tps {
-		for _, sb := range oracleSessionBeadShapes() {
-			info := session.InfoFromPersistedBead(sb)
-			got := sessionCoreConfigForHashInfo(tp, info)
-			want := sessionCoreConfigForHash(tp, sb)
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("sessionCoreConfigForHash(%s): info=%+v raw=%+v", sb.ID, got, want)
-			}
-		}
+	if len(assignedWorkGolden) == 0 || !reflect.DeepEqual(got, assignedWorkGolden) {
+		t.Errorf("assigned-work characterization drift; got=%#v", got)
 	}
 }
 

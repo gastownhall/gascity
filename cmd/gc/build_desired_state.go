@@ -2869,184 +2869,6 @@ func poolDesiredRequestIdentity(cfgAgent *config.Agent, slot int) (*config.Agent
 	return &instanceAgent, qualifiedInstance, slot
 }
 
-// setPoolTemplateRuntimeIdentity stamps the pool alias unless this bead is in a
-// known deferred-alias state. Stable legacy pool beads can lack alias metadata;
-// those keep their historic instance identity until syncSessionBeads backfills.
-func setPoolTemplateRuntimeIdentity(tp *TemplateParams, desiredAlias string, sessionBead beads.Bead) {
-	if tp == nil {
-		return
-	}
-	if strings.TrimSpace(sessionBead.Metadata["alias"]) != strings.TrimSpace(desiredAlias) && poolRuntimeAliasIsDeferred(sessionBead) {
-		tp.Alias = ""
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_ALIAS"] = ""
-		if tp.SessionName != "" {
-			tp.Env["GC_AGENT"] = tp.SessionName
-		}
-		tp.EnvIdentityStamped = false
-		return
-	}
-	tp.Alias = desiredAlias
-	setTemplateEnvIdentity(tp, desiredAlias)
-}
-
-func poolRuntimeAliasIsDeferred(sessionBead beads.Bead) bool {
-	if strings.TrimSpace(sessionBead.Metadata["alias"]) != "" {
-		return false
-	}
-	if strings.TrimSpace(sessionBead.Metadata[poolAliasConflictMetadataKey]) != "" {
-		return true
-	}
-	if strings.TrimSpace(sessionBead.Metadata["pending_create_claim"]) == boolMetadata(true) {
-		return true
-	}
-	state := strings.TrimSpace(sessionBead.Metadata["state"])
-	return state == "creating" || state == string(session.StateStartPending)
-}
-
-func normalizeNonExpandingPoolSessionBead(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	sessionBead beads.Bead,
-) (beads.Bead, error) {
-	// The store write is authoritative; callers must use the returned bead
-	// rather than re-reading bp.sessionBeads for this ID in the same tick.
-	// If alias acquisition collides, this helper records the deferred state;
-	// syncSessionBeads owns the retry once the canonical alias holder closes.
-	if bp == nil || bp.beadStore == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() || isManualSessionBeadForAgent(sessionBead, cfgAgent) || isNamedSessionBead(sessionBead) || sessionBead.ID == "" {
-		return sessionBead, nil
-	}
-	canonical := cfgAgent.QualifiedName()
-	metadata := map[string]string{}
-	aliasNeedsUpdate := false
-	clearAliasConflictMetadata := func() {
-		queueClearPoolAliasConflictMetadata(metadata, sessionBead.Metadata)
-	}
-	alias := strings.TrimSpace(sessionBead.Metadata["alias"])
-	deferredAlias := strings.TrimSpace(sessionBead.Metadata[poolAliasConflictMetadataKey])
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBeadAgentName(sessionBead)) > 0 && strings.TrimSpace(sessionBead.Metadata["agent_name"]) != canonical {
-		metadata["agent_name"] = canonical
-	}
-	if (nonExpandingPoolIdentitySlot(cfgAgent, alias) > 0 && alias != canonical) || (alias == "" && deferredAlias == canonical) {
-		for key, value := range session.UpdatedAliasMetadata(sessionBead.Metadata, canonical) {
-			metadata[key] = value
-		}
-		clearAliasConflictMetadata()
-		aliasNeedsUpdate = true
-	}
-	if alias == canonical {
-		clearAliasConflictMetadata()
-	}
-	if strings.TrimSpace(sessionBead.Metadata["pool_slot"]) != "" {
-		metadata["pool_slot"] = ""
-	}
-
-	var title *string
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBead.Title) > 0 && strings.TrimSpace(sessionBead.Title) != canonical {
-		normalizedTitle := canonical
-		title = &normalizedTitle
-	}
-
-	removeLabels := make([]string, 0, len(sessionBead.Labels))
-	hasCanonicalAgentLabel := containsString(sessionBead.Labels, "agent:"+canonical)
-	for _, label := range sessionBead.Labels {
-		label = strings.TrimSpace(label)
-		if strings.HasPrefix(label, "agent:") && nonExpandingPoolIdentitySlot(cfgAgent, strings.TrimPrefix(label, "agent:")) > 0 {
-			removeLabels = append(removeLabels, label)
-		}
-	}
-	var addLabels []string
-	if (len(metadata) > 0 || title != nil || len(removeLabels) > 0) && !hasCanonicalAgentLabel {
-		addLabels = []string{"agent:" + canonical}
-	}
-	if len(metadata) == 0 && title == nil && len(removeLabels) == 0 && len(addLabels) == 0 {
-		return sessionBead, nil
-	}
-
-	apply := func() error {
-		return bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{
-			Title:        title,
-			Metadata:     metadata,
-			Labels:       addLabels,
-			RemoveLabels: removeLabels,
-		})
-	}
-	if aliasNeedsUpdate {
-		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, canonical, sessionBead.ID); err != nil {
-				return err
-			}
-			return apply()
-		}); err != nil {
-			return sessionBead, fmt.Errorf("normalizing singleton pool identity for bead %s to %q: %w", sessionBead.ID, canonical, err)
-		}
-	} else if err := apply(); err != nil {
-		return sessionBead, fmt.Errorf("normalizing singleton pool identity for bead %s to %q: %w", sessionBead.ID, canonical, err)
-	}
-
-	if bp.stderr != nil {
-		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: collapsing phantom pool identity for bead %s to %q\n", canonical, sessionBead.ID, canonical) //nolint:errcheck
-	}
-	if len(metadata) > 0 && sessionBead.Metadata != nil {
-		sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
-	}
-	if sessionBead.Metadata == nil {
-		sessionBead.Metadata = map[string]string{}
-	}
-	for key, value := range metadata {
-		sessionBead.Metadata[key] = value
-	}
-	if title != nil {
-		sessionBead.Title = *title
-	}
-	if len(removeLabels) > 0 || len(addLabels) > 0 {
-		remove := make(map[string]bool, len(removeLabels))
-		for _, label := range removeLabels {
-			remove[label] = true
-		}
-		filtered := make([]string, 0, len(sessionBead.Labels)+len(addLabels))
-		for _, label := range sessionBead.Labels {
-			if !remove[label] {
-				filtered = append(filtered, label)
-			}
-		}
-		sessionBead.Labels = filtered
-	}
-	for _, label := range addLabels {
-		if !containsString(sessionBead.Labels, label) {
-			sessionBead.Labels = append(sessionBead.Labels, label)
-		}
-	}
-	return sessionBead, nil
-}
-
-func staleNonExpandingPoolSessionBead(cfgAgent *config.Agent, sessionBead beads.Bead) bool {
-	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return false
-	}
-	if isManualSessionBeadForAgent(sessionBead, cfgAgent) {
-		return false
-	}
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBeadAgentName(sessionBead)) > 0 {
-		return true
-	}
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBead.Metadata["alias"]) > 0 {
-		return true
-	}
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBead.Title) > 0 {
-		return true
-	}
-	for _, label := range sessionBead.Labels {
-		label = strings.TrimSpace(label)
-		if strings.HasPrefix(label, "agent:") && nonExpandingPoolIdentitySlot(cfgAgent, strings.TrimPrefix(label, "agent:")) > 0 {
-			return true
-		}
-	}
-	return strings.TrimSpace(sessionBead.Metadata["pool_slot"]) != ""
-}
-
 // staleNonExpandingPoolSessionBeadInfo is the session.Info mirror of
 // staleNonExpandingPoolSessionBead: it resolves the same non-expanding
 // singleton-pool identity from typed Info fields (agent_name/label fallback via
@@ -3318,23 +3140,6 @@ func sessionBeadConfigAgent(cfgAgent *config.Agent, qualifiedName string) *confi
 	return &instanceAgent
 }
 
-func claimPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
-	if slot := existingPoolSlotWithConfig(cfg, cfgAgent, sessionBead); slot > 0 {
-		if used[slot] {
-			return 0
-		}
-		used[slot] = true
-		return slot
-	}
-	for slot := 1; ; slot++ {
-		if used[slot] {
-			continue
-		}
-		used[slot] = true
-		return slot
-	}
-}
-
 func existingPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead) int {
 	if cfgAgent == nil {
 		return 0
@@ -3588,32 +3393,6 @@ func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, in
 	return 0
 }
 
-// WI-7 W-pool: the raw pool selection/creation/reuse cluster below
-// (findOpenSessionBeadByID, reusablePoolSessionBead(s),
-// reusableDependencyPoolSessionBead(s), findReusableCanonicalNonExpanding*,
-// normalizeNonExpandingPoolSessionBead, recordDeferredNonExpandingPoolAliasConflict,
-// setPoolTemplateRuntimeIdentity, poolRuntimeAliasIsDeferred,
-// staleNonExpandingPoolSessionBead, claimDesiredPoolSlot, sessionBeadHasAssignedWork,
-// sortSessionBeadsByCreatedAtThenID) no longer has a production caller: the pool
-// path returns session.Info end to end via the *Info siblings in
-// build_desired_state_pool_info.go. These raw forms are RETAINED as the
-// load-bearing equivalence-oracle references for those siblings (the migration
-// pattern established by freshRestartSessionKey / resolvedSessionTemplate /
-// existingPoolSlotWithConfig — the raw form is the byte-identity reference the twin
-// is pinned against). They retire in W-delete together with the raw
-// sessionBeadSnapshot half and their oracles.
-func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (beads.Bead, bool) {
-	if sessionBeads == nil || id == "" {
-		return beads.Bead{}, false
-	}
-	for _, bead := range sessionBeads.Open() {
-		if bead.ID == id {
-			return bead, true
-		}
-	}
-	return beads.Bead{}, false
-}
-
 // poolSessionCreatePlan describes a fresh pool session bead that has been
 // selected for creation by the planning phase. Materializing the plan via
 // executePlannedPoolSessionBeadCreate performs the slow per-alias-locked
@@ -3792,91 +3571,6 @@ func executePlannedPoolSessionBeadCreate(
 	return info, err
 }
 
-func claimDesiredPoolSlot(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
-	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return 0
-	}
-	return claimPoolSlotWithConfig(cfg, cfgAgent, sessionBead, used)
-}
-
-func reusablePoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, template string, bead beads.Bead, used map[string]bool) bool {
-	if bp == nil {
-		return false
-	}
-	if bead.Status == "closed" {
-		return false
-	}
-	if isDrainedSessionBead(bead) {
-		return false
-	}
-	if isFailedCreateSessionBead(bead) {
-		return false
-	}
-	if bead.Metadata["state"] == "asleep" {
-		return false
-	}
-	if isManualSessionBeadForAgent(bead, cfgAgent) {
-		return false
-	}
-	if isNamedSessionBead(bead) {
-		return false
-	}
-	if sessionBeadHasAssignedWork(bp.assignedWorkBeads, bead) {
-		return false
-	}
-	if used != nil && used[bead.ID] {
-		return false
-	}
-	return resolvedSessionTemplate(bead, reuseTemplateConfig(bp)) == template
-}
-
-func reusablePoolSessionBeads(bp *agentBuildParams, cfgAgent *config.Agent, template string, used map[string]bool) []beads.Bead {
-	if bp == nil || bp.sessionBeads == nil {
-		return nil
-	}
-	candidates := []beads.Bead{}
-	for _, bead := range bp.sessionBeads.Open() {
-		if reusablePoolSessionBead(bp, cfgAgent, template, bead, used) {
-			candidates = append(candidates, bead)
-		}
-	}
-	sortSessionBeadsByCreatedAtThenID(candidates)
-	return candidates
-}
-
-func sortSessionBeadsByCreatedAtThenID(candidates []beads.Bead) {
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
-			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
-		}
-		return candidates[i].ID < candidates[j].ID
-	})
-}
-
-func findReusableCanonicalNonExpandingPoolSessionBead(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	template string,
-	used map[string]bool,
-) (beads.Bead, bool) {
-	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return beads.Bead{}, false
-	}
-	canonical := cfgAgent.QualifiedName()
-	for _, bead := range reusablePoolSessionBeads(bp, cfgAgent, template, used) {
-		if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
-			continue
-		}
-		if staleNonExpandingPoolSessionBead(cfgAgent, bead) {
-			continue
-		}
-		if beadIdentifiesAsCanonical(bead, canonical) {
-			return bead, true
-		}
-	}
-	return beads.Bead{}, false
-}
-
 func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
@@ -3898,55 +3592,6 @@ func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
 		strings.TrimSpace(i.Alias) == canonical ||
 		strings.TrimSpace(i.Title) == canonical ||
 		containsString(i.Labels, "agent:"+canonical)
-}
-
-func normalizeNonExpandingPoolSessionBeadForSelection(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	sessionBead beads.Bead,
-) (beads.Bead, error) {
-	bead, err := normalizeNonExpandingPoolSessionBead(bp, cfgAgent, sessionBead)
-	if err == nil {
-		return bead, nil
-	}
-	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() || !errors.Is(err, session.ErrSessionAliasExists) {
-		return bead, err
-	}
-	if bp != nil && bp.stderr != nil {
-		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: deferring singleton pool identity normalization for bead %s: %v\n", cfgAgent.QualifiedName(), sessionBead.ID, err) //nolint:errcheck
-	}
-	return recordDeferredNonExpandingPoolAliasConflict(bp, cfgAgent, sessionBead)
-}
-
-func recordDeferredNonExpandingPoolAliasConflict(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	sessionBead beads.Bead,
-) (beads.Bead, error) {
-	// The store write is authoritative; callers must use the returned bead
-	// rather than re-reading bp.sessionBeads for this ID in the same tick.
-	canonical := cfgAgent.QualifiedName()
-	count := 0
-	if existing, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata[poolAliasConflictCountMetadataKey])); err == nil && existing > 0 {
-		count = existing
-	}
-	metadata := session.UpdatedAliasMetadata(sessionBead.Metadata, "")
-	metadata[poolAliasConflictMetadataKey] = canonical
-	metadata[poolAliasConflictCountMetadataKey] = strconv.Itoa(count + 1)
-	metadata[poolAliasConflictAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
-	if bp != nil && bp.beadStore != nil && sessionBead.ID != "" {
-		if err := bp.beadStore.Update(sessionBead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
-			return sessionBead, fmt.Errorf("recording deferred singleton pool alias conflict for bead %s: %w", sessionBead.ID, err)
-		}
-	}
-	sessionBead.Metadata = cloneStringMap(sessionBead.Metadata)
-	if sessionBead.Metadata == nil {
-		sessionBead.Metadata = map[string]string{}
-	}
-	for key, value := range metadata {
-		sessionBead.Metadata[key] = value
-	}
-	return sessionBead, nil
 }
 
 func queueClearPoolAliasConflictMetadata(metadata, existing map[string]string) {
@@ -4040,34 +3685,13 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 	return strings.TrimSpace(i.MetadataState) == string(session.StateFailedCreate)
 }
 
-func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) bool {
-	for _, wb := range workBeads {
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
-			continue
-		}
-		if assignee == sessionBead.ID || assignee == strings.TrimSpace(sessionBead.Metadata["session_name"]) {
-			return true
-		}
-		if namedIdentity := strings.TrimSpace(sessionBead.Metadata["configured_named_identity"]); namedIdentity != "" && assignee == namedIdentity {
-			return true
-		}
-	}
-	return false
-}
-
-// sessionBeadHasAssignedWorkInfo is the per-parameter split of
-// sessionBeadHasAssignedWork: the SESSION side reads typed Info fields (ID,
-// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays
-// raw (ClassWork — Bead is the domain object). Byte-identical to the raw form,
-// pinned by TestSessionBeadHasAssignedWorkInfoMatchesRaw.
-//
-// WI-7 W-pool: reusablePoolSessionInfo (the typed reuse predicate) is now the
-// production call site — the pool selection path returns session.Info, so the
-// predicate reads OpenInfos and this twin is production. The raw
-// sessionBeadHasAssignedWork survives as the equivalence-oracle reference (like the
-// rest of the raw pool-selection cluster), retiring with the raw snapshot half in
-// W-delete.
+// sessionBeadHasAssignedWorkInfo reports whether any open/in-progress work bead is
+// assigned to the session: the SESSION side reads typed Info fields (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays raw
+// (ClassWork — Bead is the domain object). It is the production reuse predicate the
+// pool selection path calls; its behavior is pinned by TestSessionBeadHasAssignedWorkInfo
+// (WI-7 W-delete retired the raw sessionBeadHasAssignedWork equivalence reference along
+// with the rest of the raw pool cluster and re-pointed the pin to a golden).
 func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -4467,45 +4091,6 @@ func selectOrCreateDependencyPoolSessionBead(
 	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, qualifiedInstance, poolSlot, nil)
 }
 
-func reusableDependencyPoolSessionBeads(bp *agentBuildParams, template string) []beads.Bead {
-	if bp == nil || bp.sessionBeads == nil {
-		return nil
-	}
-	candidates := []beads.Bead{}
-	for _, bead := range bp.sessionBeads.Open() {
-		if reusableDependencyPoolSessionBead(bp, template, bead) {
-			candidates = append(candidates, bead)
-		}
-	}
-	sortSessionBeadsByCreatedAtThenID(candidates)
-	return candidates
-}
-
-func reusableDependencyPoolSessionBead(bp *agentBuildParams, template string, bead beads.Bead) bool {
-	if bp == nil {
-		return false
-	}
-	if bead.Status == "closed" || isManualSessionBead(bead) {
-		return false
-	}
-	if isDrainedSessionBead(bead) {
-		return false
-	}
-	if isFailedCreateSessionBead(bead) {
-		return false
-	}
-	if isNamedSessionBead(bead) {
-		return false
-	}
-	if bead.Metadata["dependency_only"] != boolMetadata(true) {
-		return false
-	}
-	if resolvedSessionTemplate(bead, reuseTemplateConfig(bp)) != template {
-		return false
-	}
-	return strings.TrimSpace(bead.Metadata["session_name"]) != ""
-}
-
 func reuseTemplateConfig(bp *agentBuildParams) *config.City {
 	if bp == nil {
 		return nil
@@ -4514,26 +4099,6 @@ func reuseTemplateConfig(bp *agentBuildParams) *config.City {
 		return bp.city
 	}
 	return &config.City{Agents: bp.agents}
-}
-
-func findReusableCanonicalNonExpandingDependencyPoolSessionBead(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	template string,
-) (beads.Bead, bool) {
-	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return beads.Bead{}, false
-	}
-	canonical := cfgAgent.QualifiedName()
-	for _, bead := range reusableDependencyPoolSessionBeads(bp, template) {
-		if staleNonExpandingPoolSessionBead(cfgAgent, bead) {
-			continue
-		}
-		if beadIdentifiesAsCanonical(bead, canonical) {
-			return bead, true
-		}
-	}
-	return beads.Bead{}, false
 }
 
 func poolSessionCreateStartedAt(_ *agentBuildParams) time.Time {
