@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -115,8 +116,79 @@ func TestBrowserLoginRejectsServiceMismatch(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := c.Login(ctx, LoginOptions{}); err == nil || !strings.Contains(err.Error(), "want") {
+	if _, err := c.Login(ctx, LoginOptions{}); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("err = %v; want a service-mismatch rejection", err)
+	}
+}
+
+func TestBrowserLoginRejectsAbsentService(t *testing.T) {
+	const base = "https://service.example"
+	c := NewClient(base, io.Discard)
+	c.OpenBrowser = func(authURL string) error {
+		u, _ := url.Parse(authURL)
+		q := u.Query()
+		tokenURL := strings.Replace(q.Get("redirect_uri"), "/callback", "/token", 1)
+		// service omitted entirely — must be rejected (mandatory service match).
+		body, _ := json.Marshal(map[string]string{"token": "tok", "state": q.Get("state")})
+		resp, err := http.Post(tokenURL, "application/json", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Login(ctx, LoginOptions{}); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("err = %v; want rejection when the callback omits service", err)
+	}
+}
+
+func TestWhoamiRefusesCrossOriginRedirect(t *testing.T) {
+	var reached bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true // reaching here means the bearer followed the redirect
+		_, _ = io.WriteString(w, `{"user":{"id":"x"}}`)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/gc/v0/me", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	_, err := NewClient(redirector.URL, io.Discard).Whoami(context.Background(), "tok")
+	if err == nil || !strings.Contains(err.Error(), "different origin") {
+		t.Fatalf("err = %v; want a refused cross-origin redirect", err)
+	}
+	if reached {
+		t.Fatalf("bearer followed a redirect to a different origin")
+	}
+}
+
+func TestWhoamiClassifiesStatuses(t *testing.T) {
+	cases := []struct {
+		status      int
+		body        string
+		wantUnauthd bool
+	}{
+		{http.StatusUnauthorized, `{"error":{"code":"invalid_token","message":"expired"}}`, true},
+		{http.StatusForbidden, `{"error":{"code":"forbidden","message":"no scope"}}`, false},
+		{http.StatusInternalServerError, `{"error":{"message":"boom"}}`, false},
+	}
+	for _, tc := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		_, err := NewClient(server.URL, io.Discard).Whoami(context.Background(), "tok")
+		server.Close()
+		var ae *AuthError
+		if !errors.As(err, &ae) {
+			t.Fatalf("status %d: err = %v; want an *AuthError", tc.status, err)
+		}
+		if ae.Unauthenticated() != tc.wantUnauthd {
+			t.Fatalf("status %d: Unauthenticated()=%v want %v", tc.status, ae.Unauthenticated(), tc.wantUnauthd)
+		}
 	}
 }
 

@@ -145,11 +145,12 @@ func TestResolveServiceBaseURLLadder(t *testing.T) {
 
 func TestNormalizeServiceBaseURL(t *testing.T) {
 	cases := map[string]string{
-		"gascity.com":             "https://gascity.com",
-		"https://x.example/":      "https://x.example",
-		"http://h:8080/base/":     "http://h:8080/base",
-		"https://x.example?a=b#c": "https://x.example",
-		"":                        defaultServiceURL,
+		"gascity.com":                 "https://gascity.com",
+		"https://x.example/":          "https://x.example",
+		"http://127.0.0.1:8080/base/": "http://127.0.0.1:8080/base", // loopback http allowed
+		"http://localhost:9000":       "http://localhost:9000",      // loopback http allowed
+		"https://x.example?a=b#c":     "https://x.example",
+		"":                            defaultServiceURL,
 	}
 	for in, want := range cases {
 		got, err := normalizeServiceBaseURL(in)
@@ -162,5 +163,9 @@ func TestNormalizeServiceBaseURL(t *testing.T) {
 	}
 	if _, err := normalizeServiceBaseURL("https://"); err == nil {
 		t.Fatalf("normalize should reject a URL with no host")
+	}
+	// Plain http against a non-loopback host must be rejected (cleartext bearer).
+	if _, err := normalizeServiceBaseURL("http://gascity.com"); err == nil {
+		t.Fatalf("normalize should reject non-loopback http")
 	}
 }

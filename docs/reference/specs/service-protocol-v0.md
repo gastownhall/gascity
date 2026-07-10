@@ -63,6 +63,11 @@ A URL string is **configuration data, not vendor logic** — the compiled-in
 default is exactly the same category as the pack registry's
 `registry.gascity.com` default and carries no policy.
 
+A client MUST use `https` for the base URL; plain `http` is permitted only against
+loopback (`localhost` / `127.0.0.1` / `::1`) for local development. The session
+bearer is transmitted on every authenticated request, so cleartext transport is
+refused (see [§7](#7-the-session-token-and-401-vs-403)).
+
 ## 2. Versioning
 
 - The version string for this revision is `gascity.dev/service/v0`.
@@ -116,8 +121,10 @@ Content-Type: application/json
 
 The CLI:
 - rejects the delivery unless `state` matches the value it generated;
-- rejects it if `service` is present and does not equal the login target
-  (a stray callback cannot redirect the token to a different service);
+- rejects it unless `service` is **present and equals** the login target — a
+  callback that omits or mismatches `service` is refused, so a stray or hostile
+  callback can never redirect the token to a different service. (`service` is
+  therefore REQUIRED in the fragment.)
 - stores `token` and returns.
 
 `token` is an **opaque bearer string** with a server-defined lifetime. The CLI
@@ -239,18 +246,44 @@ Non-2xx responses SHOULD carry a JSON body with an `error` object:
 ```
 
 `code` is a short machine token; `message` is human-facing and printed verbatim.
+Well-known codes a client keys on (all other non-2xx are handled by HTTP status):
+
+- `invalid_token` — the session is missing, expired, or invalid (**re-login**).
+- `forbidden` / `insufficient_scope` — authenticated but not permitted for this
+  action (**do not re-login**; surface `message`).
+
 The device-token endpoint additionally uses the bare RFC-8628 `error` string
 values enumerated in [§3.2](#32-device-code-login--post-gcv0authdevicecodetoken).
 Servers MAY additionally emit `application/problem+json`; clients treat any
 non-2xx as failure and surface `message` when present.
 
-## 7. Token lifetime and 401
+## 7. The session token, and 401 vs 403
 
-Tokens are opaque and server-defined. The client does not refresh. If a stored
-token is rejected (`401`/`403`) the client reports "not logged in; run `gc
-login`" — it never attempts a silent re-mint of a human credential. (Non-human
-credential exchange, e.g. minting short-lived downstream credentials from the
-stored bearer, is a server-side and helper concern and is out of scope here.)
+The stored token is an **opaque, server-revocable session handle** with a
+server-defined lifetime. The client never inspects it, never refreshes it, and
+holds no key. A server MAY internally exchange the session for short-lived
+downstream credentials to reach individual products — **that exchange is entirely
+invisible to the client**, which only ever sends the session bearer. To let a
+server distinguish token classes on the wire, servers SHOULD make the session
+handle **syntactically distinguishable** (e.g. a stable, server-defined prefix);
+the prefix itself is not part of this contract.
+
+A rejected request is classified so the client gives the right remedy — and never
+loops:
+
+- **`401`** (or `error.code` = `invalid_token`) → the session is invalid/expired →
+  "not logged in; run `gc login`".
+- **`403`** (`forbidden` / `insufficient_scope`) → authenticated but not permitted
+  → print the server `message` verbatim; **do not** advise re-login.
+- **`5xx`** → a server-side failure → retryable; do not advise re-login.
+
+The client MUST NOT treat a `403` as a login failure — re-login mints the same
+session and would loop. Human credentials are never silently re-minted.
+
+**Transport.** The session bearer is the only long-lived credential and is *not*
+proof-of-possession bound, so a client MUST use `https` for the base URL (plain
+`http` only against loopback), and MUST NOT follow a redirect that changes
+scheme/host/port from the login origin — the bearer must never leave that origin.
 
 ## 8. Discovery (optional, forward-compatible)
 
@@ -280,7 +313,17 @@ version are coordinated:
   `GET /gc/v0/runs/{id}/events`, `POST /gc/v0/runs/{id}/claim`: submit and watch
   a formula run, optionally anonymously (the `gc run --at` flow).
 
-Both reuse §1–§7 verbatim (base-URL resolution, versioning, opaque bearer, the
+- **Scoped-token challenge** — a `401` MAY carry a standard RFC 6750
+  `WWW-Authenticate: Bearer realm="…", scope="example:resource.action"` challenge
+  naming a token endpoint from which a client fetches a short-lived, scoped
+  credential (the `docker login` model, for a future client that holds its own
+  scoped tokens). A **v0 client ignores the challenge and reports not-logged-in per
+  §7.** When implemented: the `realm` is trusted only if same-origin with the login
+  base URL or named by the login origin's discovery document (§8, via a
+  `token_endpoint` field); the session bearer is sent only to the login origin;
+  scopes are opaque strings the client echoes verbatim.
+
+Both reuse §1–§7 verbatim (base-URL resolution, versioning, session handle, the
 opacity rule, error shape). `POST /gc/v0/runs` additionally permits an **absent**
 `Authorization` header (anonymous submission).
 

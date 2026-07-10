@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -147,6 +149,11 @@ func doWhoami(ctx context.Context, opts loginOptions, stdout, stderr io.Writer) 
 	defer cancel()
 	user, err := cliauth.NewClient(baseURL, stdout).Whoami(ctx, token)
 	if err != nil {
+		var authErr *cliauth.AuthError
+		if errors.As(err, &authErr) && authErr.Unauthenticated() {
+			fmt.Fprintln(stderr, "gc whoami: not logged in; run `gc login`") //nolint:errcheck
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc whoami: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -194,10 +201,25 @@ func normalizeServiceBaseURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("invalid service URL %q: missing host", raw)
 	}
+	// The session token is sent as a bearer, so require https. Plain http is
+	// allowed only against loopback (local development / tests).
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return "", fmt.Errorf("service URL %q must use https; http is allowed only for localhost", raw)
+	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func defaultTokenLabel() string {

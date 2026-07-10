@@ -76,7 +76,7 @@ type Client struct {
 func NewClient(baseURL string, out io.Writer) *Client {
 	return &Client{
 		BaseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		HTTPClient: newHTTPClient(),
 		Endpoints:  ServiceV0Endpoints(),
 		Out:        out,
 		after:      time.After,
@@ -87,8 +87,40 @@ func (c *Client) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return newHTTPClient()
 }
+
+// newHTTPClient builds the protocol HTTP client with redirect hardening: the
+// stored session bearer is the only long-lived credential, so it must never
+// follow a redirect off the origin it was issued for (including an https→http
+// same-host downgrade, which the stdlib does NOT strip).
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: refuseCrossOriginRedirect,
+	}
+}
+
+func refuseCrossOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if !sameOrigin(via[0].URL, req.URL) {
+		return fmt.Errorf("refusing redirect to a different origin (%s → %s): credentials must not leave the login origin",
+			originOf(via[0].URL), originOf(req.URL))
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
+// sameOrigin compares scheme+host+port (url.Host includes the port).
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+func originOf(u *url.URL) string { return u.Scheme + "://" + u.Host }
 
 func (c *Client) afterFunc() func(time.Duration) <-chan time.Time {
 	if c.after != nil {
@@ -137,10 +169,7 @@ func (c *Client) Whoami(ctx context.Context, token string) (User, error) {
 		return User{}, fmt.Errorf("checking login: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if payload.Error.Message != "" {
-			return User{}, fmt.Errorf("service rejected token (%s): %s", payload.Error.Code, payload.Error.Message)
-		}
-		return User{}, fmt.Errorf("service rejected token: HTTP %d", resp.StatusCode)
+		return User{}, newAuthError("checking login", resp.StatusCode, payload.Error.Code, payload.Error.Message)
 	}
 	if strings.TrimSpace(payload.User.ID) == "" {
 		return User{}, errors.New("service token did not authenticate a user")
@@ -198,8 +227,11 @@ func (c *Client) browserLogin(ctx context.Context, label string, openBrowser boo
 
 	select {
 	case result := <-resultCh:
-		if result.Service != "" && result.Service != c.BaseURL {
-			return "", fmt.Errorf("login callback returned service %q, want %q", result.Service, c.BaseURL)
+		// Mandatory service match: reject a callback whose service is absent or
+		// unequal to the login target, so a stray/hostile callback can never
+		// redirect the stored token to a different service.
+		if result.Service != c.BaseURL {
+			return "", fmt.Errorf("login callback service %q does not match %q; refusing to store the token", result.Service, c.BaseURL)
 		}
 		return result.Token, nil
 	case <-ctx.Done():
