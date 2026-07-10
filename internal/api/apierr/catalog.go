@@ -24,6 +24,7 @@ var (
 	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
 	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
 	WorkflowNotFound    = Register(ProblemType{Code: "workflow-not-found", Status: http.StatusNotFound, Title: "Workflow Not Found"})
+	RunNotFound         = Register(ProblemType{Code: "run-not-found", Status: http.StatusNotFound, Title: "Run Not Found"})
 	FormulaNotFound     = Register(ProblemType{Code: "formula-not-found", Status: http.StatusNotFound, Title: "Formula Not Found"})
 	OrderNotFound       = Register(ProblemType{Code: "order-not-found", Status: http.StatusNotFound, Title: "Order Not Found"})
 	ExtmsgGroupNotFound = Register(ProblemType{Code: "extmsg-group-not-found", Status: http.StatusNotFound, Title: "External-Message Group Not Found"})

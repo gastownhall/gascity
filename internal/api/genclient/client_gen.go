@@ -20,16 +20,16 @@ import (
 
 // Defines values for BindingStatus.
 const (
-	Active BindingStatus = "active"
-	Ended  BindingStatus = "ended"
+	BindingStatusActive BindingStatus = "active"
+	BindingStatusEnded  BindingStatus = "ended"
 )
 
 // Valid indicates whether the value is a known member of the BindingStatus enum.
 func (e BindingStatus) Valid() bool {
 	switch e {
-	case Active:
+	case BindingStatusActive:
 		return true
-	case Ended:
+	case BindingStatusEnded:
 		return true
 	default:
 		return false
@@ -126,6 +126,72 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 	}
 }
 
+// Defines values for RunStatus.
+const (
+	RunStatusActive     RunStatus = "active"
+	RunStatusCancelled  RunStatus = "cancelled"
+	RunStatusCancelling RunStatus = "cancelling"
+	RunStatusCompleted  RunStatus = "completed"
+	RunStatusFailed     RunStatus = "failed"
+	RunStatusPending    RunStatus = "pending"
+	RunStatusSkipped    RunStatus = "skipped"
+	RunStatusWaiting    RunStatus = "waiting"
+)
+
+// Valid indicates whether the value is a known member of the RunStatus enum.
+func (e RunStatus) Valid() bool {
+	switch e {
+	case RunStatusActive:
+		return true
+	case RunStatusCancelled:
+		return true
+	case RunStatusCancelling:
+		return true
+	case RunStatusCompleted:
+		return true
+	case RunStatusFailed:
+		return true
+	case RunStatusPending:
+		return true
+	case RunStatusSkipped:
+		return true
+	case RunStatusWaiting:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunStepStatus.
+const (
+	RunStepStatusActive    RunStepStatus = "active"
+	RunStepStatusBlocked   RunStepStatus = "blocked"
+	RunStepStatusCompleted RunStepStatus = "completed"
+	RunStepStatusFailed    RunStepStatus = "failed"
+	RunStepStatusPending   RunStepStatus = "pending"
+	RunStepStatusSkipped   RunStepStatus = "skipped"
+)
+
+// Valid indicates whether the value is a known member of the RunStepStatus enum.
+func (e RunStepStatus) Valid() bool {
+	switch e {
+	case RunStepStatusActive:
+		return true
+	case RunStepStatusBlocked:
+		return true
+	case RunStepStatusCompleted:
+		return true
+	case RunStepStatusFailed:
+		return true
+	case RunStepStatusPending:
+		return true
+	case RunStepStatusSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SubmitIntent.
 const (
 	Default      SubmitIntent = "default"
@@ -149,16 +215,16 @@ func (e SubmitIntent) Valid() bool {
 
 // Defines values for SupervisorRequestPayloadPhase.
 const (
-	SupervisorRequestPayloadPhaseComplete SupervisorRequestPayloadPhase = "complete"
-	SupervisorRequestPayloadPhaseStart    SupervisorRequestPayloadPhase = "start"
+	Complete SupervisorRequestPayloadPhase = "complete"
+	Start    SupervisorRequestPayloadPhase = "start"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorRequestPayloadPhase enum.
 func (e SupervisorRequestPayloadPhase) Valid() bool {
 	switch e {
-	case SupervisorRequestPayloadPhaseComplete:
+	case Complete:
 		return true
-	case SupervisorRequestPayloadPhaseStart:
+	case Start:
 		return true
 	default:
 		return false
@@ -2689,6 +2755,95 @@ type RotatedPayload struct {
 	PriorArchive  string `json:"prior_archive"`
 	PriorFirstSeq int64  `json:"prior_first_seq"`
 	PriorLastSeq  int64  `json:"prior_last_seq"`
+}
+
+// Run defines model for Run.
+type Run struct {
+	// Formula Formula name driving the run, when known.
+	Formula   *string       `json:"formula,omitempty"`
+	LastError *RunLastError `json:"last_error,omitempty"`
+
+	// RunId Stable run identifier (the run root bead id).
+	RunId string   `json:"run_id"`
+	Scope RunScope `json:"scope"`
+
+	// StartedAt RFC3339 run start time (root creation).
+	StartedAt *string `json:"started_at,omitempty"`
+
+	// Status Closed lifecycle state of a run.
+	Status RunStatus `json:"status"`
+
+	// Target Where the run is routed (rig/target), when known.
+	Target *string `json:"target,omitempty"`
+
+	// Title Human-readable run title.
+	Title string `json:"title"`
+
+	// UpdatedAt RFC3339 time of the run's most recent activity.
+	UpdatedAt *string `json:"updated_at,omitempty"`
+}
+
+// RunLastError defines model for RunLastError.
+type RunLastError struct {
+	// Code Machine-readable outcome code (e.g. fail, skipped, canceled).
+	Code string `json:"code"`
+
+	// Message Human-readable failure detail, when available.
+	Message *string `json:"message,omitempty"`
+}
+
+// RunScope defines model for RunScope.
+type RunScope struct {
+	// Kind Scope kind (city or rig), when resolved.
+	Kind *string `json:"kind,omitempty"`
+
+	// Ref Scope reference within the kind, when resolved.
+	Ref *string `json:"ref,omitempty"`
+}
+
+// RunStatus Closed lifecycle state of a run.
+type RunStatus string
+
+// RunStep defines model for RunStep.
+type RunStep struct {
+	// Assignee Current assignee, when set.
+	Assignee *string `json:"assignee,omitempty"`
+
+	// Id Step (child bead) identifier.
+	Id string `json:"id"`
+
+	// Kind Step kind (bead type).
+	Kind *string `json:"kind,omitempty"`
+
+	// Status Closed lifecycle state of a run step.
+	Status RunStepStatus `json:"status"`
+
+	// Title Step title.
+	Title string `json:"title"`
+}
+
+// RunStepStatus Closed lifecycle state of a run step.
+type RunStepStatus string
+
+// RunStepsOutputBody defines model for RunStepsOutputBody.
+type RunStepsOutputBody struct {
+	// RunId Run identifier the steps belong to.
+	RunId string `json:"run_id"`
+
+	// Steps Steps of the run.
+	Steps *[]RunStep `json:"steps"`
+}
+
+// RunsListOutputBody defines model for RunsListOutputBody.
+type RunsListOutputBody struct {
+	// Partial True when some runs could not be fully projected.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Reasons the projection was partial.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
+	// Runs Runs in the city, newest activity first.
+	Runs *[]Run `json:"runs"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -6889,6 +7044,12 @@ type GetV0CityByCityNameRigsParams struct {
 type CreateRigParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+}
+
+// GetV0CityByCityNameRunsParams defines parameters for GetV0CityByCityNameRuns.
+type GetV0CityByCityNameRunsParams struct {
+	// Limit Maximum runs to return (0 uses the server default).
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // PostV0CityByCityNameServiceByNameRestartParams defines parameters for PostV0CityByCityNameServiceByNameRestart.
@@ -13514,6 +13675,15 @@ type ClientInterface interface {
 
 	CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameRuns request
+	GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameRunsByRunId request
+	GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameRunsByRunIdSteps request
+	GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameServiceByName request
 	GetV0CityByCityNameServiceByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15540,6 +15710,42 @@ func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, params 
 
 func (c *Client) CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateRigRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsByRunIdRequest(c.Server, cityName, runId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsByRunIdStepsRequest(c.Server, cityName, runId)
 	if err != nil {
 		return nil, err
 	}
@@ -23854,6 +24060,144 @@ func NewCreateRigRequestWithBody(server string, cityName string, params *CreateR
 	return req, nil
 }
 
+// NewGetV0CityByCityNameRunsRequest generates requests for GetV0CityByCityNameRuns
+func NewGetV0CityByCityNameRunsRequest(server string, cityName string, params *GetV0CityByCityNameRunsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameRunsByRunIdRequest generates requests for GetV0CityByCityNameRunsByRunId
+func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, runId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameRunsByRunIdStepsRequest generates requests for GetV0CityByCityNameRunsByRunIdSteps
+func NewGetV0CityByCityNameRunsByRunIdStepsRequest(server string, cityName string, runId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s/steps", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameServiceByNameRequest generates requests for GetV0CityByCityNameServiceByName
 func NewGetV0CityByCityNameServiceByNameRequest(server string, cityName string, name string) (*http.Request, error) {
 	var err error
@@ -26513,6 +26857,15 @@ type ClientWithResponsesInterface interface {
 	CreateRigWithBodyWithResponse(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
 
 	CreateRigWithResponse(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
+
+	// GetV0CityByCityNameRunsWithResponse request
+	GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error)
+
+	// GetV0CityByCityNameRunsByRunIdWithResponse request
+	GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error)
+
+	// GetV0CityByCityNameRunsByRunIdStepsWithResponse request
+	GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error)
 
 	// GetV0CityByCityNameServiceByNameWithResponse request
 	GetV0CityByCityNameServiceByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameServiceByNameResponse, error)
@@ -30014,6 +30367,83 @@ func (r CreateRigResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameRunsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RunsListOutputBody
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameRunsByRunIdResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *Run
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsByRunIdResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsByRunIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameRunsByRunIdStepsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RunStepsOutputBody
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsByRunIdStepsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsByRunIdStepsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameServiceByNameResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -32305,6 +32735,33 @@ func (c *ClientWithResponses) CreateRigWithResponse(ctx context.Context, cityNam
 		return nil, err
 	}
 	return ParseCreateRigResponse(rsp)
+}
+
+// GetV0CityByCityNameRunsWithResponse request returning *GetV0CityByCityNameRunsResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRuns(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsResponse(rsp)
+}
+
+// GetV0CityByCityNameRunsByRunIdWithResponse request returning *GetV0CityByCityNameRunsByRunIdResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRunsByRunId(ctx, cityName, runId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsByRunIdResponse(rsp)
+}
+
+// GetV0CityByCityNameRunsByRunIdStepsWithResponse request returning *GetV0CityByCityNameRunsByRunIdStepsResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRunsByRunIdSteps(ctx, cityName, runId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsByRunIdStepsResponse(rsp)
 }
 
 // GetV0CityByCityNameServiceByNameWithResponse request returning *GetV0CityByCityNameServiceByNameResponse
@@ -40350,6 +40807,161 @@ func ParseCreateRigResponse(rsp *http.Response) (*CreateRigResponse, error) {
 			return nil, err
 		}
 		response.ApplicationproblemJSON501 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsResponse parses an HTTP response from a GetV0CityByCityNameRunsWithResponse call
+func ParseGetV0CityByCityNameRunsResponse(rsp *http.Response) (*GetV0CityByCityNameRunsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunsListOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsByRunIdResponse parses an HTTP response from a GetV0CityByCityNameRunsByRunIdWithResponse call
+func ParseGetV0CityByCityNameRunsByRunIdResponse(rsp *http.Response) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsByRunIdResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Run
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsByRunIdStepsResponse parses an HTTP response from a GetV0CityByCityNameRunsByRunIdStepsWithResponse call
+func ParseGetV0CityByCityNameRunsByRunIdStepsResponse(rsp *http.Response) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsByRunIdStepsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunStepsOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

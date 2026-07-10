@@ -2187,6 +2187,7 @@
               "urn:gascity:error:patch-not-found",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
+              "urn:gascity:error:run-not-found",
               "urn:gascity:error:scope-not-found",
               "urn:gascity:error:service-not-found",
               "urn:gascity:error:service-unavailable",
@@ -2231,6 +2232,7 @@
               "urn:gascity:error:patch-not-found",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
+              "urn:gascity:error:run-not-found",
               "urn:gascity:error:scope-not-found",
               "urn:gascity:error:service-not-found",
               "urn:gascity:error:service-unavailable",
@@ -6507,6 +6509,199 @@
           "prior_archive",
           "prior_first_seq",
           "prior_last_seq"
+        ],
+        "type": "object"
+      },
+      "Run": {
+        "additionalProperties": false,
+        "properties": {
+          "formula": {
+            "description": "Formula name driving the run, when known.",
+            "type": "string"
+          },
+          "last_error": {
+            "$ref": "#/components/schemas/RunLastError",
+            "description": "Structured failure reason for a terminal run."
+          },
+          "run_id": {
+            "description": "Stable run identifier (the run root bead id).",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/RunScope",
+            "description": "Resolved run scope."
+          },
+          "started_at": {
+            "description": "RFC3339 run start time (root creation).",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus",
+            "description": "Closed lifecycle status."
+          },
+          "target": {
+            "description": "Where the run is routed (rig/target), when known.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Human-readable run title.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "RFC3339 time of the run's most recent activity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "title",
+          "status",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "RunLastError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "description": "Machine-readable outcome code (e.g. fail, skipped, canceled).",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable failure detail, when available.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "RunScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Scope kind (city or rig), when resolved.",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Scope reference within the kind, when resolved.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RunStatus": {
+        "description": "Closed lifecycle state of a run.",
+        "enum": [
+          "pending",
+          "active",
+          "waiting",
+          "cancelling",
+          "completed",
+          "failed",
+          "cancelled",
+          "skipped"
+        ],
+        "type": "string"
+      },
+      "RunStep": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "description": "Current assignee, when set.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Step (child bead) identifier.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Step kind (bead type).",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStepStatus",
+            "description": "Closed step lifecycle status."
+          },
+          "title": {
+            "description": "Step title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status"
+        ],
+        "type": "object"
+      },
+      "RunStepStatus": {
+        "description": "Closed lifecycle state of a run step.",
+        "enum": [
+          "pending",
+          "active",
+          "blocked",
+          "completed",
+          "failed",
+          "skipped"
+        ],
+        "type": "string"
+      },
+      "RunStepsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "description": "Run identifier the steps belong to.",
+            "type": "string"
+          },
+          "steps": {
+            "description": "Steps of the run.",
+            "items": {
+              "$ref": "#/components/schemas/RunStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "RunsListOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "partial": {
+            "description": "True when some runs could not be fully projected.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Reasons the projection was partial.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "runs": {
+            "description": "Runs in the city, newest activity first.",
+            "items": {
+              "$ref": "#/components/schemas/Run"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "runs"
         ],
         "type": "object"
       },
@@ -35531,6 +35726,318 @@
           }
         },
         "summary": "Create a rig"
+      }
+    },
+    "/v0/city/{cityName}/runs": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-runs",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum runs to return (0 uses the server default).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum runs to return (0 uses the server default).",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsListOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name runs"
+      }
+    },
+    "/v0/city/{cityName}/runs/{run_id}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-runs-by-run-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Run identifier.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "description": "Run identifier.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Run"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name runs by run ID"
+      }
+    },
+    "/v0/city/{cityName}/runs/{run_id}/steps": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-runs-by-run-id-steps",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Run identifier.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "description": "Run identifier.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStepsOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name runs by run ID steps"
       }
     },
     "/v0/city/{cityName}/service/{name}": {
