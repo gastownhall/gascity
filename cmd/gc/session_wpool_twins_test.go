@@ -164,6 +164,58 @@ func TestPoolReuseTwinsCharacterization(t *testing.T) {
 	}
 }
 
+// TestClaimDesiredPoolSlotInfoMarksUsedSlot restores the used-map SIDE-EFFECT pin that
+// the retired TestClaimDesiredPoolSlotInfoMatchesRaw carried (across the same three seed
+// maps): a claim that returns slot s (>0) MUST mark used[s]. Dropping the used[slot]=true
+// write — in either the existing-slot branch or the incrementing loop — lets two
+// candidates claim the same slot and mint duplicate pool identities; the return-value
+// golden alone (TestPoolReuseTwinsCharacterization, single seed) does NOT catch it. This
+// is a self-checking invariant (resulting map == seed ∪ {slot}, and a second claim never
+// re-hands the same slot), so it exercises both branches over the full corpus.
+func TestClaimDesiredPoolSlotInfoMarksUsedSlot(t *testing.T) {
+	cfg := &config.City{}
+	seeds := []map[int]bool{{}, {1: true}, {1: true, 2: true}}
+	claimed := false
+	for ai, agent := range wpoolTwinAgents() {
+		for _, b := range wpoolTwinCorpus() {
+			info := session.InfoFromPersistedBead(b)
+			for si, seed := range seeds {
+				used := map[int]bool{}
+				for k := range seed {
+					used[k] = true
+				}
+				slot := claimDesiredPoolSlotInfo(cfg, agent, info, used)
+
+				want := map[int]bool{}
+				for k := range seed {
+					want[k] = true
+				}
+				if slot > 0 {
+					claimed = true
+					want[slot] = true
+					if !used[slot] {
+						t.Errorf("agent%d/%s/seed%d: claimed slot %d NOT marked in used=%v (two candidates would claim it)", ai, b.ID, si, slot, used)
+					}
+					// A second claim on the resulting map never re-hands the same slot.
+					used2 := map[int]bool{}
+					for k := range used {
+						used2[k] = true
+					}
+					if slot2 := claimDesiredPoolSlotInfo(cfg, agent, info, used2); slot2 == slot {
+						t.Errorf("agent%d/%s/seed%d: second claim re-handed slot %d (used[slot] not persisted)", ai, b.ID, si, slot)
+					}
+				}
+				if !reflect.DeepEqual(used, want) {
+					t.Errorf("agent%d/%s/seed%d: resulting used=%v, want seed ∪ {slot} = %v", ai, b.ID, si, used, want)
+				}
+			}
+		}
+	}
+	if !claimed {
+		t.Fatal("no corpus bead × agent claimed a non-zero slot; the used-map side effect was never exercised")
+	}
+}
+
 // TestReusablePoolSessionInfosOrder pins the general-reuse candidate set AND its
 // CreatedAt/ID precedence order over the typed feed (the "general reuse order by
 // CreatedAt/ID" half of the pool-slot selection precedence characterization).

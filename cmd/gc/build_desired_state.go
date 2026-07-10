@@ -3140,23 +3140,6 @@ func sessionBeadConfigAgent(cfgAgent *config.Agent, qualifiedName string) *confi
 	return &instanceAgent
 }
 
-func claimPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
-	if slot := existingPoolSlotWithConfig(cfg, cfgAgent, sessionBead); slot > 0 {
-		if used[slot] {
-			return 0
-		}
-		used[slot] = true
-		return slot
-	}
-	for slot := 1; ; slot++ {
-		if used[slot] {
-			continue
-		}
-		used[slot] = true
-		return slot
-	}
-}
-
 func existingPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead) int {
 	if cfgAgent == nil {
 		return 0
@@ -3702,18 +3685,13 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 	return strings.TrimSpace(i.MetadataState) == string(session.StateFailedCreate)
 }
 
-// sessionBeadHasAssignedWorkInfo is the per-parameter split of
-// sessionBeadHasAssignedWork: the SESSION side reads typed Info fields (ID,
-// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays
-// raw (ClassWork — Bead is the domain object). Byte-identical to the raw form,
-// pinned by TestSessionBeadHasAssignedWorkInfoMatchesRaw.
-//
-// WI-7 W-pool: reusablePoolSessionInfo (the typed reuse predicate) is now the
-// production call site — the pool selection path returns session.Info, so the
-// predicate reads OpenInfos and this twin is production. The raw
-// sessionBeadHasAssignedWork survives as the equivalence-oracle reference (like the
-// rest of the raw pool-selection cluster), retiring with the raw snapshot half in
-// W-delete.
+// sessionBeadHasAssignedWorkInfo reports whether any open/in-progress work bead is
+// assigned to the session: the SESSION side reads typed Info fields (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays raw
+// (ClassWork — Bead is the domain object). It is the production reuse predicate the
+// pool selection path calls; its behavior is pinned by TestSessionBeadHasAssignedWorkInfo
+// (WI-7 W-delete retired the raw sessionBeadHasAssignedWork equivalence reference along
+// with the rest of the raw pool cluster and re-pointed the pin to a golden).
 func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)

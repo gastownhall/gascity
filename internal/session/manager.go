@@ -255,6 +255,12 @@ type Info struct {
 	// cleared). The Codex transcript windowing (ResolveCodexTranscriptBySessionOrder)
 	// and the compute-usage lane anchor on it, so the Info mirror keeps the raw value.
 	AwakeStartedAt string // awake_started_at (raw)
+	// UsageComputeEmittedAt is the RAW usage_compute_emitted_at metadata: the
+	// awake_started_at value of the interval whose compute Fact has already been
+	// recorded. The compute-usage lane compares it to AwakeStartedAt to skip a
+	// terminal session whose current interval is already accounted BEFORE issuing a
+	// per-session store Get.
+	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)

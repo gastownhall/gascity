@@ -1111,8 +1111,8 @@ func reconcileSessionBeadsTraced(
 ) int {
 	// Compat wrapper: build the tick's row feed + carrier snapshot from the raw
 	// session beads the test/helper caller supplies (production callers pass
-	// sessionBeads.OpenForReconcile() directly). The snapshot filters closed beads
-	// exactly like Open()/OpenForReconcile() do in production.
+	// sessionBeads.OpenForReconcile() directly). The snapshot constructor drops closed
+	// beads, exactly as the production store-load feed does.
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,

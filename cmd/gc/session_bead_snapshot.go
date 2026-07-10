@@ -285,9 +285,9 @@ func (s *sessionBeadSnapshot) WriteBackReconcileInfos(infoByID map[string]sessio
 }
 
 // OpenForReconcile is the reconciler tick feed: a copy of every open session's
-// ReconcileSession (Info paired with its circuit-breaker cluster), in the same
-// order as Open()/OpenInfos(). OpenForReconcile()[i].Info equals OpenInfos()[i]
-// and OpenForReconcile()[i].Circuit equals the circuit projection of that bead.
+// ReconcileSession (Info paired with its circuit-breaker cluster), in the same order as
+// OpenInfos(). OpenForReconcile()[i].Info equals OpenInfos()[i] and
+// OpenForReconcile()[i].Circuit equals that session's circuit projection.
 func (s *sessionBeadSnapshot) OpenForReconcile() []sessionpkg.ReconcileSession {
 	if s == nil {
 		return nil

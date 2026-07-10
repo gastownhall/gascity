@@ -146,6 +146,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.LastWokeAt = v
 		case "awake_started_at":
 			info.AwakeStartedAt = v
+		case "usage_compute_emitted_at":
+			info.UsageComputeEmittedAt = v
 		case "state_reason":
 			info.StateReason = v
 		case "creation_complete_at":

@@ -105,6 +105,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TransportMetadata:          b.Metadata["transport"],
 		LastWokeAt:                 b.Metadata["last_woke_at"],
 		AwakeStartedAt:             b.Metadata["awake_started_at"],
+		UsageComputeEmittedAt:      b.Metadata["usage_compute_emitted_at"],
 		StateReason:                b.Metadata["state_reason"],
 		CreationCompleteAt:         b.Metadata["creation_complete_at"],
 		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],

@@ -132,15 +132,34 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	return true
 }
 
+// computeFactGetCandidate reports whether a session is worth a per-session store Get for
+// a compute Fact, decided purely from its Info projection — BEFORE any Get. A session
+// qualifies only when it is in a compute-terminal state, has an awake interval to account
+// (awake_started_at set), and that interval is not already recorded
+// (usage_compute_emitted_at != awake_started_at). This is the same short-circuit
+// emitComputeFactForBead applies AFTER the Get, hoisted onto Info so a parked (idle/
+// asleep) session whose interval is already accounted costs zero Gets — the common steady
+// state. It is the pure, testable gate behind emitDueComputeFacts's per-session Get.
+func computeFactGetCandidate(info session.Info) bool {
+	if !isComputeTerminalState(info.MetadataState) {
+		return false
+	}
+	start := strings.TrimSpace(info.AwakeStartedAt)
+	if start == "" {
+		return false
+	}
+	return strings.TrimSpace(info.UsageComputeEmittedAt) != start
+}
+
 // emitDueComputeFacts emits a compute Fact for any of the given open sessions whose
-// awake interval has ended (terminal state) and has not yet been recorded. It reuses
-// the reconcile tick's already-loaded Info snapshot for the cheap terminal-state
-// filter, then fetches the raw bead only for the few sessions it will actually emit
-// for: the usage lane genuinely needs the whole bead (ResolveRunID walks the run-chain
-// keys, and slept_at + the usage_compute_emitted_at idempotency marker are deliberately
-// not projected onto session.Info), so this is the usage lane's OWN edge read rather
-// than a snapshot raw-half read. Steady state (no terminal sessions) fetches nothing.
-// Best-effort: it never blocks or fails the reconcile tick.
+// awake interval has ended (terminal state) and has not yet been recorded. It reuses the
+// reconcile tick's already-loaded Info snapshot for the cheap candidate filter
+// (computeFactGetCandidate), then fetches the raw bead ONLY for the few sessions that
+// pass it: the usage lane genuinely needs the whole bead (ResolveRunID walks the
+// run-chain keys, and slept_at is not projected onto session.Info), so this is the usage
+// lane's OWN edge read rather than a snapshot raw-half read. A steady fleet of parked
+// sessions whose intervals are already accounted issues zero Gets. Best-effort: it never
+// blocks or fails the reconcile tick.
 func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info) {
 	if cr.cs == nil {
 		return
@@ -170,12 +189,19 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 	now := time.Now().UTC()
 	for _, info := range sessions {
-		if !isComputeTerminalState(info.MetadataState) {
+		if !computeFactGetCandidate(info) {
 			continue
 		}
 		b, err := store.Get(info.ID)
 		if err != nil {
 			logf("usage: loading session %s for compute fact failed: %v", info.ID, err)
+			continue
+		}
+		// Re-check the terminal state from the FRESH bead: a session that re-awoke in
+		// the window since the snapshot was taken must not mint a tiny-wall fact for its
+		// just-STARTED interval and suppress the real end-of-interval emission. Best-
+		// effort accounting, the same NDI class as the sync-tail re-list delta.
+		if b.Metadata == nil || !isComputeTerminalState(b.Metadata["state"]) {
 			continue
 		}
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf)

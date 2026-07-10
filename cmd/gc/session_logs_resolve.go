@@ -104,11 +104,11 @@ func canFallbackStoredSessionLogByWorkDir(sessFront *sessionpkg.Store, logCtx se
 	return err == nil && len(siblings) == 1
 }
 
-// sessionLogFallbackSiblings returns the live same-workdir session beads that a
-// workdir-based transcript fallback would be ambiguous across. canFallback...
-// gates on exactly one; resolveCodexSiblingLogPath uses the full set to order
-// Codex transcripts. The filters mirror the pre-split raw-metadata version but
-// read through the session.Info codec (class-store leak closure).
+// sessionLogFallbackSiblings returns the live same-workdir sessions (as session.Info)
+// that a workdir-based transcript fallback would be ambiguous across. canFallback...
+// gates on exactly one; resolveCodexSiblingLogPath uses the full set to order Codex
+// transcripts. The candidates arrive already projected to Info from the store edge
+// (ListByMetadataInfos), so no raw bead crosses this boundary.
 func sessionLogFallbackSiblings(sessFront *sessionpkg.Store, logCtx sessionLogContext) ([]sessionpkg.Info, error) {
 	all, err := sessionLogFallbackCandidates(sessFront, logCtx.workDir, logCtx.provider)
 	if err != nil {

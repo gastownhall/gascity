@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -75,6 +76,65 @@ func oracleSessionBeadShapes() []beads.Bead {
 
 // assignedWorkGolden is the captured golden for TestSessionBeadHasAssignedWorkInfo.
 var assignedWorkGolden = map[string]bool{"ga-bare": false, "ga-named": true, "ga-named-fallback": true, "ga-noname": false, "ga-pool": true}
+
+// coreConfigHashGolden is the captured golden for TestSessionCoreConfigForHashInfoGolden.
+var coreConfigHashGolden = map[string]string{"empty/ga-bare": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-effort-override": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named-fallback": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-noname": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-pool": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker-cmd/ga-bare": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-effort-override": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named-fallback": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-noname": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-pool": "v4:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-provider/ga-bare": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-effort-override": "v4:f4922fa899cca0571515e4568d09101f08aa5ae3b737a050ded89bb0b56ca11f", "worker-provider/ga-named": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-named-fallback": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-noname": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-pool": "v4:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker/ga-bare": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-effort-override": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named-fallback": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-noname": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-pool": "v4:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34"}
+
+// TestSessionCoreConfigForHashInfoGolden is the DEDICATED pin for
+// sessionCoreConfigForHashInfo — the config-drift core-hash input builder. Its retired
+// raw-vs-Info equivalence oracle was self-consistent (the raw form was a thin projection
+// wrapper), so this replaces it with a CoreFingerprint golden over the corpus × three
+// TemplateParams shapes, INCLUDING a template_overrides shape that exercises the Info
+// override-application branch. A silent change to how the core config is assembled (or to
+// applyTemplateOverridesToConfigInfo) repartitions drift keys fleet-wide; perturbing any
+// hashed field changes a fingerprint and fails this golden.
+func TestSessionCoreConfigForHashInfoGolden(t *testing.T) {
+	shapes := oracleSessionBeadShapes()
+	// A shape carrying template_overrides that resolve against the provider schema below,
+	// so the Info override-application branch (not just the pass-through tp fields)
+	// participates in the hash: under the worker-provider tp its --effort flag flips
+	// low→high, producing a DISTINCT fingerprint from the non-override shapes.
+	shapes = append(shapes, beads.Bead{
+		ID: "ga-effort-override", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"template": "worker", "template_overrides": `{"effort":"high"}`},
+	})
+	effortProvider := &config.ResolvedProvider{
+		OptionsSchema: []config.ProviderOption{{
+			Key:  "effort",
+			Type: "select",
+			Choices: []config.OptionChoice{
+				{Value: "low", FlagArgs: []string{"--effort", "low"}},
+				{Value: "high", FlagArgs: []string{"--effort", "high"}},
+			},
+		}},
+		EffectiveDefaults: map[string]string{"effort": "low"},
+	}
+	tps := []struct {
+		name string
+		tp   TemplateParams
+	}{
+		{"empty", TemplateParams{}},
+		{"worker", TemplateParams{TemplateName: "worker"}},
+		{"worker-cmd", TemplateParams{TemplateName: "worker", Command: "claude --model x"}},
+		{"worker-provider", TemplateParams{TemplateName: "worker", Command: "agent --effort low", ResolvedProvider: effortProvider}},
+	}
+
+	got := map[string]string{}
+	for _, tc := range tps {
+		for _, sb := range shapes {
+			info := session.InfoFromPersistedBead(sb)
+			got[tc.name+"/"+sb.ID] = runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tc.tp, info))
+		}
+	}
+	// The override path must actually fire: under worker-provider the override shape
+	// differs from a non-override shape (guards against a vacuous, override-inert golden).
+	if got["worker-provider/ga-effort-override"] == got["worker-provider/ga-bare"] {
+		t.Fatal("template_overrides did not affect the core hash; the override branch is not exercised")
+	}
+	if len(coreConfigHashGolden) == 0 || !reflect.DeepEqual(got, coreConfigHashGolden) {
+		t.Errorf("core-config hash characterization drift; got=%#v", got)
+	}
+}
 
 // TestSessionBeadHasAssignedWorkInfo characterizes the session-side split of the
 // assigned-work check over a fixed work set and every session-bead shape, pinned
