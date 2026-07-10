@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltauth"
 )
 
 // CleanupDoltClient is the SQL surface the cleanup engine needs. The
@@ -175,10 +178,24 @@ type sqlCleanupDoltClient struct {
 	db *sql.DB
 }
 
+// resolveCleanupDoltUser returns the Dolt user the cleanup engine's DROP
+// stage should authenticate as for cityPath. It honors GC_DOLT_USER (set
+// for external-Dolt endpoints authed as a non-root user) and falls back to
+// "root", which is correct for the managed-local Dolt server this city
+// provisions itself.
+func resolveCleanupDoltUser(cityPath, host string, port int) string {
+	return doltauth.Resolve(cityPath, "root", host, port).User
+}
+
 // newSQLCleanupDoltClient opens a connection to the resolved Dolt server.
 // Caller must Close() when done.
-func newSQLCleanupDoltClient(host, port string) (CleanupDoltClient, error) {
-	db, err := managedDoltOpenDB(host, port, "root")
+func newSQLCleanupDoltClient(cityPath, host, port string) (CleanupDoltClient, error) {
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return nil, fmt.Errorf("invalid dolt port %q: %w", port, err)
+	}
+	user := resolveCleanupDoltUser(cityPath, host, portNum)
+	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("open dolt connection: %w", err)
 	}

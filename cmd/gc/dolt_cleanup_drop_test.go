@@ -614,3 +614,29 @@ func TestPSEnumerationTimeoutExceedsProcEnumerationTimeout(t *testing.T) {
 			psEnumerationTimeout, procEnumerationTimeout)
 	}
 }
+
+// TestResolveCleanupDoltUserHonorsGCDoltUserEnv is a regression guard for
+// gascity#4123: the DROP stage's SQL client hardcoded "root" regardless of
+// the resolved external-Dolt credentials, so every DROP-stage query on an
+// external endpoint (authed as a non-root user like GC_DOLT_USER=superlzy)
+// failed with "Access denied for user 'root'" even though the same city's
+// `gc dolt sql` connections succeeded. The SCAN/list stage shares this same
+// client, so the failure surfaces on the very first ListDatabases call.
+func TestResolveCleanupDoltUserHonorsGCDoltUserEnv(t *testing.T) {
+	t.Setenv("GC_DOLT_USER", "superlzy")
+	got := resolveCleanupDoltUser(t.TempDir(), "127.0.0.1", 3306)
+	if got != "superlzy" {
+		t.Fatalf("resolveCleanupDoltUser() = %q, want %q", got, "superlzy")
+	}
+}
+
+// TestResolveCleanupDoltUserDefaultsToRootWhenUnset preserves today's
+// correct behavior for the managed-local Dolt server, which always
+// provisions a root user and has no GC_DOLT_USER override.
+func TestResolveCleanupDoltUserDefaultsToRootWhenUnset(t *testing.T) {
+	t.Setenv("GC_DOLT_USER", "")
+	got := resolveCleanupDoltUser(t.TempDir(), "127.0.0.1", 3306)
+	if got != "root" {
+		t.Fatalf("resolveCleanupDoltUser() = %q, want %q", got, "root")
+	}
+}
