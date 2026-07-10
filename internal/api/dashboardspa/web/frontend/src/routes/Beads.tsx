@@ -24,11 +24,7 @@ import { beadProject } from '../hooks/projectOf';
 import { listSupervisorAgents, type SupervisorAgent } from '../supervisor/agentReads';
 import { listSupervisorBeads, type SupervisorBead } from '../supervisor/beadReads';
 import { listSupervisorRigs } from '../supervisor/rigReads';
-import {
-  closeSupervisorBead,
-  createAndSlingSupervisorBead,
-  nudgeSupervisorAgent,
-} from '../supervisor/beadWrites';
+import { closeSupervisorBead, createAndSlingSupervisorBead } from '../supervisor/beadWrites';
 import { listSupervisorSessions } from '../supervisor/sessionReads';
 
 const EMPTY_IDS: ReadonlySet<string> = new Set();
@@ -42,8 +38,6 @@ const CLOSED_CHIP_ID = 'closed';
 // board's SSE-driven refresh into a much wider trailing window so churn yields
 // at most one refetch per window and a latency spike can no longer empty it.
 const BOARD_REFRESH_COALESCE_MS = 10_000;
-
-type BeadAction = 'close' | 'nudge';
 
 interface ActionMessage {
   tone: 'ok' | 'error';
@@ -88,11 +82,7 @@ export function BeadsPage() {
   const [showClosed, setShowClosed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(selectedBeadParam);
   const [closing, setClosing] = useState<SupervisorBead | null>(null);
-  const [closeReason, setCloseReason] = useState('');
-  const [actionInFlight, setActionInFlight] = useState<{
-    id: string;
-    action: BeadAction;
-  } | null>(null);
+  const [actionInFlight, setActionInFlight] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<ActionMessage | null>(null);
   const [creating, setCreating] = useState(false);
   const [createInFlight, setCreateInFlight] = useState(false);
@@ -194,30 +184,20 @@ export function BeadsPage() {
     if (selectedBeadParam !== null) setSelectedId(selectedBeadParam);
   }, [selectedBeadParam]);
 
-  const runAction = useCallback(
-    async (bead: SupervisorBead, action: BeadAction, reason?: string) => {
+  const runClose = useCallback(
+    async (bead: SupervisorBead) => {
       // Defense-in-depth: the disabled buttons already block this, but a
       // keyboard/programmatic path must never reach a write the server 405s.
       if (readOnly) return;
-      setActionInFlight({ id: bead.id, action });
+      setActionInFlight(bead.id);
       setActionMessage(null);
       try {
-        if (action === 'close') {
-          await closeSupervisorBead(bead.id, reason);
-          setClosing(null);
-          setCloseReason('');
-          setActionMessage({ tone: 'ok', text: `Closed ${bead.id}.` });
-        } else {
-          const assignee = bead.assignee?.trim() ?? '';
-          if (assignee.length === 0) {
-            throw new Error('Assigned agent is required before nudging.');
-          }
-          await nudgeSupervisorAgent(assignee);
-          setActionMessage({ tone: 'ok', text: `Nudged ${assignee}.` });
-        }
+        await closeSupervisorBead(bead.id);
+        setClosing(null);
+        setActionMessage({ tone: 'ok', text: `Closed ${bead.id}.` });
         await refresh();
       } catch (err) {
-        setActionMessage({ tone: 'error', text: formatApiError(err, `${action} failed`) });
+        setActionMessage({ tone: 'error', text: formatApiError(err, 'close failed') });
       } finally {
         setActionInFlight(null);
       }
@@ -310,10 +290,8 @@ export function BeadsPage() {
   // operator), so there is no inline Claim affordance.
   const renderBeadActions = useCallback(
     (bead: SupervisorBead) => {
-      const assignee = bead.assignee?.trim() ?? '';
       const busy = actionInFlight !== null;
-      const actionLabel =
-        actionInFlight?.id === bead.id ? actionInFlight.action.replace('_', ' ') : null;
+      const actionLabel = actionInFlight === bead.id ? 'closing' : null;
 
       const roTitle = readOnly ? READ_ONLY_CONTROL_TITLE : undefined;
 
@@ -330,27 +308,16 @@ export function BeadsPage() {
             title={roTitle}
             disabled={readOnly || busy || bead.status === 'closed'}
             onClick={() => {
-              setCloseReason('');
               setActionMessage(null);
               setClosing(bead);
             }}
           >
             Close
           </Button>
-          <Button
-            type="button"
-            size="sm"
-            tone="quiet"
-            title={roTitle}
-            disabled={readOnly || busy || assignee.length === 0}
-            onClick={() => void runAction(bead, 'nudge')}
-          >
-            Nudge
-          </Button>
         </div>
       );
     },
-    [actionInFlight, readOnly, runAction],
+    [actionInFlight, readOnly],
   );
 
   const synopsis = useMemo(
@@ -519,10 +486,7 @@ export function BeadsPage() {
       <Modal
         open={closing !== null}
         onClose={() => {
-          if (actionInFlight === null) {
-            setClosing(null);
-            setCloseReason('');
-          }
+          if (actionInFlight === null) setClosing(null);
         }}
         title={closing ? `Close ${closing.id}` : 'Close bead'}
         caption={closing?.title}
@@ -534,10 +498,7 @@ export function BeadsPage() {
               size="sm"
               tone="quiet"
               disabled={actionInFlight !== null}
-              onClick={() => {
-                setClosing(null);
-                setCloseReason('');
-              }}
+              onClick={() => setClosing(null)}
             >
               Cancel
             </Button>
@@ -548,7 +509,7 @@ export function BeadsPage() {
               title={readOnly ? READ_ONLY_CONTROL_TITLE : undefined}
               disabled={readOnly || closing === null || actionInFlight !== null}
               onClick={() => {
-                if (closing) void runAction(closing, 'close', closeReason);
+                if (closing) void runClose(closing);
               }}
             >
               Close bead
@@ -556,16 +517,9 @@ export function BeadsPage() {
           </>
         }
       >
-        <label className="block space-y-2 text-body">
-          <span className="text-label uppercase tracking-wider text-fg-muted">Reason</span>
-          <textarea
-            value={closeReason}
-            onChange={(event) => setCloseReason(event.target.value)}
-            rows={4}
-            placeholder="Optional close reason"
-            className="w-full rounded-sm border border-rule bg-transparent px-3 py-2 text-body text-fg focus-mark"
-          />
-        </label>
+        <p className="text-body text-fg-muted">
+          Close this bead? It will be marked closed and drop out of the open queue.
+        </p>
       </Modal>
 
       <Modal

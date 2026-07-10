@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { NowProvider } from '../contexts/NowContext';
@@ -15,14 +15,6 @@ vi.mock('../api/client', () => ({
       this.kind = kind;
     }
   },
-  apiErrorParts: (err: unknown, fallback = 'request failed') => {
-    if (err instanceof Error && 'status' in err) {
-      const apiErr = err as Error & { status: number; kind?: string };
-      return { message: apiErr.message, status: apiErr.status, kind: apiErr.kind };
-    }
-    if (err instanceof Error) return { message: err.message };
-    return { message: fallback };
-  },
   formatApiError: (err: unknown, fallback = 'request failed') => {
     if (err instanceof Error && 'status' in err) {
       const apiErr = err as Error & { status: number };
@@ -36,7 +28,6 @@ vi.mock('../api/client', () => ({
 const mockListSupervisorSessions = vi.hoisted(() => vi.fn());
 const mockListSupervisorBeads = vi.hoisted(() => vi.fn());
 const mockListSupervisorMail = vi.hoisted(() => vi.fn());
-const mockFetchSupervisorAgentPrime = vi.hoisted(() => vi.fn());
 const mockUseVisibleRefresh = vi.hoisted(() => vi.fn());
 
 vi.mock('../supervisor/sessionReads', () => ({
@@ -55,10 +46,6 @@ vi.mock('../supervisor/beadReads', () => ({
 
 vi.mock('../supervisor/mailReads', () => ({
   listSupervisorMail: mockListSupervisorMail,
-}));
-
-vi.mock('../supervisor/agentReads', () => ({
-  fetchSupervisorAgentPrime: mockFetchSupervisorAgentPrime,
 }));
 
 vi.mock('../contexts/ViewingAsContext', () => ({
@@ -99,7 +86,6 @@ describe('AgentDetailPage error reporting', () => {
     mockListSupervisorSessions.mockResolvedValue({ items: [] });
     mockListSupervisorBeads.mockRejectedValue(new Error('beads unavailable'));
     mockListSupervisorMail.mockResolvedValue({ items: [] });
-    mockFetchSupervisorAgentPrime.mockResolvedValue({ agent: 'mayor', prompt: '', bytes: 0 });
     mockReportClientError.mockReset();
     mockUseVisibleRefresh.mockClear();
   });
@@ -152,50 +138,6 @@ describe('AgentDetailPage error reporting', () => {
     });
     expect(await screen.findByText('beads unavailable')).toBeTruthy();
     expect(screen.queryByText('Loading beads.')).toBeNull();
-  });
-
-  it('fetches directives through the supervisor prime API when refreshed', async () => {
-    mockListSupervisorSessions.mockResolvedValue({
-      items: [
-        {
-          id: 'gc-session-1',
-          session_name: 'mayor',
-          alias: 'mayor',
-          template: 'mayor',
-          title: 'mayor',
-          state: 'active',
-          provider: 'claude',
-          running: true,
-          attached: false,
-          created_at: '2026-06-01T00:00:00Z',
-        },
-      ],
-    });
-    mockListSupervisorBeads.mockResolvedValue({ items: [] });
-    mockFetchSupervisorAgentPrime.mockResolvedValue({
-      agent: 'mayor',
-      prompt: 'DIRECTIVE BODY',
-      bytes: 'DIRECTIVE BODY'.length,
-    });
-
-    render(
-      <MemoryRouter
-        initialEntries={['/agents/mayor']}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
-        <NowProvider intervalMs={1_000_000}>
-          <Routes>
-            <Route path="/agents/:slug" element={<AgentDetailPage />} />
-          </Routes>
-        </NowProvider>
-      </MemoryRouter>,
-    );
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Refresh' }));
-    await waitFor(() => {
-      expect(mockFetchSupervisorAgentPrime).toHaveBeenCalledWith('mayor');
-    });
-    expect(await screen.findByText('DIRECTIVE BODY')).toBeTruthy();
   });
 
   it('uses supervisor SSE rather than visible polling for session and bead refreshes', async () => {

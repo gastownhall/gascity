@@ -24,8 +24,6 @@ const baseApi: SupervisorApi = {
   createBead: vi.fn(),
   updateBead: vi.fn(),
   closeBead: vi.fn(),
-  nudgeAgent: vi.fn(),
-  agentPrime: vi.fn(),
   sling: vi.fn(),
   formulaFeed: vi.fn(),
   listMail: vi.fn(),

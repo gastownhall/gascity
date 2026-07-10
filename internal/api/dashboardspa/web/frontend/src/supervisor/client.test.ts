@@ -502,7 +502,7 @@ describe('supervisor client wrapper', () => {
     });
   });
 
-  it('closes supervisor beads through the generated SDK with mutation headers and reason', async () => {
+  it('closes supervisor beads through the generated SDK with mutation headers', async () => {
     const fetchSpy = vi.fn(
       async (_input: RequestInfo | URL) =>
         new Response(JSON.stringify({ status: 'closed' }), {
@@ -516,11 +516,9 @@ describe('supervisor client wrapper', () => {
       fetch: fetchSpy as typeof fetch,
     });
 
-    await expect(
-      api.closeBead('test-city', 'td-bead-abc123', {
-        reason: 'operator verified duplicate',
-      }),
-    ).resolves.toMatchObject({ status: 'closed' });
+    await expect(api.closeBead('test-city', 'td-bead-abc123')).resolves.toMatchObject({
+      status: 'closed',
+    });
 
     const req = fetchSpy.mock.calls[0]?.[0];
     expect(requestedUrl(req)).toBe(
@@ -530,9 +528,7 @@ describe('supervisor client wrapper', () => {
     const request = req as Request;
     expect(request.method).toBe('POST');
     expect(request.headers.get('X-GC-Request')).toBe('dashboard');
-    await expect(request.json()).resolves.toEqual({
-      reason: 'operator verified duplicate',
-    });
+    await expect(request.text()).resolves.toBe('');
   });
 
   it('creates supervisor beads through the generated SDK with mutation headers', async () => {
@@ -617,113 +613,6 @@ describe('supervisor client wrapper', () => {
       rig: 'east',
       target: 'mayor',
     });
-  });
-
-  it('nudges unqualified supervisor agents through the generated SDK with mutation headers', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(JSON.stringify({ status: 'ok' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.nudgeAgent('test-city', 'mayor')).resolves.toMatchObject({ status: 'ok' });
-
-    const req = fetchSpy.mock.calls[0]?.[0];
-    expect(requestedUrl(req)).toBe('http://gc-supervisor.test/v0/city/test-city/agent/mayor/nudge');
-    expect(req).toBeInstanceOf(Request);
-    const request = req as Request;
-    expect(request.method).toBe('POST');
-    expect(request.headers.get('X-GC-Request')).toBe('dashboard');
-    await expect(request.text()).resolves.toBe('');
-  });
-
-  it('nudges qualified supervisor agents through the generated SDK with mutation headers', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(JSON.stringify({ status: 'ok' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.nudgeAgent('test-city', 'east/mayor')).resolves.toMatchObject({
-      status: 'ok',
-    });
-
-    const req = fetchSpy.mock.calls[0]?.[0];
-    expect(requestedUrl(req)).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/agent/east/mayor/nudge',
-    );
-    expect(req).toBeInstanceOf(Request);
-    const request = req as Request;
-    expect(request.method).toBe('POST');
-    expect(request.headers.get('X-GC-Request')).toBe('dashboard');
-    await expect(request.text()).resolves.toBe('');
-  });
-
-  it('reads unqualified supervisor agent prime prompts through the generated SDK', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(JSON.stringify({ agent: 'mayor', prompt: 'composed prompt', bytes: 15 }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.agentPrime('test-city', 'mayor')).resolves.toMatchObject({
-      agent: 'mayor',
-      prompt: 'composed prompt',
-      bytes: 15,
-    });
-
-    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/agent/mayor/prime',
-    );
-  });
-
-  it('reads qualified supervisor agent prime prompts through the generated SDK', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(
-          JSON.stringify({ agent: 'east/mayor', prompt: 'qualified prompt', bytes: 16 }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.agentPrime('test-city', 'east/mayor')).resolves.toMatchObject({
-      agent: 'east/mayor',
-      prompt: 'qualified prompt',
-      bytes: 16,
-    });
-
-    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/agent/east/mayor/prime',
-    );
   });
 
   it('calls supervisor mail through the generated SDK without dashboard DTO stripping', async () => {
@@ -1260,8 +1149,6 @@ describe('supervisor client wrapper', () => {
       createBead: vi.fn(),
       updateBead: vi.fn(),
       closeBead: vi.fn(),
-      nudgeAgent: vi.fn(),
-      agentPrime: vi.fn(),
       sling: vi.fn(),
       cityEventStreamUrl: vi.fn(() => '/gc-supervisor/v0/city/test-city/events/stream'),
       sessionStreamUrl: vi.fn(() => '/gc-supervisor/v0/city/test-city/session/gc-session-1/stream'),
