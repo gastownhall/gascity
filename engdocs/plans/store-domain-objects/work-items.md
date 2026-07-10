@@ -150,10 +150,23 @@ Fold O2 + O4. `ApplyPatch` **returns the refreshed `Info` as a LOCAL fold** (not
 >   deleted the dead 16-fn raw pool cluster + re-pointed oracles. Red-team approve-with-nits (0 blockers);
 >   6 nits fixed in commit C incl. 2 mandatory oracle-regression restorations (fail-then-pass verified).
 >   Commits cfdc94e30/b7ef1af77/bec1a2be3. **Interior IFP now = cmd_session 1 + session_resolution 1 (W-flip).**
-> - **W-flip** (§5b): front-door flip (`class_store.go` + `api.State` → domain stores).
-> - **W-unexport** (§5e): codec unexport + guards → permanent zero-pins. Orders codecs gated on deferred
->   WI-3 two-class wiring. InfoFromPersistedBead unexports IFF W-tick+W-delete reach true interior zero
->   (else session_logs_resolve / session_resolution sanctioned — the design will decide).
+> - **W-flip + W-unexport** ✅ (merge `13c0ff6f9`, combined final wave): zeroed the LAST TWO interior
+>   `InfoFromPersistedBead` sites — `cmd_session.go` cmdSessionKill (raw Get+codec → `sessionFrontDoor().Get`→Info,
+>   bridge preserved; the `infoErr` best-effort branch is defensive, `resolveSessionIDWithConfig` gates
+>   foreign/missing first) and `internal/api/session_resolution.go` retire lane (→ `ExactMetadataSessionCandidatesInfo`
+>   + exported Info classifiers + new `LifecycleIdentityReleasedInfo`). **Interior (non-test) `InfoFromPersistedBead`
+>   = TRUE ZERO across all 4 scan dirs** (census-enforced; no gaming). Retired the `GetWithPersistedResponse`
+>   needle (deleted the dead zero-caller `SessionCatalog.GetWithPersistedResponse`). Red-team changes-needed→resolved
+>   (the mandated kill pin tested an UNREACHABLE branch — proven by mutation; added the reachable foreign/missing
+>   + candidate-Info oracles). Commits ffada9ce8/325d5b877/493691763.
+> - **W-unexport (compiler rename) DEFERRED — honest under-reach.** `InfoFromPersistedBead` is NOT renamed to
+>   `infoFromPersistedBead`: it is a test-fixture constructor at **~444 external call sites / 51 external test files**
+>   (cmd/gc, internal/api, internal/worker) — the compiler rename breaks them all. The census ratchet ALREADY
+>   enforces the non-test interior boundary at true zero; the needle stays as a permanent interior-zero-pin.
+>   Achieving the compiler boundary needs a separate mechanical **W-test-fixture** wave (migrate the ~523 test
+>   sites to a `sessiontest` shim / lowercase internal-package tests), then unexport all session codecs together.
+>   `ListAllSessionBeads` (session_beads.go:1, sync/beadmail floor) + orders codecs (`RunFromTrackingBead`/
+>   `MaxSeqFromLabels`, WI-3) stay exported+pinned per the honest endgame verdict.
 >
 > Every session-store wave (W2/W3/W5) tripped the SAME front-door-Get contract
 > subtlety (session.Store.Get/GetPersistedResponse returns `ErrSessionNotFound` +

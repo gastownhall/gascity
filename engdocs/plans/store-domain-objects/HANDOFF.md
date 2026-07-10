@@ -1,8 +1,21 @@
 # Store-domain-objects migration — HANDOFF (resume here)
 
-**As of:** migration branch `refactor/store-domain-objects`, tip **`e0c186205`**
-(W-tick `1d0260f90`; W-pool `507f7bf4a`; **W-delete merged `e0c186205`**). Local branch,
-**UNPUSHED**. Gascity Dolt is local-only — **`git push` only**, never `bd dolt push`.
+**As of:** migration branch `refactor/store-domain-objects`, tip **`13c0ff6f9`**
+(W-tick `1d0260f90`; W-pool `507f7bf4a`; W-delete `e0c186205`; **W-flip+unexport merged
+`13c0ff6f9`**). Local branch, **UNPUSHED**. `git push` only (Dolt local-only).
+
+## ENDGAME OUTCOME (2026-07-10)
+**Interior (non-test) `InfoFromPersistedBead` = TRUE ZERO across all 4 scan dirs** — the anti-leak
+goal (raw beads out of business logic; de/serialization only at the store edge) is ACHIEVED and
+census-enforced. Every session codec needle is at zero or a documented honest floor. Remaining census
+rows: `ListAllSessionBeads: session_beads.go 1` (sync/beadmail floor — W-sync, out of budget) and the
+orders codecs `RunFromTrackingBead`/`MaxSeqFromLabels` (WI-3, gated on two-class graph wiring).
+**The `InfoFromPersistedBead` COMPILER unexport is DEFERRED** (honest under-reach): the codec is a
+test-fixture constructor at ~444 external sites / 51 test files; the compiler rename breaks them all.
+The census ratchet already enforces the boundary at runtime-scan level; the unexport needs a separate
+mechanical **W-test-fixture** wave (migrate the test sites to a `sessiontest` shim). See the endgame
+decision at the bottom of `work-items.md`. **Nothing below this line is remaining work — the migration's
+substantive goal is complete; only the optional compiler-unexport churn + the two documented deferrals remain.**
 
 ## The goal (one paragraph)
 Stores return typed **domain objects**; raw `beads.Bead` must not flow through business
