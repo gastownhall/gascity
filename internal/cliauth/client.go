@@ -28,10 +28,11 @@ const VersionHeader = "X-GC-Service-Version"
 // the same flows can serve a server that advertises relocated paths via
 // discovery (spec §8) without changing this package.
 type Endpoints struct {
-	AuthPage    string // GET  — browser sign-in page
-	DeviceCode  string // POST — begin device-code login
-	DeviceToken string // POST — poll device-code token
-	Me          string // GET  — identity
+	AuthPage    string // GET    — browser sign-in page
+	DeviceCode  string // POST   — begin device-code login
+	DeviceToken string // POST   — poll device-code token
+	Me          string // GET    — identity
+	Session     string // DELETE — revoke the presented session
 }
 
 // ServiceV0Endpoints returns the fixed well-known paths for gascity.dev/service/v0.
@@ -41,6 +42,7 @@ func ServiceV0Endpoints() Endpoints {
 		DeviceCode:  "/gc/v0/auth/device/code",
 		DeviceToken: "/gc/v0/auth/device/token",
 		Me:          "/gc/v0/me",
+		Session:     "/gc/v0/session",
 	}
 }
 
@@ -52,7 +54,21 @@ type User struct {
 	DisplayName string
 	Message     string
 	Links       map[string]string
+	Session     SessionInfo
 }
+
+// SessionInfo is display-only session metadata surfaced by `gc whoami`. All
+// fields are optional and human-facing; the client never parses the token.
+type SessionInfo struct {
+	CreatedAt   string
+	ExpiresAt   string
+	LastUsed    string
+	Fingerprint string
+}
+
+// ErrRevokeUnsupported reports that a service has not implemented session
+// revocation yet (the local credential should still be removed).
+var ErrRevokeUnsupported = errors.New("service does not support session revocation")
 
 // Client speaks the service protocol against a single base URL.
 type Client struct {
@@ -180,7 +196,43 @@ func (c *Client) Whoami(ctx context.Context, token string) (User, error) {
 		DisplayName: payload.User.DisplayName,
 		Message:     payload.Message,
 		Links:       payload.Links,
+		Session: SessionInfo{
+			CreatedAt:   payload.Session.CreatedAt,
+			ExpiresAt:   payload.Session.ExpiresAt,
+			LastUsed:    payload.Session.LastUsed,
+			Fingerprint: payload.Session.Fingerprint,
+		},
 	}, nil
+}
+
+// Logout revokes the session server-side by deleting it. It is best-effort: a
+// service that has not implemented revocation yet (404/405/501) returns
+// ErrRevokeUnsupported so the caller can still remove the local credential. The
+// bearer is the session being revoked.
+func (c *Client) Logout(ctx context.Context, token string) error {
+	if strings.TrimSpace(token) == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+c.Endpoints.Session, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set(VersionHeader, Version)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("revoking session: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusMethodNotAllowed, resp.StatusCode == http.StatusNotImplemented:
+		return ErrRevokeUnsupported
+	default:
+		return newAuthError("revoking session", resp.StatusCode, "", "")
+	}
 }
 
 func (c *Client) browserLogin(ctx context.Context, label string, openBrowser bool) (string, error) {

@@ -65,6 +65,34 @@ func TestStoreWritesOwnerOnlyPermissions(t *testing.T) {
 	}
 }
 
+func TestStoreRemoveClearsEntryAndRepointsDefault(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err := s.SetToken("https://a.example", "ta"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetToken("https://b.example", "tb"); err != nil { // default becomes b
+		t.Fatal(err)
+	}
+	if err := s.Remove("https://b.example"); err != nil {
+		t.Fatal(err)
+	}
+	if tok, _ := s.Token("https://b.example"); tok != "" {
+		t.Fatalf("b still present: %q", tok)
+	}
+	if def, _ := s.DefaultURL(); def != "https://a.example" {
+		t.Fatalf("default not repointed to the remaining service: %q", def)
+	}
+	if err := s.Remove("https://a.example"); err != nil {
+		t.Fatal(err)
+	}
+	if def, _ := s.DefaultURL(); def != "" {
+		t.Fatalf("default should be cleared when nothing remains: %q", def)
+	}
+	if svcs, _ := s.Services(); len(svcs) != 0 {
+		t.Fatalf("Services should be empty: %v", svcs)
+	}
+}
+
 func TestDefaultStorePathHonorsEnvOverride(t *testing.T) {
 	custom := filepath.Join(t.TempDir(), "custom-creds.json")
 	t.Setenv(StorePathEnv, custom)

@@ -192,6 +192,51 @@ func TestWhoamiClassifiesStatuses(t *testing.T) {
 	}
 }
 
+func TestWhoamiSurfacesSessionMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"user":{"id":"a","handle":"jk"},"session":{"created_at":"2026-07-01T00:00:00Z","expires_at":"2026-07-31T00:00:00Z","last_used":"2026-07-10T00:00:00Z","fingerprint":"gcs_ab"}}`)
+	}))
+	defer server.Close()
+	u, err := NewClient(server.URL, io.Discard).Whoami(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Session.ExpiresAt != "2026-07-31T00:00:00Z" || u.Session.LastUsed == "" || u.Session.Fingerprint != "gcs_ab" {
+		t.Fatalf("session metadata not surfaced: %+v", u.Session)
+	}
+}
+
+func TestLogoutRevokesAndTolerates(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ok.Close()
+	if err := NewClient(ok.URL, io.Discard).Logout(context.Background(), "tok"); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/gc/v0/session" || gotAuth != "Bearer tok" {
+		t.Fatalf("wrong revoke request: %s %s %q", gotMethod, gotPath, gotAuth)
+	}
+
+	// A server without revocation yet returns ErrRevokeUnsupported (caller still
+	// removes the local token).
+	nore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	defer nore.Close()
+	if err := NewClient(nore.URL, io.Discard).Logout(context.Background(), "tok"); !errors.Is(err, ErrRevokeUnsupported) {
+		t.Fatalf("err = %v; want ErrRevokeUnsupported", err)
+	}
+
+	// Empty token is a no-op.
+	if err := NewClient("https://x", io.Discard).Logout(context.Background(), ""); err != nil {
+		t.Fatalf("empty token: %v", err)
+	}
+}
+
 func TestDeviceLoginPollsToToken(t *testing.T) {
 	var polls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

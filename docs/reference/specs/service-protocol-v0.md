@@ -89,7 +89,8 @@ compatibility). Errors use the shape in [§6](#6-errors).
 | `GET`  | `/gc/v0/auth/cli`          | none    | Browser sign-in page (server-rendered) |
 | `POST` | `/gc/v0/auth/device/code`  | none    | Begin device-code login (headless) |
 | `POST` | `/gc/v0/auth/device/token` | none    | Poll for the device-code token |
-| `GET`  | `/gc/v0/me`                | bearer  | Identify the authenticated account |
+| `GET`    | `/gc/v0/me`                | bearer  | Identify the authenticated account |
+| `DELETE` | `/gc/v0/session`           | bearer  | Revoke the presented session (`gc logout`) |
 
 ### 3.1 Browser-callback login — `GET /gc/v0/auth/cli`
 
@@ -188,6 +189,7 @@ Response `200`:
 ```json
 {
   "user": { "id": "<opaque>", "handle": "julian", "display_name": "Julian K." },
+  "session": { "created_at": "…Z", "expires_at": "…Z", "last_used": "…Z", "fingerprint": "gcs_ab" },
   "message": "You have $5 of trial credit.",
   "links": { "account": "https://gascity.com/account" }
 }
@@ -196,12 +198,32 @@ Response `200`:
 - `user.id` — a stable opaque account identifier. **There is no org or tenant
   field.** An account is addressed only by opaque `id`/`handle`; the wire
   carries no tenancy identity.
+- `session` — optional, **display-only** metadata (`created_at`, `expires_at`,
+  `last_used`, `fingerprint`) the CLI shows via `gc whoami` so a user can see when
+  the session expires and correlate it with the account's session list. The client
+  never parses the token; `fingerprint` is a short non-secret label, never the
+  handle.
 - `message` / `links` — optional, server-authored, printed verbatim by the CLI
   (see [§5](#5-the-opacity-rule)).
 
 A non-2xx response means the token is not valid; the CLI treats the caller as
 not-logged-in. `gc login` calls `/gc/v0/me` immediately after obtaining a token
 to verify it before storing.
+
+### 3.4 Logout — `DELETE /gc/v0/session`
+
+```
+DELETE {base}/gc/v0/session
+Authorization: Bearer <token>
+```
+
+Revokes the presented session server-side. `gc logout` calls this, then removes
+the local credential. It is best-effort: a server that has not implemented
+revocation returns `404`/`405`/`501` and the client still removes the local
+token (and warns). Because the session is the only long-lived credential and is
+not proof-of-possession bound, **revocation is the containment for a leaked
+credential**; a conforming hosted server SHOULD implement it, revoking such that
+the session stops resolving on the next request (see [§7](#7-the-session-token-and-401-vs-403)).
 
 ## 4. Client credential storage
 
@@ -322,6 +344,12 @@ version are coordinated:
   base URL or named by the login origin's discovery document (§8, via a
   `token_endpoint` field); the session bearer is sent only to the login origin;
   scopes are opaque strings the client echoes verbatim.
+- **Session rotation** — a server MAY return a replacement session handle in a
+  response header on an authenticated response; a client that supports rotation
+  atomically re-stores it (a pure string swap — no parsing) and treats reuse of a
+  superseded handle as the server's cue to re-login. **v0 clients ignore the
+  header.** Reserved so the header name can be fixed without a breaking change;
+  rotation buys server-side theft detection without proof-of-possession.
 
 Both reuse §1–§7 verbatim (base-URL resolution, versioning, session handle, the
 opacity rule, error shape). `POST /gc/v0/runs` additionally permits an **absent**

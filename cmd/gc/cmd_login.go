@@ -86,6 +86,86 @@ func newWhoamiCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+func newLogoutCmd(stdout, stderr io.Writer) *cobra.Command {
+	var serviceURL string
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "logout",
+		Short: "Log out of a hosted Gas City service (revoke the session and forget the token)",
+		Long: `Log out of a hosted Gas City service: revoke the session server-side, then
+remove the stored token. Because the session is the only long-lived credential,
+this is the kill switch for a leaked ~/.gc/credentials.json — the local token is
+always removed even if the server-side revoke fails or is not yet supported.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if doLogout(cmd.Context(), serviceURL, all, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&serviceURL, "at", "", "service base URL; defaults to "+serviceURLEnv+", the stored default, then "+defaultServiceURL)
+	cmd.Flags().BoolVar(&all, "all", false, "log out of every stored service")
+	return cmd
+}
+
+func doLogout(ctx context.Context, serviceURL string, all bool, stdout, stderr io.Writer) int {
+	store := cliauth.NewStore(cliauth.DefaultStorePath())
+	var targets []string
+	if all {
+		svcs, err := store.Services()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc logout: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		targets = svcs
+	} else {
+		base, err := resolveServiceBaseURL(serviceURL, store)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc logout: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		targets = []string{base}
+	}
+
+	code := 0
+	loggedOut := 0
+	for _, base := range targets {
+		token, err := store.Token(base)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc logout: %v\n", err) //nolint:errcheck
+			code = 1
+			continue
+		}
+		if token == "" {
+			continue
+		}
+		// Revoke server-side first (best-effort), then always remove locally.
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = cliauth.NewClient(base, stdout).Logout(ctx, token)
+		cancel()
+		switch {
+		case err == nil:
+			fmt.Fprintf(stdout, "Revoked session at %s\n", base) //nolint:errcheck
+		case errors.Is(err, cliauth.ErrRevokeUnsupported):
+			fmt.Fprintf(stderr, "gc logout: %s does not support server-side revocation yet; removed the local token only\n", base) //nolint:errcheck
+		default:
+			fmt.Fprintf(stderr, "gc logout: could not revoke at %s: %v — remove it from your account's session list to be safe\n", base, err) //nolint:errcheck
+			code = 1
+		}
+		if err := store.Remove(base); err != nil {
+			fmt.Fprintf(stderr, "gc logout: %v\n", err) //nolint:errcheck
+			code = 1
+			continue
+		}
+		loggedOut++
+	}
+	if loggedOut == 0 && code == 0 {
+		fmt.Fprintln(stdout, "Not logged in to any service.") //nolint:errcheck
+	}
+	return code
+}
+
 func doLogin(ctx context.Context, opts loginOptions, stdout, stderr io.Writer) int {
 	store := cliauth.NewStore(cliauth.DefaultStorePath())
 	baseURL, err := resolveServiceBaseURL(opts.ServiceURL, store)
@@ -102,6 +182,9 @@ func doLogin(ctx context.Context, opts loginOptions, stdout, stderr io.Writer) i
 	client := cliauth.NewClient(baseURL, stdout)
 	client.OpenBrowser = openURL
 	if token == "" {
+		if looksLikeCI() {
+			fmt.Fprintln(stderr, "gc login: this looks like CI — a human session is not a CI credential; use a machine principal for automation") //nolint:errcheck
+		}
 		token, err = client.Login(ctx, cliauth.LoginOptions{
 			Label:     opts.Label,
 			Device:    opts.Device,
@@ -158,8 +241,40 @@ func doWhoami(ctx context.Context, opts loginOptions, stdout, stderr io.Writer) 
 		return 1
 	}
 	fmt.Fprintf(stdout, "@%s (%s) at %s\n", user.Handle, user.ID, baseURL) //nolint:errcheck
+	printSessionInfo(stdout, stderr, user.Session)
 	printServiceMessage(stdout, user)
 	return 0
+}
+
+// printSessionInfo shows display-only session metadata the server reported, and
+// warns when the session is close to expiry. The client never parses the token.
+func printSessionInfo(stdout, stderr io.Writer, s cliauth.SessionInfo) {
+	if s.CreatedAt != "" {
+		fmt.Fprintf(stdout, "  session created %s\n", s.CreatedAt) //nolint:errcheck
+	}
+	if s.LastUsed != "" {
+		fmt.Fprintf(stdout, "  last used %s\n", s.LastUsed) //nolint:errcheck
+	}
+	if s.ExpiresAt == "" {
+		return
+	}
+	fmt.Fprintf(stdout, "  expires %s\n", s.ExpiresAt) //nolint:errcheck
+	if exp, err := time.Parse(time.RFC3339, s.ExpiresAt); err == nil {
+		if d := time.Until(exp); d > 0 && d < 72*time.Hour {
+			fmt.Fprintf(stderr, "  session expires in ~%s — run `gc login` to refresh\n", d.Round(time.Hour)) //nolint:errcheck
+		}
+	}
+}
+
+// looksLikeCI reports whether we appear to be running in CI/automation, where a
+// human session is the wrong credential (machine principals should be used).
+func looksLikeCI() bool {
+	for _, k := range []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI"} {
+		if strings.TrimSpace(os.Getenv(k)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // printServiceMessage prints the server-authored message verbatim. The CLI

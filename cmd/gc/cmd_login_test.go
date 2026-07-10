@@ -106,6 +106,60 @@ func TestDoWhoamiNotLoggedIn(t *testing.T) {
 	}
 }
 
+func TestDoLogoutRevokesAndRemovesLocal(t *testing.T) {
+	t.Setenv(cliauth.StorePathEnv, filepath.Join(t.TempDir(), "credentials.json"))
+	t.Setenv(serviceTokenEnv, "")
+	var revoked bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/gc/v0/session" {
+			revoked = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	base, _ := normalizeServiceBaseURL(server.URL)
+	if err := cliauth.NewStore(cliauth.DefaultStorePath()).SetToken(base, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := doLogout(context.Background(), server.URL, false, &out, &errb); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, errb.String())
+	}
+	if !revoked {
+		t.Fatalf("server-side revoke was not called")
+	}
+	if tok, _ := cliauth.NewStore(cliauth.DefaultStorePath()).Token(base); tok != "" {
+		t.Fatalf("local token not removed: %q", tok)
+	}
+	if !strings.Contains(out.String(), "Revoked session") {
+		t.Fatalf("stdout=%q", out.String())
+	}
+}
+
+func TestDoLogoutRemovesLocalWhenServerHasNoRevoke(t *testing.T) {
+	t.Setenv(cliauth.StorePathEnv, filepath.Join(t.TempDir(), "credentials.json"))
+	t.Setenv(serviceTokenEnv, "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	defer server.Close()
+	base, _ := normalizeServiceBaseURL(server.URL)
+	if err := cliauth.NewStore(cliauth.DefaultStorePath()).SetToken(base, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	// A server without revocation is not a hard failure; the local token is still removed.
+	if code := doLogout(context.Background(), server.URL, false, &out, &errb); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, errb.String())
+	}
+	if tok, _ := cliauth.NewStore(cliauth.DefaultStorePath()).Token(base); tok != "" {
+		t.Fatalf("local token not removed: %q", tok)
+	}
+}
+
 func TestResolveServiceBaseURLLadder(t *testing.T) {
 	store := cliauth.NewStore(filepath.Join(t.TempDir(), "credentials.json"))
 

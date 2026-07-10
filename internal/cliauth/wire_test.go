@@ -37,8 +37,9 @@ func indexComma(s string) int {
 // such policy travels only in the opaque message/links fields (spec §5).
 func TestWireFieldsAreStableAndVendorNeutral(t *testing.T) {
 	want := map[string][]string{
-		"meResponse":          {"user", "message", "links", "error"},
+		"meResponse":          {"user", "session", "message", "links", "error"},
 		"meUser":              {"id", "handle", "display_name"},
+		"sessionInfo":         {"created_at", "expires_at", "last_used", "fingerprint"},
 		"apiError":            {"code", "message"},
 		"deviceCodeResponse":  {"device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in", "interval", "error"},
 		"deviceTokenResponse": {"access_token", "token_type", "error", "interval"},
@@ -47,6 +48,7 @@ func TestWireFieldsAreStableAndVendorNeutral(t *testing.T) {
 	got := map[string][]string{
 		"meResponse":          jsonTags(reflect.TypeOf(meResponse{})),
 		"meUser":              jsonTags(reflect.TypeOf(meUser{})),
+		"sessionInfo":         jsonTags(reflect.TypeOf(sessionInfo{})),
 		"apiError":            jsonTags(reflect.TypeOf(apiError{})),
 		"deviceCodeResponse":  jsonTags(reflect.TypeOf(deviceCodeResponse{})),
 		"deviceTokenResponse": jsonTags(reflect.TypeOf(deviceTokenResponse{})),

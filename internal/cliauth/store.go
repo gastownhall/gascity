@@ -146,3 +146,34 @@ func (s *Store) DefaultURL() (string, error) {
 	}
 	return strings.TrimSpace(cf.DefaultServiceURL), nil
 }
+
+// Services returns every service URL with a stored token.
+func (s *Store) Services() ([]string, error) {
+	cf, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	urls := make([]string, 0, len(cf.Services))
+	for url := range cf.Services {
+		urls = append(urls, url)
+	}
+	return urls, nil
+}
+
+// Remove deletes the stored token for baseURL. When baseURL was the default, the
+// default is repointed to any remaining service (or cleared).
+func (s *Store) Remove(baseURL string) error {
+	cf, err := s.load()
+	if err != nil {
+		return err
+	}
+	delete(cf.Services, baseURL)
+	if cf.DefaultServiceURL == baseURL {
+		cf.DefaultServiceURL = ""
+		for url := range cf.Services {
+			cf.DefaultServiceURL = url
+			break
+		}
+	}
+	return s.save(cf)
+}

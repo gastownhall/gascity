@@ -10,9 +10,20 @@ package cliauth
 // meResponse is the GET /gc/v0/me response.
 type meResponse struct {
 	User    meUser            `json:"user"`
+	Session sessionInfo       `json:"session"`
 	Message string            `json:"message"`
 	Links   map[string]string `json:"links"`
 	Error   apiError          `json:"error"`
+}
+
+// sessionInfo is display-only session metadata (all optional): the CLI shows it
+// so a user can see when their session expires and was last used, and correlate
+// it with the server-side session list. The client never parses the token itself.
+type sessionInfo struct {
+	CreatedAt   string `json:"created_at"`
+	ExpiresAt   string `json:"expires_at"`
+	LastUsed    string `json:"last_used"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // meUser identifies the authenticated account by opaque id/handle only — there

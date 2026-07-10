@@ -167,32 +167,91 @@ different owner, do first; (2) **cliauth hardening + spec edits — PR #4135, no
 (3) crucible verifier trust audit; (4) the edge auth/session surface — the bulk;
 (5) cities translation. Variant B client stays deferred.
 
-## 6. Security model & transport (the load-bearing part)
+## 6. Security: the no-DPoP posture, resolved
 
-The session bearer is the crown jewel — the only long-lived credential, and
-without DPoP it is **replayable until expiry** (a stolen 0600 file is enough).
-That mandates:
+*Resolved by a 4-lens Fable security review (2026-07-10) that weighed decisions
+(2) and (3). Decision (2) — accept the Docker/`gh` no-DPoP bearer — is **SAFE
+only WITH the compensating controls below** (all four lenses). Decision (3) —
+the TTL/revocation model — is resolved to concrete numbers here.*
 
-- **HTTPS only.** The CLI MUST refuse a non-`https` base URL (except explicit
-  loopback for dev). Today an explicitly-typed `http://` is accepted → the bearer
-  goes out in cleartext. **(Client fix, PR #4135.)**
-- **Redirect hardening.** The protocol HTTP client MUST refuse any redirect that
-  changes **scheme+host+port** from the login origin (in particular an
-  `https→http` same-host downgrade, which Go's stdlib does *not* strip) — the
-  bearer must never egress off-origin. **(Client fix, PR #4135.)**
-- **Mandatory callback service-match.** The browser-login callback MUST reject a
-  payload whose `service` is **absent or unequal** to the login target — today the
-  check is skipped when `service` is omitted. **(Client fix, PR #4135.)**
-- **Origin, defined once** as scheme+host+port, shared by the callback check and
-  the (future) realm-trust check — no two subtly different comparisons.
-- **Bounded replay window.** Short session TTL, **fast server-side revocation
-  checked on every resolve**, and mint-per-session rate/anomaly limits (edge-side).
-  The high-value minted credentials stay short-lived and **never touch disk**.
-- **DPoP still applies to machine principals**; a future high-assurance human tier
-  could opt in. v0 human onboarding does not.
+### 6.1 Transport (shipped in #4135)
 
-The design does **not** claim parity with the DPoP spine — it claims a bounded,
-revocable, TLS-only bearer, which is the accepted get-started-CLI tradeoff.
+- **HTTPS only** — the CLI refuses a non-`https` base URL (loopback excepted), so
+  the bearer never travels in cleartext.
+- **Redirect hardening** — the client refuses any redirect changing
+  scheme+host+port from the login origin (incl. the `https→http` same-host
+  downgrade the stdlib does not strip); the bearer never egresses off-origin.
+- **Mandatory callback service-match** — reject a callback whose `service` is
+  absent or unequal to the login target.
+- **Origin** is defined once (scheme+host+port), shared by the callback and the
+  future realm-trust check.
+
+### 6.2 The tradeoff, honestly (decision 2)
+
+"Good enough for Docker" holds for the **auth shape**, not the **authorization
+consequences**. A stolen `~/.gc/credentials.json` mints, for the session's life:
+`city.create` (hosted compute + trial credits = free-tier fraud economics that
+hit GitHub Actions / Heroku / GitLab CI), `beads.write` (inject work autonomous
+agents execute), and `config.write` (**≈ RCE** on the hosted controller, per the
+city-write red-team). Docker's worst case is pushing a bad image. The model is
+safe **only** with the §6.4 controls; the design does not claim DPoP parity.
+
+### 6.3 Session lifetime & revocation (decision 3 — RESOLVED)
+
+| Knob | Policy |
+| --- | --- |
+| **Session lifetime** | **7-day idle (sliding) / 30-day absolute, non-extendable.** Trial/unverified orgs: **72h idle / 7d absolute** until verified, then upgrade in place. **No non-expiring sessions.** |
+| **Renewal** | **Server-side sliding only** — the edge bumps `last_used` per resolve (throttled ~1 write / 5 min). **No refresh-token rotation in v0** (it forces write-after-use into the dumb client and races/corrupts `credentials.json` across parallel `gc`/CI copies). At the 30-day cap → full re-login (seconds, ~monthly). |
+| **Revocation** | Tombstone the session row, **checked synchronously on every resolve/mint, fail-closed.** Kill is effectively instant (next mint denied); total residual = the already-minted **≤90s** credential → a hard **≤90s (≤2.5 min worst-case) containment SLA**. Triggers: `gc logout`, web per-session + revoke-all, password/SSO change, secret-scan hit, anomaly, org offboarding. |
+
+**⚠ Protected invariant — "validity checked on every resolve."** The entire
+no-DPoP posture rests on this. The first engineer who adds a session cache or
+read-replica for latency silently converts near-instant revocation into
+TTL-bounded revocation. State it as an invariant in the edge spec with a **≤60s
+max-staleness cap** if a cache is ever introduced.
+
+**Optional fast-follow (reserve now, build later): opaque-handle rotation.** A
+session >24h old → the edge returns a replacement handle in a response header;
+the CLI atomically swaps it (pure string swap, zero crypto), old handle valid for
+a 60s grace. Buys theft *detection* (reuse of a superseded handle = compromise →
+revoke the family), the OAuth refresh-rotation payoff without DPoP.
+
+### 6.4 Compensating controls (edge-side; required for §6.2 to hold)
+
+Ship **with** the edge, not after:
+
+1. **Scannable handles + secret-scanning + auto-revoke** — `gcs_<32B>` prefix
+   registered with GitHub secret scanning; auto-revoke + notify on any hit. This
+   is the load-bearing half of "good enough for `gh`." Store only the SHA-256.
+2. **Trial gating before first `city.create`** — verified email + (payment /
+   aged-OAuth / phone), hard spend cap (~$10–20), ≤2 concurrent trial cities,
+   `city.create` ≤2/h/session and ≤5/day/org, signup-velocity checks.
+3. **24h interactive-auth freshness (sudo-mode)** on `city.create` +
+   `config.write` — shrinks the highest-value replay window from the session TTL
+   to a day, with **zero CLI change** (edge returns 401 → `gc login`).
+4. **Per-session mint-rate limits + anomaly detection** (new-ASN / impossible-
+   travel → auto-suspend + notify).
+5. **Session inventory** — a web session/device list (created / last-used / geo)
+   with per-session and revoke-all; you cannot revoke what the user cannot see.
+
+### 6.5 CLI must-ships (this repo)
+
+Revocation is the containment, so the kill switch and visibility are not optional:
+
+- **`gc logout [service] [--all]`** — server-revoke (DELETE the session) then
+  delete the local entry; revoke-first, always-delete-locally.
+- **`gc whoami`** surfaces session `created` / `expires` / `last_used` + a
+  fingerprint (display-only — never parses the token) + a `<72h` warning.
+- **401/403 split** so a revoked/expired session says "run `gc login`" not a loop
+  — ✅ shipped in #4135.
+- **CI / non-TTY warning at `gc login`** — steer automation to a machine principal,
+  never a pasted human session; plus an "exclude `~/.gc` from dotfile/backup sync"
+  notice.
+- **Rotation-header acceptance** — reserve the response header in the v0 spec now;
+  the CLI atomically re-stores a replacement handle (fast-follow).
+
+DPoP still applies to machine principals; a future high-assurance human tier could
+opt in. v0 human onboarding does not.
 
 ## 7. OSS vs private split
 
@@ -222,6 +281,10 @@ revocation + resolve/mint/inject + cities translation), per-product signers, the
    logged in; run `gc login`"; `403`/`forbidden`/`insufficient_scope` →
    authenticated-but-unauthorized, print the server `message` verbatim, do **not**
    advise re-login; `5xx` → server failure, retryable (no re-login advice).
+5. **`gc logout` + session visibility** (the containment kill switch, §6.5):
+   `gc logout [service] [--all]` server-revokes then deletes locally, and
+   `gc whoami` surfaces session `created`/`expires`/`last_used` (display-only).
+   Best-effort server-revoke until the edge lands; the local delete always works.
 
 **Spec (`service-protocol-v0.md`):**
 5. **Credential-model precision** (§5/§7), generic: the stored token is an opaque,
@@ -243,11 +306,14 @@ revocation + resolve/mint/inject + cities translation), per-product signers, the
 
 1. **Variant A vs B for v0** — recommend A (edge-transparent, CLI unchanged);
    reserve the standard-`Bearer` challenge now.
-2. **No DPoP on the human path** — accept the bounded, revocable, TLS-only bearer
-   tradeoff (Docker/`gh`)? The load-bearing call.
-3. **Session TTL + revocation** — concrete TTL and "revocation = stop resolving,
-   checked every request" (no client CRL). Resolve before calling the model
-   shippable.
+2. **No DPoP on the human path** — ✅ **RESOLVED: accepted (SAFE-WITH-CONTROLS).**
+   The Docker/`gh` bearer shape is fine; the §6.4 compensating controls are
+   mandatory because the blast radius (config.write ≈ RCE, city.create = compute +
+   trial-fraud) exceeds Docker's.
+3. **Session TTL + revocation** — ✅ **RESOLVED (§6.3):** 7d idle / 30d absolute
+   (trial 72h/7d), server-side sliding, no client rotation in v0, revocation
+   checked per-resolve fail-closed (≤90s / ≤2.5min containment). "Checked every
+   resolve" is a protected invariant.
 4. **Which edge** — a distinct `cli-edge` service reusing `identityedge`'s
    mint/inject library (recommended), vs. extending the deployed `identityedge`'s
    accepted principal set.
