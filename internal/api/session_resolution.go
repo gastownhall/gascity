@@ -79,18 +79,6 @@ func apiCityName(cfg *config.City, cityPath string) string {
 	return config.EffectiveCityName(cfg, filepath.Base(cityPath))
 }
 
-func apiIsNamedSessionBead(b beads.Bead) bool {
-	return session.IsNamedSessionBead(b)
-}
-
-func apiNamedSessionIdentity(b beads.Bead) string {
-	return session.NamedSessionIdentity(b)
-}
-
-func apiNamedSessionContinuityEligible(b beads.Bead) bool {
-	return session.NamedSessionContinuityEligible(b)
-}
-
 func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (apiNamedSessionSpec, bool, error) {
 	cfg := s.state.Config()
 	target = apiNormalizeSessionTarget(target)
@@ -143,63 +131,63 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	return bead, ok, nil
 }
 
-func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) ([]beads.Bead, error) {
+func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) ([]session.Info, error) {
 	if store == nil {
 		return nil, nil
 	}
-	all, err := session.ExactMetadataSessionCandidates(store, false, map[string]string{
+	// Typed candidate feed: ExactMetadataSessionCandidatesInfo projects each
+	// candidate through the codec ONCE inside the session edge, so this retire
+	// lane reads only session.Info fields — no raw bead is cracked here and no
+	// b.Metadata key is inlined (the census-honest replacement for the old raw
+	// codec projection of SessionNameMetadata per candidate).
+	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
 		session.NamedSessionIdentityMetadata: spec.Identity,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing named session candidates: %w", err)
 	}
-	retired := make([]beads.Bead, 0)
+	retired := make([]session.Info, 0)
 	now := time.Now().UTC()
-	for _, b := range all {
-		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
+	for _, info := range all {
+		if info.Closed || !session.IsNamedSessionInfo(info) || session.NamedSessionIdentityInfo(info) != spec.Identity || session.NamedSessionInfoContinuityEligible(info) {
 			continue
 		}
-		if session.LifecycleIdentityReleased(b.Status, b.Metadata) {
-			retired = append(retired, b)
+		if session.LifecycleIdentityReleasedInfo(info) {
+			retired = append(retired, info)
 			continue
 		}
-		// Raw-lane read: this loop iterates the raw ExactMetadataSessionCandidates
-		// feed (a genuine WI-7-era raw retire lane, not converted in W2). The bead is
-		// already in hand from that raw feed, so the codec projection is confined to
-		// this edge — its honest InfoFromPersistedBead census count is recorded in
-		// the WI-0 guard rather than gamed to zero by inlining the metadata key.
-		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
-			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
+		if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
+			if handle, err := s.workerHandleForSession(store, info.ID); err == nil {
 				_ = handle.Kill(context.Background())
 			}
 		}
 		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
 		patch["alias_history"] = ""
-		if err := store.SetMetadataBatch(b.ID, patch); err != nil {
-			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", b.ID, err)
+		if err := store.SetMetadataBatch(info.ID, patch); err != nil {
+			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", info.ID, err)
 		}
-		retired = append(retired, b)
+		retired = append(retired, info)
 	}
 	return retired, nil
 }
 
-func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []beads.Bead, replacementID string) error {
+func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []session.Info, replacementID string) error {
 	if store == nil || strings.TrimSpace(replacementID) == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	for _, b := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, b.ID, replacementID); err != nil {
+	for _, info := range retired {
+		if err := reassignOpenWorkAssignedToSession(store, info.ID, replacementID); err != nil {
 			return err
 		}
-		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(b.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign waits from retired session %s to %s: %w", b.ID, replacementID, err)
+		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
+			return fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
-		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {
-			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", b.ID, replacementID, err)
+		if err := extmsg.ReassignSessionBindings(ctx, store, info.ID, replacementID, now); err != nil {
+			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
-		if err := extmsg.ReassignSessionParticipants(ctx, store, b.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", b.ID, replacementID, err)
+		if err := extmsg.ReassignSessionParticipants(ctx, store, info.ID, replacementID); err != nil {
+			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
 	}
 	return nil
@@ -406,7 +394,7 @@ func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSession
 //     would deliver against an incomplete provider, worse than not-found.
 //     Once the reconciler flips state=active, subsequent inbounds resolve.
 //
-// Configured named-session beads are skipped (apiIsNamedSessionBead) so
+// Configured named-session beads are skipped (session.IsNamedSessionInfo) so
 // session.ResolveSessionID still owns those identifiers via its
 // orphan-rejection path. This step is wired AFTER session.ResolveSessionID
 // in the resolver chain so session_name/alias matches always win when both

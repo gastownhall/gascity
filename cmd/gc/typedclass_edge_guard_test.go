@@ -130,28 +130,19 @@ var typedClassCodecEdgeFiles = map[string]bool{
 // carry no entry. Regenerate by running this test with the map empty and pasting
 // the emitted literal.
 var typedClassCodecCensus = map[string]map[string]int{
-	"InfoFromPersistedBead(": {
-		// WI-7 W-delete zeroed four periphery rows: session_bead_snapshot (3→0, the
-		// raw-half deletion — loadSessionBeadSnapshot builds from the typed
-		// ReconcileSession feed via ListAllForReconcileWithFingerprint), cmd_stop (1→0,
-		// markCityStopSessionSleepReason → Store.ListLabeledSessionInfosUnfiltered),
-		// session_hash (1→0, the alias-change rebaseline lane takes a bridged front-door
-		// Get → sessionCoreConfigForHashInfo), and session_logs_resolve (2→0, the
-		// transcript resolver + fallback siblings took []Info via the Info.AwakeStartedAt
-		// field-add + Store.ListByMetadataInfos). The two survivors are the WI-7 W-flip
-		// front-door sites:
-		//
-		// cmd_session is cmdSessionKill's raw store.Get + codec, a CLI front-door-Get flip
-		// deferred to the WI-7 front-door migration (W-flip / §5b/§6).
-		"cmd/gc/cmd_session.go": 1,
-		// WI-6 W2 red-team: session_resolution.go's retireContinuityIneligible loop is a
-		// genuine WI-7-era raw retire lane (bead already in hand from the raw
-		// ExactMetadataSessionCandidates feed). Its codec projection is HONEST and
-		// confined to that edge — recorded here rather than gamed to zero by inlining the
-		// b.Metadata["session_name"] key. Retires with the named_config raw surfaces in
-		// WI-7 W-flip.
-		"internal/api/session_resolution.go": 1,
-	},
+	// InfoFromPersistedBead( is now a PERMANENT INTERIOR ZERO across all four scan
+	// dirs (no census entry). WI-7 W-flip zeroed the last two interior sites:
+	// cmd_session (cmdSessionKill's raw store.Get + codec → sessionFrontDoor(sessStore).Get
+	// with the best-effort front-door-Get bridge), and internal/api/session_resolution
+	// (the retire lane → session.ExactMetadataSessionCandidatesInfo + the exported Info
+	// classifiers IsNamedSessionInfo / NamedSessionIdentityInfo /
+	// NamedSessionInfoContinuityEligible / LifecycleIdentityReleasedInfo, reading
+	// info.SessionNameMetadata directly — no b.Metadata key inlined). The needle stays
+	// policed as a permanent zero-pin tripwire. The codec is NOT yet unexported: it is
+	// referenced as a fixture constructor by ~444 external test call sites across ~51
+	// _test.go files (cmd/gc, internal/api, internal/worker, internal/beads), which the
+	// interior-only census (non-test scan) does not police; migrating those off the
+	// exported codec is a separate out-of-budget wave (see the endgame report).
 	"ListAllSessionBeads(": {
 		// WI-7 W-delete zeroed session_bead_snapshot (1→0, the raw-half load edge flipped
 		// to ListAllForReconcile) and doctor_session_model (1→0, doctor issues its own two

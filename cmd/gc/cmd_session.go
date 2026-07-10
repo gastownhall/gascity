@@ -2292,12 +2292,19 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 
 	sp := newSessionProvider()
-	bead, beadErr := sessStore.Get(sessionID)
-	info := session.InfoFromPersistedBead(bead)
+	// Best-effort session read via the session front door (relocation-safe: the
+	// generic sessStore is already the session-class store). Unlike the raw
+	// sessStore.Get, the front-door Get wraps "loading session %q", returns
+	// ErrSessionNotFound for a present-but-non-session bead, and rejects beads
+	// failing IsSessionBeadOrRepairable. That stricter rejection must NOT abort a
+	// kill the raw path would have attempted: a missing / damaged-past-repair /
+	// foreign target lands in the same best-effort branch below (empty identity,
+	// runtime treated as active, proceed to handle.Kill) that beadErr != nil used.
+	info, infoErr := sessionFrontDoor(sessStore).Get(sessionID)
 	identity := ""
 	runtimeAlreadyInactive := false
-	if beadErr == nil {
-		identity = namedSessionIdentity(bead)
+	if infoErr == nil {
+		identity = namedSessionIdentityInfo(info)
 		runtimeAlreadyInactive = sessionKillRuntimeAlreadyInactive(info, sp)
 	}
 
@@ -2313,8 +2320,8 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 
-	if beadErr != nil {
-		fmt.Fprintf(stderr, "gc session kill: warning: loading session %s for circuit breaker clear: %v\n", sessionID, beadErr) //nolint:errcheck // best-effort stderr
+	if infoErr != nil {
+		fmt.Fprintf(stderr, "gc session kill: warning: loading session %s for circuit breaker clear: %v\n", sessionID, infoErr) //nolint:errcheck // best-effort stderr
 	} else if identity != "" {
 		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, sessStore, sessionID, identity); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
@@ -2333,7 +2340,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// kill leaves behind (#3629). Written here at the CLI layer rather than in
 	// Manager.Kill so the drain-ack async-stop path (verifiedStop ->
 	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
-	if beadErr == nil {
+	if infoErr == nil {
 		now := time.Now().UTC()
 		patch := session.SleepPatch(now, "killed")
 		patch["synced_at"] = now.Format(time.RFC3339)
@@ -2364,7 +2371,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		Message: "killed",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
-	recordSessionKillStop(info, beadErr, cfg)
+	recordSessionKillStop(info, infoErr, cfg)
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "kill",
