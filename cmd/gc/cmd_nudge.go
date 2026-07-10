@@ -1721,9 +1721,30 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
 	return true
 }
 
+func queuedNudgeClaimableForTargetWithStore(store beads.Store, target nudgeTarget, item queuedNudge) bool {
+	if queuedNudgeClaimableForTarget(target, item) {
+		return true
+	}
+	if !target.matchesQueueAgent(item.Agent) {
+		return false
+	}
+	if item.SessionID == "" || target.sessionID == "" || item.SessionID == target.sessionID {
+		return false
+	}
+	if store == nil {
+		return false
+	}
+	referenced, err := store.Get(item.SessionID)
+	if err != nil {
+		return errors.Is(err, beads.ErrNotFound)
+	}
+	return referenced.Status == "closed"
+}
+
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	store := openNudgeBeadStore(cityPath)
 	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
-		return queuedNudgeClaimableForTarget(target, item)
+		return queuedNudgeClaimableForTargetWithStore(store, target, item)
 	})
 }
 

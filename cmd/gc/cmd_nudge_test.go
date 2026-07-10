@@ -2822,6 +2822,81 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 	}
 }
 
+func TestTryDeliverQueuedNudgesByPollerDeadLettersStaleSessionFence(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	item := newQueuedNudgeWithOptions("worker", "stale session fence", "session", now, queuedNudgeOptions{
+		ID:                "n-stale-session",
+		SessionID:         "gc-old",
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	target := nudgeTarget{
+		cityPath:          dir,
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         info.ID,
+		continuationEpoch: "2",
+		resolved:          &config.ResolvedProvider{Name: "codex"},
+		sessionName:       info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false for stale fenced nudge")
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 0 {
+		t.Fatalf("nudge calls = %d, want 0", len(nudgeCalls))
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0", len(inFlight))
+	}
+	if len(dead) != 1 {
+		t.Fatalf("dead = %d, want 1", len(dead))
+	}
+	if dead[0].ID != item.ID {
+		t.Fatalf("dead[0].ID = %q, want %q", dead[0].ID, item.ID)
+	}
+	if dead[0].LastError != errNudgeSessionFenceMismatch.Error() {
+		t.Fatalf("dead[0].LastError = %q, want %q", dead[0].LastError, errNudgeSessionFenceMismatch.Error())
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
