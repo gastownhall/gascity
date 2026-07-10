@@ -343,6 +343,29 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 	return b
 }
 
+// sessionInfo reads the persisted session.Info for id through the front door over
+// the env's store — the store-read replacement for
+// session.InfoFromPersistedBead(bead) on a bead this env already created (or
+// mutated in place). Get runs the codec internally, so the projection is
+// byte-identical to cracking the bead directly, but no raw *beads.Bead crosses
+// into the test's assertions. It panics on a load failure, matching
+// createSessionBead's fail-fast style (a missing id is a test-setup bug).
+func (e *reconcilerTestEnv) sessionInfo(id string) sessionpkg.Info {
+	info, err := sessionFrontDoor(e.store).Get(id)
+	if err != nil {
+		panic("reconcilerTestEnv.sessionInfo: " + err.Error())
+	}
+	return info
+}
+
+// createSessionInfo creates a session bead with createSessionBead's exact fixture
+// shape and returns its front-door session.Info in one step — the store-create
+// replacement for assembling a bead literal purely to crack it with the codec.
+func (e *reconcilerTestEnv) createSessionInfo(name, template string) sessionpkg.Info {
+	b := e.createSessionBead(name, template)
+	return e.sessionInfo(b.ID)
+}
+
 func (e *reconcilerTestEnv) setSessionMetadata(session *beads.Bead, kvs map[string]string) {
 	for key, value := range kvs {
 		_ = e.store.SetMetadata(session.ID, key, value)
@@ -359,6 +382,28 @@ func (e *reconcilerTestEnv) markSessionActive(session *beads.Bead) {
 		"state":        "active",
 		"last_woke_at": e.clk.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// TestReconcilerTestEnvSessionInfoHelpers exercises the createSessionInfo /
+// sessionInfo store-double helpers so they are wired (not dead code) and pins
+// their behavior: createSessionInfo returns the fixture's projected Info, and
+// sessionInfo re-reads the CURRENT persisted state after an in-place mutation.
+func TestReconcilerTestEnvSessionInfoHelpers(t *testing.T) {
+	e := newReconcilerTestEnv()
+
+	info := e.createSessionInfo("w1", "worker")
+	if info.ID == "" {
+		t.Fatal("createSessionInfo returned an empty id")
+	}
+	if info.AgentName != "w1" || info.Template != "worker" || string(info.State) != "asleep" {
+		t.Fatalf("createSessionInfo fixture wrong: agent=%q template=%q state=%q", info.AgentName, info.Template, info.State)
+	}
+
+	b := e.createSessionBead("w2", "worker")
+	e.markSessionActive(&b)
+	if got := e.sessionInfo(b.ID); string(got.State) != "active" {
+		t.Fatalf("sessionInfo after markSessionActive: state=%q, want active", got.State)
+	}
 }
 
 func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
