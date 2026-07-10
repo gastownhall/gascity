@@ -1,0 +1,301 @@
+---
+title: Gas City Service Protocol — v0
+description: Authoritative specification for the generic hosted-service wire protocol used by gc login.
+---
+
+| Field | Value |
+|---|---|
+| Status | Authoritative specification |
+| Last verified | 2026-07-10 |
+| Contract | `gascity.dev/service/v0` |
+| Primary implementation | `internal/cliauth`, `cmd/gc` (`gc login`, `gc whoami`) |
+| Concept model | [How Gas City Works](/getting-started/how-gas-city-works) — the Agent (WHO) primitive |
+| Default endpoint | `https://gascity.com` (a flag default, not part of the contract) |
+
+# Gas City Service Protocol v0
+
+Version string: `gascity.dev/service/v0`
+
+## What this is
+
+A small, generic HTTP protocol that lets the `gc` CLI authenticate to a
+**Gas City service** and act against it — the same way `docker login
+<registry>` authenticates to any conforming container registry and
+`registry-1.docker.io` merely happens to be the default. `gc login`
+speaks this protocol; **`https://gascity.com` is only the default value of
+a flag.** Any server that implements the endpoints below works with an
+unmodified `gc` binary:
+
+```
+gc login                                  # → the default, https://gascity.com
+gc login --at https://gc.mycorp.example   # → a self-hosted conforming server
+```
+
+The protocol is deliberately dumb. The CLI holds an **opaque bearer token**
+it never parses; it opens URLs the server returns and prints strings the
+server authored. Everything a product does behind auth — account creation,
+trial credits, org selection, plan enforcement — lives entirely server-side
+and is invisible to the CLI. This is not only a design preference: it is the
+property that keeps the OSS client free of any vendor-specific or commercial
+logic. **Generic and vendor-neutral are the same constraint.**
+
+This document specifies the **auth + identity** surface that `gc login` and
+`gc whoami` require. Two further resource families — **cities** (provision a
+hosted city) and **runs** (submit a formula) — extend the same protocol under
+the same versioned prefix and are specified separately; see
+[§9 Reserved surface](#9-reserved-surface).
+
+## 1. Base URL and endpoint resolution
+
+Every request targets a **base URL**, which MAY itself carry a path prefix
+(e.g. `https://gascity.com` or `https://example.com/gascity`). All protocol
+paths are relative to it.
+
+The `gc` client resolves the base URL through this ladder (identical in shape
+to the existing pack-registry resolution):
+
+1. the explicit `--at <url>` flag value;
+2. the `GC_SERVICE_URL` environment variable;
+3. the stored default in the client credential file (the last URL logged into);
+4. the compiled-in default constant `https://gascity.com`.
+
+A URL string is **configuration data, not vendor logic** — the compiled-in
+default is exactly the same category as the pack registry's
+`registry.gascity.com` default and carries no policy.
+
+## 2. Versioning
+
+- The version string for this revision is `gascity.dev/service/v0`.
+- Every request from a conforming client SHOULD send
+  `X-GC-Service-Version: gascity.dev/service/v0`. A server MAY use it to route
+  or to reject an unsupported client with `426 Upgrade Required`.
+- Paths are namespaced under the versioned prefix `/gc/v0/`. A future
+  incompatible revision uses a new prefix (`/gc/v1/`) and a new version string;
+  the two can be served side by side.
+
+## 3. Endpoints (auth + identity)
+
+All request and response bodies are `application/json`. Field names are
+`snake_case`. Unknown fields MUST be ignored by both sides (forward
+compatibility). Errors use the shape in [§6](#6-errors).
+
+| Method | Path | Auth | Purpose |
+| ------ | ---- | ---- | ------- |
+| `GET`  | `/gc/v0/auth/cli`          | none    | Browser sign-in page (server-rendered) |
+| `POST` | `/gc/v0/auth/device/code`  | none    | Begin device-code login (headless) |
+| `POST` | `/gc/v0/auth/device/token` | none    | Poll for the device-code token |
+| `GET`  | `/gc/v0/me`                | bearer  | Identify the authenticated account |
+
+### 3.1 Browser-callback login — `GET /gc/v0/auth/cli`
+
+The primary interactive flow. The CLI starts a **loopback HTTP server** on
+`127.0.0.1:<random-port>`, generates a random CSRF `state`, and opens the
+user's browser to:
+
+```
+GET {base}/gc/v0/auth/cli?redirect_uri={loopback}/callback&state={state}&label={label}
+```
+
+- `redirect_uri` — the CLI's loopback callback (`http://127.0.0.1:<port>/callback`).
+- `state` — an opaque, unguessable CSRF value the CLI generates and later verifies.
+- `label` — a human label for the minted token (e.g. `user@host`), for display
+  on the account's token list.
+
+Everything behind this URL is **server-rendered and server-owned**: sign-in,
+sign-up, org/workspace selection, consent. On success the page redirects the
+browser to `redirect_uri` with the credential in the **URL fragment** (so it
+never reaches the server logs of any intermediary), and a small script on the
+CLI-served callback page forwards it to the loopback server:
+
+```
+POST http://127.0.0.1:<port>/token
+Content-Type: application/json
+
+{ "token": "<opaque-bearer>", "service": "{base}", "state": "{state}" }
+```
+
+The CLI:
+- rejects the delivery unless `state` matches the value it generated;
+- rejects it if `service` is present and does not equal the login target
+  (a stray callback cannot redirect the token to a different service);
+- stores `token` and returns.
+
+`token` is an **opaque bearer string** with a server-defined lifetime. The CLI
+never inspects it — no JWT parsing, no DPoP, no refresh protocol lives in the
+client. A server that wants short-lived credentials performs any exchange
+internally and re-issues on `401` (see [§7](#7-token-lifetime-and-401)).
+
+### 3.2 Device-code login — `POST /gc/v0/auth/device/{code,token}`
+
+The headless / SSH flow, shaped after RFC 8628. Selected by `gc login --device`
+(and offered automatically when no browser can be opened).
+
+**Begin** — `POST /gc/v0/auth/device/code`
+
+```json
+{ "label": "user@host" }
+```
+
+Response `200`:
+
+```json
+{
+  "device_code": "<opaque>",
+  "user_code": "BDWK-JQPX",
+  "verification_uri": "https://gascity.com/device",
+  "verification_uri_complete": "https://gascity.com/device?code=BDWK-JQPX",
+  "expires_in": 900,
+  "interval": 5
+}
+```
+
+The CLI prints `verification_uri` and `user_code` (and the `_complete` link if
+present), then polls.
+
+**Poll** — `POST /gc/v0/auth/device/token`
+
+```json
+{ "device_code": "<opaque>" }
+```
+
+- On success `200`: `{ "access_token": "<opaque-bearer>", "token_type": "bearer" }`.
+- While pending, respond with a non-2xx status and a body carrying an `error`:
+  - `authorization_pending` — keep polling at the current interval;
+  - `slow_down` — increase the interval (to the returned `interval` if present,
+    else by a fixed step);
+  - `access_denied` — the user rejected; stop with an error;
+  - `expired_token` — the code expired; stop with an error.
+
+The CLI honors the server's `interval` and stops at `expires_in` (plus a small
+grace).
+
+### 3.3 Identity — `GET /gc/v0/me`
+
+```
+GET {base}/gc/v0/me
+Authorization: Bearer <token>
+```
+
+Response `200`:
+
+```json
+{
+  "user": { "id": "<opaque>", "handle": "julian", "display_name": "Julian K." },
+  "message": "You have $5 of trial credit.",
+  "links": { "account": "https://gascity.com/account" }
+}
+```
+
+- `user.id` — a stable opaque account identifier. **There is no org or tenant
+  field.** An account is addressed only by opaque `id`/`handle`; the wire
+  carries no tenancy identity.
+- `message` / `links` — optional, server-authored, printed verbatim by the CLI
+  (see [§5](#5-the-opacity-rule)).
+
+A non-2xx response means the token is not valid; the CLI treats the caller as
+not-logged-in. `gc login` calls `/gc/v0/me` immediately after obtaining a token
+to verify it before storing.
+
+## 4. Client credential storage
+
+Informative (client behavior, not wire): `gc` stores tokens in
+`~/.gc/credentials.json` (under the Gas City home, overridable via the standard
+Gas City home env), keyed by base URL, written atomically with `0600`
+permissions:
+
+```json
+{
+  "default_service_url": "https://gascity.com",
+  "services": {
+    "https://gascity.com": { "token": "<opaque>", "updated_at": "2026-07-10T…Z" }
+  }
+}
+```
+
+Multiple services coexist (the docker model: many registries, one `docker
+login`). `gc whoami` reads the stored token for the resolved base URL.
+
+## 5. The opacity rule
+
+The CLI renders **only** what the server sends:
+
+- Human-facing policy copy travels as opaque `message` strings.
+- Actionable destinations travel as opaque `links` URLs the CLI may open.
+- The token is an opaque bearer.
+
+The CLI MUST NOT contain — and this protocol MUST NOT define wire fields for —
+trial/credit/billing/plan/quota/subscription semantics, provisioning steps,
+expiry math, or org/tenant identity. If a product wants to show "$5 of trial
+credit," that sentence arrives as a `message`. This keeps the client generic
+across arbitrary servers and free of vendor-specific logic. A conforming server
+MAY reject a client that attempts to negotiate such semantics.
+
+## 6. Errors
+
+Non-2xx responses SHOULD carry a JSON body with an `error` object:
+
+```json
+{ "error": { "code": "invalid_token", "message": "Session expired." } }
+```
+
+`code` is a short machine token; `message` is human-facing and printed verbatim.
+The device-token endpoint additionally uses the bare RFC-8628 `error` string
+values enumerated in [§3.2](#32-device-code-login--post-gcv0authdevicecodetoken).
+Servers MAY additionally emit `application/problem+json`; clients treat any
+non-2xx as failure and surface `message` when present.
+
+## 7. Token lifetime and 401
+
+Tokens are opaque and server-defined. The client does not refresh. If a stored
+token is rejected (`401`/`403`) the client reports "not logged in; run `gc
+login`" — it never attempts a silent re-mint of a human credential. (Non-human
+credential exchange, e.g. minting short-lived downstream credentials from the
+stored bearer, is a server-side and helper concern and is out of scope here.)
+
+## 8. Discovery (optional, forward-compatible)
+
+A server MAY publish:
+
+```
+GET {base}/.well-known/gascity-service
+→ 200 { "version": "gascity.dev/service/v0",
+        "endpoints": { "auth_cli": "/gc/v0/auth/cli", "device_code": "…",
+                       "device_token": "…", "me": "/gc/v0/me" },
+        "message": "…" }
+```
+
+A client MAY probe this to allow a server to relocate paths; absent or `404`, the
+client uses the fixed well-known paths in [§3](#3-endpoints-auth--identity). The
+v0 `gc` client uses the fixed paths and does not require discovery.
+
+## 9. Reserved surface
+
+The following extend this protocol under `/gc/v0/` and are specified in
+companion documents as they land. They are listed here so the namespace and
+version are coordinated:
+
+- **Cities** — `POST /gc/v0/cities`, `GET /gc/v0/cities/{id}`: provision and
+  watch a hosted city (the `gc init --at` flow).
+- **Runs** — `POST /gc/v0/runs`, `GET /gc/v0/runs/{id}`,
+  `GET /gc/v0/runs/{id}/events`, `POST /gc/v0/runs/{id}/claim`: submit and watch
+  a formula run, optionally anonymously (the `gc run --at` flow).
+
+Both reuse §1–§7 verbatim (base-URL resolution, versioning, opaque bearer, the
+opacity rule, error shape). `POST /gc/v0/runs` additionally permits an **absent**
+`Authorization` header (anonymous submission).
+
+## 10. Server conformance checklist (for `gc login`)
+
+A server is conformant for `gc login` / `gc whoami` if it:
+
+1. serves an interactive sign-in page at `GET /gc/v0/auth/cli` that redirects to
+   `redirect_uri` with `token`, `service`, and `state` in the URL fragment;
+2. implements the device-code pair at `POST /gc/v0/auth/device/{code,token}`
+   with the RFC-8628-shaped fields and error values above;
+3. implements `GET /gc/v0/me` returning `{ user: { id, handle, display_name } }`
+   for a valid bearer and a non-2xx for an invalid one;
+4. treats the token as an opaque bearer it can validate;
+5. confines all account/commercial policy behind these endpoints, exposing it to
+   the client only through opaque `message`/`links`.
+
+`https://gascity.com` is one such server. So is any other.
