@@ -13,9 +13,11 @@ orders codecs `RunFromTrackingBead`/`MaxSeqFromLabels` (WI-3, gated on two-class
 **The `InfoFromPersistedBead` COMPILER unexport is DEFERRED** (honest under-reach): the codec is a
 test-fixture constructor at ~444 external sites / 51 test files; the compiler rename breaks them all.
 The census ratchet already enforces the boundary at runtime-scan level; the unexport needs a separate
-mechanical **W-test-fixture** wave (migrate the test sites to a `sessiontest` shim). See the endgame
-decision at the bottom of `work-items.md`. **Nothing below this line is remaining work — the migration's
-substantive goal is complete; only the optional compiler-unexport churn + the two documented deferrals remain.**
+**W-test-fixture** wave — migrate the ~498 raw-bead test fixtures to REAL STORE TEST DOUBLES (Julian's
+directive: hand-cracked raw beads in tests is a code smell; a shim was rejected as it relocates the smell),
+which then lets `InfoFromPersistedBead` unexport. **That wave is planned + ready to execute — resume via
+`W-TESTFIXTURE-HANDOFF.md` + `W-TESTFIXTURE-PROMPT.md` (this dir); authoritative plan =
+`test-double-migration-plan.md`.** Below this line is the pre-endgame history.
 
 ## The goal (one paragraph)
 Stores return typed **domain objects**; raw `beads.Bead` must not flow through business
