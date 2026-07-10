@@ -40,24 +40,38 @@ another backend by a patch (see below).
 
 ### Per-agent / per-rig
 
-Override the backend for a single agent — or every agent in a rig — with an
-agent patch. The override field is `session`:
+herdr has no per-agent selector: the backend is chosen city-wide by `[session]
+provider` (above) or by the `GC_SESSION` environment variable (below). The
+per-agent patch field is `session`, and it is a **transport** override — it
+accepts only `acp`, `tmux`, or omission. `session = "herdr"` is *not* valid and
+never selects the herdr runtime; it is flagged during config validation:
 
-```toml
-# one agent by name
-[[patches.agent]]
-name = "dog-1"
-session = "herdr"
-
-# every agent in a rig (match by the rig's working dir)
-[[patches.agent]]
-dir = "webapp"
-session = "herdr"
+```text
+session "herdr" is not a valid session transport (use "acp", "tmux", or omit)
 ```
 
-A per-agent `session` override wins over the `[session]` city default, so you
-can run the whole city on herdr while pinning specific agents to tmux (or the
-reverse — keep tmux as the default and pilot herdr on one agent).
+To put only some agents on herdr, keep herdr as the city default and pin the
+agents you *don't* want on it back to tmux — one agent by `name`, or every
+agent in a rig by its working `dir`:
+
+```toml
+[session]
+provider = "herdr"
+
+# keep one agent by name on tmux
+[[patches.agent]]
+name = "dog-1"
+session = "tmux"
+
+# keep every agent in a rig on tmux (match by the rig's working dir)
+[[patches.agent]]
+dir = "webapp"
+session = "tmux"
+```
+
+A per-agent `session = "tmux"` pin wins over the `[session]` city default, so
+the set of agents you pin back is what bounds herdr's reach. See **Piloting
+safely** below for the recommended roll-out order.
 
 ### Environment (one-off)
 
@@ -88,12 +102,15 @@ herdr is opt-in precisely so you can roll it out gradually. Recommended path:
    session = "tmux"
    ```
 
-2. **Start with one low-stakes agent** — a dog, or a single rig's witness —
-   by giving just that agent a `session = "herdr"` patch while the city default
-   stays tmux. Watch it through a normal work cycle before widening.
+2. **Keep the herdr surface small at first.** herdr is only selectable as the
+   city default, so put just a low-stakes agent or two (a dog, or a single
+   rig's witness) on it by flipping the default to `provider = "herdr"` and
+   pinning every *other* agent back to tmux with `session = "tmux"` patches (as
+   in step 1). Watch the pilot agents through a normal work cycle before
+   widening.
 
-3. **Widen** to a rig (`dir = "<rig>"`), then to the city default, once the
-   pilot agents are stable.
+3. **Widen** by removing tmux pins — a rig at a time (`dir = "<rig>"`) — until
+   the whole city runs on the herdr default, once the pilot agents are stable.
 
 ## Applying and verifying
 
