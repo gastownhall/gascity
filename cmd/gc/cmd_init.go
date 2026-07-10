@@ -757,7 +757,10 @@ func normalizeBootstrapProfile(profile string) (string, error) {
 }
 
 func initPromptTemplatePath(templatePath string) (string, bool) {
-	if !strings.HasPrefix(templatePath, citylayout.PromptsRoot+string(filepath.Separator)) {
+	// Template paths come from embedded config and are always slash-separated,
+	// so compare against "/" rather than the OS separator (which is `\` on
+	// Windows and silently skipped every scaffold there).
+	if !strings.HasPrefix(filepath.ToSlash(templatePath), citylayout.PromptsRoot+"/") {
 		return "", false
 	}
 	base := filepath.Base(templatePath)
