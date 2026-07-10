@@ -218,7 +218,7 @@ func (p *Plane) registerRoutes() {
 // returns ("", false) for an unknown or malformed name; callers translate that
 // into a 404.
 func (p *Plane) resolveCityPath(name string) (string, bool) {
-	if !validCityName(name) || p.deps.Resolver == nil {
+	if !ValidCityName(name) || p.deps.Resolver == nil {
 		return "", false
 	}
 	return p.deps.Resolver.CityPath(name)

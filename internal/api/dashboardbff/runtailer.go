@@ -53,6 +53,14 @@ type runTailerManager struct {
 	sessionsCache *singleFlightCache[string, cachedSessions]
 	formulaCache  *singleFlightCache[formulaCacheKey, cachedFormulaDetail]
 
+	// sessionsTTL is the sessionsCacheTTL package var captured at construction.
+	// The sessions compute closure can run on the tailer loop's DETACHED prime
+	// goroutine (which Stop deliberately does not join), so reading the mutable
+	// package var there races with a test shortening it; the immutable capture
+	// keeps that read race-free while tests keep the set-var-then-construct
+	// convention.
+	sessionsTTL time.Duration
+
 	mu      sync.Mutex
 	cities  map[string]*cityRunTailer
 	ctx     context.Context
@@ -67,6 +75,7 @@ func newRunTailerManager(deps Deps) *runTailerManager {
 		cities:        make(map[string]*cityRunTailer),
 		sessionsCache: newSingleFlightCache[string, cachedSessions](),
 		formulaCache:  newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
+		sessionsTTL:   sessionsCacheTTL,
 	}
 }
 
@@ -87,7 +96,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 	defer m.mu.Unlock()
 	t, ok := m.cities[name]
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
 	if m.enabled && m.ctx != nil && !t.started {
@@ -118,6 +127,11 @@ type cityRunTailer struct {
 	// CPU (no re-scan, no re-projection, no re-marshal). See rundetail_memo.go.
 	snapshotCache *runSnapshotCache
 	detailMemo    *runDetailMemo
+
+	// unknownRuns grants a truly-unknown runId (a run slung but not yet folded
+	// into this projection) a warming-grace window on the detail endpoints
+	// before the terminal 404. See rundetail_grace.go.
+	unknownRuns *unknownRunGrace
 
 	mu      sync.RWMutex
 	summary runproj.RunSummary
@@ -501,6 +515,11 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 		return runDetailMemoValue{}, ready, err
 	}
 
+	// The fold resolved this run's root, so the run is KNOWN to the projection:
+	// drop any unknown-run grace marker so a runId that becomes known never
+	// lingers in the first-seen map (rundetail_grace.go).
+	t.unknownRuns.forget(runID)
+
 	// Resolve the request-time sessions enrichment and its cache version. The
 	// version (0 when unavailable) is part of the memo key so a sessions refresh —
 	// or an availability flip — rebuilds.
@@ -606,7 +625,10 @@ func (m *runTailerManager) fetchSessionsVersioned(ctx context.Context, name stri
 		}
 		// A successful sessions read is a positive last-good: serve it stale on a
 		// later failed refetch rather than blanking the health card.
-		return cachedSessions{items: items}, sessionsCacheTTL, true, true
+		// m.sessionsTTL (not the sessionsCacheTTL var): this closure can run on
+		// the detached prime goroutine, so it must read the construction-time
+		// capture, never the test-mutable package var.
+		return cachedSessions{items: items}, m.sessionsTTL, true, true
 	})
 	if !ok {
 		return nil, 0, false
@@ -824,30 +846,10 @@ func (p *Plane) registerRunDetail() {
 			writeError(w, http.StatusNotFound, "unknown city")
 			return
 		}
-		value, ready, err := t.detail(r.Context(), r.PathValue("runId"))
+		runID := r.PathValue("runId")
+		value, ready, err := t.detail(r.Context(), runID)
 		if err != nil {
-			var unsupported *runproj.UnsupportedRunError
-			if errors.As(err, &unsupported) {
-				writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
-					Error:  unsupported.Message,
-					Reason: string(unsupported.Reason),
-				})
-				return
-			}
-			// The run root is absent from the warm projection. While the cold replay
-			// is still in flight the fold may be incomplete, so report warming
-			// rather than a hard 404 for a run that may yet appear. This 503 is a
-			// retry signal, not a terminal error: the SPA loader
-			// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) already
-			// retries any 5xx — including this warming 503 — with bounded backoff
-			// before surfacing it, so the client re-polls until the replay finishes
-			// (covered by runDetail.test.ts "retries while the projection is
-			// warming").
-			if !ready {
-				writeError(w, http.StatusServiceUnavailable, "run view is warming")
-				return
-			}
-			writeError(w, http.StatusNotFound, "unknown run")
+			t.writeRunDetailReadError(w, runID, err, ready)
 			return
 		}
 		// Serve the memoized marshaled bytes verbatim — the memo already produced
@@ -856,6 +858,51 @@ func (p *Plane) registerRunDetail() {
 		// the JSON encoder appends).
 		writeJSONBytes(w, http.StatusOK, value.bytes)
 	})
+}
+
+// writeRunDetailReadError maps a failed detail() read to the HTTP response —
+// shared by the JSON GET and the SSE stream precheck so both endpoints answer
+// identically: 422 for an unsupported (v1/wisp) run, 503 while the projection
+// is still warming or while a truly-unknown run is inside its warming-grace
+// window, 404 otherwise.
+func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID string, err error, ready bool) {
+	var unsupported *runproj.UnsupportedRunError
+	if errors.As(err, &unsupported) {
+		// A definitive answer: the run root EXISTS in the projection but has no
+		// run-detail view. Checked BEFORE the grace window below — not_run_view
+		// must stay a 422, never a warming 503.
+		writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
+			Error:  unsupported.Message,
+			Reason: string(unsupported.Reason),
+		})
+		return
+	}
+	// The run root is absent from the warm projection. While the cold replay
+	// is still in flight the fold may be incomplete, so report warming
+	// rather than a hard 404 for a run that may yet appear. This 503 is a
+	// retry signal, not a terminal error: the SPA loader
+	// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) already
+	// retries any 5xx — including this warming 503 — with bounded backoff
+	// before surfacing it, so the client re-polls until the replay finishes
+	// (covered by runDetail.test.ts "retries while the projection is
+	// warming").
+	if !ready {
+		writeError(w, http.StatusServiceUnavailable, "run view is warming")
+		return
+	}
+	// The projection is warm but has never seen this run. A run slung from the
+	// CLI stays invisible here until the controller's cache-reconcile emits its
+	// bead events (30-120s), and the SPA treats a 404 as terminal while it
+	// retries the warming 503 — so a truly-unknown run gets the SAME warming
+	// 503 for a grace window measured from its first request
+	// (rundetail_grace.go); once the window expires the plain 404 below is
+	// restored. Only the not-found case is graced: every other failure keeps
+	// its existing mapping.
+	if errors.Is(err, runproj.ErrRunNotFound) && t.unknownRuns.inGrace(runID) {
+		writeError(w, http.StatusServiceUnavailable, "run view is warming")
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown run")
 }
 
 // cityRunTailer resolves the city to its run tailer, returning false for an
@@ -897,7 +944,7 @@ func (p *Plane) eagerWarmTailers() {
 		return
 	}
 	for _, c := range p.deps.Resolver.Cities() {
-		if !validCityName(c.Name) || c.Path == "" {
+		if !ValidCityName(c.Name) || c.Path == "" {
 			continue
 		}
 		p.runTailers.ensure(c.Name, cityEventsPath(c.Path))

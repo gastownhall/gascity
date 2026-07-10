@@ -354,22 +354,9 @@ func TestRunDetailEndpointUnknownCity404(t *testing.T) {
 	}
 }
 
-// TestRunDetailEndpointUnknownRun404 confirms a missing run 404s once the tailer
-// is warm.
-func TestRunDetailEndpointUnknownRun404(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, ".gc", "events.jsonl")
-	writeEventLog(t, logPath, runDetailRootEvent())
-
-	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
-	p.Start(t.Context())
-	defer p.Stop()
-
-	// Warm the tailer first (a summary read blocks on the cold replay), so the
-	// missing run is a true 404, not a warming 503.
-	_ = getRunSummary(t, p, "alpha")
-	getRunDetailExpectStatus(t, p, "alpha", "missing", http.StatusNotFound)
-}
+// A missing run once the tailer is warm answers 503 for the unknown-run grace
+// window and 404 after it expires — covered by
+// TestRunDetailEndpointUnknownRunWarmingGrace in rundetail_grace_test.go.
 
 // TestRunDetailEndpointNotRunView maps a non-graph.v2 run to 422 with the
 // not_run_view reason so the SPA renders the honest list-only message.
@@ -410,16 +397,15 @@ func getRunDetailRaw(t *testing.T, p *Plane, city, runID string) *httptest.Respo
 	return rec
 }
 
-func getRunDetailExpectStatus(t *testing.T, p *Plane, city, runID string, want int) {
+func expectRunDetailStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) {
 	t.Helper()
-	rec := getRunDetailRaw(t, p, city, runID)
 	if rec.Code != want {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, want, rec.Body.String())
 	}
 }
 
 // getRunDetail fetches a run's detail and decodes the success (200) body. Non-2xx
-// paths use getRunDetailRaw / getRunDetailExpectStatus, so the expected status is
+// paths use getRunDetailRaw / expectRunDetailStatus, so the expected status is
 // fixed here rather than a parameter.
 func getRunDetail(t *testing.T, p *Plane, city, runID string) runDetailWire {
 	t.Helper()

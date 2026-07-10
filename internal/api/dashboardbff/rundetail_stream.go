@@ -3,7 +3,6 @@ package dashboardbff
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -113,11 +112,13 @@ func (p *Plane) handleRunDetailStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Precheck exactly like the GET so the HTTP error is returned BEFORE any SSE
-	// body is committed: 422 for an unsupported (v1/wisp) run, 404 for a missing
-	// run once warm, 503 while the projection is still warming.
+	// body is committed: 422 for an unsupported (v1/wisp) run, 503 while the
+	// projection is still warming or while a truly-unknown run is inside its
+	// warming-grace window, 404 for a missing run once warm. The shared
+	// writeRunDetailReadError keeps the two endpoints' mappings identical.
 	value, ready, err := t.detail(r.Context(), runID)
 	if err != nil {
-		writeRunDetailStreamPrecheckError(w, err, ready)
+		t.writeRunDetailReadError(w, runID, err, ready)
 		return
 	}
 
@@ -129,26 +130,6 @@ func (p *Plane) handleRunDetailStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t.serveRunDetailStream(r.Context(), w, flusher, runID, value)
-}
-
-// writeRunDetailStreamPrecheckError maps a failed precheck detail() read to the
-// HTTP status the SPA's stream fallback expects, returned before any SSE body is
-// committed: 422 for an unsupported (v1/wisp) run, 503 while the projection is
-// still warming, 404 for a run absent once warm.
-func writeRunDetailStreamPrecheckError(w http.ResponseWriter, err error, ready bool) {
-	var unsupported *runproj.UnsupportedRunError
-	if errors.As(err, &unsupported) {
-		writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
-			Error:  unsupported.Message,
-			Reason: string(unsupported.Reason),
-		})
-		return
-	}
-	if !ready {
-		writeError(w, http.StatusServiceUnavailable, "run view is warming")
-		return
-	}
-	writeError(w, http.StatusNotFound, "unknown run")
 }
 
 // writeRunDetailStreamHeaders commits the SSE response headers and the 200 status.

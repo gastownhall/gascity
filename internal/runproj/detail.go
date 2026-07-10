@@ -1,6 +1,7 @@
 package runproj
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -8,6 +9,14 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// ErrRunNotFound is the sentinel wrapped by SnapshotForRun (and everything
+// built on it) when the requested run root is absent from the folded beads —
+// the run is truly unknown to the projection, as opposed to present but
+// unprojectable (UnsupportedRunError). Callers branch on it with errors.Is;
+// the dashboard BFF uses it to grant a just-slung run's deep link a warming
+// grace window instead of a terminal 404.
+var ErrRunNotFound = errors.New("run not found")
 
 // snapshotScanCount counts every snapshotForRun invocation. It exists so a test
 // can prove the single-scan entry points fold a run exactly once (the detail
@@ -30,7 +39,7 @@ type RunSnapshot struct {
 // BuildRunDetailFromSnapshot consume. version and eventSeq parameterize the
 // snapshot identity (the golden passes 1/100; the live tailer passes a real
 // version and its LastSeq cursor). It returns an error only when the run root is
-// absent from beadList.
+// absent from beadList; that error wraps ErrRunNotFound.
 func SnapshotForRun(beadList []beads.Bead, runID string, version int, eventSeq int64) (RunSnapshot, error) {
 	raw, err := snapshotForRun(beadList, runID, version, eventSeq)
 	if err != nil {
@@ -218,7 +227,7 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		}
 	}
 	if rootIdx < 0 {
-		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
+		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q: %w", rootID, ErrRunNotFound)
 	}
 	root := beadList[rootIdx]
 

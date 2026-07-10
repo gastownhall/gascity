@@ -3065,15 +3065,18 @@ type SlingInputBody struct {
 
 // SlingResponse defines model for SlingResponse.
 type SlingResponse struct {
-	AttachedBeadId *string   `json:"attached_bead_id,omitempty"`
-	Bead           *string   `json:"bead,omitempty"`
-	Formula        *string   `json:"formula,omitempty"`
-	Mode           *string   `json:"mode,omitempty"`
-	RootBeadId     *string   `json:"root_bead_id,omitempty"`
-	Status         string    `json:"status"`
-	Target         string    `json:"target"`
-	Warnings       *[]string `json:"warnings,omitempty"`
-	WorkflowId     *string   `json:"workflow_id,omitempty"`
+	AttachedBeadId *string `json:"attached_bead_id,omitempty"`
+	Bead           *string `json:"bead,omitempty"`
+
+	// DashboardUrl Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it.
+	DashboardUrl *string   `json:"dashboard_url,omitempty"`
+	Formula      *string   `json:"formula,omitempty"`
+	Mode         *string   `json:"mode,omitempty"`
+	RootBeadId   *string   `json:"root_bead_id,omitempty"`
+	Status       string    `json:"status"`
+	Target       string    `json:"target"`
+	Warnings     *[]string `json:"warnings,omitempty"`
+	WorkflowId   *string   `json:"workflow_id,omitempty"`
 }
 
 // Status defines model for Status.
