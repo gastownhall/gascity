@@ -59,6 +59,9 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
+	for i, slc := range cfg.Daemon.SessionLivenessChecks {
+		check(fmt.Sprintf("[daemon.session_liveness_checks[%d]]", i), "freshness_window", slc.FreshnessWindow)
+	}
 	check("[daemon]", "restart_window", cfg.Daemon.RestartWindow)
 	check("[daemon]", "session_circuit_breaker_window", cfg.Daemon.SessionCircuitBreakerWindow)
 	check("[daemon]", "session_circuit_breaker_reset_after", cfg.Daemon.SessionCircuitBreakerResetAfter)

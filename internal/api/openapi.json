@@ -2370,6 +2370,9 @@
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           {
+            "$ref": "#/components/schemas/SessionLivenessStalePayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
@@ -6790,6 +6793,38 @@
         ],
         "type": "object"
       },
+      "SessionLivenessStalePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "episode_id": {
+            "type": "string"
+          },
+          "escalate_to": {
+            "type": "string"
+          },
+          "freshness_window": {
+            "type": "string"
+          },
+          "last_activity": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "stale_since": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "episode_id",
+          "stale_since",
+          "freshness_window"
+        ],
+        "type": "object"
+      },
       "SessionMessageInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -8425,6 +8460,7 @@
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
+            "session.liveness_stale": "#/components/schemas/TypedEventStreamEnvelopeSessionLivenessStale",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
@@ -8614,6 +8650,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionLivenessStale"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
@@ -9541,6 +9580,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
+                "session.liveness_stale",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -11657,6 +11697,48 @@
         "title": "TypedEventStreamEnvelope session.idle_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionLivenessStale": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLivenessStalePayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.liveness_stale",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.liveness_stale",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionMaxAgeKilled": {
         "additionalProperties": false,
         "properties": {
@@ -12635,6 +12717,7 @@
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
+            "session.liveness_stale": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionLivenessStale",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
@@ -12824,6 +12907,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionLivenessStale"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
@@ -13818,6 +13904,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
+                "session.liveness_stale",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -16093,6 +16180,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.idle_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionLivenessStale": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLivenessStalePayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.liveness_stale",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.liveness_stale",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled": {
