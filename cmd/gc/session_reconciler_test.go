@@ -9613,7 +9613,7 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 
 	env.stderr.Reset()
-	recordResetStallIfDue(session, "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(session, "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
@@ -9625,18 +9625,82 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	})
-	recordResetStallIfDue(session, "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(session, "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
 	})
 	env.stderr.Reset()
-	recordResetStallIfDue(session, "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(session, "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}
 	if len(rec.Events) != 2 {
 		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
+	}
+}
+
+// TestRecordResetStallIfDue_ExemptsStillStartingRuntime pins the ga-y8s9 /
+// upstream #4081 fix: a reset whose runtime is already *running* (the agent is
+// just finishing a slow startup, e.g. a crawling `gc prime` under DoltLite
+// store load) is a slow start, NOT a stalled reset, and must not emit
+// session.reset_stalled. A reset that produced no running runtime is a genuine
+// stall and must still fire — and the exempt path must not swallow the dedup
+// token that a later genuine stall depends on.
+func TestRecordResetStallIfDue_ExemptsStillStartingRuntime(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+
+	tracer := newSessionReconcilerTracer(t.TempDir(), "test-city", io.Discard)
+	t.Cleanup(func() { _ = tracer.Close() })
+	trace := tracer.BeginCycle(TraceTickTriggerPatrol, "", env.clk.Now().UTC(), env.cfg)
+	// Arm detail AFTER BeginCycle: BeginCycle's syncArms re-derives tracer.detail
+	// from cfg, and the startup-exempt decision uses TraceOutcomeExempt, which
+	// (unlike the Failed reset_stalled) does not auto-arm — so the template must
+	// be in detail mode for RecordDecision to keep the record.
+	tracer.detail = map[string]TraceSource{"worker": TraceSourceManual}
+
+	// running=true, alive=false, elapsed(75s) > startup_timeout(60s): the reset
+	// brought a runtime up and the agent is still starting — no alarm.
+	recordResetStallIfDue(session, "worker", "worker", true, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	if len(rec.Events) != 0 {
+		t.Fatalf("still-starting runtime fired %d events, want 0: %#v", len(rec.Events), rec.Events)
+	}
+	if got := strings.TrimSpace(env.stderr.String()); got != "" {
+		t.Fatalf("still-starting runtime wrote stderr %q, want silence", got)
+	}
+	foundExempt := false
+	for _, r := range trace.records {
+		if r.SiteCode == TraceSiteReconcilerProgressStallExempt && r.ReasonCode == TraceReasonRuntimeStarting {
+			foundExempt = true
+			break
+		}
+	}
+	if !foundExempt {
+		t.Fatalf("startup-progress exemption trace not recorded; records=%+v", trace.records)
+	}
+
+	// A later tick where the runtime is GONE (running=false) is a genuine
+	// stalled reset and must fire — proving the exempt path did not consume the
+	// per-session dedup token.
+	env.stderr.Reset()
+	recordResetStallIfDue(session, "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	if len(rec.Events) != 1 {
+		t.Fatalf("genuine stall (no running runtime) fired %d events, want 1", len(rec.Events))
+	}
+	if rec.Events[0].Type != events.SessionResetStalled {
+		t.Fatalf("event type = %q, want %q", rec.Events[0].Type, events.SessionResetStalled)
 	}
 }
 
