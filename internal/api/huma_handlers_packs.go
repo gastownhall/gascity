@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 )
@@ -172,21 +173,21 @@ func packImportHTTPError(err error) error {
 		// ErrNameDerive and ErrReservedPrefix are client input-validation failures
 		// (no derivable name, or a reserved "default-rig:" name), so they are 400s
 		// like ErrInvalidSource, not 500s.
-		return huma.Error400BadRequest(err.Error())
+		return apierr.InvalidRequest.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrImportExists):
-		return huma.Error409Conflict(err.Error())
+		return apierr.ConflictWrongState.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrNotFound):
-		return huma.Error404NotFound(err.Error())
+		return apierr.PackNotFound.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrVersionResolveFailed):
 		// Resolving the operator-named source via `git ls-remote` is a genuinely
 		// upstream dependency, so a failure here is a bad gateway.
-		return huma.Error502BadGateway(err.Error())
+		return apierr.BadGateway.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrInstallFailed):
 		// ErrInstallFailed wraps LOCAL failures too (the import-graph read,
 		// manifest save, lockfile write), not just an upstream clone, so it maps
 		// to a server error — matching importsvc's documented HTTP 500.
-		return huma.Error500InternalServerError("pack install failed", err)
+		return apierr.Internal.With("pack install failed", &huma.ErrorDetail{Message: err.Error()})
 	default:
-		return huma.Error500InternalServerError("pack import failed", err)
+		return apierr.Internal.With("pack import failed", &huma.ErrorDetail{Message: err.Error()})
 	}
 }

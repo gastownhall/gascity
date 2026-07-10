@@ -296,6 +296,13 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	if !tracking {
 		return
 	}
+	// Bind the poke seam on the caller's goroutine, at queue time. The async
+	// goroutine below may outlive its reconcile invocation (see the poke
+	// comment), and re-reading the mutable package-global seam from a detached
+	// goroutine races with tests that swap it — and lets a goroutine queued by
+	// one test poke a later test's swapped-in counter. Capturing the value here
+	// confines each goroutine to the seam that was live when its stop was queued.
+	poke := drainAckAsyncStopPokeController
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -330,7 +337,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// the caller's subsequent writes on the same writer (data race on
 		// non-goroutine-safe buffers). The controller reconciles on the next
 		// patrol tick regardless.
-		_ = drainAckAsyncStopPokeController(cityPath)
+		_ = poke(cityPath)
 	}()
 }
 

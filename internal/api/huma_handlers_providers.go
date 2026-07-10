@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -125,7 +125,7 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 		}, nil
 	}
 
-	return nil, huma.Error404NotFound("provider " + name + " not found")
+	return nil, apierr.ProviderNotFound.Msg("provider " + name + " not found")
 }
 
 // humaHandleProviderCreate is the Huma-typed handler for POST /v0/providers.
@@ -196,7 +196,7 @@ func (s *Server) humaHandleProviderUpdate(_ context.Context, input *ProviderUpda
 		msg := err.Error()
 		// Preserve the special builtin-override hint.
 		if strings.Contains(msg, "not found") && isBuiltinProvider(input.Name) {
-			return nil, huma.Error409Conflict(
+			return nil, apierr.ConflictWrongState.Msg(
 				"provider " + input.Name + " is a builtin; use PUT /v0/patches/providers to override")
 		}
 		return nil, mutationError(err)
@@ -217,7 +217,7 @@ func (s *Server) humaHandleProviderDelete(_ context.Context, input *ProviderDele
 		msg := err.Error()
 		// Preserve the special builtin-override hint.
 		if strings.Contains(msg, "not found") && isBuiltinProvider(input.Name) {
-			return nil, huma.Error409Conflict(
+			return nil, apierr.ConflictWrongState.Msg(
 				"provider " + input.Name + " is a builtin; use DELETE /v0/patches/provider/" + input.Name + " to remove overrides")
 		}
 		return nil, mutationError(err)

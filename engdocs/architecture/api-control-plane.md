@@ -436,6 +436,37 @@ Huma enters the stack), error bodies are pre-serialized
 per well-known error, no runtime `json.Marshal`. The constants
 live in `internal/api/middleware.go` as `problemBody` values.
 
+**Machine-readable codes: the `apierr` registry.** Every error carries a
+stable machine identity — an RFC 9457 `type` URN (`urn:gascity:error:<code>`)
+plus a convenience `code` member — so an autonomous consumer branches on a
+registered identifier instead of parsing `detail` prose. `internal/api/apierr`
+is the single source of truth, mirroring the typed-events registry
+(`events.RegisterPayload`): a central catalog (`apierr/catalog.go`) of
+`ProblemType{Code,Status,Title}` values, minted through the constructors
+(`apierr.BeadNotFound.Msg(...)`, `.With(...)`) so the URN can never drift from a
+registered code. `apierr.ErrorModel` embeds `huma.ErrorModel` and adds
+`code,omitempty`; the Go type is named `ErrorModel` so the OpenAPI schema keeps
+that name (no genclient/TS churn).
+
+`errors_install.go` overrides `huma.NewError` at package-init so *every* error —
+including Huma's own request-validation failures — becomes an
+`*apierr.ErrorModel`. Huma's built-in 422 (`"validation failed"`) is the one
+auto-stamped fallback (`validation-failed`); every other error Huma constructs
+is wrapped verbatim with an empty (omitted) `code`, byte-identical on the wire,
+where absence of a code marks an as-yet-unconverted legacy path. Because
+`defineErrors` derives the error schema from `NewError`, `apierr.ErrorModel` is
+the sole error schema for the whole API; `documentProblemTypes` publishes the
+catalog as `x-gascity-problem-types` on `ErrorModel.type`.
+
+Operations opt into an enumerated error contract with `errorStatuses(...)` (or
+`Operation.Errors`), which turns their catch-all `default` response into one
+problem+json response per status (Huma auto-appends 422/500). The bead and sling
+endpoints are the first such pilot. Two CI guards keep it honest:
+`TestEveryEmittedErrorCodeIsRegistered` (no `urn:gascity:error:` literal outside
+`apierr/`; every emitted URN resolves in the registry — the analog of
+`TestEveryKnownEventTypeHasRegisteredPayload`) and `TestErrorModelSpecProjection`
+(the published `x-gascity-problem-types` equals the sorted registry).
+
 ### 3.9 The carved-out non-typed paths
 
 Four surfaces inside `internal/api/` are deliberately outside the

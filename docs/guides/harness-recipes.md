@@ -89,7 +89,7 @@ Reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
 ```toml
 # Direct
 provider        = "codex"
-option_defaults = { model = "gpt-5.5" }    # gpt-5.5 · gpt-5.3-codex-spark · o3 · o4-mini
+option_defaults = { model = "gpt-5.5" }    # gpt-5.6-sol · gpt-5.6-terra · gpt-5.6-luna · gpt-5.5 · gpt-5.3-codex · o3 · o4-mini
 ```
 
 ```toml

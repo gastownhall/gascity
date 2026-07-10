@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -58,7 +59,7 @@ func (s *Server) humaHandleFormulaSource(_ context.Context, input *FormulaSource
 		return nil, mutationError(err)
 	}
 	if !found {
-		return nil, huma.Error404NotFound("no editable city-local formula " + input.Name)
+		return nil, apierr.FormulaNotFound.Msg("no editable city-local formula " + input.Name)
 	}
 	out := &FormulaSourceOutput{}
 	out.Body.Name = input.Name
@@ -101,7 +102,7 @@ func (s *Server) humaHandleFormulaUpsert(_ context.Context, input *FormulaUpsert
 		return nil, errMutationsNotSupported
 	}
 	if errs := validateFormulaSource(s.state.Config(), input.Name, input.RawBody); len(errs) > 0 {
-		return nil, huma.Error400BadRequest("formula validation failed: " + strings.Join(errs, "; "))
+		return nil, apierr.InvalidRequest.Msg("formula validation failed: " + strings.Join(errs, "; "))
 	}
 	if err := fm.UpsertFormula(input.Name, input.RawBody); err != nil {
 		return nil, mutationError(err)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -24,11 +25,11 @@ import (
 func humaResolveError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
-		return huma.Error409Conflict("ambiguous: " + err.Error())
+		return apierr.SessionConflict.Msg("ambiguous: " + err.Error())
 	case errors.Is(err, session.ErrSessionNotFound):
-		return huma.Error404NotFound("not_found: " + err.Error())
+		return apierr.SessionNotFound.Msg("not_found: " + err.Error())
 	default:
-		return huma.Error500InternalServerError("internal: " + err.Error())
+		return apierr.Internal.Msg("internal: " + err.Error())
 	}
 }
 
@@ -37,29 +38,29 @@ func humaResolveError(err error) error {
 func humaSessionManagerError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrInvalidSessionName):
-		return huma.Error400BadRequest("invalid: " + err.Error())
+		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrSessionNameExists):
-		return huma.Error409Conflict("conflict: " + err.Error())
+		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrInvalidSessionAlias):
-		return huma.Error400BadRequest("invalid: " + err.Error())
+		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrSessionAliasExists):
-		return huma.Error409Conflict("conflict: " + err.Error())
+		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
-		return huma.Error501NotImplemented("unsupported: " + err.Error())
+		return apierr.NotImplemented.Msg("unsupported: " + err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
-		return huma.Error409Conflict("pending_interaction: " + err.Error())
+		return apierr.SessionConflict.Msg("pending_interaction: " + err.Error())
 	case errors.Is(err, session.ErrNoPendingInteraction):
-		return huma.Error409Conflict("no_pending: " + err.Error())
+		return apierr.SessionConflict.Msg("no_pending: " + err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
-		return huma.Error409Conflict("invalid_interaction: " + err.Error())
+		return apierr.SessionConflict.Msg("invalid_interaction: " + err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
-		return huma.Error409Conflict("conflict: " + err.Error())
+		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrSessionActive):
-		return huma.Error409Conflict("conflict: " + err.Error())
+		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrNotSession):
-		return huma.Error400BadRequest("invalid: " + err.Error())
+		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrIllegalTransition):
-		return huma.Error409Conflict("illegal_transition: " + err.Error())
+		return apierr.SessionConflict.Msg("illegal_transition: " + err.Error())
 	default:
 		return humaStoreError(err)
 	}
@@ -69,9 +70,9 @@ func humaSessionManagerError(err error) error {
 
 func humaStoreError(err error) error {
 	if errors.Is(err, beads.ErrNotFound) {
-		return huma.Error404NotFound("not_found: " + err.Error())
+		return apierr.SessionNotFound.Msg("not_found: " + err.Error())
 	}
-	return huma.Error500InternalServerError("internal: " + err.Error())
+	return apierr.Internal.Msg("internal: " + err.Error())
 }
 
 func writeHumaStatusError(w http.ResponseWriter, err error) {

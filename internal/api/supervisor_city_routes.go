@@ -30,33 +30,33 @@ func sessionStreamEventMap() map[string]any {
 // per-request city resolution.
 func (sm *SupervisorMux) registerCityRoutes() {
 	// Status + Health.
-	cityGet(sm, "/status", (*Server).humaHandleStatus)
-	cityGet(sm, "/health", (*Server).humaHandleHealth)
+	cityGet(sm, "/status", (*Server).humaHandleStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/health", (*Server).humaHandleHealth, errorStatuses(http.StatusNotFound))
 
 	// City detail.
-	cityGet(sm, "", (*Server).humaHandleCityGet)
-	cityPatch(sm, "", (*Server).humaHandleCityPatch)
+	cityGet(sm, "", (*Server).humaHandleCityGet, errorStatuses(http.StatusNotFound))
+	cityPatch(sm, "", (*Server).humaHandleCityPatch, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 
 	// Readiness (per-city).
-	cityGet(sm, "/readiness", (*Server).humaHandleReadiness)
-	cityGet(sm, "/provider-readiness", (*Server).humaHandleProviderReadiness)
+	cityGet(sm, "/readiness", (*Server).humaHandleReadiness, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
+	cityGet(sm, "/provider-readiness", (*Server).humaHandleProviderReadiness, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
 
 	// Config.
-	cityGet(sm, "/config", (*Server).humaHandleConfigGet)
-	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain)
-	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate)
-	cityGet(sm, "/config/defaults", (*Server).humaHandleConfigDefaults)
+	cityGet(sm, "/config", (*Server).humaHandleConfigGet, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/config/defaults", (*Server).humaHandleConfigDefaults, errorStatuses(http.StatusNotFound))
 
 	// Agents — read / CRUD. Agents can be addressed unqualified
 	// ({base}) or rig-qualified ({dir}/{base}); there is no third
 	// form, so two explicit routes cover every real case without a
 	// trailing-path wildcard. The routes we register are the routes
 	// we expose.
-	cityGet(sm, "/agents", (*Server).humaHandleAgentList)
-	cityGet(sm, "/agent/{dir}/{base}/output", (*Server).humaHandleAgentOutputQualified)
-	cityGet(sm, "/agent/{base}/output", (*Server).humaHandleAgentOutput)
-	cityGet(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentQualified)
-	cityGet(sm, "/agent/{base}", (*Server).humaHandleAgent)
+	cityGet(sm, "/agents", (*Server).humaHandleAgentList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/agent/{dir}/{base}/output", (*Server).humaHandleAgentOutputQualified, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/agent/{base}/output", (*Server).humaHandleAgentOutput, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentQualified, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/agent/{base}", (*Server).humaHandleAgent, errorStatuses(http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-agent",
 		Method:        http.MethodPost,
@@ -64,13 +64,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Create an agent",
 		Description:   "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
 	}, (*Server).humaHandleAgentCreate)
-	cityPatch(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentUpdateQualified)
-	cityPatch(sm, "/agent/{base}", (*Server).humaHandleAgentUpdate)
-	cityDelete(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentDeleteQualified)
-	cityDelete(sm, "/agent/{base}", (*Server).humaHandleAgentDelete)
-	cityPost(sm, "/agent/{dir}/{base}/{action}", (*Server).humaHandleAgentActionQualified)
-	cityPost(sm, "/agent/{base}/{action}", (*Server).humaHandleAgentAction)
+	cityPatch(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentUpdateQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPatch(sm, "/agent/{base}", (*Server).humaHandleAgentUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityDelete(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentDeleteQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityDelete(sm, "/agent/{base}", (*Server).humaHandleAgentDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPost(sm, "/agent/{dir}/{base}/{action}", (*Server).humaHandleAgentActionQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityPost(sm, "/agent/{base}/{action}", (*Server).humaHandleAgentAction, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 
 	// Agent output SSE streams.
 	agentOutputEventMap := map[string]any{
@@ -99,161 +100,176 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		sseCityStream(sm, (*Server).streamAgentOutputQualified))
 
 	// Providers.
-	cityGet(sm, "/providers", (*Server).humaHandleProviderList)
-	cityGet(sm, "/providers/public", (*Server).humaHandleProviderPublicList)
-	cityGet(sm, "/provider/{name}", (*Server).humaHandleProviderGet)
+	cityGet(sm, "/providers", (*Server).humaHandleProviderList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/providers/public", (*Server).humaHandleProviderPublicList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/provider/{name}", (*Server).humaHandleProviderGet, errorStatuses(http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-provider",
 		Method:        http.MethodPost,
 		Path:          "/providers",
 		Summary:       "Create a provider",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented},
 	}, (*Server).humaHandleProviderCreate)
-	cityPatch(sm, "/provider/{name}", (*Server).humaHandleProviderUpdate)
-	cityDelete(sm, "/provider/{name}", (*Server).humaHandleProviderDelete)
+	cityPatch(sm, "/provider/{name}", (*Server).humaHandleProviderUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityDelete(sm, "/provider/{name}", (*Server).humaHandleProviderDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 
 	// Rigs.
-	cityGet(sm, "/rigs", (*Server).humaHandleRigList)
-	cityGet(sm, "/rig/{name}", (*Server).humaHandleRigGet)
+	cityGet(sm, "/rigs", (*Server).humaHandleRigList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/rig/{name}", (*Server).humaHandleRigGet, errorStatuses(http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-rig",
 		Method:        http.MethodPost,
 		Path:          "/rigs",
 		Summary:       "Create a rig",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented},
 	}, (*Server).humaHandleRigCreate)
-	cityPatch(sm, "/rig/{name}", (*Server).humaHandleRigUpdate)
-	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete)
-	cityPost(sm, "/rig/{name}/{action}", (*Server).humaHandleRigAction)
+	cityPatch(sm, "/rig/{name}", (*Server).humaHandleRigUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityPost(sm, "/rig/{name}/{action}", (*Server).humaHandleRigAction, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 
 	// Patches — agent. Same qualified/unqualified split as /agent: two
 	// explicit routes instead of a trailing-path wildcard.
-	cityGet(sm, "/patches/agents", (*Server).humaHandleAgentPatchList)
-	cityGet(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchGetQualified)
-	cityGet(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchGet)
-	cityPut(sm, "/patches/agents", (*Server).humaHandleAgentPatchSet)
-	cityDelete(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchDeleteQualified)
-	cityDelete(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchDelete)
+	cityGet(sm, "/patches/agents", (*Server).humaHandleAgentPatchList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchGetQualified, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchGet, errorStatuses(http.StatusNotFound))
+	cityPut(sm, "/patches/agents", (*Server).humaHandleAgentPatchSet, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityDelete(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchDeleteQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityDelete(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 	// Patches — rig.
-	cityGet(sm, "/patches/rigs", (*Server).humaHandleRigPatchList)
-	cityGet(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchGet)
-	cityPut(sm, "/patches/rigs", (*Server).humaHandleRigPatchSet)
-	cityDelete(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchDelete)
+	cityGet(sm, "/patches/rigs", (*Server).humaHandleRigPatchList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchGet, errorStatuses(http.StatusNotFound))
+	cityPut(sm, "/patches/rigs", (*Server).humaHandleRigPatchSet, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityDelete(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 	// Patches — provider.
-	cityGet(sm, "/patches/providers", (*Server).humaHandleProviderPatchList)
-	cityGet(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchGet)
-	cityPut(sm, "/patches/providers", (*Server).humaHandleProviderPatchSet)
-	cityDelete(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchDelete)
+	cityGet(sm, "/patches/providers", (*Server).humaHandleProviderPatchList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchGet, errorStatuses(http.StatusNotFound))
+	cityPut(sm, "/patches/providers", (*Server).humaHandleProviderPatchSet, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityDelete(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 
-	// Beads.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList)
-	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph)
-	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady)
+	// Beads. The bead ops are the P12 error-contract pilot: each declares the
+	// error statuses it can return (Huma adds the auto 422/500) so its problem+json
+	// responses are enumerated in the spec and machine-branchable via the type/code
+	// the handler stamps through the apierr catalog. Mutations additionally declare
+	// 403 because the always-installed CSRF middleware (and read-only mode) reject
+	// a mutation with a 403 before the handler runs; reads never emit it.
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,
 		Path:          "/beads",
 		Summary:       "Create a bead",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleBeadCreate)
-	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet)
-	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps)
-	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose)
-	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen)
-	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate)
-	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate)
-	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign)
-	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete)
+	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps, errorStatuses(http.StatusNotFound))
+	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
-	// Mail.
-	cityGet(sm, "/mail", (*Server).humaHandleMailList)
+	// Mail. Part of the P12 error-contract slice (see Beads above): each op
+	// enumerates the error statuses it can return (Huma adds auto 422/500);
+	// mutations declare 403 for the CSRF/read-only middleware.
+	cityGet(sm, "/mail", (*Server).humaHandleMailList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-mail",
 		Method:        http.MethodPost,
 		Path:          "/mail",
 		Summary:       "Send a mail message",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleMailSend)
-	cityGet(sm, "/mail/count", (*Server).humaHandleMailCount)
-	cityGet(sm, "/mail/thread/{id}", (*Server).humaHandleMailThread)
-	cityGet(sm, "/mail/{id}", (*Server).humaHandleMailGet)
-	cityPost(sm, "/mail/{id}/read", (*Server).humaHandleMailRead)
-	cityPost(sm, "/mail/{id}/mark-unread", (*Server).humaHandleMailMarkUnread)
-	cityPost(sm, "/mail/{id}/archive", (*Server).humaHandleMailArchive)
+	cityGet(sm, "/mail/count", (*Server).humaHandleMailCount, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/mail/thread/{id}", (*Server).humaHandleMailThread, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/mail/{id}", (*Server).humaHandleMailGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/mail/{id}/read", (*Server).humaHandleMailRead, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityPost(sm, "/mail/{id}/mark-unread", (*Server).humaHandleMailMarkUnread, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityPost(sm, "/mail/{id}/archive", (*Server).humaHandleMailArchive, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "reply-mail",
 		Method:        http.MethodPost,
 		Path:          "/mail/{id}/reply",
 		Summary:       "Reply to a mail message",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, (*Server).humaHandleMailReply)
-	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete)
+	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Convoys.
-	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList)
+	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-convoy",
 		Method:        http.MethodPost,
 		Path:          "/convoys",
 		Summary:       "Create a convoy",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, (*Server).humaHandleConvoyCreate)
-	cityGet(sm, "/convoy/{id}", (*Server).humaHandleConvoyGet)
-	cityPost(sm, "/convoy/{id}/add", (*Server).humaHandleConvoyAdd)
-	cityPost(sm, "/convoy/{id}/remove", (*Server).humaHandleConvoyRemove)
-	cityGet(sm, "/convoy/{id}/check", (*Server).humaHandleConvoyCheck)
-	cityPost(sm, "/convoy/{id}/close", (*Server).humaHandleConvoyClose)
-	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete)
+	cityGet(sm, "/convoy/{id}", (*Server).humaHandleConvoyGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/convoy/{id}/add", (*Server).humaHandleConvoyAdd, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityPost(sm, "/convoy/{id}/remove", (*Server).humaHandleConvoyRemove, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityGet(sm, "/convoy/{id}/check", (*Server).humaHandleConvoyCheck, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/convoy/{id}/close", (*Server).humaHandleConvoyClose, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Events (list/emit/rotate — stream is a separate SSE registration below).
-	cityGet(sm, "/events", (*Server).humaHandleEventList)
+	cityGet(sm, "/events", (*Server).humaHandleEventList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "emit-event",
 		Method:        http.MethodPost,
 		Path:          "/events",
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleEventEmit)
 	cityRegister(sm, huma.Operation{
 		OperationID: "rotate-events",
 		Method:      http.MethodPost,
 		Path:        "/events/rotate",
 		Summary:     "Force rotate the city event log",
+		Errors:      []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed},
 	}, (*Server).humaHandleEventRotate)
 
 	// Orders.
-	cityGet(sm, "/orders", (*Server).humaHandleOrderList)
-	cityGet(sm, "/orders/check", (*Server).humaHandleOrderCheck)
-	cityGet(sm, "/orders/history", (*Server).humaHandleOrderHistory)
-	cityGet(sm, "/order/history/{bead_id}", (*Server).humaHandleOrderHistoryDetail)
-	cityGet(sm, "/order/{name}", (*Server).humaHandleOrderGet)
-	cityPost(sm, "/order/{name}/enable", (*Server).humaHandleOrderEnable)
-	cityPost(sm, "/order/{name}/disable", (*Server).humaHandleOrderDisable)
+	cityGet(sm, "/orders", (*Server).humaHandleOrderList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/orders/check", (*Server).humaHandleOrderCheck, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/orders/history", (*Server).humaHandleOrderHistory, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/order/history/{bead_id}", (*Server).humaHandleOrderHistoryDetail, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/order/{name}", (*Server).humaHandleOrderGet, errorStatuses(http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/order/{name}/enable", (*Server).humaHandleOrderEnable, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPost(sm, "/order/{name}/disable", (*Server).humaHandleOrderDisable, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 	// Typed operator path to fire a trigger="webhook" order directly with typed
 	// params. Inherits write-auth/CSRF/read-only from cityPost (write-auth IS the
 	// auth here — no signature). Reuses the E6 sink + E0.5 dispatcher seam.
 	cityPost(sm, "/order/{name}/run", (*Server).humaHandleOrderRun, func(op *huma.Operation) {
 		op.DefaultStatus = http.StatusAccepted
-	})
-	cityGet(sm, "/orders/feed", (*Server).humaHandleOrdersFeed)
+	}, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/orders/feed", (*Server).humaHandleOrdersFeed, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
 
 	// Formulas.
-	cityGet(sm, "/formulas", (*Server).humaHandleFormulaList)
-	cityGet(sm, "/formulas/{name}/runs", (*Server).humaHandleFormulaRuns)
-	cityGet(sm, "/formulas/{name}/source", (*Server).humaHandleFormulaSource)
-	cityGet(sm, "/formulas/{name}", (*Server).humaHandleFormulaDetail)
-	cityGet(sm, "/formula/{name}", (*Server).humaHandleFormulaDetail)
-	cityPost(sm, "/formulas/{name}/preview", (*Server).humaHandleFormulaPreview)
-	cityPost(sm, "/formulas/{name}/validate", (*Server).humaHandleFormulaValidate, withMaxFormulaBody)
-	cityPut(sm, "/formulas/{name}", (*Server).humaHandleFormulaUpsert, withMaxFormulaBody)
-	cityDelete(sm, "/formulas/{name}", (*Server).humaHandleFormulaDelete)
-	cityGet(sm, "/formulas/feed", (*Server).humaHandleFormulaFeed)
+	cityGet(sm, "/formulas", (*Server).humaHandleFormulaList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/formulas/{name}/runs", (*Server).humaHandleFormulaRuns, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/formulas/{name}/source", (*Server).humaHandleFormulaSource, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusNotImplemented))
+	cityGet(sm, "/formulas/{name}", (*Server).humaHandleFormulaDetail, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/formula/{name}", (*Server).humaHandleFormulaDetail, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/formulas/{name}/preview", (*Server).humaHandleFormulaPreview, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/formulas/{name}/validate", (*Server).humaHandleFormulaValidate, withMaxFormulaBody, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusRequestEntityTooLarge))
+	cityPut(sm, "/formulas/{name}", (*Server).humaHandleFormulaUpsert, withMaxFormulaBody, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusRequestEntityTooLarge, http.StatusNotImplemented))
+	cityDelete(sm, "/formulas/{name}", (*Server).humaHandleFormulaDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityGet(sm, "/formulas/feed", (*Server).humaHandleFormulaFeed, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	// Backwards-compatible workflow aliases.
-	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet)
-	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete)
+	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
+	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Packs.
-	cityGet(sm, "/packs", (*Server).humaHandlePackList)
+	cityGet(sm, "/packs", (*Server).humaHandlePackList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "add-pack",
 		Method:        http.MethodPost,
@@ -261,14 +277,16 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Add a pack",
 		Description:   "Imports a pack into the city by source (a remote git URL or registry ref), resolving + installing it so its templates compose into the city.",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusBadGateway},
 	}, (*Server).humaHandlePackAdd)
-	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove)
+	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
-	// Sling.
-	cityPost(sm, "/sling", (*Server).humaHandleSling)
+	// Sling. Part of the P12 error-contract pilot (see Beads above); a mutation,
+	// so it also declares 403 for the CSRF/read-only middleware.
+	cityPost(sm, "/sling", (*Server).humaHandleSling, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
 	// Maintenance (Dolt store gc + snapshot).
-	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus)
+	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "trigger-maintenance-dolt-gc",
 		Method:        http.MethodPost,
@@ -276,12 +294,13 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Trigger a Dolt store maintenance run",
 		Description:   "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
 		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleMaintenanceTriggerDoltGC)
 
 	// Services (workspace services).
-	cityGet(sm, "/services", (*Server).humaHandleServiceList)
-	cityGet(sm, "/service/{name}", (*Server).humaHandleServiceGet)
-	cityPost(sm, "/service/{name}/restart", (*Server).humaHandleServiceRestart)
+	cityGet(sm, "/services", (*Server).humaHandleServiceList, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/service/{name}", (*Server).humaHandleServiceGet, errorStatuses(http.StatusNotFound))
+	cityPost(sm, "/service/{name}/restart", (*Server).humaHandleServiceRestart, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Sessions (non-stream — stream is the SSE registration below).
 	cityRegister(sm, huma.Operation{
@@ -290,20 +309,22 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/sessions",
 		Summary:       "Create a session",
 		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionCreate)
-	cityGet(sm, "/sessions", (*Server).humaHandleSessionList)
-	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet)
-	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
-	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
-	cityGet(sm, "/pending", (*Server).humaHandleCityPending)
-	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
-	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
+	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/pending", (*Server).humaHandleCityPending, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "submit-session",
 		Method:        http.MethodPost,
 		Path:          "/session/{id}/submit",
 		Summary:       "Submit a message to a session",
 		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionSubmit)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-session-message",
@@ -311,22 +332,24 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/messages",
 		Summary:       "Send a message to a session",
 		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
-	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop)
-	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill)
+	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "respond-session",
 		Method:        http.MethodPost,
 		Path:          "/session/{id}/respond",
 		Summary:       "Respond to a pending interaction",
 		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionRespond)
-	cityPost(sm, "/session/{id}/suspend", (*Server).humaHandleSessionSuspend)
-	cityPost(sm, "/session/{id}/close", (*Server).humaHandleSessionClose)
-	cityPost(sm, "/session/{id}/wake", (*Server).humaHandleSessionWake)
-	cityPost(sm, "/session/{id}/rename", (*Server).humaHandleSessionRename)
-	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList)
-	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet)
+	cityPost(sm, "/session/{id}/suspend", (*Server).humaHandleSessionSuspend, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/close", (*Server).humaHandleSessionClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/wake", (*Server).humaHandleSessionWake, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/rename", (*Server).humaHandleSessionRename, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 
 	// Session SSE stream.
 	registerSSE(sm.humaAPI, huma.Operation{
@@ -362,30 +385,32 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		sseCityStream(sm, (*Server).streamEvents))
 
 	// ExtMsg.
-	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound)
-	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound)
-	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList)
-	cityPost(sm, "/extmsg/bind", (*Server).humaHandleExtMsgBind)
-	cityPost(sm, "/extmsg/unbind", (*Server).humaHandleExtMsgUnbind)
-	cityGet(sm, "/extmsg/groups", (*Server).humaHandleExtMsgGroupLookup)
+	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/extmsg/bind", (*Server).humaHandleExtMsgBind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/extmsg/unbind", (*Server).humaHandleExtMsgUnbind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/extmsg/groups", (*Server).humaHandleExtMsgGroupLookup, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "ensure-extmsg-group",
 		Method:        http.MethodPost,
 		Path:          "/extmsg/groups",
 		Summary:       "Ensure an external messaging group exists",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgGroupEnsure)
-	cityPost(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantUpsert)
-	cityDelete(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantRemove)
-	cityGet(sm, "/extmsg/transcript", (*Server).humaHandleExtMsgTranscriptList)
-	cityPost(sm, "/extmsg/transcript/ack", (*Server).humaHandleExtMsgTranscriptAck)
-	cityGet(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterList)
+	cityPost(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantUpsert, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityDelete(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantRemove, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/extmsg/transcript", (*Server).humaHandleExtMsgTranscriptList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/extmsg/transcript/ack", (*Server).humaHandleExtMsgTranscriptAck, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "register-extmsg-adapter",
 		Method:        http.MethodPost,
 		Path:          "/extmsg/adapters",
 		Summary:       "Register an external messaging adapter",
 		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgAdapterRegister)
-	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister)
+	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 }
