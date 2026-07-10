@@ -23,24 +23,21 @@ import (
 // See gastownhall/gascity#2148 for the named-session lookup-error visibility
 // regression this field exists to surface.
 type sessionBeadSnapshot struct {
-	// mu guards open + the four lookup maps. add() (called from inside
-	// createPoolSessionBead) can fire from multiple goroutines when
-	// realizePoolDesiredSessions parallelizes pool session bead creates
-	// across distinct aliases — see gastownhall/gascity#2319. All read
-	// methods take RLock; add() takes Lock.
-	mu   sync.RWMutex
-	open []beads.Bead
-	// openInfos is the session.Info projection of open, in lockstep order:
-	// openInfos[i] == InfoFromPersistedBead(open[i]). It is the typed front
-	// door the P4 consumers migrate onto; the raw open slice and the index
-	// maps below stay byte-identical for the current callers.
+	// mu guards openInfos/openCircuits + the four lookup maps. addInfo() (called
+	// from the pool create/reuse path) can fire from multiple goroutines when
+	// realizePoolDesiredSessions parallelizes pool session bead creates across
+	// distinct aliases — see gastownhall/gascity#2319. All read methods take RLock;
+	// addInfo() takes Lock.
+	mu sync.RWMutex
+	// openInfos is the typed session.Info projection of every open session, the
+	// snapshot's sole domain surface (the raw-bead half was deleted in WI-7 W-delete;
+	// callers that genuinely need raw beads read the store directly).
 	openInfos []sessionpkg.Info
-	// openCircuits is the persisted circuit-breaker cluster projection of open, in
-	// lockstep order: openCircuits[i] == CircuitStateFromMetadata(open[i].Metadata).
-	// The reconciler tick feed (OpenForReconcile) pairs it with openInfos so the
-	// circuit cluster — deliberately off session.Info — reaches Phase 0.5 without a
-	// per-id store Get. An Info-fed snapshot (FromInfos) has no backing circuit
-	// metadata, so its entries are the zero CircuitState.
+	// openCircuits is the persisted circuit-breaker cluster projection, in lockstep
+	// order with openInfos. The reconciler tick feed (OpenForReconcile) pairs it with
+	// openInfos so the circuit cluster — deliberately off session.Info — reaches
+	// Phase 0.5 without a per-id store Get. An Info-fed snapshot (FromInfos) has no
+	// backing circuit metadata, so its entries are the zero CircuitState.
 	openCircuits              []sessionpkg.CircuitState
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
@@ -75,7 +72,7 @@ func (s *sessionBeadSnapshot) LoadError() error {
 // snapshot instead of nil) use this so downstream consumers can still see the
 // underlying failure via LoadError.
 func newSessionBeadSnapshotWithError(err error) *sessionBeadSnapshot {
-	s := newSessionBeadSnapshot(nil)
+	s := newSessionBeadSnapshotFromInfos(nil)
 	// loadErr is set during construction, before s is published to any other
 	// goroutine, so no s.mu lock is needed here even though LoadError() reads
 	// it under RLock.
@@ -85,132 +82,52 @@ func newSessionBeadSnapshotWithError(err error) *sessionBeadSnapshot {
 
 func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	if store == nil {
-		return newSessionBeadSnapshot(nil), nil
+		snap := newSessionBeadSnapshotFromInfos(nil)
+		snap.fingerprint = sessionpkg.SessionSetFingerprint(nil)
+		return snap, nil
 	}
-	// Type+Label union via the shared helper. The motivating bug:
-	// canonical configured_named_session beads can lose their gc:session
-	// label after crashes or schema migrations but retain
-	// issue_type=session; a label-only query strands them invisible to
-	// the reconciler, which then never heals their state=awake metadata
-	// after a runtime is lost. Their alias reservations live forever,
-	// blocking createPoolSessionBead from materializing replacements
-	// ("alias … already belongs to gm-XXXX") and preventing the pool
-	// from spawning for that template until manual intervention.
+	// Typed reconcile feed via the session front door: the same Type+Label union
+	// ListAllSessionBeads applied (so canonical session beads that lost their
+	// gc:session label after a crash or migration still surface — a label-only query
+	// strands them invisible to the reconciler, which then never heals their
+	// state=awake metadata after a runtime is lost, and their alias reservations live
+	// forever blocking pool replacements), projected to ReconcileSession rows and
+	// paired with the raw-bead config-change fingerprint in ONE list. The snapshot no
+	// longer holds raw beads; the fingerprint is computed edge-side (it hashes ALL
+	// metadata, which Info drops) and carried as a field.
 	//
-	// Closed history is intentionally not loaded here — the reconciler
-	// calls this several times per tick and closed history grows
-	// without bound. Callers that need a closed record must fetch that
-	// one ID explicitly.
-	sessions, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
+	// Closed history is intentionally not loaded here — the reconciler calls this
+	// several times per tick and closed history grows without bound. Callers that need
+	// a closed record must fetch that one ID explicitly.
+	rows, fingerprint, err := sessionFrontDoor(store).ListAllForReconcileWithFingerprint(sessionpkg.ListAllOptions{})
 	if err != nil {
 		return nil, err
 	}
-	return newSessionBeadSnapshot(sessions), nil
+	snap := newSessionBeadSnapshotFromReconcileRows(rows)
+	snap.fingerprint = fingerprint
+	return snap, nil
 }
 
-func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
-	filtered := make([]beads.Bead, 0, len(beadsIn))
-	beadIDByAgentName := make(map[string]string)
-	beadIDByTemplateHint := make(map[string]string)
-	sessionNameByAgentName := make(map[string]string)
-	sessionNameByTemplateHint := make(map[string]string)
-
-	openInfos := make([]sessionpkg.Info, 0, len(beadsIn))
-	openCircuits := make([]sessionpkg.CircuitState, 0, len(beadsIn))
-
-	for _, b := range beadsIn {
-		if b.Status == "closed" {
-			continue
-		}
-		filtered = append(filtered, b)
-		openInfos = append(openInfos, sessionpkg.InfoFromPersistedBead(b))
-		openCircuits = append(openCircuits, sessionpkg.CircuitStateFromMetadata(b.Metadata))
-
-		sn := b.Metadata["session_name"]
-		if sn == "" {
-			continue
-		}
-		isCanonicalNamed := strings.TrimSpace(b.Metadata["configured_named_identity"]) != ""
-		if agentName := sessionBeadAgentName(b); agentName != "" {
-			if isPoolManagedSessionBead(b) && agentName == b.Metadata["template"] {
-				if stamped := stampedPoolQualifiedIdentity(b); stamped != "" {
-					agentName = stamped
-				} else if !isCanonicalPoolManagedSessionBeadForTemplate(b, agentName) {
-					agentName = ""
-				}
-			}
-			if agentName == "" {
-				continue
-			}
-			// Canonical named session beads always win the index so
-			// resolveSessionName returns the correct session_name even
-			// when leaked pool-style beads exist for the same template.
-			if _, exists := sessionNameByAgentName[agentName]; !exists || isCanonicalNamed {
-				beadIDByAgentName[agentName] = b.ID
-				sessionNameByAgentName[agentName] = sn
-			}
-		}
-		if isPoolManagedSessionBead(b) {
-			continue
-		}
-		if template := b.Metadata["template"]; template != "" {
-			if _, exists := sessionNameByTemplateHint[template]; !exists || isCanonicalNamed {
-				beadIDByTemplateHint[template] = b.ID
-				sessionNameByTemplateHint[template] = sn
-			}
-		}
-		if commonName := b.Metadata["common_name"]; commonName != "" {
-			if _, exists := sessionNameByTemplateHint[commonName]; !exists {
-				beadIDByTemplateHint[commonName] = b.ID
-				sessionNameByTemplateHint[commonName] = sn
-			}
-		}
-	}
-
-	return &sessionBeadSnapshot{
-		open:                      filtered,
-		openInfos:                 openInfos,
-		openCircuits:              openCircuits,
-		beadIDByAgentName:         beadIDByAgentName,
-		beadIDByTemplateHint:      beadIDByTemplateHint,
-		sessionNameByAgentName:    sessionNameByAgentName,
-		sessionNameByTemplateHint: sessionNameByTemplateHint,
-		fingerprint:               sessionpkg.SessionSetFingerprint(filtered),
-	}
-}
-
-// newSessionBeadSnapshotFromInfos builds a snapshot from a typed session.Info
-// feed instead of raw beads. It is the full front-door constructor: it
-// populates openInfos AND the four agent/template index maps, reading typed
-// Info fields through the equivalence-proven classifier twins
-// (sessionBeadAgentNameInfo, isPoolManagedSessionInfo,
-// stampedPoolQualifiedIdentityInfo, isCanonicalPoolManagedSessionInfoForTemplate)
-// in place of the raw metadata reads newSessionBeadSnapshot uses. The index
-// precedence — canonical configured_named beads win the agent/template index,
-// pool-managed beads skip the template-hint index, and common_name provides the
-// last-resort hint — is identical to the raw constructor and pinned by
-// TestSessionBeadSnapshotConstructorInfoEquivalence across the fixture corpus so
-// an index-precedence divergence (which strands named sessions invisibly) fails
-// the build.
-//
-// The raw open []beads.Bead slice is left nil: an Info-fed snapshot has no
-// backing beads, so ONLY the bead-returning raw-half readers (Open, FindByID, the
-// FindSessionBead* family) return empty on it — callers that need a raw
-// beads.Bead must build the snapshot from beads via newSessionBeadSnapshot. The
-// typed surface (OpenInfos, FindInfoByID, FindInfoByTemplate,
-// FindInfoByNamedIdentity) is backed by openInfos and the index maps this
-// constructor populates, so it works correctly on an Info-built snapshot.
+// newSessionBeadSnapshotFromInfos builds a snapshot from a typed session.Info feed.
+// It populates openInfos AND the four agent/template index maps, reading typed Info
+// fields through the classifier twins (sessionBeadAgentNameInfo,
+// isPoolManagedSessionInfo, stampedPoolQualifiedIdentityInfo,
+// isCanonicalPoolManagedSessionInfoForTemplate). The index precedence — canonical
+// configured_named beads win the agent/template index, pool-managed beads skip the
+// template-hint index, and common_name provides the last-resort hint — is pinned by
+// TestSessionBeadSnapshotFromReconcileRowsIndexPrecedence across the fixture corpus so
+// an index-precedence divergence (which strands named sessions invisibly) fails the
+// build. Circuits are zero-valued (an Info-only feed carries no circuit metadata).
 func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
 	return newSessionBeadSnapshotFromInfosAndCircuits(infos, nil)
 }
 
 // newSessionBeadSnapshotFromReconcileRows builds a snapshot from a typed
-// ReconcileSession feed, retaining each row's circuit cluster alongside its Info.
-// It is the reconciler-tick constructor: the tick's working set is fed as rows
-// (OpenForReconcile), and the retire/heal folds mutate rows in place, so the
-// snapshot rebuilt from them must keep the circuit projections that OpenForReconcile
-// needs. Like newSessionBeadSnapshotFromInfos, the raw open []beads.Bead half is
-// left nil.
+// ReconcileSession feed, retaining each row's circuit cluster alongside its Info. It
+// is the reconciler-tick + store-load constructor: the tick's working set is fed as
+// rows (OpenForReconcile / Store.ListAllForReconcile), and the retire/heal folds
+// mutate rows in place, so the snapshot rebuilt from them must keep the circuit
+// projections OpenForReconcile needs.
 func newSessionBeadSnapshotFromReconcileRows(rows []sessionpkg.ReconcileSession) *sessionBeadSnapshot {
 	infos := make([]sessionpkg.Info, len(rows))
 	circuits := make([]sessionpkg.CircuitState, len(rows))
@@ -297,49 +214,20 @@ func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuit
 	}
 }
 
-// replaceOpenLocked replaces the snapshot's open set and rebuilt lookup maps
-// from `open`. Callers must hold s.mu.
-func (s *sessionBeadSnapshot) replaceOpenLocked(open []beads.Bead) {
-	rebuilt := newSessionBeadSnapshot(open)
-	s.open = rebuilt.open
-	s.openInfos = rebuilt.openInfos
-	s.openCircuits = rebuilt.openCircuits
-	s.beadIDByAgentName = rebuilt.beadIDByAgentName
-	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
-	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
-	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
-}
-
-func (s *sessionBeadSnapshot) add(bead beads.Bead) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	open := make([]beads.Bead, 0, len(s.open)+1)
-	open = append(open, s.open...)
-	open = append(open, bead)
-	s.replaceOpenLocked(open)
-}
-
 // addInfo appends a freshly created/reopened session's projected Info to the
 // snapshot's typed half so same-cycle selection observes it. The pool create/reuse
-// path (W-pool) inserts session.Info here now that it returns Info instead of a raw
-// bead. It rebuilds the agent/template index maps from the extended openInfos via
-// the equivalence-proven Info constructor while PRESERVING each existing row's
-// circuit cluster and appending the zero CircuitState for the new row (a fresh bead
-// carries no circuit metadata).
+// path inserts session.Info here (its typed create front door returns Info, not a raw
+// bead). It rebuilds the agent/template index maps from the extended openInfos via the
+// equivalence-proven Info constructor while PRESERVING each existing row's circuit
+// cluster and appending the zero CircuitState for the new row (a fresh bead carries no
+// circuit metadata).
 //
-// The raw open []beads.Bead half is intentionally left untouched (addInfo holds no
-// raw bead). Consumers that read the typed half — the build's own reuse scans
-// (OpenInfos) and the reconcile tick (which re-loads the snapshot from the store
-// after buildDesiredState) — observe the new session directly. The one same-cycle
-// reader of the RAW half, the sync path via snapshotOrLoadSessionBeads, reconciles
-// the resulting skew by reloading from the store whenever len(OpenInfos()) >
-// len(Open()) (which holds iff addInfo ran this cycle), so sync never treats a
-// just-created session_name as absent and mints a duplicate. The raw half is deleted
-// with W-delete. Under Lock; safe for the parallel pool-create fan-out
-// (gastownhall/gascity#2319).
+// Consumers read the typed half — the build's own reuse scans (OpenInfos) and the
+// reconcile tick (which re-loads the snapshot from the store after buildDesiredState) —
+// so they observe the new session directly. The sync path re-lists raw beads from the
+// store every cycle, so a just-created session_name is durably visible there too
+// (CreateSessionInfo persists the bead before projecting it). Under Lock; safe for the
+// parallel pool-create fan-out (gastownhall/gascity#2319).
 func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
 	if s == nil {
 		return
@@ -361,32 +249,8 @@ func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
 	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
 }
 
-// WI-6: the raw-bead half of sessionBeadSnapshot (Open / FindByID /
-// FindSessionBeadByTemplate / FindSessionBeadByNamedIdentity /
-// FindSessionNameByNamedIdentity and the raw stampedPoolQualifiedIdentity used by
-// the constructor) survives WI-5. The W4 typed-half migration retired every
-// reconciler-owned consumer, but Open() still has many non-front-door callers
-// spanning cmd_start.go, build_desired_state.go, city_runtime.go and
-// session_beads.go, and FindByID / FindSessionNameByNamedIdentity are still called
-// from the WI-6-owned city_runtime.go / cmd_wait.go / providers.go lanes. Before
-// deleting the raw half, grep the tree for the non-test call sites (e.g.
-// `grep -rn --include='*.go' '\.Open()' cmd internal | grep -v _test.go`, and the
-// same for FindByID / FindSessionNameByNamedIdentity) and migrate each onto
-// OpenInfos()/FindInfoByID()/FindInfoByNamedIdentity() in WI-6.
-func (s *sessionBeadSnapshot) Open() []beads.Bead {
-	if s == nil {
-		return nil
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]beads.Bead, len(s.open))
-	copy(result, s.open)
-	return result
-}
-
-// OpenInfos is the typed mirror of Open: a copy of the session.Info projection
-// of every open bead, in the same order as Open(). OpenInfos()[i] equals
-// InfoFromPersistedBead(Open()[i]) for all i.
+// OpenInfos is a copy of the session.Info projection of every open session, in the
+// snapshot's canonical order (the order OpenForReconcile also uses).
 func (s *sessionBeadSnapshot) OpenInfos() []sessionpkg.Info {
 	if s == nil {
 		return nil
@@ -405,8 +269,8 @@ func (s *sessionBeadSnapshot) OpenInfos() []sessionpkg.Info {
 // tick works on separate ReconcileSession rows, and this writeback restores that
 // post-tick observation. For each open row whose id appears in infoByID the row's
 // Info is replaced with the post-tick Info; rows absent from infoByID (e.g. a
-// session created mid-tick via add) keep their current Info. Circuits and the raw
-// open half are untouched. Under Lock.
+// session created mid-tick via addInfo) keep their current Info. Circuits are
+// untouched. Under Lock.
 func (s *sessionBeadSnapshot) WriteBackReconcileInfos(infoByID map[string]sessionpkg.Info) {
 	if s == nil || len(infoByID) == 0 {
 		return
@@ -474,24 +338,8 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 	return s.sessionNameByTemplateHint[template]
 }
 
-func (s *sessionBeadSnapshot) FindSessionBeadByTemplate(template string) (beads.Bead, bool) {
-	if s == nil {
-		return beads.Bead{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if id := s.beadIDByAgentName[template]; id != "" {
-		return s.findByIDLocked(id)
-	}
-	if id := s.beadIDByTemplateHint[template]; id != "" {
-		return s.findByIDLocked(id)
-	}
-	return beads.Bead{}, false
-}
-
-// FindInfoByTemplate is the typed mirror of FindSessionBeadByTemplate: it
-// returns the session.Info projection of the same bead that method would
-// resolve for template.
+// FindInfoByTemplate returns the session.Info of the bead the template resolves to,
+// preferring the agent-name index over the template-hint index.
 func (s *sessionBeadSnapshot) FindInfoByTemplate(template string) (sessionpkg.Info, bool) {
 	if s == nil {
 		return sessionpkg.Info{}, false
@@ -507,27 +355,7 @@ func (s *sessionBeadSnapshot) FindInfoByTemplate(template string) (sessionpkg.In
 	return sessionpkg.Info{}, false
 }
 
-func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
-	if s == nil || strings.TrimSpace(id) == "" {
-		return beads.Bead{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.findByIDLocked(id)
-}
-
-// findByIDLocked is the inner lookup; callers must hold at least s.mu.RLock.
-func (s *sessionBeadSnapshot) findByIDLocked(id string) (beads.Bead, bool) {
-	for _, bead := range s.open {
-		if bead.ID == id {
-			return bead, true
-		}
-	}
-	return beads.Bead{}, false
-}
-
-// FindInfoByID is the typed mirror of FindByID: it returns the session.Info
-// projection of the same bead FindByID would return for id.
+// FindInfoByID returns the session.Info of the open session with the given id.
 func (s *sessionBeadSnapshot) FindInfoByID(id string) (sessionpkg.Info, bool) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return sessionpkg.Info{}, false
@@ -537,11 +365,8 @@ func (s *sessionBeadSnapshot) FindInfoByID(id string) (sessionpkg.Info, bool) {
 	return s.findInfoByIDLocked(id)
 }
 
-// findInfoByIDLocked is the typed inner lookup; callers must hold at least
-// s.mu.RLock. It scans openInfos directly (not the raw open slice) so it works on
-// both bead-built and Info-built snapshots: newSessionBeadSnapshotFromInfos leaves
-// open nil but populates openInfos, and for a bead-built snapshot open/openInfos
-// are lockstep so the first match is identical either way.
+// findInfoByIDLocked is the inner lookup over openInfos; callers must hold at least
+// s.mu.RLock.
 func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bool) {
 	for _, info := range s.openInfos {
 		if info.ID == id {
@@ -551,35 +376,8 @@ func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bo
 	return sessionpkg.Info{}, false
 }
 
-func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) string {
-	bead, ok := s.FindSessionBeadByNamedIdentity(identity)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(bead.Metadata["session_name"])
-}
-
-func (s *sessionBeadSnapshot) FindSessionBeadByNamedIdentity(identity string) (beads.Bead, bool) {
-	if s == nil || strings.TrimSpace(identity) == "" {
-		return beads.Bead{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, bead := range s.open {
-		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
-			continue
-		}
-		return bead, true
-	}
-	return beads.Bead{}, false
-}
-
-// FindInfoByNamedIdentity is the typed mirror of FindSessionBeadByNamedIdentity:
-// it returns the session.Info projection of the session whose configured named
-// identity matches. It scans openInfos directly (matching the trimmed
-// Info.ConfiguredNamedIdentity, which InfoFromPersistedBead carries verbatim) so
-// it works on both bead-built and Info-built snapshots; for a bead-built snapshot
-// open/openInfos are lockstep so the first match is identical to the raw form.
+// FindInfoByNamedIdentity returns the session.Info of the open session whose
+// configured named identity matches (trimmed Info.ConfiguredNamedIdentity).
 func (s *sessionBeadSnapshot) FindInfoByNamedIdentity(identity string) (sessionpkg.Info, bool) {
 	if s == nil || strings.TrimSpace(identity) == "" {
 		return sessionpkg.Info{}, false
@@ -595,31 +393,9 @@ func (s *sessionBeadSnapshot) FindInfoByNamedIdentity(identity string) (sessionp
 	return sessionpkg.Info{}, false
 }
 
-func stampedPoolQualifiedIdentity(bead beads.Bead) string {
-	if !isPoolManagedSessionBead(bead) {
-		return ""
-	}
-	slot, err := strconv.Atoi(strings.TrimSpace(bead.Metadata["pool_slot"]))
-	if err != nil || slot <= 0 {
-		return ""
-	}
-	template := strings.TrimSpace(bead.Metadata["template"])
-	if template == "" {
-		return ""
-	}
-	scope, name := config.ParseQualifiedName(template)
-	if name == "" {
-		return ""
-	}
-	instance := fmt.Sprintf("%s-%d", name, slot)
-	if scope != "" {
-		return scope + "/" + instance
-	}
-	return instance
-}
-
-// stampedPoolQualifiedIdentityInfo is the session.Info mirror of
-// stampedPoolQualifiedIdentity.
+// stampedPoolQualifiedIdentityInfo derives the qualified pool instance identity
+// ("scope/name-slot") from a session.Info, or "" when the session is not a slotted
+// pool-managed session.
 func stampedPoolQualifiedIdentityInfo(i sessionpkg.Info) string {
 	if !isPoolManagedSessionInfo(i) {
 		return ""

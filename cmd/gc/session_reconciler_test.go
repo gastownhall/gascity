@@ -765,7 +765,7 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
-	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
 	env.setSessionMetadata(&session, map[string]string{
 		"started_config_hash": runtime.CoreFingerprint(agentCfg),
 		"started_live_hash":   runtime.LiveFingerprint(agentCfg),
@@ -7418,7 +7418,7 @@ func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesOrdinarySession(t *testi
 
 	// Stored baseline = the running config with ONLY the launch half (Command)
 	// changed, so the provision hash matches and the launch hash differs.
-	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{
@@ -7477,7 +7477,7 @@ func TestReconcileSessionBeads_LaunchAndLiveDriftRelaunchThenLiveNextTick(t *tes
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 
-	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
 	// Launch-only Core drift (Command), plus a stale live hash so live also drifts.
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
@@ -7553,7 +7553,7 @@ func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesNamedSession(t *testing.
 	session := env.createSessionBead(sessionName, "worker")
 	env.markSessionActive(&session)
 
-	agentCfg := sessionCoreConfigForHash(env.desiredState[sessionName], session)
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState[sessionName], sessionpkg.InfoFromPersistedBead(session))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{
@@ -7595,7 +7595,7 @@ func TestReconcileSessionBeads_ProvisionDriftDoesNotRelaunch(t *testing.T) {
 
 	// Stored baseline differs in a provision-half field (PreStart): both the
 	// provision hash AND the core hash move, so this is not launch-only.
-	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
 	oldCfg := agentCfg
 	oldCfg.PreStart = append([]string{"echo stale-prestart"}, agentCfg.PreStart...)
 	env.setSessionMetadata(&session, map[string]string{
@@ -7627,7 +7627,7 @@ func TestReconcileSessionBeads_LaunchOnlyDriftFallsBackWhenRelaunchFails(t *test
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 
-	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{

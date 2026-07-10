@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -98,99 +99,76 @@ func wpoolTwinAgents() []*config.Agent {
 	}
 }
 
-// TestPoolReusePredicateInfoTwinsMatchRaw is the equivalence oracle for the
-// session.Info reuse/creation predicate siblings. For every corpus bead × agent it
-// asserts each Info twin agrees with its raw form, so a mutation of any twin branch
-// (a dropped guard, a wrong Info field, a flipped comparison) fails the build. The
-// raw predicates are the reference; the twins read the projected Info.
-func TestPoolReusePredicateInfoTwinsMatchRaw(t *testing.T) {
+// TestPoolReuseTwinsCharacterization is the PERMANENT characterization of the
+// W-pool session.Info reuse/creation/slot/stamp siblings, pinned against a golden
+// captured over the diverse corpus. It replaced the raw-vs-Info equivalence oracles
+// whose raw reference forms retired with the snapshot raw half in WI-7 W-delete. A
+// mutation of any twin branch (a dropped guard, a wrong Info field, a flipped
+// comparison, a reordered candidate list) changes an output and fails the build.
+func TestPoolReuseTwinsCharacterization(t *testing.T) {
+	agents := wpoolTwinAgents()
+	corpus := wpoolTwinCorpus()
 	work := []beads.Bead{
 		{ID: "w-1", Assignee: "s-open", Status: "in_progress"},
 		{ID: "w-2", Assignee: "gc-creating", Status: "open"},
 	}
-	for _, agent := range wpoolTwinAgents() {
-		agent := agent
+
+	gotAliasDeferred := map[string]bool{}
+	for _, b := range corpus {
+		gotAliasDeferred[b.ID] = poolRuntimeAliasIsDeferredInfo(session.InfoFromPersistedBead(b))
+	}
+	gotReusable := map[string]bool{}
+	gotDepReusable := map[string]bool{}
+	gotSlot := map[string]int{}
+	for ai, agent := range agents {
 		bp := &agentBuildParams{city: &config.City{Agents: []config.Agent{*agent}}, assignedWorkBeads: work}
-		for _, b := range wpoolTwinCorpus() {
+		cfg := &config.City{}
+		for _, b := range corpus {
 			info := session.InfoFromPersistedBead(b)
-
-			if got, want := poolRuntimeAliasIsDeferredInfo(info), poolRuntimeAliasIsDeferred(b); got != want {
-				t.Errorf("poolRuntimeAliasIsDeferred[%s/%s]: info=%v raw=%v", agent.Name, b.ID, got, want)
-			}
-			// staleNonExpandingPoolSessionBeadInfo (the shared staleness projection the
-			// reuse finders use) is already pinned vs its raw form by
-			// TestSessionClassifierInfoEquivalence.
-			if got, want := reusablePoolSessionInfo(bp, agent, "claude", info, nil), reusablePoolSessionBead(bp, agent, "claude", b, nil); got != want {
-				t.Errorf("reusablePoolSession[%s/%s]: info=%v raw=%v", agent.Name, b.ID, got, want)
-			}
-			if got, want := reusableDependencyPoolSessionInfo(bp, "claude", info), reusableDependencyPoolSessionBead(bp, "claude", b); got != want {
-				t.Errorf("reusableDependencyPoolSession[%s/%s]: info=%v raw=%v", agent.Name, b.ID, got, want)
-			}
+			k := fmt.Sprintf("%d/%s", ai, b.ID)
+			gotReusable[k] = reusablePoolSessionInfo(bp, agent, "claude", info, nil)
+			gotDepReusable[k] = reusableDependencyPoolSessionInfo(bp, "claude", info)
+			used := map[int]bool{1: true}
+			gotSlot[k] = claimDesiredPoolSlotInfo(cfg, agent, info, used)
 		}
 	}
-}
-
-// TestClaimDesiredPoolSlotInfoMatchesRaw pins that the Info slot-claim sibling
-// returns the same slot AND mutates the used-slots map identically to the raw form
-// across the corpus, for both a fresh used map and a pre-claimed one.
-func TestClaimDesiredPoolSlotInfoMatchesRaw(t *testing.T) {
-	cfg := &config.City{}
-	for _, agent := range wpoolTwinAgents() {
-		agent := agent
-		for _, b := range wpoolTwinCorpus() {
-			info := session.InfoFromPersistedBead(b)
-			for _, seed := range []map[int]bool{{}, {1: true}, {1: true, 2: true}} {
-				rawUsed := cloneIntSet(seed)
-				infoUsed := cloneIntSet(seed)
-				rawSlot := claimDesiredPoolSlot(cfg, agent, b, rawUsed)
-				infoSlot := claimDesiredPoolSlotInfo(cfg, agent, info, infoUsed)
-				if rawSlot != infoSlot {
-					t.Errorf("claimDesiredPoolSlot[%s/%s] seed=%v: info=%d raw=%d", agent.Name, b.ID, seed, infoSlot, rawSlot)
-				}
-				if !reflect.DeepEqual(rawUsed, infoUsed) {
-					t.Errorf("claimDesiredPoolSlot used-map[%s/%s] seed=%v: info=%v raw=%v", agent.Name, b.ID, seed, infoUsed, rawUsed)
-				}
-			}
-		}
-	}
-}
-
-func cloneIntSet(in map[int]bool) map[int]bool {
-	out := make(map[int]bool, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-// TestSetPoolTemplateRuntimeIdentityInfoMatchesRaw pins that the Info sibling
-// applies byte-identical mutations to a TemplateParams (the deferred-alias env
-// clear vs the identity stamp) across the corpus.
-func TestSetPoolTemplateRuntimeIdentityInfoMatchesRaw(t *testing.T) {
-	for _, b := range wpoolTwinCorpus() {
+	gotStamp := map[string]string{}
+	for _, b := range corpus {
 		info := session.InfoFromPersistedBead(b)
 		for _, alias := range []string{"claude-1", "mayor", ""} {
-			rawTP := TemplateParams{SessionName: "sess", Env: map[string]string{"X": "1"}}
-			infoTP := TemplateParams{SessionName: "sess", Env: map[string]string{"X": "1"}}
-			setPoolTemplateRuntimeIdentity(&rawTP, alias, b)
-			setPoolTemplateRuntimeIdentityInfo(&infoTP, alias, info)
-			if !reflect.DeepEqual(rawTP, infoTP) {
-				t.Errorf("setPoolTemplateRuntimeIdentity[%s alias=%q]:\n info=%+v\n raw=%+v", b.ID, alias, infoTP, rawTP)
-			}
+			tp := TemplateParams{SessionName: "sess", Env: map[string]string{"X": "1"}}
+			setPoolTemplateRuntimeIdentityInfo(&tp, alias, info)
+			gotStamp[b.ID+"|"+alias] = fmt.Sprintf("alias=%q stamped=%v env=%v", tp.Alias, tp.EnvIdentityStamped, tp.Env)
 		}
+	}
+
+	wantAliasDeferred := map[string]bool{"gc-asleep": false, "gc-closed": false, "gc-creating": true, "gc-deferred": true, "gc-dep": false, "gc-drained": false, "gc-failed": false, "gc-manual-flag": false, "gc-manual-origin": false, "gc-named": false, "gc-nosession": false, "gc-open": false, "gc-pending": true, "gc-startpending": true}
+	if !reflect.DeepEqual(gotAliasDeferred, wantAliasDeferred) {
+		t.Errorf("poolRuntimeAliasIsDeferredInfo drift:\n got=%#v\nwant=%#v", gotAliasDeferred, wantAliasDeferred)
+	}
+	wantReusable := map[string]bool{"0/gc-asleep": false, "0/gc-closed": false, "0/gc-creating": false, "0/gc-deferred": false, "0/gc-dep": true, "0/gc-drained": false, "0/gc-failed": false, "0/gc-manual-flag": false, "0/gc-manual-origin": false, "0/gc-named": false, "0/gc-nosession": true, "0/gc-open": false, "0/gc-pending": false, "0/gc-startpending": true, "1/gc-asleep": false, "1/gc-closed": false, "1/gc-creating": false, "1/gc-deferred": false, "1/gc-dep": true, "1/gc-drained": false, "1/gc-failed": false, "1/gc-manual-flag": false, "1/gc-manual-origin": false, "1/gc-named": false, "1/gc-nosession": true, "1/gc-open": false, "1/gc-pending": false, "1/gc-startpending": true, "2/gc-asleep": false, "2/gc-closed": false, "2/gc-creating": false, "2/gc-deferred": false, "2/gc-dep": true, "2/gc-drained": false, "2/gc-failed": false, "2/gc-manual-flag": false, "2/gc-manual-origin": false, "2/gc-named": false, "2/gc-nosession": true, "2/gc-open": false, "2/gc-pending": false, "2/gc-startpending": true}
+	if !reflect.DeepEqual(gotReusable, wantReusable) {
+		t.Errorf("reusablePoolSessionInfo drift:\n got=%#v\nwant=%#v", gotReusable, wantReusable)
+	}
+	wantDepReusable := map[string]bool{"0/gc-asleep": false, "0/gc-closed": false, "0/gc-creating": false, "0/gc-deferred": false, "0/gc-dep": true, "0/gc-drained": false, "0/gc-failed": false, "0/gc-manual-flag": false, "0/gc-manual-origin": false, "0/gc-named": false, "0/gc-nosession": false, "0/gc-open": false, "0/gc-pending": false, "0/gc-startpending": false, "1/gc-asleep": false, "1/gc-closed": false, "1/gc-creating": false, "1/gc-deferred": false, "1/gc-dep": true, "1/gc-drained": false, "1/gc-failed": false, "1/gc-manual-flag": false, "1/gc-manual-origin": false, "1/gc-named": false, "1/gc-nosession": false, "1/gc-open": false, "1/gc-pending": false, "1/gc-startpending": false, "2/gc-asleep": false, "2/gc-closed": false, "2/gc-creating": false, "2/gc-deferred": false, "2/gc-dep": true, "2/gc-drained": false, "2/gc-failed": false, "2/gc-manual-flag": false, "2/gc-manual-origin": false, "2/gc-named": false, "2/gc-nosession": false, "2/gc-open": false, "2/gc-pending": false, "2/gc-startpending": false}
+	if !reflect.DeepEqual(gotDepReusable, wantDepReusable) {
+		t.Errorf("reusableDependencyPoolSessionInfo drift:\n got=%#v\nwant=%#v", gotDepReusable, wantDepReusable)
+	}
+	wantSlot := map[string]int{"0/gc-asleep": 2, "0/gc-closed": 2, "0/gc-creating": 2, "0/gc-deferred": 2, "0/gc-dep": 2, "0/gc-drained": 2, "0/gc-failed": 2, "0/gc-manual-flag": 2, "0/gc-manual-origin": 2, "0/gc-named": 2, "0/gc-nosession": 3, "0/gc-open": 0, "0/gc-pending": 2, "0/gc-startpending": 2, "1/gc-asleep": 0, "1/gc-closed": 0, "1/gc-creating": 0, "1/gc-deferred": 0, "1/gc-dep": 0, "1/gc-drained": 0, "1/gc-failed": 0, "1/gc-manual-flag": 0, "1/gc-manual-origin": 0, "1/gc-named": 0, "1/gc-nosession": 0, "1/gc-open": 0, "1/gc-pending": 0, "1/gc-startpending": 0, "2/gc-asleep": 2, "2/gc-closed": 2, "2/gc-creating": 2, "2/gc-deferred": 2, "2/gc-dep": 2, "2/gc-drained": 2, "2/gc-failed": 2, "2/gc-manual-flag": 2, "2/gc-manual-origin": 2, "2/gc-named": 2, "2/gc-nosession": 3, "2/gc-open": 0, "2/gc-pending": 2, "2/gc-startpending": 2}
+	if !reflect.DeepEqual(gotSlot, wantSlot) {
+		t.Errorf("claimDesiredPoolSlotInfo drift:\n got=%#v\nwant=%#v", gotSlot, wantSlot)
+	}
+	wantStamp := map[string]string{"gc-asleep|": "alias=\"\" stamped=false env=map[X:1]", "gc-asleep|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-asleep|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-closed|": "alias=\"\" stamped=false env=map[X:1]", "gc-closed|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-closed|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-creating|": "alias=\"\" stamped=false env=map[X:1]", "gc-creating|claude-1": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-creating|mayor": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-deferred|": "alias=\"\" stamped=false env=map[X:1]", "gc-deferred|claude-1": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-deferred|mayor": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-dep|": "alias=\"\" stamped=false env=map[X:1]", "gc-dep|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-dep|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-drained|": "alias=\"\" stamped=false env=map[X:1]", "gc-drained|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-drained|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-failed|": "alias=\"\" stamped=false env=map[X:1]", "gc-failed|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-failed|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-manual-flag|": "alias=\"\" stamped=false env=map[X:1]", "gc-manual-flag|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-manual-flag|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-manual-origin|": "alias=\"\" stamped=false env=map[X:1]", "gc-manual-origin|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-manual-origin|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-named|": "alias=\"\" stamped=false env=map[X:1]", "gc-named|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-named|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-nosession|": "alias=\"\" stamped=false env=map[X:1]", "gc-nosession|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-nosession|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-open|": "alias=\"\" stamped=false env=map[X:1]", "gc-open|claude-1": "alias=\"claude-1\" stamped=true env=map[GC_AGENT:claude-1 GC_ALIAS:claude-1 X:1]", "gc-open|mayor": "alias=\"mayor\" stamped=true env=map[GC_AGENT:mayor GC_ALIAS:mayor X:1]", "gc-pending|": "alias=\"\" stamped=false env=map[X:1]", "gc-pending|claude-1": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-pending|mayor": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-startpending|": "alias=\"\" stamped=false env=map[X:1]", "gc-startpending|claude-1": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]", "gc-startpending|mayor": "alias=\"\" stamped=false env=map[GC_AGENT:sess GC_ALIAS: X:1]"}
+	if !reflect.DeepEqual(gotStamp, wantStamp) {
+		t.Errorf("setPoolTemplateRuntimeIdentityInfo drift:\n got=%#v\nwant=%#v", gotStamp, wantStamp)
 	}
 }
 
-// TestReusablePoolSessionInfosMatchRawOrder pins the general-reuse candidate set AND
-// its CreatedAt/ID precedence order: the Info lister must return the same session IDs
-// in the same order as the raw lister over a shared snapshot (pool + dependency
-// variants). This is the "general reuse order by CreatedAt/ID" half of the pool-slot
-// selection precedence characterization, over the typed feed.
-func TestReusablePoolSessionInfosMatchRawOrder(t *testing.T) {
+// TestReusablePoolSessionInfosOrder pins the general-reuse candidate set AND its
+// CreatedAt/ID precedence order over the typed feed (the "general reuse order by
+// CreatedAt/ID" half of the pool-slot selection precedence characterization).
+func TestReusablePoolSessionInfosOrder(t *testing.T) {
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	corpus := []beads.Bead{}
-	// Three reusable pool candidates with out-of-order CreatedAt + an equal-CreatedAt
-	// pair to exercise the ID tiebreak.
 	mk := func(id string, dt time.Duration, dep bool) beads.Bead {
 		meta := map[string]string{"template": "claude", "agent_name": "claude", "session_name": "s-" + id, "pool_managed": "true"}
 		if dep {
@@ -200,50 +178,33 @@ func TestReusablePoolSessionInfosMatchRawOrder(t *testing.T) {
 		b.CreatedAt = base.Add(dt)
 		return b
 	}
-	corpus = append(corpus,
+	corpus := []beads.Bead{
 		mk("gc-c", 3*time.Hour, false),
 		mk("gc-a", 1*time.Hour, false),
 		mk("gc-b", 1*time.Hour, false), // same CreatedAt as gc-a -> ID tiebreak
 		mk("gc-d", 2*time.Hour, false),
 		mk("gc-dep1", 5*time.Hour, true),
 		wpoolSessionBead("gc-closed2", "closed", "claude", nil, map[string]string{"template": "claude", "agent_name": "claude", "session_name": "s-cl", "pool_managed": "true"}),
-	)
+	}
 	snap := newSessionBeadSnapshot(corpus)
 	agent := &config.Agent{Name: "claude", MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{sessionBeads: snap}
 
-	rawPoolIDs := beadIDs(reusablePoolSessionBeads(bp, agent, "claude", nil))
-	infoPoolIDs := infoIDs(reusablePoolSessionInfos(bp, agent, "claude", nil))
-	if !reflect.DeepEqual(rawPoolIDs, infoPoolIDs) {
-		t.Errorf("reusablePoolSession order diverged:\n info=%v\n raw=%v", infoPoolIDs, rawPoolIDs)
+	// General pool reuse: all open non-dependency + dependency candidates, ordered
+	// CreatedAt asc with the ID tiebreak (gc-a before gc-b at 1h), closed excluded.
+	if got, want := infoIDs(reusablePoolSessionInfos(bp, agent, "claude", nil)), []string{"gc-a", "gc-b", "gc-d", "gc-c", "gc-dep1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("reusablePoolSessionInfos order = %v, want %v (CreatedAt asc, ID tiebreak; closed excluded)", got, want)
 	}
-
-	rawDep := beadIDs(reusableDependencyPoolSessionBeads(bp, "claude"))
-	infoDep := infoIDs(reusableDependencyPoolSessionInfos(bp, "claude"))
-	if !reflect.DeepEqual(rawDep, infoDep) {
-		t.Errorf("reusableDependencyPoolSession order diverged:\n info=%v\n raw=%v", infoDep, rawDep)
+	if got, want := infoIDs(reusableDependencyPoolSessionInfos(bp, "claude")), []string{"gc-dep1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("reusableDependencyPoolSessionInfos = %v, want %v", got, want)
 	}
-	// The canonical-singleton finders over the typed feed must match the raw finders
-	// (both the pool and dependency variants).
+	// The canonical-singleton finder over the typed feed resolves the earliest-created
+	// reusable candidate (gc-a) for a singleton agent.
 	singleton := &config.Agent{Name: "claude", MaxActiveSessions: intPtr(1)}
-	rawCanon, rawOK := findReusableCanonicalNonExpandingPoolSessionBead(bp, singleton, "claude", nil)
-	infoCanon, infoOK := findReusableCanonicalNonExpandingPoolSessionInfo(bp, singleton, "claude", nil)
-	if rawOK != infoOK || rawCanon.ID != infoCanon.ID {
-		t.Errorf("findReusableCanonical: info=(%q,%v) raw=(%q,%v)", infoCanon.ID, infoOK, rawCanon.ID, rawOK)
+	canon, ok := findReusableCanonicalNonExpandingPoolSessionInfo(bp, singleton, "claude", nil)
+	if !ok || canon.ID != "gc-a" {
+		t.Errorf("findReusableCanonicalNonExpandingPoolSessionInfo = (%q, %v), want (gc-a, true)", canon.ID, ok)
 	}
-	rawDepCanon, rawDepOK := findReusableCanonicalNonExpandingDependencyPoolSessionBead(bp, singleton, "claude")
-	infoDepCanon, infoDepOK := findReusableCanonicalNonExpandingDependencyPoolSessionInfo(bp, singleton, "claude")
-	if rawDepOK != infoDepOK || rawDepCanon.ID != infoDepCanon.ID {
-		t.Errorf("findReusableCanonicalDependency: info=(%q,%v) raw=(%q,%v)", infoDepCanon.ID, infoDepOK, rawDepCanon.ID, rawDepOK)
-	}
-}
-
-func beadIDs(bs []beads.Bead) []string {
-	out := make([]string, len(bs))
-	for i, b := range bs {
-		out[i] = b.ID
-	}
-	return out
 }
 
 func infoIDs(is []session.Info) []string {
@@ -254,14 +215,13 @@ func infoIDs(is []session.Info) []string {
 	return out
 }
 
-// TestNormalizeNonExpandingPoolSessionInfoIsAuthoritative is the LOAD-BEARING pin
-// for the riskiest point in W-pool: the singleton pool-identity collapse. The Info
-// normalize must (a) issue the byte-identical bp.beadStore.Update the raw form
-// issues (verified by re-reading both stores) and (b) return an Info that equals the
-// projection of the persisted, collapsed bead — the "normalize-returns-authoritative-
-// value" contract. A mutation of the Info fold (a dropped pool_slot clear, wrong
-// alias-history, missing label prune) makes the returned Info diverge from the
-// persisted projection and fails this test.
+// TestNormalizeNonExpandingPoolSessionInfoIsAuthoritative is the LOAD-BEARING pin for
+// the riskiest point in W-pool: the singleton pool-identity collapse. The Info
+// normalize must (a) persist the collapse (verified by re-reading the store) and
+// (b) return an Info that equals the projection of the persisted, collapsed bead — the
+// "normalize-returns-authoritative-value" contract. A mutation of the Info fold (a
+// dropped pool_slot clear, wrong alias-history, missing label prune) makes the returned
+// Info diverge from the persisted projection and fails this test.
 func TestNormalizeNonExpandingPoolSessionInfoIsAuthoritative(t *testing.T) {
 	seed := func() beads.Bead {
 		return wpoolSessionBead("gm-1", "open", "mayor-1", []string{"agent:mayor-1"}, map[string]string{
@@ -274,15 +234,9 @@ func TestNormalizeNonExpandingPoolSessionInfoIsAuthoritative(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{*cfgAgent}}
 	cityPath := t.TempDir()
 
-	rawStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
 	infoStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
-	rawBP := &agentBuildParams{cityPath: cityPath, beadStore: rawStore, city: cfg}
 	infoBP := &agentBuildParams{cityPath: cityPath, beadStore: infoStore, city: cfg}
 
-	rawBead, err := normalizeNonExpandingPoolSessionBead(rawBP, cfgAgent, seed())
-	if err != nil {
-		t.Fatalf("raw normalize: %v", err)
-	}
 	foldedInfo, err := normalizeNonExpandingPoolSessionInfo(infoBP, cfgAgent, session.InfoFromPersistedBead(seed()))
 	if err != nil {
 		t.Fatalf("info normalize: %v", err)
@@ -293,35 +247,20 @@ func TestNormalizeNonExpandingPoolSessionInfoIsAuthoritative(t *testing.T) {
 		t.Fatalf("collapse did not trigger: %+v", foldedInfo)
 	}
 
-	// (a) The write is byte-identical: the two stores project to the same Info.
-	rawPersisted, err := session.NewStore(beads.SessionStore{Store: rawStore}).Get("gm-1")
-	if err != nil {
-		t.Fatalf("raw store Get: %v", err)
-	}
+	// normalize returns the authoritative persisted value.
 	infoPersisted, err := session.NewStore(beads.SessionStore{Store: infoStore}).Get("gm-1")
 	if err != nil {
 		t.Fatalf("info store Get: %v", err)
-	}
-	if !reflect.DeepEqual(rawPersisted, infoPersisted) {
-		t.Errorf("persisted state diverged:\n info=%+v\n raw=%+v", infoPersisted, rawPersisted)
-	}
-
-	// (b) The returned Info equals the projection of the raw collapsed bead AND the
-	// authoritative persisted projection.
-	if !reflect.DeepEqual(foldedInfo, session.InfoFromPersistedBead(rawBead)) {
-		t.Errorf("folded Info != projection of raw collapsed bead:\n folded=%+v\n rawproj=%+v", foldedInfo, session.InfoFromPersistedBead(rawBead))
 	}
 	if !reflect.DeepEqual(foldedInfo, infoPersisted) {
 		t.Errorf("normalize did not return the authoritative persisted value:\n folded=%+v\n persisted=%+v", foldedInfo, infoPersisted)
 	}
 }
 
-// TestRecordDeferredNonExpandingPoolAliasConflictInfoMatchesRaw pins the
-// deferred-conflict fallback fold: the Info form records the same alias-clear +
-// conflict bookkeeping and returns an Info equal to the projection of the raw form's
-// bead, modulo the non-deterministic pool_alias_conflict_at timestamp (asserted
-// non-empty on both).
-func TestRecordDeferredNonExpandingPoolAliasConflictInfoMatchesRaw(t *testing.T) {
+// TestRecordDeferredNonExpandingPoolAliasConflictInfoFold pins the deferred-conflict
+// fallback fold: the Info form clears the alias, bumps the conflict bookkeeping, stamps
+// pool_alias_conflict_at, and returns the authoritative persisted projection.
+func TestRecordDeferredNonExpandingPoolAliasConflictInfoFold(t *testing.T) {
 	seed := func() beads.Bead {
 		return wpoolSessionBead("gm-2", "open", "mayor", nil, map[string]string{
 			"template": "mayor", "agent_name": "mayor", "alias": "mayor", "session_name": "s-2",
@@ -329,30 +268,25 @@ func TestRecordDeferredNonExpandingPoolAliasConflictInfoMatchesRaw(t *testing.T)
 		})
 	}
 	cfgAgent := &config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	rawStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
 	infoStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
-	rawBP := &agentBuildParams{beadStore: rawStore}
 	infoBP := &agentBuildParams{beadStore: infoStore}
 
-	rawBead, err := recordDeferredNonExpandingPoolAliasConflict(rawBP, cfgAgent, seed())
-	if err != nil {
-		t.Fatalf("raw recordDeferred: %v", err)
-	}
 	foldedInfo, err := recordDeferredNonExpandingPoolAliasConflictInfo(infoBP, cfgAgent, session.InfoFromPersistedBead(seed()))
 	if err != nil {
 		t.Fatalf("info recordDeferred: %v", err)
 	}
-	rawProj := session.InfoFromPersistedBead(rawBead)
-	if foldedInfo.PoolAliasConflictAt == "" || rawProj.PoolAliasConflictAt == "" {
-		t.Errorf("pool_alias_conflict_at must be stamped: info=%q raw=%q", foldedInfo.PoolAliasConflictAt, rawProj.PoolAliasConflictAt)
-	}
-	foldedInfo.PoolAliasConflictAt = ""
-	rawProj.PoolAliasConflictAt = ""
-	if !reflect.DeepEqual(foldedInfo, rawProj) {
-		t.Errorf("recordDeferred fold diverged (ignoring timestamp):\n info=%+v\n raw=%+v", foldedInfo, rawProj)
+	if foldedInfo.PoolAliasConflictAt == "" {
+		t.Errorf("pool_alias_conflict_at must be stamped: %q", foldedInfo.PoolAliasConflictAt)
 	}
 	if foldedInfo.PoolAliasConflict != "mayor" || foldedInfo.PoolAliasConflictCount != "2" {
 		t.Errorf("conflict bookkeeping wrong: conflict=%q count=%q", foldedInfo.PoolAliasConflict, foldedInfo.PoolAliasConflictCount)
+	}
+	infoPersisted, err := session.NewStore(beads.SessionStore{Store: infoStore}).Get("gm-2")
+	if err != nil {
+		t.Fatalf("info store Get: %v", err)
+	}
+	if !reflect.DeepEqual(foldedInfo, infoPersisted) {
+		t.Errorf("recordDeferred did not return the authoritative persisted value:\n folded=%+v\n persisted=%+v", foldedInfo, infoPersisted)
 	}
 }
 

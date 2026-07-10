@@ -390,7 +390,7 @@ type statusObservationTarget struct {
 
 func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
-		return newSessionBeadSnapshot(nil)
+		return newSessionBeadSnapshotFromInfos(nil)
 	}
 	// Callers pass the session coordination-class store (cliSessionStore) so a
 	// [beads.classes.sessions] relocation reaches this snapshot; the guard in
@@ -446,7 +446,7 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 			return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot: %w", result.err))
 		}
 		if result.snapshot == nil {
-			return newSessionBeadSnapshot(nil)
+			return newSessionBeadSnapshotFromInfos(nil)
 		}
 		return result.snapshot
 	case <-time.After(statusSessionSnapshotTimeout):

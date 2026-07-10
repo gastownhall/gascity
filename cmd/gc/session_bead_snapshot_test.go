@@ -62,7 +62,7 @@ func BenchmarkLoadSessionBeadSnapshot_LargeStore(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if got := len(snap.Open()); got != 50 {
+		if got := len(snap.OpenInfos()); got != 50 {
 			b.Fatalf("Open()=%d, want 50", got)
 		}
 	}
@@ -80,7 +80,7 @@ func BenchmarkLoadSessionBeadSnapshot_OpenOnlyBaseline(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if got := len(snap.Open()); got != 50 {
+		if got := len(snap.OpenInfos()); got != 50 {
 			b.Fatalf("Open()=%d, want 50", got)
 		}
 	}
@@ -132,7 +132,7 @@ func TestLoadSessionBeadSnapshot_IncludesTypedBeadsWithoutLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
-	if got := len(snap.Open()); got != 2 {
+	if got := len(snap.OpenInfos()); got != 2 {
 		t.Fatalf("Open()=%d, want 2 (labelless + labeled session beads)", got)
 	}
 	if got := snap.FindSessionNameByTemplate("beads/reviewer"); got != "beads--reviewer" {
@@ -162,7 +162,7 @@ func TestLoadSessionBeadSnapshot_DeduplicatesAcrossQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
-	if got := len(snap.Open()); got != 1 {
+	if got := len(snap.OpenInfos()); got != 1 {
 		t.Fatalf("Open()=%d, want 1 — bead matching both queries must dedup", got)
 	}
 }
@@ -373,12 +373,11 @@ func TestSessionBeadSnapshotFromReconcileRowsIndexPrecedence(t *testing.T) {
 	}
 }
 
-// TestSessionBeadSnapshotFromInfosTypedLookups pins the WI-6 W4 nit-1 fix: an
-// Info-built snapshot (raw open slice nil) must still answer the typed FindInfo*
-// lookups from openInfos + the index maps. Against the pre-fix code — where
-// findInfoByIDLocked / FindInfoByNamedIdentity scanned the nil open slice — every
-// assertion below returned (Info{}, false), silently stranding a future
-// Get-projection sweep built on this constructor.
+// TestSessionBeadSnapshotFromInfosTypedLookups pins that an Info-built snapshot
+// answers the typed FindInfo* lookups from openInfos + the index maps. Against the
+// pre-fix code — where findInfoByIDLocked / FindInfoByNamedIdentity scanned a
+// then-existing raw slice — every assertion below returned (Info{}, false), silently
+// stranding a Get-projection sweep built on this constructor.
 func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
 	seed := session.InfoFromPersistedBead(beads.Bead{
 		ID:     "ga-named-reviewer",
@@ -392,11 +391,6 @@ func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
 		},
 	})
 	snap := newSessionBeadSnapshotFromInfos([]session.Info{seed})
-
-	// Precondition: this is genuinely the nil-open (Info-built) shape the fix targets.
-	if snap.open != nil {
-		t.Fatalf("Info-built snapshot must leave open nil, got %d beads", len(snap.open))
-	}
 
 	if got, ok := snap.FindInfoByID("ga-named-reviewer"); !ok || got.ID != "ga-named-reviewer" {
 		t.Errorf("FindInfoByID = (%+v, %v), want the seeded info", got, ok)
@@ -427,12 +421,12 @@ func TestSessionBeadSnapshotIndexesCanonicalSingletonPoolManagedBead(t *testing.
 	if got := snapshot.FindSessionNameByTemplate("cashmaster/refinery"); got != "s-canonical-refinery" {
 		t.Fatalf("FindSessionNameByTemplate(canonical singleton pool bead) = %q, want s-canonical-refinery", got)
 	}
-	bead, ok := snapshot.FindSessionBeadByTemplate("cashmaster/refinery")
+	info, ok := snapshot.FindInfoByTemplate("cashmaster/refinery")
 	if !ok {
-		t.Fatal("FindSessionBeadByTemplate(canonical singleton pool bead) = false")
+		t.Fatal("FindInfoByTemplate(canonical singleton pool bead) = false")
 	}
-	if bead.ID != "refinery-session" {
-		t.Fatalf("FindSessionBeadByTemplate ID = %q, want refinery-session", bead.ID)
+	if info.ID != "refinery-session" {
+		t.Fatalf("FindInfoByTemplate ID = %q, want refinery-session", info.ID)
 	}
 }
 

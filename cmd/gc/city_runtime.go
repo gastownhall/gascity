@@ -2155,7 +2155,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	// Emit any due compute usage facts by reusing the open-session snapshot this
 	// tick already loaded, rather than issuing a second redundant store scan.
-	cr.emitDueComputeFacts(ctx, sessionBeads.Open())
+	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos())
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
@@ -2248,7 +2248,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		}
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_undesired_pool_sessions", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
-	open := sessionBeads.Open()
 	openInfos := sessionBeads.OpenInfos()
 
 	// Use cr.cityName consistently — it's the authoritative runtime name.
@@ -2310,7 +2309,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		reconcileStartOptions...,
 	)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.reconcile_sessions", phaseStart, map[string]any{
-		"open_session_count":             len(open),
+		"open_session_count":             len(openInfos),
 		"desired_session_count":          len(desiredState),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
@@ -2350,7 +2349,15 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// this. See nudgeStalledPoolClaims for the churn-free state machine.
 	if !cr.sp.Capabilities().CanReportActivity {
 		phaseStart = time.Now()
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, open, assignedWorkBeads, time.Now(), cr.stdout)
+		// The idle-claim nudge lane reads idle-claim marker keys that session.Info does
+		// not project, so it needs raw beads. Now that the snapshot no longer holds a
+		// raw half, this fallback branch (only runs for runtimes that cannot report
+		// activity) does its own edge read rather than a snapshot raw-half read.
+		if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
+		} else {
+			nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
+		}
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 	}
 }

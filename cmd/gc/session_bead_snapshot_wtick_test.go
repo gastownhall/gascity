@@ -101,9 +101,6 @@ func TestNewSessionBeadSnapshotFromReconcileRows(t *testing.T) {
 	if out[0].Info.ID != "s-1" || out[0].Circuit.State != sessionpkg.SessionCircuitStateOpen || out[0].Circuit.ResetGeneration != "4" {
 		t.Fatalf("row 0 not round-tripped: %+v", out[0])
 	}
-	if len(snap.Open()) != 0 {
-		t.Fatalf("rows-built snapshot must leave the raw open half nil, got %d beads", len(snap.Open()))
-	}
 	if info, ok := snap.FindInfoByID("s-2"); !ok || info.ID != "s-2" {
 		t.Fatalf("FindInfoByID(s-2) failed on a rows-built snapshot: ok=%v info=%+v", ok, info)
 	}

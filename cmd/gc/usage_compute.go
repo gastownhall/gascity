@@ -132,12 +132,16 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	return true
 }
 
-// emitDueComputeFacts emits a compute Fact for any of the given session beads
-// whose awake interval has ended (terminal state) and has not yet been
-// recorded. It reuses the reconcile tick's already-loaded open-session snapshot
-// rather than issuing its own redundant store scan. Best-effort: it never blocks
-// or fails the reconcile tick.
-func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []beads.Bead) {
+// emitDueComputeFacts emits a compute Fact for any of the given open sessions whose
+// awake interval has ended (terminal state) and has not yet been recorded. It reuses
+// the reconcile tick's already-loaded Info snapshot for the cheap terminal-state
+// filter, then fetches the raw bead only for the few sessions it will actually emit
+// for: the usage lane genuinely needs the whole bead (ResolveRunID walks the run-chain
+// keys, and slept_at + the usage_compute_emitted_at idempotency marker are deliberately
+// not projected onto session.Info), so this is the usage lane's OWN edge read rather
+// than a snapshot raw-half read. Steady state (no terminal sessions) fetches nothing.
+// Best-effort: it never blocks or fails the reconcile tick.
+func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info) {
 	if cr.cs == nil {
 		return
 	}
@@ -165,8 +169,13 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []beads
 		fmt.Fprintf(cr.stderr, format+"\n", args...) //nolint:errcheck // best-effort stderr
 	}
 	now := time.Now().UTC()
-	for _, b := range sessions {
-		if b.Metadata == nil || !isComputeTerminalState(b.Metadata["state"]) {
+	for _, info := range sessions {
+		if !isComputeTerminalState(info.MetadataState) {
+			continue
+		}
+		b, err := store.Get(info.ID)
+		if err != nil {
+			logf("usage: loading session %s for compute fact failed: %v", info.ID, err)
 			continue
 		}
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf)

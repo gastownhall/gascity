@@ -287,6 +287,26 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	return out, nil
 }
 
+// ListByMetadataInfos returns the Info projection of every bead matching the given
+// metadata filters, keeping the raw-bead codec confined to this edge. It is the typed
+// front door for the session-log workdir fallback's ListByMetadata scans (the callers
+// need only Info fields). limit is passed through to the store; a zero limit is
+// unbounded. No raw bead escapes.
+func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Info, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	found, err := s.store.ListByMetadata(filters, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Info, 0, len(found))
+	for _, b := range found {
+		out = append(out, InfoFromPersistedBead(b))
+	}
+	return out, nil
+}
+
 // ListLabeledSessionInfosUnfiltered returns the Info projection of every OPEN bead
 // carrying the gc:session label, WITHOUT the IsSessionBeadOrRepairable narrowing that
 // List applies. It is the label-only, closed-excluded, unfiltered lister the

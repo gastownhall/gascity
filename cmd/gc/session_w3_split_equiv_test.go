@@ -73,10 +73,15 @@ func oracleSessionBeadShapes() []beads.Bead {
 	}
 }
 
-// TestSessionBeadHasAssignedWorkInfoMatchesRaw proves the session-side split of
-// sessionBeadHasAssignedWork: for a fixed set of work beads, the Info form and
-// the raw form agree across every session-bead shape.
-func TestSessionBeadHasAssignedWorkInfoMatchesRaw(t *testing.T) {
+// assignedWorkGolden is the captured golden for TestSessionBeadHasAssignedWorkInfo.
+var assignedWorkGolden = map[string]bool{"ga-bare": false, "ga-named": true, "ga-named-fallback": true, "ga-noname": false, "ga-pool": true}
+
+// TestSessionBeadHasAssignedWorkInfo characterizes the session-side split of the
+// assigned-work check over a fixed work set and every session-bead shape, pinned
+// against a golden. It replaced the raw-vs-Info equivalence oracle (the raw form
+// sessionBeadHasAssignedWork retired with the snapshot raw half in WI-7 W-delete). A
+// mutation of the Info form's identity/name/id matching flips a golden entry and fails.
+func TestSessionBeadHasAssignedWorkInfo(t *testing.T) {
 	work := []beads.Bead{
 		{ID: "wb-open-id", Status: "open", Assignee: "ga-pool"},
 		{ID: "wb-name", Status: "in_progress", Assignee: "worker-ga-pool"},
@@ -85,41 +90,18 @@ func TestSessionBeadHasAssignedWorkInfoMatchesRaw(t *testing.T) {
 		{ID: "wb-blank", Status: "open", Assignee: ""},
 		{ID: "wb-unmatched", Status: "in_progress", Assignee: "nobody"},
 	}
+	got := map[string]bool{}
 	for _, sb := range oracleSessionBeadShapes() {
 		info := session.InfoFromPersistedBead(sb)
-		if got, want := sessionBeadHasAssignedWorkInfo(work, info), sessionBeadHasAssignedWork(work, sb); got != want {
-			t.Errorf("sessionBeadHasAssignedWork(%s): info=%v raw=%v", sb.ID, got, want)
+		got[sb.ID] = sessionBeadHasAssignedWorkInfo(work, info)
+		// The empty work set is false for every shape (guards the has-work path is
+		// gated on the work set, not the session alone).
+		if sessionBeadHasAssignedWorkInfo(nil, info) {
+			t.Errorf("sessionBeadHasAssignedWorkInfo(nil, %s) = true, want false", sb.ID)
 		}
 	}
-	// Empty work slice must be false on both forms.
-	for _, sb := range oracleSessionBeadShapes() {
-		info := session.InfoFromPersistedBead(sb)
-		if got, want := sessionBeadHasAssignedWorkInfo(nil, info), sessionBeadHasAssignedWork(nil, sb); got != want {
-			t.Errorf("sessionBeadHasAssignedWork(nil, %s): info=%v raw=%v", sb.ID, got, want)
-		}
-	}
-}
-
-// TestSessionCoreConfigForHashInfoMatchesRaw pins the config-drift fingerprint
-// helper: the Info form must equal the raw wrapper for every session-bead shape.
-// The wrapper feeds the drift key, so any divergence would silently repartition
-// which sessions the reconciler treats as drifted (W2 deferred this for lack of
-// an oracle row; here it is pinned hard).
-func TestSessionCoreConfigForHashInfoMatchesRaw(t *testing.T) {
-	tps := []TemplateParams{
-		{},
-		{TemplateName: "worker"},
-		{TemplateName: "worker", Command: "claude --model x"},
-	}
-	for _, tp := range tps {
-		for _, sb := range oracleSessionBeadShapes() {
-			info := session.InfoFromPersistedBead(sb)
-			got := sessionCoreConfigForHashInfo(tp, info)
-			want := sessionCoreConfigForHash(tp, sb)
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("sessionCoreConfigForHash(%s): info=%+v raw=%+v", sb.ID, got, want)
-			}
-		}
+	if len(assignedWorkGolden) == 0 || !reflect.DeepEqual(got, assignedWorkGolden) {
+		t.Errorf("assigned-work characterization drift; got=%#v", got)
 	}
 }
 
