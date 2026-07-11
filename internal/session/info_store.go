@@ -20,7 +20,7 @@ import (
 // backends: a bead persisted to bd, sqlite, or postgres round-trips to the same
 // Info. Callers that need live runtime state (Attached, runtime-downgraded
 // State, detected transport) must go through Manager, not this function.
-func InfoFromPersistedBead(b beads.Bead) Info {
+func infoFromPersistedBead(b beads.Bead) Info {
 	sessName := b.Metadata["session_name"]
 	if sessName == "" {
 		sessName = sessionNameFor(b.ID)
@@ -67,6 +67,9 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		DependencyOnlyMetadata:  b.Metadata["dependency_only"],
 		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
 		ManualSessionMetadata:   b.Metadata["manual_session"],
+		PoolAliasConflict:       b.Metadata["pool_alias_conflict"],
+		PoolAliasConflictCount:  b.Metadata["pool_alias_conflict_count"],
+		PoolAliasConflictAt:     b.Metadata["pool_alias_conflict_at"],
 		Labels:                  b.Labels,
 		MCPIdentity:             b.Metadata[MCPIdentityMetadataKey],
 		MCPServersSnapshot:      b.Metadata[MCPServersSnapshotMetadataKey],
@@ -84,6 +87,9 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TriggerBeadStoreRef: b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey],
 		BrainParentSID:      b.Metadata[beadmeta.BrainParentSIDMetadataKey],
 		Pack:                b.Metadata[beadmeta.PackMetadataKey],
+		PackWorkspace:       b.Metadata[beadmeta.PackWorkspaceMetadataKey],
+		WorkDirCanonical:    b.Metadata[beadmeta.WorkDirMetadataKey],
+		WorkerDir:           b.Metadata[beadmeta.WorkerDirMetadataKey],
 
 		// state / bookkeeping cluster. MetadataState is the RAW state metadata,
 		// kept verbatim so the reconciler classifiers read the same value the
@@ -98,9 +104,12 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		ContinuityEligible:         b.Metadata["continuity_eligible"],
 		TransportMetadata:          b.Metadata["transport"],
 		LastWokeAt:                 b.Metadata["last_woke_at"],
+		AwakeStartedAt:             b.Metadata["awake_started_at"],
+		UsageComputeEmittedAt:      b.Metadata["usage_compute_emitted_at"],
 		StateReason:                b.Metadata["state_reason"],
 		CreationCompleteAt:         b.Metadata["creation_complete_at"],
 		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],
+		SessionCircuitState:        b.Metadata[SessionCircuitStateMetadataKey],
 		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
 		Generation:                 b.Metadata["generation"],
 		StartedConfigHash:          b.Metadata["started_config_hash"],
@@ -124,6 +133,8 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		StartedProvisionHash:           b.Metadata["started_provision_hash"],
 		StartedLaunchHash:              b.Metadata["started_launch_hash"],
 		StartedLiveHash:                b.Metadata["started_live_hash"],
+		LiveHash:                       b.Metadata["live_hash"],
+		StartupDialogVerified:          b.Metadata["startup_dialog_verified"],
 		ConfigDriftDeferredAt:          b.Metadata["config_drift_deferred_at"],
 		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
 		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
@@ -136,6 +147,21 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
 		ProviderKind:                   b.Metadata["provider_kind"],
+		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
+
+		// sleep-policy cluster (raw mirrors; see Info doc). The 7 key literals
+		// match the inline keys in cmd/gc/session_sleep.go today (they are inline
+		// literals there, not shared constants). The ApplyPatch reprojection oracle
+		// pins only the in-package InfoFromPersistedBead↔ApplyPatch parallelism —
+		// it does NOT catch a cmd/gc-side key rename, which surfaces when the sleep
+		// helpers migrate onto these fields (W6).
+		SleepPolicyFingerprint:       b.Metadata["sleep_policy_fingerprint"],
+		RequestedSleepAfterIdle:      b.Metadata["requested_sleep_after_idle"],
+		EffectiveSleepAfterIdle:      b.Metadata["effective_sleep_after_idle"],
+		SleepPolicySource:            b.Metadata["sleep_policy_source"],
+		SleepCapability:              b.Metadata["sleep_capability"],
+		SleepPolicyAdjustmentReason:  b.Metadata["sleep_policy_adjustment_reason"],
+		ConfigWakeSuppressedMetadata: b.Metadata["config_wake_suppressed"],
 	}
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n
@@ -159,9 +185,10 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 // The Get/List projection is the persisted view only — no live runtime overlay.
 // Callers that need live runtime enrichment (liveness, attachment, detected
 // transport) still go through session.Manager. The API/response-building layer
-// currently reads persisted state via Manager.GetWithPersistedResponse (same
-// InfoFromPersistedBead codec); routing that read path through Store is a
-// follow-up. The reconciler already routes its writes through this type.
+// reads persisted state through this type's GetPersistedResponse and pairs it
+// with Manager.EnrichInfo for the runtime overlay (see the api sessionGetEnriched
+// composition and worker.sessionRecordViaManager). The reconciler
+// already routes its writes through this type.
 type Store struct {
 	store beads.SessionStore
 }
@@ -174,16 +201,62 @@ func NewStore(store beads.SessionStore) *Store {
 }
 
 // Get returns the persisted session.Info for the given id. It returns
-// ErrSessionNotFound when no session bead exists for the id.
+// ErrSessionNotFound when the bead EXISTS but is not a session bead (or carries
+// an empty id); an ABSENT id surfaces the store's not-found error wrapped as
+// `loading session %q` (NOT ErrSessionNotFound). Callers must not
+// errors.Is(err, ErrSessionNotFound) to detect absence — check for the wrapped
+// beads.ErrNotFound instead. See validatedBead.
 func (s *Store) Get(id string) (Info, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return Info{}, err
+	}
+	return infoFromPersistedBead(b), nil
+}
+
+// GetPersistedResponse returns the persisted session.Info paired with the
+// persisted-response projection (status + metadata) for id, in a single store
+// fetch. It is the persisted-read half of the session Get read model — pair it
+// with Manager.EnrichInfo for the runtime overlay (the api sessionGetEnriched
+// composition and worker.sessionRecordViaManager do exactly
+// that): the caller gets both projections without a raw *beads.Bead crossing the
+// boundary and without a second store.Get. It shares Get's exact
+// error contract (both route through validatedBead): ErrSessionNotFound for a
+// present-but-non-session bead, and the wrapped store not-found error (NOT
+// ErrSessionNotFound) for an absent id.
+func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return Info{}, PersistedResponse{}, err
+	}
+	return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+}
+
+// validatedBead loads the session bead for id. A load failure (including an
+// absent id) is wrapped with `loading session %q` context; a loaded bead that is
+// not a session bead (or has an empty id) is rejected with ErrSessionNotFound. It
+// is the shared read behind Get and GetPersistedResponse so the two agree on
+// validation and error text (a single source of truth for "is this a session
+// bead"). Note the split: absence yields the wrapped store error, NOT
+// ErrSessionNotFound — that sentinel is reserved for a present non-session bead.
+func (s *Store) validatedBead(id string) (beads.Bead, error) {
+	// Nil-inner-store short-circuit, mirroring ListAll's listAllBeads guard
+	// (s == nil || s.store.Store == nil): a nil backing store cannot produce the
+	// bead, so treat it as absence — the wrapped store not-found error, matching
+	// the absent-id path below and NOT the ErrSessionNotFound sentinel (reserved
+	// for a present non-session bead). Without this a non-nil *Store wrapping a
+	// nil inner store would panic in s.store.Get.
+	if s == nil || s.store.Store == nil {
+		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
+	}
 	b, err := s.store.Get(id)
 	if err != nil {
-		return Info{}, fmt.Errorf("loading session %q: %w", id, err)
+		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, err)
 	}
 	if strings.TrimSpace(b.ID) == "" || !IsSessionBeadOrRepairable(b) {
-		return Info{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
+		return beads.Bead{}, fmt.Errorf("%w: %s", ErrSessionNotFound, id)
 	}
-	return InfoFromPersistedBead(b), nil
+	return b, nil
 }
 
 // List returns the persisted session.Info for all session beads, applying the
@@ -193,7 +266,7 @@ func (s *Store) Get(id string) (Info, error) {
 func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	// IncludeClosed so the in-memory filter below can honor state=closed and
 	// state=all; sessionMatchesFilters drops closed beads for the default and
-	// non-closed filters, matching Manager.ListFullFromBeads semantics.
+	// non-closed filters, matching the shared session-list filtering semantics.
 	all, err := s.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		Sort:          beads.SortCreatedDesc,
@@ -210,14 +283,63 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
 			continue
 		}
-		out = append(out, InfoFromPersistedBead(b))
+		out = append(out, infoFromPersistedBead(b))
+	}
+	return out, nil
+}
+
+// ListByMetadataInfos returns the Info projection of every bead matching the given
+// metadata filters, keeping the raw-bead codec confined to this edge. It is the typed
+// front door for the session-log workdir fallback's ListByMetadata scans (the callers
+// need only Info fields). limit is passed through to the store; a zero limit is
+// unbounded. No raw bead escapes.
+func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Info, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	found, err := s.store.ListByMetadata(filters, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Info, 0, len(found))
+	for _, b := range found {
+		out = append(out, infoFromPersistedBead(b))
+	}
+	return out, nil
+}
+
+// ListLabeledSessionInfosUnfiltered returns the Info projection of every OPEN bead
+// carrying the gc:session label, WITHOUT the IsSessionBeadOrRepairable narrowing that
+// List applies. It is the label-only, closed-excluded, unfiltered lister the
+// city-stop sleep-reason sweep needs: that sweep marks possibly-damaged
+// gc:session-labeled beads whose type is a non-empty non-"session" value, which
+// List's IsSessionBeadOrRepairable filter would drop, and it must NOT widen to the
+// ListAll type+label union (which would also mark label-lost type-only beads — a
+// behavior change). ListByLabel already excludes closed beads by default; the
+// explicit closed skip keeps the closed-excluded contract byte-stable across store
+// backends. No raw bead escapes.
+func (s *Store) ListLabeledSessionInfosUnfiltered() ([]Info, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	labeled, err := s.store.ListByLabel(LabelSession, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Info, 0, len(labeled))
+	for _, b := range labeled {
+		if b.Status == "closed" {
+			continue
+		}
+		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, nil
 }
 
 // sessionMatchesFilters reports whether a session bead passes the state and
 // template filters. It is the single predicate for session-list filtering,
-// shared by both InfoStore listing and Manager.ListFullFromBeads.
+// shared by the Store.List projection and (via sessionMatchesFiltersInfo) the
+// Info-fed listing.
 func sessionMatchesFilters(b beads.Bead, stateFilter, templateFilter string) bool {
 	state := normalizeInfoState(State(b.Metadata["state"]))
 
@@ -247,6 +369,56 @@ func sessionMatchesFilters(b beads.Bead, stateFilter, templateFilter string) boo
 	}
 
 	if templateFilter != "" && b.Metadata["template"] != templateFilter {
+		return false
+	}
+	return true
+}
+
+// sessionMatchesFiltersInfo is the Info-taking twin of sessionMatchesFilters. It
+// recomputes the state from MetadataState (the RAW state metadata, NOT the
+// closed-blanked/normalized Info.State — the bead form derives `state` from
+// b.Metadata["state"] regardless of close), reads Closed for the open/closed
+// status compares, and Template for the template filter.
+//
+// ACCEPTED DELTA: the bead form compares the exact status string
+// (b.Status=="open"), while this twin has only Closed (== b.Status=="closed") to
+// work with — Info carries no raw Status. For the SDK's binary open/closed
+// invariant the two are identical; for a hypothetical out-of-band status
+// (e.g. "archived") the twin's `sf=="open"` (== !Closed) is WIDER than the bead
+// form's exact `b.Status=="open"`. They diverge ONLY on the "open" filter for a
+// non-open, non-closed status; everywhere else they agree.
+// TestSessionMatchesFiltersInfoEquivalence pins the byte-identity across the
+// open/closed corpus (including the closed-with-raw-state trap) AND pins this
+// documented open-filter delta against an exotic-status row.
+func sessionMatchesFiltersInfo(info Info, stateFilter, templateFilter string) bool {
+	state := normalizeInfoState(State(info.MetadataState))
+
+	switch {
+	case stateFilter != "" && stateFilter != "all":
+		match := false
+		for _, sf := range strings.Split(stateFilter, ",") {
+			switch {
+			case sf == "closed" && info.Closed:
+				match = true
+			case sf == "open" && !info.Closed:
+				match = true
+			case !info.Closed && sf == string(state):
+				match = true
+			}
+			if match {
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	case stateFilter == "":
+		if info.Closed {
+			return false
+		}
+	}
+
+	if templateFilter != "" && info.Template != templateFilter {
 		return false
 	}
 	return true

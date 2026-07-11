@@ -942,7 +942,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 		t.Fatalf("loadSessionBeadSnapshot(): %v", err)
 	}
 	if info, conflict := findNamedSessionConflictInfo(snapshot, spec); !conflict {
-		t.Fatalf("findNamedSessionConflictInfo() = false, want conflict; snapshot=%#v", snapshot.Open())
+		t.Fatalf("findNamedSessionConflictInfo() = false, want conflict; snapshot=%#v", snapshot.OpenInfos())
 	} else if info.Template != "other" {
 		t.Fatalf("findNamedSessionConflictInfo() info template = %q, want other", info.Template)
 	}

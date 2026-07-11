@@ -475,7 +475,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(deliverySessStore, candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
 	if err != nil {
 		// Release the claims so the next drain or poller pass retries
 		// promptly instead of waiting out the in-flight lease.
@@ -868,7 +868,7 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
 		return err
 	}
-	if err := requestManagedNudgeWake(target, cliSessionStore(store, target.cfg, target.cityPath)); err != nil {
+	if err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeFrontDoor(nudges), item, "managed wake failed: "+err.Error()); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
@@ -878,23 +878,21 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 }
 
 // requestManagedNudgeWake wakes a managed session that owns queued nudges. The
-// store param is contractually the session coordination-class store: store.Get
-// and session.WakeSession operate on the session bead plus its gc:wait beads
-// (both ClassSessions). Callers route it via cliSessionStore. The one nudge op
-// inside — nudgeWithdrawQueuedWaitNudges — opens its own nudge store and stays
-// on the nudges class.
-func requestManagedNudgeWake(target nudgeTarget, store beads.Store) error {
-	if store == nil || target.sessionID == "" {
+// sessFront param is the session coordination-class write front door:
+// WakeSession operates on the session bead plus its gc:wait beads (both
+// ClassSessions). Callers construct it at the root via cliSessionFrontDoor so a
+// [beads.classes.sessions] relocation reaches it. The one nudge op inside —
+// nudgeWithdrawQueuedWaitNudges — opens its own nudge store and stays on the
+// nudges class.
+func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error {
+	if !sessFront.Backed() || target.sessionID == "" {
 		return nil
 	}
-	b, err := store.Get(target.sessionID)
+	res, err := sessFront.WakeSession(target.sessionID, time.Now().UTC(), session.WakeOpts{})
 	if err != nil {
 		return err
 	}
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
-	if err != nil {
-		return err
-	}
+	nudgeIDs := res.NudgeIDs
 	if len(nudgeIDs) > 0 {
 		if err := nudgeWithdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
 			if nudgeWarningWriter != nil {
@@ -1133,11 +1131,11 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 		sessStore := cliSessionStore(store.Store, cfg, cityPath)
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
 		if err == nil {
-			b, getErr := sessStore.Get(sessionID)
+			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {
 				return nudgeTarget{}, getErr
 			}
-			return resolveNudgeTargetFromSessionBead(cityPath, cfg, b), nil
+			return resolveNudgeTargetFromSessionInfo(cityPath, cfg, info), nil
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return nudgeTarget{}, err
@@ -1147,8 +1145,8 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 }
 
 // nudgeTargetFields carries the pre-extracted session attributes buildNudgeTarget
-// needs. Both resolvers (raw bead and typed session.Info) populate it from their
-// own source, so the identity-resolution tail lives in exactly one place.
+// needs. resolveNudgeTargetFromSessionInfo populates it from a session.Info
+// projection, so the identity-resolution tail lives in exactly one place.
 type nudgeTargetFields struct {
 	sessionID         string
 	sessionName       string
@@ -1162,30 +1160,11 @@ type nudgeTargetFields struct {
 	continuationEpoch string
 }
 
-func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b beads.Bead) nudgeTarget {
-	sessionName := strings.TrimSpace(b.Metadata["session_name"])
-	if sessionName == "" {
-		sessionName = sessionNameFromBeadID(b.ID)
-	}
-	return buildNudgeTarget(cityPath, cfg, nudgeTargetFields{
-		sessionID:         b.ID,
-		sessionName:       sessionName,
-		alias:             strings.TrimSpace(b.Metadata["alias"]),
-		agentName:         strings.TrimSpace(b.Metadata["agent_name"]),
-		template:          strings.TrimSpace(b.Metadata["template"]),
-		commonName:        strings.TrimSpace(b.Metadata["common_name"]),
-		aliasHistory:      session.AliasHistory(b.Metadata),
-		transport:         strings.TrimSpace(b.Metadata["transport"]),
-		provider:          strings.TrimSpace(b.Metadata["provider"]),
-		continuationEpoch: strings.TrimSpace(b.Metadata["continuation_epoch"]),
-	})
-}
-
-// resolveNudgeTargetFromSessionInfo is the typed front-door sibling of
-// resolveNudgeTargetFromSessionBead: it reads the same session attributes from a
-// session.Info projection instead of the raw bead. Note the transport source is
-// i.TransportMetadata (the RAW value), not i.Transport (which normalizeTransport
-// would make non-empty), so the found.Session fallback below fires identically.
+// resolveNudgeTargetFromSessionInfo reads the session attributes buildNudgeTarget
+// needs from a session.Info projection (the typed front door) rather than cracking
+// the raw session bead. Note the transport source is i.TransportMetadata (the RAW
+// value), not i.Transport (which normalizeTransport would make non-empty), so the
+// found.Session fallback below fires identically.
 func resolveNudgeTargetFromSessionInfo(cityPath string, cfg *config.City, i session.Info) nudgeTarget {
 	sessionName := strings.TrimSpace(i.SessionNameMetadata)
 	if sessionName == "" {
@@ -1335,7 +1314,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(deliverySessStore, candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
 	if err != nil {
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
 		return false, errors.Join(bookkeepErr, err, relErr)
@@ -1479,19 +1458,19 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 	if store == nil {
 		return target
 	}
-	open, err := loadSessionBeads(store)
+	open, err := loadOpenSessionInfos(store)
 	if err != nil {
 		return target
 	}
-	for _, b := range open {
-		if b.Metadata["session_name"] != target.sessionName {
+	for _, info := range open {
+		if info.SessionNameMetadata != target.sessionName {
 			continue
 		}
 		if target.sessionID == "" {
-			target.sessionID = b.ID
+			target.sessionID = info.ID
 		}
 		if target.continuationEpoch == "" {
-			target.continuationEpoch = b.Metadata["continuation_epoch"]
+			target.continuationEpoch = info.ContinuationEpoch
 		}
 		return target
 	}
@@ -1527,18 +1506,19 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 }
 
 // splitQueuedNudgesForDelivery partitions claimed nudges into deliverable items
-// and reason-tagged blocked items. The store param is contractually the session
-// coordination-class store: blockedQueuedNudgeReason reads the referenced gc:wait
-// bead (coordclass.ClassSessions) to gate wait-sourced nudges. Callers route it
-// via cliSessionStore.
-func splitQueuedNudgesForDelivery(store beads.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
+// and reason-tagged blocked items. The sessFront param is the session
+// coordination-class write front door: blockedQueuedNudgeReason reads the
+// referenced gc:wait bead (coordclass.ClassSessions) to gate wait-sourced
+// nudges. Callers construct it at the root over the session-class store (via
+// cliSessionStore) so a [beads.classes.sessions] relocation reaches it.
+func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
 	if len(items) == 0 {
 		return nil, nil, nil
 	}
 	deliverable := make([]queuedNudge, 0, len(items))
 	blocked := make(map[string][]queuedNudge)
 	for _, item := range items {
-		reason, shouldBlock, err := blockedQueuedNudgeReason(store, item)
+		reason, shouldBlock, err := blockedQueuedNudgeReason(sessFront, item)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1551,21 +1531,21 @@ func splitQueuedNudgesForDelivery(store beads.Store, items []queuedNudge) ([]que
 	return deliverable, blocked, nil
 }
 
-func blockedQueuedNudgeReason(store beads.Store, item queuedNudge) (string, bool, error) {
-	if store == nil || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
+func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
+	if !sessFront.Backed() || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
 		return "", false, nil
 	}
-	wait, err := store.Get(item.Reference.ID)
+	wait, err := sessFront.GetWait(item.Reference.ID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return "wait-missing", true, nil
 		}
+		if errors.Is(err, session.ErrNotAWait) {
+			return "wait-reference-invalid", true, nil
+		}
 		return "", false, err
 	}
-	if !session.IsWaitBead(wait) {
-		return "wait-reference-invalid", true, nil
-	}
-	switch wait.Metadata["state"] {
+	switch wait.State {
 	case waitStateReady:
 		return "", false, nil
 	case waitStateCanceled:

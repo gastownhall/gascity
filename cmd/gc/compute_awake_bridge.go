@@ -175,7 +175,7 @@ func buildAwakeInputFromReconciler(
 		infoBy[in.ID] = in
 	}
 	for _, target := range wakeTargets {
-		info := infoBy[target.session.ID]
+		info := infoBy[target.info.ID]
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
 			continue
@@ -222,7 +222,7 @@ func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *conf
 }
 
 // awakeSetToWakeEvals converts ComputeAwakeSet output to wakeEvaluation map
-// for compatibility with advanceSessionDrainsWithSessions.
+// for compatibility with advanceSessionDrainsWithSessionsTraced.
 func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []AwakeSessionBead) map[string]wakeEvaluation {
 	evals := make(map[string]wakeEvaluation, len(decisions))
 	for _, bead := range sessionBeads {

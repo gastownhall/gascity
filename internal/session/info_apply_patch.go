@@ -17,10 +17,10 @@ import (
 //
 // It is byte-identical to a full re-projection of the patched metadata:
 //
-//	info.ApplyPatch(p)  ==  InfoFromPersistedBead(bead{Status, Type, Title, ...,
+//	info.ApplyPatch(p)  ==  infoFromPersistedBead(bead{Status, Type, Title, ...,
 //	                            Metadata: p.Apply(meta)})
 //
-// for the metadata-derived fields, where info == InfoFromPersistedBead(bead).
+// for the metadata-derived fields, where info == infoFromPersistedBead(bead).
 // Only fields whose source key appears in the patch are re-derived, from that
 // key's raw patch value, using the same per-key logic as InfoFromPersistedBead;
 // every other field carries forward unchanged. Bead-level fields (ID, Type,
@@ -99,6 +99,12 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 		case "manual_session":
 			info.ManualSession = strings.TrimSpace(v) == "true"
 			info.ManualSessionMetadata = v
+		case "pool_alias_conflict":
+			info.PoolAliasConflict = v
+		case "pool_alias_conflict_count":
+			info.PoolAliasConflictCount = v
+		case "pool_alias_conflict_at":
+			info.PoolAliasConflictAt = v
 		case MCPIdentityMetadataKey:
 			info.MCPIdentity = v
 		case MCPServersSnapshotMetadataKey:
@@ -119,6 +125,12 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.BrainParentSID = v
 		case beadmeta.PackMetadataKey:
 			info.Pack = v
+		case beadmeta.PackWorkspaceMetadataKey:
+			info.PackWorkspace = v
+		case beadmeta.WorkDirMetadataKey:
+			info.WorkDirCanonical = v
+		case beadmeta.WorkerDirMetadataKey:
+			info.WorkerDir = v
 		case "pending_create_claim":
 			info.PendingCreateClaim = strings.TrimSpace(v) == "true"
 			info.PendingCreateClaimMetadata = v
@@ -132,12 +144,18 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.ContinuityEligible = v
 		case "last_woke_at":
 			info.LastWokeAt = v
+		case "awake_started_at":
+			info.AwakeStartedAt = v
+		case "usage_compute_emitted_at":
+			info.UsageComputeEmittedAt = v
 		case "state_reason":
 			info.StateReason = v
 		case "creation_complete_at":
 			info.CreationCompleteAt = v
 		case "continuation_reset_pending":
 			info.ContinuationResetPending = v
+		case SessionCircuitStateMetadataKey:
+			info.SessionCircuitState = v
 		case ResetCommittedAtKey:
 			info.ResetCommittedAt = v
 		case "generation":
@@ -170,6 +188,10 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			info.StartedLaunchHash = v
 		case "started_live_hash":
 			info.StartedLiveHash = v
+		case "live_hash":
+			info.LiveHash = v
+		case "startup_dialog_verified":
+			info.StartupDialogVerified = v
 		case "config_drift_deferred_at":
 			info.ConfigDriftDeferredAt = v
 		case "config_drift_deferred_key":
@@ -199,6 +221,22 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 			}
 		case "provider_kind":
 			info.ProviderKind = v
+		case "builtin_ancestor":
+			info.BuiltinAncestor = v
+		case "sleep_policy_fingerprint":
+			info.SleepPolicyFingerprint = v
+		case "requested_sleep_after_idle":
+			info.RequestedSleepAfterIdle = v
+		case "effective_sleep_after_idle":
+			info.EffectiveSleepAfterIdle = v
+		case "sleep_policy_source":
+			info.SleepPolicySource = v
+		case "sleep_capability":
+			info.SleepCapability = v
+		case "sleep_policy_adjustment_reason":
+			info.SleepPolicyAdjustmentReason = v
+		case "config_wake_suppressed":
+			info.ConfigWakeSuppressedMetadata = v
 		case MetadataLastNudgeDeliveredAt:
 			info.LastNudgeDeliveredAt = time.Time{}
 			if raw := strings.TrimSpace(v); raw != "" {
@@ -207,10 +245,10 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 				}
 			}
 		default:
-			// Keys InfoFromPersistedBead does not project (e.g. live_hash,
-			// startup_dialog_verified, env.*) have no Info field, so a patch to
-			// them changes no Info fact. Ignoring them keeps ApplyPatch
-			// byte-identical to a full re-projection.
+			// Keys InfoFromPersistedBead does not project (e.g. env.*,
+			// wake_requested_at) have no Info field, so a patch to them changes no
+			// Info fact. Ignoring them keeps ApplyPatch byte-identical to a full
+			// re-projection.
 		}
 	}
 	return info
@@ -234,8 +272,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 // re-projecting the raw working bead or issuing a store Get.
 //
 // TestInfoMarkClosedMatchesReprojection is the equivalence oracle: for any open
-// bead b, InfoFromPersistedBead(b).MarkClosed() equals
-// InfoFromPersistedBead(b with Status "closed").
+// bead b, infoFromPersistedBead(b).MarkClosed() equals
+// infoFromPersistedBead(b with Status "closed").
 func (info Info) MarkClosed() Info {
 	info.Closed = true
 	info.State = "" // closed beads have no runtime state

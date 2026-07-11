@@ -16812,6 +16812,115 @@
         ],
         "type": "object"
       },
+      "WaitListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "capped": {
+            "description": "True when the lookup hit the per-scope cap and the list is partial.",
+            "type": "boolean"
+          },
+          "waits": {
+            "description": "Durable session waits, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/WaitView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "waits",
+          "capped"
+        ],
+        "type": "object"
+      },
+      "WaitView": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "description": "Bead creation time (RFC3339, UTC).",
+            "type": "string"
+          },
+          "delivery_attempt": {
+            "description": "Current delivery attempt counter.",
+            "type": "string"
+          },
+          "dep_ids": {
+            "description": "Dependency bead IDs the wait watches.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "dep_mode": {
+            "description": "all or any.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Raw RFC3339 expiry string, kept verbatim.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Wait bead ID.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Wait kind, e.g. deps.",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Bead labels.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "note": {
+            "description": "Reminder text delivered when the wait is satisfied.",
+            "type": "string"
+          },
+          "nudge_id": {
+            "description": "Shadow wait-nudge ID once dispatched.",
+            "type": "string"
+          },
+          "registered_epoch": {
+            "description": "Session continuation epoch at registration.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID the wait is registered against.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name recorded at registration.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Wait lifecycle state (pending/ready/closed/...).",
+            "type": "string"
+          },
+          "status": {
+            "description": "Persisted bead status (open/closed).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "kind",
+          "state",
+          "status"
+        ],
+        "type": "object"
+      },
       "WebhookReceivedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -39105,6 +39214,154 @@
           }
         },
         "summary": "Post v0 city by city name unregister"
+      }
+    },
+    "/v0/city/{cityName}/wait/{id}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-wait-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Wait bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitView"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name wait by ID"
+      }
+    },
+    "/v0/city/{cityName}/waits": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-waits",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by wait state.",
+            "explode": false,
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "description": "Filter by wait state.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by session ID.",
+            "explode": false,
+            "in": "query",
+            "name": "session",
+            "schema": {
+              "description": "Filter by session ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitListBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name waits"
       }
     },
     "/v0/city/{cityName}/workflow/{workflow_id}": {

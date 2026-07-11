@@ -463,22 +463,22 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	}
 
 	type snapshotResult struct {
-		rows          []beads.Bead
+		infos         []session.Info
 		partialErrors []string
 		err           error
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		rows, partialErrors, err := sessionReadModelRows(readStore)
-		done <- snapshotResult{rows: rows, partialErrors: partialErrors, err: err}
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
-	var rows []beads.Bead
+	var infos []session.Info
 	var partialErrors []string
 	var err error
 	select {
 	case result := <-done:
-		rows = result.rows
+		infos = result.infos
 		partialErrors = result.partialErrors
 		err = result.err
 	case <-time.After(statusStoreReadTimeout):
@@ -494,16 +494,16 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
 
-	seenSessionName := make(map[string]bool, len(rows))
-	for _, b := range rows {
-		if b.Status == "closed" {
+	seenSessionName := make(map[string]bool, len(infos))
+	for _, sessInfo := range infos {
+		if sessInfo.Closed {
 			continue
 		}
 		info := statusSessionInfo{
-			sessionName: strings.TrimSpace(b.Metadata["session_name"]),
-			agentName:   strings.TrimSpace(b.Metadata["agent_name"]),
-			template:    strings.TrimSpace(b.Metadata["template"]),
-			state:       statusSessionState(b),
+			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
+			agentName:   strings.TrimSpace(sessInfo.AgentName),
+			template:    strings.TrimSpace(sessInfo.Template),
+			state:       statusSessionStateInfo(sessInfo),
 		}
 		if info.sessionName == "" {
 			continue
@@ -736,8 +736,11 @@ func statusSessionQualifiedName(cityName, sessTmpl string, info statusSessionInf
 	return agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 }
 
-func statusSessionState(b beads.Bead) session.State {
-	state := session.State(strings.TrimSpace(b.Metadata["state"]))
+// statusSessionStateInfo maps the raw persisted state metadata (Info.MetadataState,
+// not the closed-blanked Info.State) onto the display state the status snapshot
+// reports, folding the awake/drained aliases exactly as the retired bead form did.
+func statusSessionStateInfo(info session.Info) session.State {
+	state := session.State(strings.TrimSpace(info.MetadataState))
 	switch state {
 	case "awake":
 		return session.StateActive

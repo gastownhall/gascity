@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -398,11 +397,13 @@ func primeHookSessionTemplate(cityPath string) string {
 	// A failed load yields nil cfg, which cliSessionStore treats as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionBead, err := sessStore.Get(sessionID)
+	// The front-door Get rejects a present-but-non-session bead (ErrSessionNotFound)
+	// where the prior raw store.Get projected it; here that only tightens a
+	// crafted/stale id to the empty-return path below — not a regression.
+	info, err := sessionFrontDoor(sessStore).Get(sessionID)
 	if err != nil {
 		return ""
 	}
-	info := session.InfoFromPersistedBead(sessionBead)
 	if template := strings.TrimSpace(info.Template); template != "" {
 		return template
 	}
@@ -590,19 +591,28 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	// (see primeHookSessionTemplate); nil cfg → cliSessionStore identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionBead, err := sessStore.Get(gcSessionID)
+	// WI-6 R5: route the read through the session front door → Info. Get wraps
+	// absence as "loading session %q" and rejects non-session beads with
+	// ErrSessionNotFound; on this hook path both surface through the existing
+	// warn-and-return diagnostic (a foreign/absent bead never reaches the write),
+	// and the codex guard now resolves the family off Info (Provider precedence:
+	// builtin_ancestor → provider_kind → provider, all carried on Info).
+	sessFront := sessionFrontDoor(sessStore)
+	info, err := sessFront.Get(gcSessionID)
 	if err != nil {
-		warn("loading session bead %q: %v", gcSessionID, err)
+		// The front-door Get already wraps with `loading session %q`, carrying the
+		// id — don't re-prefix (that would double-wrap the stderr).
+		warn("%v", err)
 		return
 	}
-	if fromHookStdin && sessionProviderFamily(sessionBead) != "codex" {
+	if fromHookStdin && sessionProviderFamily(info) != "codex" {
 		warn("hook stdin provider session id is only accepted for codex session %q", gcSessionID)
 		return
 	}
-	if existing := strings.TrimSpace(session.InfoFromPersistedBead(sessionBead).SessionKey); existing != "" {
+	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
 		return
 	}
-	if err := sessionFrontDoor(sessStore).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
+	if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
 	}
 }

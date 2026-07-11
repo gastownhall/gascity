@@ -44,6 +44,89 @@ func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	}
 }
 
+// TestApplyPatchInfoPersistsAndFoldsEqualsReprojection proves ApplyPatchInfo
+// persists the patch byte-identically (one SetMetadataBatch) AND returns the
+// LOCAL fold — never a re-Get — and that the folded Info equals a full
+// reprojection of the patched bead. This is the write-returns-Info contract the
+// reconciler cuts over to in WI-5 W1.
+func TestApplyPatchInfoPersistsAndFoldsEqualsReprojection(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+		"last_woke_at":         "2026-01-01T00:00:00Z",
+	})
+	is, rec := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (pre): %v", err)
+	}
+
+	patch := MetadataPatch{"state": "asleep", "pending_create_claim": "", "last_woke_at": ""}
+	got, err := is.ApplyPatchInfo(pre, patch)
+	if err != nil {
+		t.Fatalf("ApplyPatchInfo: %v", err)
+	}
+
+	// The persist must be a single byte-identical SetMetadataBatch.
+	calls := rec.CallsForOp("SetMetadataBatch")
+	if len(calls) != 1 {
+		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
+	}
+	if calls[0].ID != "s-1" || !reflect.DeepEqual(calls[0].Metadata, map[string]string(patch)) {
+		t.Errorf("persist = (%q, %#v), want (s-1, %#v)", calls[0].ID, calls[0].Metadata, map[string]string(patch))
+	}
+
+	// The returned Info is the local fold pre.ApplyPatch(patch)...
+	if want := pre.ApplyPatch(patch); !reflect.DeepEqual(got, want) {
+		t.Errorf("ApplyPatchInfo fold diverged from pre.ApplyPatch\n got=%+v\nwant=%+v", got, want)
+	}
+	// ...which is byte-identical to a full reprojection of the patched bead.
+	if want := infoFromPersistedBead(reprojectBead(b, patch)); !reflect.DeepEqual(got, want) {
+		t.Errorf("ApplyPatchInfo fold diverged from full reprojection\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+// TestApplyPatchInfoEmptyIsNoOp proves an empty patch persists nothing and
+// returns the input Info unchanged (matching ApplyPatch's len==0 short-circuit).
+func TestApplyPatchInfoEmptyIsNoOp(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (pre): %v", err)
+	}
+	got, err := is.ApplyPatchInfo(pre, MetadataPatch{})
+	if err != nil {
+		t.Fatalf("ApplyPatchInfo: %v", err)
+	}
+	if !reflect.DeepEqual(got, pre) {
+		t.Errorf("empty patch changed Info\n got=%+v\nwant=%+v", got, pre)
+	}
+	if n := len(rec.Calls()); n != 0 {
+		t.Errorf("empty patch emitted %d calls, want 0", n)
+	}
+}
+
+// TestApplyPatchInfoWriteErrorReturnsInputUnchanged proves that when the persist
+// fails, ApplyPatchInfo returns the INPUT Info unchanged (no fold) plus the
+// error — so a caller that ignores the error keeps a snapshot consistent with
+// the store, and a caller that checks it can bail.
+func TestApplyPatchInfoWriteErrorReturnsInputUnchanged(t *testing.T) {
+	// A store with no such bead: SetMetadataBatch on a missing id errors.
+	is := NewStore(seedSessionStore(t))
+	pre := infoFromPersistedBead(sessionBeadFixture("missing", "open", map[string]string{"state": "active"}))
+
+	got, err := is.ApplyPatchInfo(pre, MetadataPatch{"state": "asleep"})
+	if err == nil {
+		t.Fatal("ApplyPatchInfo(missing): want store error, got nil")
+	}
+	if !reflect.DeepEqual(got, pre) {
+		t.Errorf("write error must return the input Info unchanged\n got=%+v\nwant=%+v", got, pre)
+	}
+}
+
 // TestApplyPatchEmptyIsNoOp proves an empty patch emits no write (matching
 // setMetaBatch's len==0 short-circuit).
 func TestApplyPatchEmptyIsNoOp(t *testing.T) {

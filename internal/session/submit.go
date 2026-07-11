@@ -322,6 +322,26 @@ func providerKind(b beads.Bead) string {
 	return ProviderFamilyFromMetadata(b.Metadata, "")
 }
 
+// ProviderFamilyFromInfo is the session.Info sibling of ProviderFamilyFromMetadata:
+// it walks the same builtin_ancestor → provider_kind → provider precedence ladder,
+// reading the raw mirrors Info carries (BuiltinAncestor, ProviderKind, Provider)
+// instead of the bead metadata map. Byte-identical to the metadata form for any
+// bead b (ProviderFamilyFromInfo(infoFromPersistedBead(b), fallback) ==
+// ProviderFamilyFromMetadata(b.Metadata, fallback)), so a caller holding a typed
+// Info can resolve the provider family without the raw bead.
+func ProviderFamilyFromInfo(info Info, fallback string) string {
+	if ancestor := strings.TrimSpace(info.BuiltinAncestor); ancestor != "" {
+		return sessionlog.ProviderFamily(ancestor)
+	}
+	if kind := strings.TrimSpace(info.ProviderKind); kind != "" {
+		return sessionlog.ProviderFamily(kind)
+	}
+	if provider := strings.TrimSpace(info.Provider); provider != "" {
+		return sessionlog.ProviderFamily(provider)
+	}
+	return sessionlog.ProviderFamily(fallback)
+}
+
 func wrappedProviderFamily(b beads.Bead, family string) bool {
 	ancestor := sessionlog.ProviderFamily(b.Metadata["builtin_ancestor"])
 	// Leave provider raw: normalizing it would collapse wrapped aliases such as

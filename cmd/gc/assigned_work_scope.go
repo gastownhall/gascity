@@ -45,19 +45,43 @@ func sessionAgentConfig(cfg *config.City, session beads.Bead) *config.Agent {
 	return findAgentByTemplate(cfg, template)
 }
 
-// openSessionReachableStoreRef returns the store-ref under which an open session
-// bead owns assigned work, for makeOpenSessionStoreRefIndex. A cross-store
-// eligible (city-scoped) session federates across every store (vp-kvp), so it is
-// indexed under crossStoreOpenSessionStoreRef — a wildcard openSessionOwnsWork
-// matches against any work store-ref. This mirrors the cross-store ownership the
-// demand and session-wake filters already grant (filterAssignedWorkBeadsForSessionWake);
-// without it the release path strands a live city-scoped holder's rig-routed
-// work and a backup worker is minted on the same bead (#3453). A session whose
-// template/agent cannot be resolved falls back to unresolvedOpenSessionStoreRef
-// (also a wildcard), preserving the legacy keep-on-match fail-safe; every other
-// session stays scoped to its configured rig's store-ref.
-func openSessionReachableStoreRef(cityPath string, cfg *config.City, session beads.Bead) string {
-	agentCfg := sessionAgentConfig(cfg, session)
+// sessionAgentConfigInfo is the session.Info form of sessionAgentConfig: it
+// resolves the backing agent from the typed template/common_name Info fields
+// instead of cracking the raw bead, staying byte-identical to the raw form
+// (TestSessionClassifierInfoEquivalence pins it).
+func sessionAgentConfigInfo(cfg *config.City, info sessionpkg.Info) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	if template == "" {
+		template = strings.TrimSpace(info.CommonName)
+	}
+	if template == "" {
+		return nil
+	}
+	return findAgentByTemplate(cfg, template)
+}
+
+// openSessionReachableStoreRefInfo returns the store-ref under which an open
+// session bead owns assigned work, for makeOpenSessionStoreRefIndex. The SESSION
+// side reads typed session.Info (WI-5 W3 per-parameter split, migrated alongside
+// reachableStoresForSession); store-ref resolution stays cfg-derived. A
+// cross-store eligible (city-scoped) session federates across every store
+// (vp-kvp), so it is indexed under crossStoreOpenSessionStoreRef — a wildcard
+// openSessionOwnsWork matches against any work store-ref. This mirrors the
+// cross-store ownership the demand and session-wake filters already grant
+// (filterAssignedWorkBeadsForSessionWake); without it the release path strands a
+// live city-scoped holder's rig-routed work and a backup worker is minted on the
+// same bead (#3453). A session whose template/agent cannot be resolved falls back
+// to unresolvedOpenSessionStoreRef (also a wildcard), preserving the legacy
+// keep-on-match fail-safe; every other session stays scoped to its configured
+// rig's store-ref.
+func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, info sessionpkg.Info) string {
+	agentCfg := sessionAgentConfigInfo(cfg, info)
 	if agentCfg == nil {
 		return unresolvedOpenSessionStoreRef
 	}

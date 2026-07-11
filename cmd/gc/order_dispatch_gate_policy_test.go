@@ -213,7 +213,7 @@ func TestStoreHasOpenDescendantsSkipsTransientNotifications(t *testing.T) {
 }
 
 // trackingGateTimeoutStore makes the first open-work gate
-// (listCanonicalOpenOrderTrackingBeads, which queries Label==labelOrderTracking)
+// (OpenRuns, which queries Label==labelOrderTracking)
 // block past the per-order gate timeout, reproducing the first-gate timeout
 // path that gateBackoffUntil must suppress on subsequent ticks.
 type trackingGateTimeoutStore struct {
@@ -288,7 +288,7 @@ func TestOrderDispatchEventTriggeredBackoffOnTrackingGateTimeout(t *testing.T) {
 }
 
 // TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout verifies that when
-// the first open-work gate (hasOpenTracking / listCanonicalOpenOrderTrackingBeads)
+// the first open-work gate (hasOpenTracking / OpenRuns)
 // times out for a non-idempotent order, gateBackoffUntil is set and suppresses
 // re-entry into that gate on subsequent ticks (#3688, first-gate site).
 func TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout(t *testing.T) {

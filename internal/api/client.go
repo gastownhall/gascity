@@ -200,6 +200,9 @@ func ShouldFallbackForRead(err error) bool {
 	if ShouldFallback(err) {
 		return true
 	}
+	if IsRouteMissing(err) {
+		return true
+	}
 	return IsServerError(err)
 }
 
@@ -227,13 +230,14 @@ func ShouldFallback(err error) bool {
 
 // FallbackReason returns a stable reason code for err when
 // ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
-// "read-only", "client-init", "conn-refused". Generic 5xx server errors
-// collapse to "conn-refused" since from the CLI's read-path perspective an
-// unhealthy server is equivalent to an unreachable one. Non-fallbackable error
-// types such as store_slow are intentionally absent from this set. Returns
-// "unknown" for non-fallbackable errors so callers that invoke FallbackReason
-// unconditionally produce a token instead of panicking; gate on
-// ShouldFallbackForRead first to avoid that sentinel.
+// "read-only", "client-init", "conn-refused", "route-missing". Generic 5xx
+// server errors collapse to "conn-refused" since from the CLI's read-path
+// perspective an unhealthy server is equivalent to an unreachable one;
+// "route-missing" is a new-CLI/old-server route gap (a 404 with no problem+json
+// body). Non-fallbackable error types such as store_slow are intentionally
+// absent from this set. Returns "unknown" for non-fallbackable errors so callers
+// that invoke FallbackReason unconditionally produce a token instead of
+// panicking; gate on ShouldFallbackForRead first to avoid that sentinel.
 func FallbackReason(err error) string {
 	var cnl *cacheNotLiveError
 	if errors.As(err, &cnl) {
@@ -246,6 +250,9 @@ func FallbackReason(err error) string {
 	var ci *clientInitError
 	if errors.As(err, &ci) {
 		return "client-init"
+	}
+	if IsRouteMissing(err) {
+		return "route-missing"
 	}
 	if IsConnError(err) || IsServerError(err) {
 		return "conn-refused"
