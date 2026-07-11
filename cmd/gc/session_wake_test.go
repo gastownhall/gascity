@@ -55,8 +55,7 @@ func makeWakeBead(id string, meta map[string]string) beads.Bead {
 // not disturb the caller's bead or the store the consumer writes back to.
 func wakeInfo(t *testing.T, b beads.Bead) sessionpkg.Info {
 	t.Helper()
-	b.Type = sessionBeadType
-	return sessiontest.SeedBead(t, b)
+	return seedSessionInfo(b)
 }
 
 func (s *countingWakeMetadataStore) SetMetadata(id, key, value string) error {
