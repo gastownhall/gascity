@@ -687,3 +687,56 @@ func flipLastByte(tok string) string {
 	sig[0] ^= 0x01
 	return parts[0] + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
+
+// mintShapedClaim signs a token whose payload is g with one claim replaced by
+// an arbitrary JSON value — shapes the string-typed Grant fields cannot
+// express. The signature covers the mutated payload, so a rejection exercises
+// claim decoding, never the signature check.
+func mintShapedClaim(t *testing.T, priv ed25519.PrivateKey, g Grant, claim string, value any) string {
+	t.Helper()
+	base, err := json.Marshal(g)
+	if err != nil {
+		t.Fatalf("marshal grant: %v", err)
+	}
+	var claims map[string]json.RawMessage
+	if err := json.Unmarshal(base, &claims); err != nil {
+		t.Fatalf("unmarshal grant: %v", err)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal claim %q: %v", claim, err)
+	}
+	claims[claim] = raw
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	sig := ed25519.Sign(priv, payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString(sig)
+}
+
+// A JSON-array claim where a string is expected must be rejected. Today that
+// falls out of json.Unmarshal failing on the string-typed Grant field
+// (ErrMalformed) — fail-closed, but only by construction. This pin exists so a
+// future switch of Grant.Aud (or Grant.CID) to []string turns these red and
+// forces a conscious decision about list-shaped claim semantics instead of
+// silently admitting array-shaped grants.
+func TestVerify_ArrayShapedClaimsRejected(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("array aud", func(t *testing.T) {
+		v, priv, g, expect := fixture(t, now)
+		tok := mintShapedClaim(t, priv, g, "aud", []string{g.Aud})
+		if _, err := v.Verify(tok, expect); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("array-shaped aud: got %v, want ErrMalformed", err)
+		}
+	})
+	t.Run("array cid on a tenancy-bound verifier", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		tok := mintShapedClaim(t, priv, g, "cid", []string{"city_acme"})
+		if _, err := v.Verify(tok, expect); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("array-shaped cid: got %v, want ErrMalformed", err)
+		}
+	})
+}
