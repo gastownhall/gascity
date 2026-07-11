@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // These two tests pin the WI-6 W6 red-team blocker as an Info-native invariant.
@@ -119,7 +120,7 @@ func TestReconcileSessionBeads_ZombieTerminalErrorSleepReasonSurvivesHeal(t *tes
 	if b.Metadata["provider_terminal_error"] == "" {
 		t.Fatalf("provider_terminal_error not recorded — the zombie terminal-error path did not run; scenario precondition unmet (metadata=%v)", b.Metadata)
 	}
-	if got := b.Metadata["sleep_reason"]; got != sleepReasonProviderTerminalError {
-		t.Fatalf("sleep_reason = %q, want %q — the zombie mark's healed state/sleep_reason/pending-create lease must reach the same-tick healStateWithRollbackInfo reader via the shared infoByID snapshot so heal's stale-creating rollback does not clobber it (WI-6 R3, no mirror). stderr=%q", got, sleepReasonProviderTerminalError, env.stderr.String())
+	if got := b.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonProviderTerminalError) {
+		t.Fatalf("sleep_reason = %q, want %q — the zombie mark's healed state/sleep_reason/pending-create lease must reach the same-tick healStateWithRollbackInfo reader via the shared infoByID snapshot so heal's stale-creating rollback does not clobber it (WI-6 R3, no mirror). stderr=%q", got, string(sessionpkg.SleepReasonProviderTerminalError), env.stderr.String())
 	}
 }

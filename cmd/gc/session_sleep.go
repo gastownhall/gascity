@@ -246,10 +246,10 @@ func configWakeSuppressedInfo(
 	if !policy.enabled() {
 		return false
 	}
-	if info.SleepReason == "idle-timeout" {
+	if info.SleepReason == string(sessionpkg.SleepReasonIdleTimeout) {
 		return false
 	}
-	if info.SleepReason == "idle" &&
+	if info.SleepReason == string(sessionpkg.SleepReasonIdle) &&
 		info.SleepPolicyFingerprint != "" &&
 		info.SleepPolicyFingerprint == policy.Fingerprint {
 		return true
@@ -303,7 +303,7 @@ func persistSleepPolicyMetadataInfo(
 	}
 	fingerprint := policy.Fingerprint
 	if ((info.MetadataState == "asleep" &&
-		info.SleepReason == "idle") ||
+		info.SleepReason == string(sessionpkg.SleepReasonIdle)) ||
 		info.SleepIntent == "idle-stop-pending") &&
 		info.SleepPolicyFingerprint != "" {
 		// Preserve the fingerprint that initiated an in-flight idle drain (same
@@ -372,7 +372,7 @@ func recoverPendingIdleSleepInfo(
 	if sessFront == nil || running || info.SleepIntent != "idle-stop-pending" {
 		return false
 	}
-	batch := sessionpkg.SleepPatch(clk.Now(), "idle")
+	batch := sessionpkg.SleepPatch(clk.Now(), string(sessionpkg.SleepReasonIdle))
 	if fingerprint := info.SleepPolicyFingerprint; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}

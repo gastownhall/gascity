@@ -55,10 +55,10 @@ func preWakeCommit(
 	}
 
 	sleepReason := ""
-	if info.SleepReason == "idle-timeout" {
+	if info.SleepReason == string(sessions.SleepReasonIdleTimeout) {
 		// Preserve the idle-timeout wake override until the replacement
 		// session has actually started. Failed starts must retry next tick.
-		sleepReason = "idle-timeout"
+		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
 	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)

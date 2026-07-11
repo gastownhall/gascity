@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type recordingStopProvider struct {
@@ -921,8 +922,8 @@ func TestMarkCityStopSessionSleepReasonSkipsCreatingSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := activeUpdated.Metadata["sleep_reason"]; got != sleepReasonCityStop {
-		t.Fatalf("active sleep_reason = %q, want %q", got, sleepReasonCityStop)
+	if got := activeUpdated.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonCityStop) {
+		t.Fatalf("active sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonCityStop))
 	}
 	creatingUpdated, err := store.Get(creating.ID)
 	if err != nil {
