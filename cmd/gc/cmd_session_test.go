@@ -1370,7 +1370,7 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1404,7 +1404,7 @@ func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
 		State:       session.StateAsleep,
 		SessionName: "worker-miss",
 	}
-	full := session.InfoFromPersistedBead(bead)
+	full := seedSessionInfo(bead)
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
 	// Missing from infoIndex → "-".
@@ -1450,7 +1450,7 @@ func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1495,7 +1495,7 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		provider,
 		nil,
@@ -1530,7 +1530,7 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		provider,
 		nil,
@@ -1565,7 +1565,7 @@ func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1599,7 +1599,7 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1720,7 +1720,7 @@ func TestSessionReason_PriorityMatrix(t *testing.T) {
 
 			reason := sessionReason(
 				newInfo(sessionName),
-				map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+				map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 				tt.cfg,
 				provider,
 				tt.poolDesired,
@@ -1774,7 +1774,7 @@ func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1811,7 +1811,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 
 	reason := sessionReason(
 		info,
-		map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		runtime.NewFake(),
 		nil,
@@ -1922,7 +1922,7 @@ func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
 			before := cloneSessionReasonMetadata(tt.bead.Metadata)
 			got := sessionReason(
 				tt.info,
-				map[string]session.Info{tt.bead.ID: session.InfoFromPersistedBead(tt.bead)},
+				map[string]session.Info{tt.bead.ID: seedSessionInfo(tt.bead)},
 				cfg,
 				tt.provider,
 				tt.poolDesired,

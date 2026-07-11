@@ -8,7 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore pins the WI-6 R4
@@ -294,7 +294,7 @@ func newForkSessionCandidate(t *testing.T, rp *config.ResolvedProvider, parentSI
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", ResolvedProvider: rp}
-	return startCandidate{info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
+	return startCandidate{info: sessiontest.SeedBead(t, session), tp: tp, order: 0}, cfg, store
 }
 
 // TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery is the
@@ -409,7 +409,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: ""})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: ""})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -423,7 +423,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: "wb-B"})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -437,7 +437,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -451,7 +451,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", sessionpkg.InfoFromPersistedBead(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
+		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
