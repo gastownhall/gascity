@@ -182,6 +182,30 @@ func (a *Agent) QualifiedInstanceName(instanceName string) string {
 	return a.Dir + "/" + name
 }
 
+// CanonicalPoolIdentity returns the identity the pool layer uses to address an
+// agent's canonical singleton session (see UsesCanonicalSingletonPoolIdentity).
+//
+// For a CITY-scoped singleton (Dir == "") it is the bare role name ("mayor"),
+// NOT the import-binding-qualified name ("gastown.mayor"): such an agent is the
+// unique holder of its role in the city, and mail/coordination address it by the
+// bare role, so the pool alias must match or routing splits across two inboxes
+// (one for "mayor", one for the live "gastown.mayor"). For a RIG-scoped singleton
+// (Dir != "") the dir qualifier is retained so it stays unambiguous across rigs.
+//
+// This is deliberately NOT folded into QualifiedName(): QualifiedName() is also
+// the template key written into session beads and used for store/config lookups,
+// which must remain binding-qualified. Only singleton alias/identity derivation
+// should use this; template-key call sites keep using QualifiedName().
+func (a *Agent) CanonicalPoolIdentity() string {
+	if a == nil {
+		return ""
+	}
+	if a.Dir == "" {
+		return a.Name
+	}
+	return a.QualifiedName()
+}
+
 // AgentMatchesIdentity returns true if the agent's qualified name matches
 // the given identity string. Handles both V1 format ("dir/name") and V2
 // format ("dir/binding.name", "binding.name"). This is the canonical way

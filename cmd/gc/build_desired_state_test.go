@@ -4636,6 +4636,105 @@ func TestNormalizeNonExpandingPoolSessionBeadReclaimsDeferredAlias(t *testing.T)
 	}
 }
 
+// nonCanonicalSingletonPoolIdentity recognizes both the synthesized slot form
+// ("mayor-1") and the legacy import-binding-qualified form ("gastown.mayor"),
+// but the legacy clause fires only for imported city-scoped singletons where the
+// binding-qualified form differs from the bare canonical identity.
+func TestNonCanonicalSingletonPoolIdentity(t *testing.T) {
+	cityMayor := &config.Agent{Name: "mayor", BindingName: "gastown", MaxActiveSessions: intPtr(1)}
+	rigMayor := &config.Agent{Name: "mayor", Dir: "hello-world", BindingName: "gastown", MaxActiveSessions: intPtr(1)}
+	pool := &config.Agent{Name: "worker", MaxActiveSessions: intPtr(3)}
+
+	cases := []struct {
+		desc     string
+		agent    *config.Agent
+		identity string
+		want     bool
+	}{
+		{"city singleton legacy binding-qualified form is non-canonical", cityMayor, "gastown.mayor", true},
+		{"city singleton slot form is binding-prefixed and non-canonical", cityMayor, "gastown.mayor-1", true},
+		{"city singleton bare slot form is not this agent's identity", cityMayor, "mayor-1", false},
+		{"city singleton bare canonical form is canonical", cityMayor, "mayor", false},
+		{"city singleton unrelated identity", cityMayor, "deacon", false},
+		{"rig singleton qualified form is its own canonical, not legacy-stale", rigMayor, "gastown.mayor", false},
+		{"non-singleton pool agent is never matched", pool, "gastown.worker", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := nonCanonicalSingletonPoolIdentity(tc.agent, tc.identity); got != tc.want {
+				t.Errorf("nonCanonicalSingletonPoolIdentity(%q) = %v, want %v", tc.identity, got, tc.want)
+			}
+		})
+	}
+}
+
+// An existing city-singleton session bead stamped with the legacy
+// binding-qualified identity ("gastown.mayor") must migrate to the bare role
+// ("mayor") in place — the same alias-rewrite path that already normalizes slot
+// forms — so mail addressed to "mayor" reaches the live session with no restart.
+// The template key must stay binding-qualified; only the alias/identity moves.
+func TestNormalizeNonExpandingPoolSessionBeadMigratesLegacyBindingQualifiedIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	legacy, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gastown.mayor", "template:gastown.mayor"},
+		Metadata: map[string]string{
+			"template":             "gastown.mayor",
+			"agent_name":           "gastown.mayor",
+			"alias":                "gastown.mayor",
+			"session_name":         "s-mayor-legacy",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			BindingName:       "gastown",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+
+	result, err := normalizeNonExpandingPoolSessionBead(bp, &cfg.Agents[0], legacy)
+	if err != nil {
+		t.Fatalf("normalizeNonExpandingPoolSessionBead: %v", err)
+	}
+	if got := result.Metadata["alias"]; got != "mayor" {
+		t.Fatalf("result alias = %q, want bare canonical \"mayor\"", got)
+	}
+	stored, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", legacy.ID, err)
+	}
+	if got := stored.Metadata["alias"]; got != "mayor" {
+		t.Errorf("stored alias = %q, want \"mayor\"", got)
+	}
+	if got := stored.Metadata["agent_name"]; got != "mayor" {
+		t.Errorf("stored agent_name = %q, want \"mayor\"", got)
+	}
+	if got := strings.TrimSpace(stored.Title); got != "mayor" {
+		t.Errorf("stored title = %q, want \"mayor\"", got)
+	}
+	if !containsString(stored.Labels, "agent:mayor") {
+		t.Errorf("stored labels = %v, want canonical agent:mayor", stored.Labels)
+	}
+	if containsString(stored.Labels, "agent:gastown.mayor") {
+		t.Errorf("stored labels = %v, must not retain legacy agent:gastown.mayor", stored.Labels)
+	}
+	if got := stored.Metadata["template"]; got != "gastown.mayor" {
+		t.Errorf("stored template = %q, want unchanged binding-qualified \"gastown.mayor\"", got)
+	}
+}
+
 func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

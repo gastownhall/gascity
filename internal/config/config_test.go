@@ -5014,6 +5014,55 @@ func TestQualifiedName(t *testing.T) {
 	}
 }
 
+func TestCanonicalPoolIdentity(t *testing.T) {
+	tests := []struct {
+		desc        string
+		agent       Agent
+		want        string
+		matchesQual bool // CanonicalPoolIdentity should equal QualifiedName here
+	}{
+		{
+			desc:        "imported city singleton drops the binding to the bare role",
+			agent:       Agent{Name: "mayor", Dir: "", BindingName: "gastown"},
+			want:        "mayor",
+			matchesQual: false, // QualifiedName is "gastown.mayor" — this is the routing-split fix
+		},
+		{
+			desc:        "non-imported city singleton is already bare",
+			agent:       Agent{Name: "mayor", Dir: ""},
+			want:        "mayor",
+			matchesQual: true,
+		},
+		{
+			desc:        "imported rig singleton keeps its dir qualifier",
+			agent:       Agent{Name: "mayor", Dir: "hello-world", BindingName: "gastown"},
+			want:        "hello-world/gastown.mayor",
+			matchesQual: true,
+		},
+		{
+			desc:        "non-imported rig singleton keeps its dir qualifier",
+			agent:       Agent{Name: "worker", Dir: "backend"},
+			want:        "backend/worker",
+			matchesQual: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			got := tt.agent.CanonicalPoolIdentity()
+			if got != tt.want {
+				t.Errorf("CanonicalPoolIdentity() = %q, want %q", got, tt.want)
+			}
+			qual := tt.agent.QualifiedName()
+			switch {
+			case tt.matchesQual && got != qual:
+				t.Errorf("CanonicalPoolIdentity() = %q diverged from QualifiedName() = %q; expected them to match", got, qual)
+			case !tt.matchesQual && got == qual:
+				t.Errorf("CanonicalPoolIdentity() = %q should differ from QualifiedName() = %q for an imported city singleton", got, qual)
+			}
+		})
+	}
+}
+
 func TestParseQualifiedName(t *testing.T) {
 	tests := []struct {
 		input   string

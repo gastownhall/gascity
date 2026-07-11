@@ -2427,7 +2427,7 @@ func desiredHasCanonicalNonExpandingPoolSession(desired map[string]TemplateParam
 	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return false
 	}
-	canonical := cfgAgent.QualifiedName()
+	canonical := cfgAgent.CanonicalPoolIdentity()
 	for _, existing := range desired {
 		if existing.TemplateName != template {
 			continue
@@ -2832,9 +2832,8 @@ func safePathSlug(value string, maxLen int) string {
 }
 
 func poolDesiredRequestIdentity(cfgAgent *config.Agent, slot int) (*config.Agent, string, int) {
-	qualifiedName := cfgAgent.QualifiedName()
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return cfgAgent, qualifiedName, 0
+		return cfgAgent, cfgAgent.CanonicalPoolIdentity(), 0
 	}
 	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
 	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
@@ -2891,7 +2890,7 @@ func normalizeNonExpandingPoolSessionBead(
 	if bp == nil || bp.beadStore == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() || isManualSessionBeadForAgent(sessionBead, cfgAgent) || isNamedSessionBead(sessionBead) || sessionBead.ID == "" {
 		return sessionBead, nil
 	}
-	canonical := cfgAgent.QualifiedName()
+	canonical := cfgAgent.CanonicalPoolIdentity()
 	metadata := map[string]string{}
 	aliasNeedsUpdate := false
 	clearAliasConflictMetadata := func() {
@@ -2899,10 +2898,10 @@ func normalizeNonExpandingPoolSessionBead(
 	}
 	alias := strings.TrimSpace(sessionBead.Metadata["alias"])
 	deferredAlias := strings.TrimSpace(sessionBead.Metadata[poolAliasConflictMetadataKey])
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBeadAgentName(sessionBead)) > 0 && strings.TrimSpace(sessionBead.Metadata["agent_name"]) != canonical {
+	if nonCanonicalSingletonPoolIdentity(cfgAgent, sessionBeadAgentName(sessionBead)) && strings.TrimSpace(sessionBead.Metadata["agent_name"]) != canonical {
 		metadata["agent_name"] = canonical
 	}
-	if (nonExpandingPoolIdentitySlot(cfgAgent, alias) > 0 && alias != canonical) || (alias == "" && deferredAlias == canonical) {
+	if (nonCanonicalSingletonPoolIdentity(cfgAgent, alias) && alias != canonical) || (alias == "" && deferredAlias == canonical) {
 		for key, value := range session.UpdatedAliasMetadata(sessionBead.Metadata, canonical) {
 			metadata[key] = value
 		}
@@ -2917,7 +2916,7 @@ func normalizeNonExpandingPoolSessionBead(
 	}
 
 	var title *string
-	if nonExpandingPoolIdentitySlot(cfgAgent, sessionBead.Title) > 0 && strings.TrimSpace(sessionBead.Title) != canonical {
+	if nonCanonicalSingletonPoolIdentity(cfgAgent, sessionBead.Title) && strings.TrimSpace(sessionBead.Title) != canonical {
 		normalizedTitle := canonical
 		title = &normalizedTitle
 	}
@@ -2926,7 +2925,7 @@ func normalizeNonExpandingPoolSessionBead(
 	hasCanonicalAgentLabel := containsString(sessionBead.Labels, "agent:"+canonical)
 	for _, label := range sessionBead.Labels {
 		label = strings.TrimSpace(label)
-		if strings.HasPrefix(label, "agent:") && nonExpandingPoolIdentitySlot(cfgAgent, strings.TrimPrefix(label, "agent:")) > 0 {
+		if strings.HasPrefix(label, "agent:") && nonCanonicalSingletonPoolIdentity(cfgAgent, strings.TrimPrefix(label, "agent:")) {
 			removeLabels = append(removeLabels, label)
 		}
 	}
@@ -3057,6 +3056,33 @@ func nonExpandingPoolIdentitySlot(cfgAgent *config.Agent, identity string) int {
 	// Accept any numeric -N suffix, not only configured pool bounds: these
 	// beads are stale singleton artifacts and may have been written externally.
 	return resolvePersistedPoolIdentitySlot(cfgAgent, true, identity)
+}
+
+// nonCanonicalSingletonPoolIdentity reports whether identity is a non-canonical identity
+// form for cfgAgent's singleton that normalization should rewrite to the canonical
+// pool identity. Two forms qualify:
+//   - a synthesized slot identity such as "mayor-1" (see nonExpandingPoolIdentitySlot), and
+//   - the legacy import-binding-qualified identity "gastown.mayor", which predates
+//     CanonicalPoolIdentity() stripping the binding for city-scoped singletons.
+//
+// Recognizing the legacy form lets an existing "gastown.mayor" session bead migrate
+// to the bare "mayor" alias in place on the next reconcile, through the same
+// alias-rewrite path as slot normalization (no session restart). The legacy clause
+// is limited to imported city-scoped singletons (Dir == "", BindingName != "")
+// where the binding-qualified and canonical forms differ.
+func nonCanonicalSingletonPoolIdentity(cfgAgent *config.Agent, identity string) bool {
+	if cfgAgent == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	if nonExpandingPoolIdentitySlot(cfgAgent, identity) > 0 {
+		return true
+	}
+	identity = strings.TrimSpace(identity)
+	return identity != "" &&
+		cfgAgent.Dir == "" &&
+		cfgAgent.BindingName != "" &&
+		identity == cfgAgent.BindingQualifiedName() &&
+		identity != cfgAgent.CanonicalPoolIdentity()
 }
 
 func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
@@ -3694,7 +3720,7 @@ func findReusableCanonicalNonExpandingPoolSessionBead(
 	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return beads.Bead{}, false
 	}
-	canonical := cfgAgent.QualifiedName()
+	canonical := cfgAgent.CanonicalPoolIdentity()
 	for _, bead := range reusablePoolSessionBeads(bp, cfgAgent, template, used) {
 		if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
 			continue
@@ -3757,7 +3783,7 @@ func recordDeferredNonExpandingPoolAliasConflict(
 ) (beads.Bead, error) {
 	// The store write is authoritative; callers must use the returned bead
 	// rather than re-reading bp.sessionBeads for this ID in the same tick.
-	canonical := cfgAgent.QualifiedName()
+	canonical := cfgAgent.CanonicalPoolIdentity()
 	count := 0
 	if existing, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata[poolAliasConflictCountMetadataKey])); err == nil && existing > 0 {
 		count = existing
@@ -4314,7 +4340,7 @@ func findReusableCanonicalNonExpandingDependencyPoolSessionBead(
 	if bp == nil || bp.sessionBeads == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return beads.Bead{}, false
 	}
-	canonical := cfgAgent.QualifiedName()
+	canonical := cfgAgent.CanonicalPoolIdentity()
 	for _, bead := range reusableDependencyPoolSessionBeads(bp, template) {
 		if staleNonExpandingPoolSessionBead(cfgAgent, bead) {
 			continue
