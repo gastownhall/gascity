@@ -354,15 +354,22 @@ func TestSnapshotAddInfoConcurrentAndCoherent(t *testing.T) {
 		}),
 	})
 	const n = 16
+	// Pre-project the fixtures on the test goroutine: sessiontest.SeedBead can
+	// t.Fatalf, which is only valid from the test goroutine, so only the
+	// concurrency under test (snap.addInfo) runs inside the spawned goroutines.
+	added := make([]session.Info, n)
+	for i := 0; i < n; i++ {
+		id := "gc-add-" + string(rune('a'+i))
+		added[i] = sessiontest.SeedBead(t, wpoolSessionBead(id, "open", "claude", nil, map[string]string{
+			"template": "worker", "agent_name": "worker", "session_name": "s-" + id,
+		}))
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id := "gc-add-" + string(rune('a'+i))
-			snap.addInfo(sessiontest.SeedBead(t, wpoolSessionBead(id, "open", "claude", nil, map[string]string{
-				"template": "worker", "agent_name": "worker", "session_name": "s-" + id,
-			})))
+			snap.addInfo(added[i])
 		}(i)
 	}
 	wg.Wait()
