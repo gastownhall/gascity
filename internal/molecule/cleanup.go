@@ -18,45 +18,6 @@ import (
 // incomplete.
 const SubtreeClosedReason = "molecule cleanup: subtree force-closed by CloseSubtree"
 
-// gateBeadType is the bead Type stamped on async gate beads (human gates and
-// other wait conditions; see deferBeadRouting and the formula compiler). An
-// open gate paired with an open workflow-finalize in the same subtree is a
-// parked resumption handle that CloseSubtree must not force-close.
-const gateBeadType = "gate"
-
-// isGateBead reports whether the bead is an async gate bead.
-func isGateBead(b beads.Bead) bool {
-	return b.Type == gateBeadType
-}
-
-// isWorkflowFinalizeBead reports whether the bead is a graph workflow's
-// finalize control bead.
-func isWorkflowFinalizeBead(b beads.Bead) bool {
-	return b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize
-}
-
-// subtreeHasParkedGate reports whether the matched subtree holds the live
-// gate→finalize park handle: at least one open gate AND at least one open
-// workflow-finalize. The finalize is what proves the park is still live; an
-// open gate without a pending finalize is an ordinary sibling and closes
-// normally, preserving the pre-existing teardown behavior for non-gate
-// molecules.
-func subtreeHasParkedGate(matched []beads.Bead) bool {
-	var openGate, openFinalize bool
-	for _, bead := range matched {
-		if bead.Status == "closed" {
-			continue
-		}
-		if isGateBead(bead) {
-			openGate = true
-		}
-		if isWorkflowFinalizeBead(bead) {
-			openFinalize = true
-		}
-	}
-	return openGate && openFinalize
-}
-
 // ListSubtree returns the root bead and all transitive parent-child
 // descendants, including already-closed beads so nested open descendants are
 // still reachable through a closed intermediate node.
@@ -166,22 +127,9 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 		return cmp.Compare(a.ID, b.ID)
 	})
 
-	// A parked human-gate molecule keeps an open gate bead paired with an open
-	// workflow-finalize: the gate is the resumption handle and the finalize is
-	// the gate-driven work (merge, etc.) that must run once the human releases
-	// the gate. When the dispatch/loop bead closes, the autoclose hook reaches
-	// here via sling.CloseAttachedSubtree; force-closing the gate or the
-	// finalize would destroy that handle, so the finalize could never run.
-	// Detect the pair and preserve exactly those two structural beads while
-	// still force-closing every unrelated open sibling.
-	preservePark := subtreeHasParkedGate(matched)
-
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
 		if bead.ID == "" || bead.Status == "closed" {
-			continue
-		}
-		if preservePark && (isGateBead(bead) || isWorkflowFinalizeBead(bead)) {
 			continue
 		}
 		ids = append(ids, bead.ID)
