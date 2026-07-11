@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -131,7 +132,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 		return startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					info: sessionpkg.InfoFromPersistedBead(*session),
+					info: seedSessionInfo(*session),
 					tp: TemplateParams{
 						SessionName:  "sky",
 						TemplateName: "helper",
@@ -286,7 +287,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		session.Metadata = patch.Apply(session.Metadata)
 
 		result := finalizeDrainAckStoppedSession(
-			"", env.cfg, env.store, nil, sessionpkg.InfoFromPersistedBead(session), identity, true,
+			"", env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
 			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr,
 		)
 
@@ -295,7 +296,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		if got, err := env.store.Get(session.ID); err != nil || got.Status != "closed" {
 			t.Fatalf("store session status = %q (err %v), want closed (fixture must reach the recordStopped path)", got.Status, err)
 		}
-		if !result.applyTo(sessionpkg.InfoFromPersistedBead(session)).Closed {
+		if !result.applyTo(sessiontest.SeedBead(t, session)).Closed {
 			t.Fatalf("drain-ack result fold not Closed; the recordStopped path must MarkClosed the snapshot")
 		}
 		return reader
@@ -421,7 +422,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gascity--gc__worker",
 		})
 
-		recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
@@ -444,7 +445,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "worker-1",
 		})
 
-		recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] != "" {
@@ -464,7 +465,7 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gc-city-dog-1",
 		})
 
-		recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
@@ -490,7 +491,7 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 		"session_name": "gascity--gc__worker",
 	})
 
-	recordChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["quarantined_until"] == "" {
@@ -614,7 +615,7 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("bead load failure records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{}), errors.New("store unavailable"), nil)
+		recordSessionKillStop(sessionpkg.Info{}, errors.New("store unavailable"), nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the bead failed to load", points)
@@ -624,7 +625,7 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("empty session name records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{"session_name": "  "}}), nil, nil)
+		recordSessionKillStop(sessionpkg.Info{SessionNameMetadata: "  "}, nil, nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none for a blank session name", points)
@@ -634,10 +635,10 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("loaded bead records the stop", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{
-			"session_name": "gascity--gc__worker",
-			"agent_name":   "gascity/gc.worker",
-		}}), nil, nil)
+		recordSessionKillStop(sessionpkg.Info{
+			SessionNameMetadata: "gascity--gc__worker",
+			AgentName:           "gascity/gc.worker",
+		}, nil, nil)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker", "reason": "killed", "status": "ok"}) {
@@ -655,9 +656,9 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 		// or template passes the session-name guard yet resolves to an empty
 		// agent identity. The RecordAgentStop backstop must drop it so the
 		// counter is never polluted with a blank, unjoinable agent series.
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{
-			"session_name": "gascity--gc__worker",
-		}}), nil, nil)
+		recordSessionKillStop(sessionpkg.Info{
+			SessionNameMetadata: "gascity--gc__worker",
+		}, nil, nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the agent identity resolves empty", points)
@@ -869,13 +870,13 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 	}
 
 	result := finalizeDrainAckStoppedSession(
-		"", env.cfg, env.store, nil, sessionpkg.InfoFromPersistedBead(session), identity, true,
+		"", env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
 		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr,
 	)
 
 	// W-tick dropped the raw session.Status="closed" mirror; the witness close is
 	// carried by result.witnessInfo (Closed), which applyTo folds onto the snapshot.
-	if !result.applyTo(sessionpkg.InfoFromPersistedBead(session)).Closed {
+	if !result.applyTo(sessiontest.SeedBead(t, session)).Closed {
 		t.Fatalf("witness-branch result fold not Closed; the witness path must fold the authoritative closed Info")
 	}
 	if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
@@ -903,7 +904,7 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-dog-3-legacy",
 		})
 
-		recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
@@ -931,7 +932,7 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-fenrir-legacy",
 		})
 
-		recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
@@ -963,7 +964,7 @@ func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name": "s-dog-3-legacy",
 		})
 
-		recordChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
@@ -991,7 +992,7 @@ func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name": "s-wolf-legacy",
 		})
 
-		recordChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
 		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
