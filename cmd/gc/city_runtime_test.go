@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -3033,6 +3034,84 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 	}
 	if !sp.IsRunning("worker-bd-123") {
 		t.Fatal("recovered tick should keep the worker running")
+	}
+}
+
+// The idle-claim backstop must run even for a runtime that CAN report activity
+// (tmux/fake). Activity reporting makes the controller SEE a warm slot as alive
+// but never delivers its claim nudge, so an idle slot handed a trigger bead it
+// never began needs this demand-driven wake exactly as herdr does. Before the
+// call-site un-gate this was skipped whenever CanReportActivity was true,
+// leaving tmux warm slots with no wake path. The marker is pre-seeded past the
+// grace window so a single tick nudges (attempt count 0 -> 1).
+func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime(t *testing.T) {
+	sp := runtime.NewFake()
+	if !sp.Capabilities().CanReportActivity {
+		t.Fatal("precondition: fake runtime must report activity for this un-gate test to be meaningful")
+	}
+	if err := sp.Start(context.Background(), "worker-bd-idle", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	staleObs := time.Now().Add(-2 * idleClaimNudgeGrace).UTC().Format(time.RFC3339)
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":                    "worker-bd-idle",
+			"template":                        "worker",
+			"agent_name":                      "worker",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           "awake",
+			"generation":                      "1",
+			beadmeta.TriggerBeadIDMetadataKey: "w-idle",
+			// Pre-seed the backstop marker so we are already past the observe
+			// grace on attempt 0: a single tick should nudge.
+			idleClaimNudgeTriggerKey: "w-idle",
+			idleClaimNudgeCountKey:   "0",
+			idleClaimNudgeAtKey:      staleObs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), Nudge: "Run gc hook --claim --json now."}}},
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	result := DesiredStateResult{
+		State:            map[string]TemplateParams{},
+		ScaleCheckCounts: map[string]int{"worker": 0},
+		AssignedWorkBeads: []beads.Bead{
+			// Open + unassigned == unclaimed: the slot's trigger bead the polecat
+			// never began. workBead sets gc.routed_to but leaves the assignee empty.
+			workBead("w-idle", "worker", "", "open", 5),
+		},
+	}
+	cr.beadReconcileTick(context.Background(), result, cr.loadSessionBeadSnapshot(), nil, false)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after tick: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("tick unexpectedly closed the idle pool session: %+v", got)
+	}
+	if c := got.Metadata[idleClaimNudgeCountKey]; c != "1" {
+		t.Fatalf("idle-claim nudge did not fire for a report-activity runtime: attempt count = %q, want 1", c)
 	}
 }
 

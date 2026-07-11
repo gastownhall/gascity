@@ -2343,16 +2343,38 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
 	// Idle recovery: re-nudge pool slots that are running but never claimed
-	// their assigned trigger bead. Gated to runtimes the controller cannot see
-	// activity for (herdr): tmux self-heals a missed startup nudge through its
-	// relaunch/respawn path and reports activity, so it neither needs nor runs
-	// this. See nudgeStalledPoolClaims for the churn-free state machine.
-	if !cr.sp.Capabilities().CanReportActivity {
+	// their assigned trigger bead. Runs for every runtime, not just herdr.
+	// tmux's relaunch/respawn path only heals a session that DIED; it does
+	// nothing for a session that is alive but idle at its prompt on a trigger
+	// bead it never began (a warm slot resumed onto work whose submit-CR was
+	// swallowed, or that survived a `gc restart` and was never re-Started).
+	// Activity reporting lets the controller SEE such a slot as alive but never
+	// delivers the claim nudge, so tmux has no demand-driven wake for it. The
+	// backstop is churn-free by construction for either runtime: it keys on the
+	// trigger bead still being open (the instant a polecat claims, the bead
+	// flips to in_progress and stops matching), persists its bounded
+	// observe→nudge→backoff state on the session bead, and never spams a tick.
+	// See nudgeStalledPoolClaims for the full invariant.
+	//
+	// Port-time perf adaptation (Strategy-R reapply of #1129): main's version
+	// passes the reconciler's raw `open` snapshot slice, but on this typed tree
+	// session.Info does not project the idle-claim marker keys, so this lane
+	// does its own loadSessionBeads edge read. Un-gated, that store list would
+	// run on every reconcile tick for every runtime. Skip the whole block when
+	// no work is routed: nudgeStalledPoolClaims can only nudge a slot whose
+	// trigger bead is present in assignedWorkBeads (its workByID index is built
+	// from that slice), so an empty assignedWorkBeads provably yields no nudge.
+	// A slot's open trigger bead is always assigned — an unassigned pool-routed
+	// bead never stamps trigger_bead_id (see idle-claim-nudge-followups.md) — so
+	// an empty assignedWorkBeads means no slot has an open trigger to act on;
+	// the only skipped effect, clearing a stale marker, is re-derived on the
+	// next tick that carries the bead. Behavior-neutral on healthy snapshots.
+	if len(assignedWorkBeads) > 0 {
 		phaseStart = time.Now()
-		// The idle-claim nudge lane reads idle-claim marker keys that session.Info does
-		// not project, so it needs raw beads. Now that the snapshot no longer holds a
-		// raw half, this fallback branch (only runs for runtimes that cannot report
-		// activity) does its own edge read rather than a snapshot raw-half read.
+		// The idle-claim nudge lane reads idle-claim marker keys that session.Info
+		// does not project, so it needs raw beads. Now that the snapshot no longer
+		// holds a raw half, this branch does its own edge read rather than a
+		// snapshot raw-half read.
 		if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
 		} else {
