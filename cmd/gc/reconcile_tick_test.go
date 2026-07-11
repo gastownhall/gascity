@@ -165,9 +165,10 @@ var infoByIDTupleAssign = regexp.MustCompile(`^\s*infoByID\[[^\]]*\]\s*,[^=]*=[^
 // TestReconcileTickFoldFrontDoor forbids reintroducing a direct
 // `infoByID[...] =` fold in session_reconciler.go: every manual mutation of the
 // tick snapshot must route through the reconcileTick front door (apply /
-// applyResult / markClosed / set) so a forgotten fold cannot silently desync the
-// cross-session min-floor / awake / drain scans from the store. The only place a
-// bare `t.infoByID[...] =` write is allowed is reconcile_tick.go itself.
+// applyResult / markClosed / set / applyStore / applyOptimistic) so a forgotten
+// fold cannot silently desync the cross-session min-floor / awake / drain scans
+// from the store. The only place a bare `t.infoByID[...] =` write is allowed is
+// reconcile_tick.go itself.
 func TestReconcileTickFoldFrontDoor(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -184,7 +185,7 @@ func TestReconcileTickFoldFrontDoor(t *testing.T) {
 			code = code[:idx] // strip line/inline comment
 		}
 		if infoByIDBareAssign.MatchString(code) || infoByIDTupleAssign.MatchString(code) {
-			t.Errorf("session_reconciler.go:%d writes infoByID directly (%q); route the fold through the reconcileTick front door (tick.apply / tick.applyResult / tick.markClosed / tick.set) instead", i+1, strings.TrimSpace(line))
+			t.Errorf("session_reconciler.go:%d writes infoByID directly (%q); route the fold through the reconcileTick front door (tick.apply / tick.applyResult / tick.markClosed / tick.set / tick.applyStore / tick.applyOptimistic) instead", i+1, strings.TrimSpace(line))
 		}
 	}
 }

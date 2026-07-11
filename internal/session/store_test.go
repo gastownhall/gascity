@@ -1,10 +1,12 @@
 package session
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -535,4 +537,109 @@ func opsOf(calls []beadstest.RecordedCall) []string {
 		out = append(out, c.Op)
 	}
 	return out
+}
+
+// updateFailStore is a beads.Store whose Update always fails; every other op
+// delegates to the embedded store. It proves UpdateMetadataInfo's all-or-nothing
+// contract: a rejected Update must leave both the durable row and the caller's
+// Info untouched.
+type updateFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s updateFailStore) Update(string, beads.UpdateOpts) error { return s.err }
+
+// TestUpdateMetadataInfoEmitsSingleUpdateWithFullPatch pins the one-operation
+// contract for the pool trigger/provenance cluster (council finding 1): the whole
+// patch is written in exactly ONE Store.Update carrying the full metadata map —
+// NOT decomposed into per-key SetMetadata / SetMetadataBatch ops, whose per-key
+// decomposition on exec:/partial-write backends could commit a mixed provenance
+// row. On success the returned Info equals the local fold pre.ApplyPatch(patch).
+func TestUpdateMetadataInfoEmitsSingleUpdateWithFullPatch(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	patch := MetadataPatch{
+		beadmeta.TriggerBeadIDMetadataKey:       "gcg-123",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig-a",
+		beadmeta.BrainParentSIDMetadataKey:      "sid-parent",
+		beadmeta.PackMetadataKey:                "packs/x",
+		beadmeta.PackWorkspaceMetadataKey:       "ws-1",
+		beadmeta.WorkDirMetadataKey:             "/work/dir",
+	}
+
+	got, err := is.UpdateMetadataInfo(pre, patch)
+	if err != nil {
+		t.Fatalf("UpdateMetadataInfo: %v", err)
+	}
+
+	updates := rec.CallsForOp("Update")
+	if len(updates) != 1 {
+		t.Fatalf("want exactly 1 Update op, got %d (all ops: %v)", len(updates), opsOf(rec.Calls()))
+	}
+	if updates[0].ID != "s-1" {
+		t.Errorf("Update target id = %q, want s-1", updates[0].ID)
+	}
+	if !reflect.DeepEqual(updates[0].Opts.Metadata, map[string]string(patch)) {
+		t.Errorf("Update metadata = %#v, want the FULL patch %#v", updates[0].Opts.Metadata, map[string]string(patch))
+	}
+	// One-operation contract: no per-key decomposition.
+	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
+		t.Errorf("SetMetadata ops = %d, want 0 (one-Update contract)", n)
+	}
+	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
+		t.Errorf("SetMetadataBatch ops = %d, want 0 (one-Update contract)", n)
+	}
+	// Success folds the patch onto Info, byte-identical to a local ApplyPatch.
+	if want := pre.ApplyPatch(patch); !reflect.DeepEqual(got, want) {
+		t.Errorf("returned Info = %#v, want local fold %#v", got, want)
+	}
+	if got.TriggerBeadID != "gcg-123" || got.Pack != "packs/x" || got.WorkDirCanonical != "/work/dir" {
+		t.Errorf("returned Info did not fold the trigger cluster: %+v", got)
+	}
+}
+
+// TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged proves
+// the all-or-nothing guarantee: when the single Update fails, NOTHING is persisted
+// (the durable row keeps its pre-write metadata) and the returned Info is the
+// INPUT unchanged, so a log-and-continue caller never advances onto a half-applied
+// provenance cluster (council finding 1).
+func TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	is := NewStore(beads.SessionStore{Store: updateFailStore{Store: mem, err: errors.New("update rejected")}})
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	patch := MetadataPatch{
+		beadmeta.TriggerBeadIDMetadataKey:       "gcg-123",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig-a",
+		beadmeta.BrainParentSIDMetadataKey:      "sid-parent",
+	}
+
+	got, err := is.UpdateMetadataInfo(pre, patch)
+	if err == nil {
+		t.Fatal("UpdateMetadataInfo: want error on failed Update, got nil")
+	}
+	// Returned Info is the input UNCHANGED — no partial fold.
+	if !reflect.DeepEqual(got, pre) {
+		t.Errorf("returned Info = %#v, want INPUT unchanged %#v", got, pre)
+	}
+	// Nothing persisted: the durable row still has none of the cluster keys.
+	after, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get after failed update: %v", err)
+	}
+	for k := range patch {
+		if v := after.Metadata[k]; v != "" {
+			t.Errorf("durable row key %q = %q after failed Update, want unset (all-or-nothing)", k, v)
+		}
+	}
 }

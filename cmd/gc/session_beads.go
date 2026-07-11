@@ -634,6 +634,13 @@ func retireDuplicateConfiguredNamedSessionRows(
 			if setMetaBatch(sessionFrontDoor(store), info.ID, batch, stderr) != nil {
 				continue
 			}
+			// S19 Stage 3 shadow: record the legacy canonical-identity clears so the
+			// converge comparator can attribute this owned-key delta (no-op unless the
+			// shadow harness is enabled). Mirrors the raw sibling
+			// (retireDuplicateConfiguredNamedSessionBeads); without it a
+			// GC_CONVERGE_SHADOW soak sees the retirement's canonical-key clears with no
+			// recorder entry and false-classifies them as foreign_write (council finding 6).
+			recordLegacyCompareWrites(info.ID, "retireDuplicateConfiguredNamedSessionRows", batch)
 			if err := sessionFrontDoor(store).SetStatusOpen(info.ID); err != nil {
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", info.ID, err) //nolint:errcheck
 				continue

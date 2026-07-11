@@ -3029,16 +3029,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					})
 					telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					// Persist + fold the sleep onto the snapshot in one step (Step 6d
-					// write-returns-Info): the same-tick re-wake's awake-scan read of
-					// state=asleep needs the sleep on the snapshot. Base is coherent (the
+					// OPTIMISTIC fold (origin/main parity): the kill already happened, so
+					// the sleep MUST land on the snapshot even if its persistence fails —
+					// the same-tick re-wake's awake-scan read of state=asleep needs it, and
+					// a dropped fold would leave the killed session looking awake and
+					// respawn it this same tick (council finding 2). applyOptimistic writes
+					// through the front door (error discarded, matching the former
+					// `_ = ApplyPatch`) and always folds locally. Base is coherent (the
 					// aggregating refresh @~2692 synced it and the intervening drift blocks
 					// `continue`). Wake fairness reads the captured Info twin
 					// (wakeFairnessTime → Info.LastWokeAt), which this fold keeps coherent
 					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
 					// coupling mirror is gone (WI-6 R4): its only consumer was the
 					// start-execution cluster's raw bead pointer, now deleted.
-					tick.applyStore(id, sessionFrontDoor(store), batch)
+					tick.applyOptimistic(id, sessionFrontDoor(store), batch)
 					alive = false
 				}
 			}
@@ -3108,16 +3112,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// last_woke_at and setting state to asleep. The wake logic
 					// below will pick it up.
 					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
-					// Persist + fold the sleep onto the snapshot in one step (Step 6d
-					// write-returns-Info): the idle kill falls through to the wakeTargets
-					// append below, whose awake-scan read of state=asleep drives a same-tick
-					// re-wake. Base coherent (aggregating refresh @~2692 + intervening
-					// `continue`s). Wake fairness reads the captured Info twin
-					// (wakeFairnessTime → Info.LastWokeAt), which this fold keeps coherent
-					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
-					// coupling mirror is gone (WI-6 R4): its only consumer was the
-					// start-execution cluster's raw bead pointer, now deleted.
-					tick.applyStore(id, sessionFrontDoor(store), batch)
+					// OPTIMISTIC fold (origin/main parity): the idle kill already happened,
+					// so the sleep MUST land on the snapshot even if its persistence fails.
+					// The idle kill falls through to the wakeTargets append below, whose
+					// awake-scan read of state=asleep drives the same-tick re-wake decision;
+					// a dropped fold on write failure would leave the killed session looking
+					// awake and respawn it this same tick (council finding 2).
+					// applyOptimistic writes through the front door (error discarded,
+					// matching the former `_ = ApplyPatch`) and always folds locally. Base
+					// coherent (aggregating refresh @~2692 + intervening `continue`s). Wake
+					// fairness reads the captured Info twin (wakeFairnessTime →
+					// Info.LastWokeAt), which this fold keeps coherent with SleepPatch's
+					// cleared last_woke_at. The former raw session.Metadata coupling mirror
+					// is gone (WI-6 R4): its only consumer was the start-execution cluster's
+					// raw bead pointer, now deleted.
+					tick.applyOptimistic(id, sessionFrontDoor(store), batch)
 					alive = false
 				}
 			}
@@ -3398,14 +3407,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			cancelSessionDrainInfo(info, sp, dt)
 			clearCompletedIdleProbe(target.info.ID, dt)
 			if info.SleepIntent == "idle-stop-pending" {
-				// Persist + fold the intent clear in one step (Step 6d write-returns-Info).
-				// This runs on an ALIVE session (the shouldWake && alive arm), which never
-				// enters startCandidates, and sleep_intent is not read off the raw
-				// session bead anywhere downstream this tick — so Step 5c dropped the
-				// raw session.Metadata mirror.
-				// The single-key clear now rides ApplyPatchInfo's SetMetadataBatch
-				// (empty-string clear), byte-equivalent to the raw SetMetadata it replaced.
-				tick.applyStore(target.info.ID, sessionFrontDoor(store), sessionpkg.MetadataPatch{"sleep_intent": ""})
+				// OPTIMISTIC fold (origin/main parity): main cleared sleep_intent with an
+				// error-ignored write and folded the clear UNCONDITIONALLY (tick.apply),
+				// so the local fold must survive a failed write here too. This runs on an
+				// ALIVE session (the shouldWake && alive arm), which never enters
+				// startCandidates, and sleep_intent is not read off the raw session bead
+				// anywhere downstream this tick — so Step 5c dropped the raw
+				// session.Metadata mirror. The single-key clear rides the front door's
+				// SetMetadataBatch (empty-string clear), byte-equivalent to the raw
+				// SetMetadata it replaced.
+				tick.applyOptimistic(target.info.ID, sessionFrontDoor(store), sessionpkg.MetadataPatch{"sleep_intent": ""})
 			}
 		}
 

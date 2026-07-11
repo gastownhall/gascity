@@ -76,6 +76,38 @@ func (s *Store) ApplyPatchInfo(info Info, patch MetadataPatch) (Info, error) {
 	return info.ApplyPatch(patch), nil
 }
 
+// UpdateMetadataInfo persists patch for info.ID via a SINGLE
+// Store.Update(id, UpdateOpts{Metadata: patch}) and folds the patch onto Info on
+// success. It is the write-returns-Info chokepoint for provenance clusters that
+// must commit ALL-OR-NOTHING across every supported backend.
+//
+// One-operation contract (why this is NOT ApplyPatchInfo): ApplyPatch routes
+// through SetMetadataBatch, which some backends decompose into one op PER KEY
+// (the exec: store issues one `bd` subprocess per map key, in nondeterministic
+// order), so a failure on the Nth key leaves an arbitrary subset of the cluster
+// committed — a mixed identity/provenance row. A single Update carries the whole
+// metadata map in one backend operation: exec: emits one JSON --set-metadata
+// subprocess, native Dolt keeps its read/merge/write transaction isolation, and
+// the caching/DoltLite stores keep their existing single-write refresh path. The
+// trigger/provenance cluster (trigger id, store ref, brain parent, pack,
+// workspace, workdir) therefore commits atomically or not at all.
+//
+// An empty patch is a no-op: it returns info unchanged with no write. On a
+// persist error the INPUT info is returned UNCHANGED with the error, so a caller
+// that logs-and-continues keeps its pre-write in-memory Info (never a partially
+// applied fold) and the durable row is left exactly as the backend left it. On
+// success the fold is info.ApplyPatch(patch) — byte-identical to re-projecting
+// the patched bead, exactly as ApplyPatchInfo folds.
+func (s *Store) UpdateMetadataInfo(info Info, patch MetadataPatch) (Info, error) {
+	if len(patch) == 0 {
+		return info, nil
+	}
+	if err := s.store.Update(info.ID, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return info, err
+	}
+	return info.ApplyPatch(patch), nil
+}
+
 // SetState heals a session to the given lifecycle state with a state_reason.
 // It replaces the canonical state-heal SetMetadataBatch(id, {state, state_reason})
 // in session_reconcile.go (healState / healStateWithRollback).

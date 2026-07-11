@@ -2732,16 +2732,20 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 // bindPoolSessionTriggerBead reconciles a pool session bead's trigger/pack/
 // workspace/work-dir cluster to its dispatch request. The SESSION side is typed
 // session.Info (WI-5 W3): it computes the byte-identical key diff via
-// computePoolTriggerBindingPatch and — the write-routing fix — persists it
-// through the session front door (Store.ApplyPatchInfo → SetMetadataBatch). The
-// persisted bead write is byte-identical to the beadStore.Update it replaced
-// (same sorted --set-metadata args); only the FAILURE-path error text changes,
-// now carrying the front door's wrap ("setting metadata on..." vs "updating
-// bead..."). The patch folds onto the returned Info in the same step. It
-// returns the bound Info; the caller folds the returned boundInfo into the
-// Info-taking resolveTemplateForSessionBeadInfo chain (WI-5 W4 dropped the
-// former raw-bead mirror and retired the raw wrapper). A dry-run build
-// with no store folds locally without a write.
+// computePoolTriggerBindingPatch and persists it through the session front
+// door's ONE-Update chokepoint (Store.UpdateMetadataInfo → single
+// Store.Update(UpdateOpts{Metadata})). The write is byte-identical to the
+// beadStore.Update this path used before the typed migration (same sorted
+// --set-metadata args in one backend op), which the SetMetadataBatch route it
+// briefly took could not guarantee: on an exec: or partial-write backend a
+// per-key decomposition can commit an arbitrary subset of the trigger/store-ref/
+// brain-parent/pack/workspace/workdir cluster, leaving a mixed provenance row.
+// UpdateMetadataInfo commits the whole cluster all-or-nothing and folds the patch
+// onto the returned Info only on success; on failure it returns info UNCHANGED
+// with the error. It returns the bound Info; the caller folds the returned
+// boundInfo into the Info-taking resolveTemplateForSessionBeadInfo chain (WI-5 W4
+// dropped the former raw-bead mirror and retired the raw wrapper). A dry-run
+// build with no store folds locally without a write.
 func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, error) {
 	if info.ID == "" {
 		return info, nil
@@ -2754,7 +2758,7 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if bp == nil || bp.beadStore == nil {
 		return info.ApplyPatch(patch), nil
 	}
-	boundInfo, err := sessionFrontDoor(bp.beadStore).ApplyPatchInfo(info, patch)
+	boundInfo, err := sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
 	if err != nil {
 		return info, err
 	}

@@ -102,16 +102,43 @@ func (t *reconcileTick) set(id string, info sessionpkg.Info) sessionpkg.Info {
 	return info
 }
 
-// applyStore is the atomic store-write + snapshot-fold mutator: it persists
-// patch through the session front door (ApplyPatchInfo) and folds the returned
-// coherent Info into the tick snapshot in one call. It carries the same
-// discarded-error semantics the open-coded `infoByID[id], _ = front.ApplyPatchInfo(...)`
-// tuple sites had: on a store-write failure ApplyPatchInfo still returns the
-// locally-folded Info, so the snapshot stays coherent for the rest of the tick
-// and the store self-heals on a later pass. Routing tuples through this mutator
-// lets the fold front-door guard forbid the bare tuple form outright.
+// applyStore is the store-write + snapshot-fold mutator whose fold REFLECTS
+// PERSISTENCE: it persists patch through the session front door (ApplyPatchInfo)
+// and folds the returned Info into the tick snapshot in one call. ApplyPatchInfo
+// folds the patch onto Info only on a SUCCESSFUL write; on a store-write failure
+// it returns the INPUT Info UNCHANGED (internal/session/store.go), so the
+// discarded error here leaves the snapshot entry exactly reflecting what the
+// store holds. Use applyStore where a stale snapshot value on write failure is
+// correct — the value is not read again this tick, or must not advance past a
+// write the store rejected. Routing tuples through this mutator lets the fold
+// front-door guard forbid the bare tuple form outright.
+//
+// Contrast applyOptimistic, whose local fold must SURVIVE a failed write (the
+// kill/sleep sites).
 func (t *reconcileTick) applyStore(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) sessionpkg.Info {
 	next, _ := front.ApplyPatchInfo(t.infoByID[id], patch)
+	t.infoByID[id] = next
+	return next
+}
+
+// applyOptimistic is the kill/sleep-site mutator whose local fold SURVIVES a
+// failed write. It attempts the durable write (front.ApplyPatch; the error is
+// intentionally discarded, matching the pre-migration `_ = ApplyPatch(...)` at
+// these sites) and then ALWAYS folds patch onto the snapshot entry for id.
+//
+// This is required at sites that killed a session's runtime and then folded
+// SleepPatch (or a marker clear) UNCONDITIONALLY on origin/main: the kill already
+// happened, so the snapshot MUST record the sleep even if its persistence failed.
+// If the fold were dropped on write failure (applyStore's behavior), the killed
+// session would still look awake to the same-tick awake scan and be respawned in
+// the same tick — or its stale last_woke_at would skew wake-budget fairness and
+// steal a peer's slot. applyStore is wrong here for exactly that reason: it
+// reflects the (failed) persistence rather than the completed kill.
+func (t *reconcileTick) applyOptimistic(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) sessionpkg.Info {
+	// Error intentionally discarded (matches origin/main's `_ = ApplyPatch` at these
+	// sites): the local fold below must survive a failed sleep write.
+	_ = front.ApplyPatch(id, patch)
+	next := t.infoByID[id].ApplyPatch(patch)
 	t.infoByID[id] = next
 	return next
 }
