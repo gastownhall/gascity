@@ -26,7 +26,7 @@ import (
 // stand-in for the raw wakeReasons helper deleted in WI-6 R2, keeping these
 // characterization tests exercising the exact same REASON-column output.
 func wakeReasonsForBead(b beads.Bead, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, workSet, readyWaitSet map[string]bool, clk clock.Clock) []WakeReason {
-	return wakeReasonsInfo(sessionpkg.InfoFromPersistedBead(b), cfg, sp, poolDesired, workSet, readyWaitSet, clk)
+	return wakeReasonsInfo(seedSessionInfo(b), cfg, sp, poolDesired, workSet, readyWaitSet, clk)
 }
 
 // testStore wraps a bead slice for SetMetadata tracking in tests.
@@ -87,6 +87,34 @@ func makeBead(id string, meta map[string]string) beads.Bead {
 	}
 }
 
+// seedSessionInfo projects a raw session fixture bead to session.Info the way
+// production reads a persisted session: it seeds the bead VERBATIM into a
+// throwaway session front door (beads.NewMemStoreFrom preserves ID, Status,
+// CreatedAt, Labels, and Metadata) and reads it back through Store.Get, which
+// runs the InfoFromPersistedBead codec internally. The projection is therefore
+// byte-identical to cracking the bead directly, but no raw *beads.Bead reaches
+// the reconciler classifiers under test — the codec stays confined to the store
+// edge.
+//
+// It stamps Type = sessionBeadType because the makeBead fixtures omit it: they
+// were written for the raw codec, which projects any bead, whereas the front
+// door narrows to session beads (IsSessionBeadOrRepairable) and would otherwise
+// reject a typeless, label-less bead. Only Info.Type moves (""→"session");
+// Labels, CreatedAt, Status→Closed, and every Metadata field are preserved
+// verbatim. No reconciler classifier reads Info.Type (the sole label reader,
+// sessionBeadAgentNameInfo, keys off "agent:"-prefixed labels, which this does
+// not touch), so every field the consumers read round-trips unchanged. It
+// panics on a seed/read failure, matching reconcilerTestEnv.sessionInfo's
+// fail-fast style — a rejected fixture is a test-setup bug, not a runtime path.
+func seedSessionInfo(b beads.Bead) sessionpkg.Info {
+	b.Type = sessionBeadType
+	info, err := sessionFrontDoor(beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)).Get(b.ID)
+	if err != nil {
+		panic("seedSessionInfo: " + err.Error())
+	}
+	return info
+}
+
 // healStateInfo is the test shim for the retired raw healState (WI-6 R3). It
 // runs the Info-form heal and mirrors the returned batch back onto the in-memory
 // bead, reproducing the raw healState's front-door write + bead mirror so the
@@ -96,7 +124,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 	if session == nil {
 		return
 	}
-	batch := healStateWithRollbackInfo(sessionpkg.InfoFromPersistedBead(*session), alive, sessFront, clk, 0, true)
+	batch := healStateWithRollbackInfo(seedSessionInfo(*session), alive, sessFront, clk, 0, true)
 	if session.Metadata == nil && len(batch) > 0 {
 		session.Metadata = make(map[string]string, len(batch))
 	}
@@ -108,7 +136,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 // healStatePatchFromBead is the test shim for the retired raw healStatePatch /
 // healStatePatchWithRollback: it projects the bead to Info and calls the Info form.
 func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
-	return healStatePatchWithRollbackInfo(sessionpkg.InfoFromPersistedBead(session), alive, clk, startupTimeout, rollbackAvailable)
+	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, clk, startupTimeout, rollbackAvailable)
 }
 
 // syncBeadFromStore mirrors the persisted metadata writes for session.ID back
@@ -389,7 +417,7 @@ func TestStaleCreatingStateUsesPendingCreateStartedAtWhenPresent(t *testing.T) {
 			})
 			session.CreatedAt = tt.createdAt
 
-			if got := staleCreatingStateInfo(sessionpkg.InfoFromPersistedBead(session), clk); got != tt.wantStale {
+			if got := staleCreatingStateInfo(seedSessionInfo(session), clk); got != tt.wantStale {
 				t.Fatalf("staleCreatingState = %v, want %v", got, tt.wantStale)
 			}
 		})
@@ -1098,7 +1126,7 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
 
 	if got.HeldUntil != "" {
 		t.Error("expected held_until to be cleared")
@@ -1123,7 +1151,7 @@ func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 		"sleep_reason": "user-hold",
 	})
 
-	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
 
 	if got.HeldUntil != future {
 		t.Error("active hold should not be cleared")
@@ -1141,7 +1169,7 @@ func TestHealExpiredTimers_ClearsExpiredQuarantine(t *testing.T) {
 		"sleep_reason":      "quarantine",
 	})
 
-	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
 
 	if got.QuarantinedUntil != "" {
 		t.Error("expected quarantined_until to be cleared")
@@ -1183,7 +1211,7 @@ func TestHealExpiredTimers_ExpiredHoldThenExpiredQuarantineSameCall(t *testing.T
 		"churn_count":       "3",
 	})
 
-	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
 
 	for _, tc := range []struct {
 		key, got, want string
@@ -1209,7 +1237,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, true, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, true, dt, sessionFrontDoor(store), clk, nil); stab {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -1225,7 +1253,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	_, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Error("rapid exit should report stability failure")
@@ -1253,7 +1281,7 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 		"wake_attempts":        "0",
 	})
 
-	_, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("in-flight pending create should not be counted as a rapid exit")
@@ -1277,7 +1305,7 @@ func TestCheckStability_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *
 		"wake_attempts":        "0",
 	})
 
-	_, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("pending_create_claim should suppress stability counting until create recovery clears the claim")
@@ -1298,7 +1326,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -1314,7 +1342,7 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
 		t.Error("session that lived past threshold should not be stability failure")
 	}
 }
@@ -1333,7 +1361,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	_, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), cfg, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), cfg, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("subprocess rapid exit should not be counted as a crash")
@@ -1355,7 +1383,7 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 		"wake_attempts": "4", // one below threshold
 	})
 
-	recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "5" {
@@ -1378,7 +1406,7 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 		"wake_attempts": "1",
 	})
 
-	recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "2" {
@@ -1399,7 +1427,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["session_key"] != "" {
@@ -1419,7 +1447,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["started_config_hash"] != "" {
@@ -1438,7 +1466,7 @@ func TestClearWakeFailures(t *testing.T) {
 		"quarantined_until": "2026-03-08T12:00:00Z",
 	})
 
-	clearWakeFailures(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store))
+	clearWakeFailures(seedSessionInfo(session), sessionFrontDoor(store))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "0" {
@@ -1465,7 +1493,7 @@ func TestClearWakeFailuresSkipsNoOpClear(t *testing.T) {
 			store := newTestStore()
 			session := makeBead("b1", tt.metadata)
 
-			clearWakeFailures(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store))
+			clearWakeFailures(seedSessionInfo(session), sessionFrontDoor(store))
 
 			if store.metadataBatchCalls != 0 {
 				t.Fatalf("SetMetadataBatch called %d times with %v, want 0", store.metadataBatchCalls, store.metadataBatchPatches)
@@ -1505,7 +1533,7 @@ func TestClearWakeFailuresWritesOnlyChangedFields(t *testing.T) {
 			store := newTestStore()
 			session := makeBead("b1", tt.metadata)
 
-			clearWakeFailures(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store))
+			clearWakeFailures(seedSessionInfo(session), sessionFrontDoor(store))
 
 			if store.metadataBatchCalls != 1 {
 				t.Fatalf("SetMetadataBatch called %d times, want 1", store.metadataBatchCalls)
@@ -1537,7 +1565,7 @@ func TestStableLongEnough(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"last_woke_at": tt.lastWoke,
 			})
-			got := stableLongEnoughInfo(sessionpkg.InfoFromPersistedBead(session), clk)
+			got := stableLongEnoughInfo(seedSessionInfo(session), clk)
 			if got != tt.want {
 				t.Errorf("stableLongEnoughInfo = %v, want %v", got, tt.want)
 			}
@@ -1565,7 +1593,7 @@ func TestSessionIsQuarantined(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"quarantined_until": tt.qVal,
 			})
-			got := sessionIsQuarantinedInfo(sessionpkg.InfoFromPersistedBead(session), clk)
+			got := sessionIsQuarantinedInfo(seedSessionInfo(session), clk)
 			if got != tt.want {
 				t.Errorf("sessionIsQuarantinedInfo = %v, want %v", got, tt.want)
 			}
@@ -1829,7 +1857,7 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	})
 	inFlight.CreatedAt = inFlightAt
 
-	if pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(inFlight), clk, startupTimeout) {
+	if pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(inFlight), clk, startupTimeout) {
 		t.Fatal("configured startup lease reported expired while Start is still in flight")
 	}
 	got := healStatePatchFromBead(inFlight, false, clk, startupTimeout, true)
@@ -1849,7 +1877,7 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	})
 	expired.CreatedAt = expiredAt
 
-	if !pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(expired), clk, startupTimeout) {
+	if !pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(expired), clk, startupTimeout) {
 		t.Fatal("configured startup lease stayed active after startup timeout and stale-key delay elapsed")
 	}
 	got = healStatePatchFromBead(expired, false, clk, startupTimeout, true)
@@ -2308,7 +2336,7 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 	if session.Metadata["started_config_hash"] != "" {
 		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
 	}
-	_, stab := checkStability(sessionpkg.InfoFromPersistedBead(session), nil, false, nil, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, nil, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Fatal("checkStability should record the rapid exit")
@@ -2415,7 +2443,7 @@ func TestSessionWakeAttempts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		session := makeBead("b1", map[string]string{"wake_attempts": tt.val})
-		got := sessionWakeAttemptsInfo(sessionpkg.InfoFromPersistedBead(session))
+		got := sessionWakeAttemptsInfo(seedSessionInfo(session))
 		if got != tt.want {
 			t.Errorf("sessionWakeAttemptsInfo(%q) = %d, want %d", tt.val, got, tt.want)
 		}
@@ -2508,7 +2536,7 @@ func TestIsKnownState_KnownStates(t *testing.T) {
 	}
 	for _, state := range known {
 		session := makeBead("b1", map[string]string{"state": state})
-		if !isKnownStateInfo(sessionpkg.InfoFromPersistedBead(session)) {
+		if !isKnownStateInfo(seedSessionInfo(session)) {
 			t.Errorf("state %q should be known", state)
 		}
 	}
@@ -2518,7 +2546,7 @@ func TestIsKnownState_UnknownStates(t *testing.T) {
 	unknown := []string{"draining", "archived", "future-state"}
 	for _, state := range unknown {
 		session := makeBead("b1", map[string]string{"state": state})
-		if isKnownStateInfo(sessionpkg.InfoFromPersistedBead(session)) {
+		if isKnownStateInfo(seedSessionInfo(session)) {
 			t.Errorf("state %q should be unknown", state)
 		}
 	}
@@ -2590,7 +2618,7 @@ func TestCheckChurn_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, true, dt, sessionFrontDoor(store), clk); churn {
+	if _, churn := checkChurn(seedSessionInfo(session), nil, true, dt, sessionFrontDoor(store), clk); churn {
 		t.Error("alive session should not trigger churn")
 	}
 }
@@ -2608,7 +2636,7 @@ func TestCheckChurn_NonProductiveDeath(t *testing.T) {
 		"churn_count":  "0",
 	})
 
-	_, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk)
+	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if !churn {
 		t.Error("non-productive death should trigger churn")
@@ -2633,7 +2661,7 @@ func TestCheckChurn_RapidExitIgnored(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk); churn {
+	if _, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk); churn {
 		t.Error("rapid exit should not trigger churn (handled by checkStability)")
 	}
 }
@@ -2649,7 +2677,7 @@ func TestCheckChurn_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *test
 		"churn_count":          "0",
 	})
 
-	_, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk)
+	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if churn {
 		t.Fatal("pending_create_claim should suppress churn counting until create recovery clears the claim")
@@ -2670,7 +2698,7 @@ func TestCheckChurn_ProductiveSessionIgnored(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
 	})
 
-	if _, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk); churn {
+	if _, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk); churn {
 		t.Error("productive session death should not trigger churn")
 	}
 }
@@ -2689,7 +2717,7 @@ func TestCheckChurn_DeadProductiveSessionClearsChurnCount(t *testing.T) {
 		"churn_count":  "2",
 	})
 
-	_, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk)
+	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if churn {
 		t.Error("dead productive session should not trigger churn")
@@ -2713,7 +2741,7 @@ func TestCheckChurn_ClearedLastWokeAtSkipsChurn(t *testing.T) {
 		"churn_count":  "2",
 	})
 
-	_, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk)
+	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if churn {
 		t.Error("session with cleared last_woke_at should not trigger churn")
@@ -2734,7 +2762,7 @@ func TestCheckChurn_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), nil, false, dt, sessionFrontDoor(store), clk); churn {
+	if _, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk); churn {
 		t.Error("draining session death should not count as churn")
 	}
 }
@@ -2752,7 +2780,7 @@ func TestCheckChurn_SubprocessProviderSkipped(t *testing.T) {
 		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), cfg, false, dt, sessionFrontDoor(store), clk); churn {
+	if _, churn := checkChurn(seedSessionInfo(session), cfg, false, dt, sessionFrontDoor(store), clk); churn {
 		t.Error("subprocess sessions should not trigger churn")
 	}
 }
@@ -2771,7 +2799,7 @@ func TestCheckChurn_CityStopSleepReasonSkipped(t *testing.T) {
 		"continuation_reset_pending": "",
 	})
 
-	_, churn := checkChurn(sessionpkg.InfoFromPersistedBead(session), &config.City{}, false, dt, sessionFrontDoor(store), clk)
+	_, churn := checkChurn(seedSessionInfo(session), &config.City{}, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if churn {
 		t.Fatal("city-stop sessions should not trigger churn")
@@ -2799,7 +2827,7 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 		"churn_count": "2", // one below threshold (defaultMaxChurnCycles=3)
 	})
 
-	recordChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["churn_count"] != "3" {
@@ -2822,7 +2850,7 @@ func TestRecordChurn_BelowThreshold(t *testing.T) {
 		"churn_count": "0",
 	})
 
-	recordChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["churn_count"] != "1" {
@@ -2843,7 +2871,7 @@ func TestRecordChurn_ClearsSessionKey(t *testing.T) {
 		"session_key": "old-key-123",
 	})
 
-	recordChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["session_key"] != "" {
@@ -2861,7 +2889,7 @@ func TestClearChurn(t *testing.T) {
 		"churn_count": "2",
 	})
 
-	clearChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store))
+	clearChurn(seedSessionInfo(session), sessionFrontDoor(store))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["churn_count"] != "0" {
@@ -2876,7 +2904,7 @@ func TestClearChurn_NoopWhenZero(t *testing.T) {
 		"churn_count": "0",
 	})
 
-	clearChurn(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store))
+	clearChurn(seedSessionInfo(session), sessionFrontDoor(store))
 	syncBeadFromStore(&session, store)
 
 	// Should not have written to store (no-op).
@@ -2904,7 +2932,7 @@ func TestProductiveLongEnough(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"last_woke_at": now.Add(-tt.wokeAgo).Format(time.RFC3339),
 			})
-			if got := productiveLongEnoughInfo(sessionpkg.InfoFromPersistedBead(session), clk); got != tt.want {
+			if got := productiveLongEnoughInfo(seedSessionInfo(session), clk); got != tt.want {
 				t.Errorf("productiveLongEnoughInfo(%v ago) = %v, want %v", tt.wokeAgo, got, tt.want)
 			}
 		})
@@ -2914,7 +2942,7 @@ func TestProductiveLongEnough(t *testing.T) {
 func TestProductiveLongEnough_NoLastWokeAt(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	session := makeBead("b1", map[string]string{})
-	if productiveLongEnoughInfo(sessionpkg.InfoFromPersistedBead(session), clk) {
+	if productiveLongEnoughInfo(seedSessionInfo(session), clk) {
 		t.Error("should return false when last_woke_at is empty")
 	}
 }
@@ -2932,7 +2960,7 @@ func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
 		"sleep_reason":      "context-churn",
 	})
 
-	got := healExpiredTimersInfo(sessionpkg.InfoFromPersistedBead(session), sessionFrontDoor(store), clk)
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), clk)
 
 	if got.QuarantinedUntil != "" {
 		t.Error("quarantined_until should be cleared")
