@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // rawOpenSessionReachableStoreRefRef reimplements the pre-migration
@@ -35,7 +36,7 @@ func rawOpenSessionReachableStoreRefRef(cityPath string, cfg *config.City, sb be
 func TestOpenSessionReachableStoreRefInfoMatchesRaw(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "mayor"}}}
 	for _, sb := range oracleSessionBeadShapes() {
-		info := session.InfoFromPersistedBead(sb)
+		info := sessiontest.SeedBead(t, sb)
 		if got, want := openSessionReachableStoreRefInfo("", cfg, info), rawOpenSessionReachableStoreRefRef("", cfg, sb); got != want {
 			t.Errorf("openSessionReachableStoreRef(%s): info=%q raw=%q", sb.ID, got, want)
 		}
@@ -122,7 +123,7 @@ func TestSessionCoreConfigForHashInfoGolden(t *testing.T) {
 	got := map[string]string{}
 	for _, tc := range tps {
 		for _, sb := range shapes {
-			info := session.InfoFromPersistedBead(sb)
+			info := sessiontest.SeedBead(t, sb)
 			got[tc.name+"/"+sb.ID] = runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tc.tp, info))
 		}
 	}
@@ -152,7 +153,7 @@ func TestSessionBeadHasAssignedWorkInfo(t *testing.T) {
 	}
 	got := map[string]bool{}
 	for _, sb := range oracleSessionBeadShapes() {
-		info := session.InfoFromPersistedBead(sb)
+		info := sessiontest.SeedBead(t, sb)
 		got[sb.ID] = sessionBeadHasAssignedWorkInfo(work, info)
 		// The empty work set is false for every shape (guards the has-work path is
 		// gated on the work set, not the session alone).
@@ -244,7 +245,7 @@ func TestComputePoolTriggerBindingPatchMatchesRaw(t *testing.T) {
 	}
 	workDirs := []string{"", "/gc/old", "/gc/new"}
 	for bn, sb := range bases {
-		info := session.InfoFromPersistedBead(sb)
+		info := sessiontest.SeedBead(t, sb)
 		for rn, req := range requests {
 			for _, wd := range workDirs {
 				got := computePoolTriggerBindingPatch(info, req, wd)
