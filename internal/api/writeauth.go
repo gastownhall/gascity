@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -245,6 +246,11 @@ var (
 	}
 )
 
+// writeAuthBootLogf is the sink for boot-time write-auth setup warnings,
+// swappable in tests. It follows the package's log.Printf idiom (server-side
+// stderr), matching how the controller and supervisor surface boot diagnostics.
+var writeAuthBootLogf = log.Printf
+
 // parseVerifyKeys parses a verifying-key set of the form
 // "kid:base64,kid2:base64" where each base64 is the standard-encoded 32-byte
 // ed25519 public key. At least one well-formed entry is required.
@@ -287,7 +293,10 @@ func parseVerifyKeys(s string) (map[string]ed25519.PublicKey, error) {
 // requires every grant's cid claim to match it exactly, failing closed on a
 // mismatching or missing cid so a grant minted for another tenant's
 // same-named city can never be replayed here. Without a verifying key the cid
-// is inert — the write plane stays off and reads are unaffected.
+// is inert — the write plane stays off and reads are unaffected. A key WITHOUT
+// a cid boots with a WARN, not an error: tenancy binding is then city-name-only,
+// which untenanted operator-run single-tenant deployments legitimately choose,
+// but which on a hosted deployment means the launcher failed to inject the cid.
 func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywriteauth.Verifier, error) {
 	raw := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_PUBKEY"))
 	if raw == "" {
@@ -311,10 +320,14 @@ func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywrite
 			return nil, fmt.Errorf("GC_CITY_WRITE_EPOCH_FLOOR: %w", err)
 		}
 	}
+	cid := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_CID"))
+	if cid == "" {
+		writeAuthBootLogf("api: write-auth: WARNING: verifying key configured but GC_CITY_WRITE_CID is empty — grant tenancy binding is city-name-only; hosted launchers are expected to inject GC_CITY_WRITE_CID")
+	}
 	return citywriteauth.New(citywriteauth.Options{
 		Aud:        writeAuthAudience,
 		LegacyAud:  writeAuthLegacyAudience,
-		CID:        strings.TrimSpace(os.Getenv("GC_CITY_WRITE_CID")),
+		CID:        cid,
 		Keys:       keys,
 		EpochFloor: epochFloor,
 		MaxTTL:     writeAuthMaxTTL,

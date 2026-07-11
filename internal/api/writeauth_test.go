@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -893,6 +894,89 @@ func TestInstallWriteAuth(t *testing.T) {
 		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
 		if err := InstallWriteAuth(sm, "", true); err == nil {
 			t.Fatal("expected fail-closed error")
+		}
+	})
+}
+
+// captureWriteAuthBootLog swaps the boot-log seam for a recorder scoped to the
+// test, returning the captured lines.
+func captureWriteAuthBootLog(t *testing.T) *[]string {
+	t.Helper()
+	var lines []string
+	orig := writeAuthBootLogf
+	writeAuthBootLogf = func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { writeAuthBootLogf = orig })
+	return &lines
+}
+
+// A verifying key without GC_CITY_WRITE_CID means grant tenancy binding is
+// city-name-only: a grant minted for another tenant's same-named city would
+// verify. That is legitimate for untenanted operator-run single-tenant
+// deployments (which may even run GC_CITY_WRITE_REQUIRED=1 without a cid), so
+// boot WARNS rather than fails — but hosted launchers are expected to inject
+// GC_CITY_WRITE_CID into every controller pod, so the warning must be loud
+// enough to catch a launcher that stopped doing so.
+func TestResolveWriteAuthVerifier_WarnsOnKeyWithoutCID(t *testing.T) {
+	pub, _ := mustKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+
+	t.Run("key without cid warns", func(t *testing.T) {
+		lines := captureWriteAuthBootLog(t)
+		t.Setenv("GC_CITY_WRITE_PUBKEY", "k1:"+b64)
+		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+		t.Setenv("GC_CITY_WRITE_CID", "")
+		v, err := ResolveWriteAuthVerifier("", false)
+		if err != nil || v == nil {
+			t.Fatalf("resolve: (%v, %v)", v, err)
+		}
+		if len(*lines) != 1 {
+			t.Fatalf("want exactly one boot warning, got %q", *lines)
+		}
+		warn := (*lines)[0]
+		if !strings.Contains(warn, "WARNING") || !strings.Contains(warn, "GC_CITY_WRITE_CID") ||
+			!strings.Contains(warn, "city-name-only") {
+			t.Fatalf("warning must name GC_CITY_WRITE_CID and the city-name-only binding, got %q", warn)
+		}
+	})
+	t.Run("required key without cid still boots, with the warn", func(t *testing.T) {
+		lines := captureWriteAuthBootLog(t)
+		t.Setenv("GC_CITY_WRITE_PUBKEY", "k1:"+b64)
+		t.Setenv("GC_CITY_WRITE_REQUIRED", "1")
+		t.Setenv("GC_CITY_WRITE_CID", "")
+		v, err := ResolveWriteAuthVerifier("", false)
+		if err != nil || v == nil {
+			t.Fatalf("required + key + no cid must boot (warn, not fail): (%v, %v)", v, err)
+		}
+		if len(*lines) != 1 {
+			t.Fatalf("want exactly one boot warning, got %q", *lines)
+		}
+	})
+	t.Run("key with cid does not warn", func(t *testing.T) {
+		lines := captureWriteAuthBootLog(t)
+		t.Setenv("GC_CITY_WRITE_PUBKEY", "k1:"+b64)
+		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+		t.Setenv("GC_CITY_WRITE_CID", "city_acme")
+		v, err := ResolveWriteAuthVerifier("", false)
+		if err != nil || v == nil {
+			t.Fatalf("resolve: (%v, %v)", v, err)
+		}
+		if len(*lines) != 0 {
+			t.Fatalf("cid is set; want no warning, got %q", *lines)
+		}
+	})
+	t.Run("no key does not warn", func(t *testing.T) {
+		lines := captureWriteAuthBootLog(t)
+		t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+		t.Setenv("GC_CITY_WRITE_CID", "")
+		v, err := ResolveWriteAuthVerifier("", false)
+		if err != nil || v != nil {
+			t.Fatalf("want (nil,nil) got (%v,%v)", v, err)
+		}
+		if len(*lines) != 0 {
+			t.Fatalf("write plane off; want no warning, got %q", *lines)
 		}
 	})
 }
