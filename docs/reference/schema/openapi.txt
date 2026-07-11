@@ -6624,10 +6624,10 @@
           "pending",
           "active",
           "waiting",
-          "cancelling",
+          "canceling",
           "completed",
           "failed",
-          "cancelled",
+          "canceled",
           "skipped"
         ],
         "type": "string"

@@ -2692,6 +2692,141 @@ export type RotatedPayload = {
     prior_last_seq: number;
 };
 
+export type Run = {
+    /**
+     * Formula name driving the run, when known.
+     */
+    formula?: string;
+    /**
+     * Structured failure reason for a terminal run.
+     */
+    last_error?: RunLastError;
+    /**
+     * Stable run identifier (the run root bead id).
+     */
+    run_id: string;
+    /**
+     * Resolved run scope.
+     */
+    scope: RunScope;
+    /**
+     * RFC3339 run start time (root creation).
+     */
+    started_at?: string;
+    /**
+     * Closed lifecycle status.
+     */
+    status: RunStatus;
+    /**
+     * Where the run is routed (rig/target), when known.
+     */
+    target?: string;
+    /**
+     * Human-readable run title.
+     */
+    title: string;
+    /**
+     * RFC3339 time of the run's most recent activity.
+     */
+    updated_at?: string;
+};
+
+export type RunLastError = {
+    /**
+     * Machine-readable outcome code (e.g. fail, skipped, canceled).
+     */
+    code: string;
+    /**
+     * Human-readable failure detail, when available.
+     */
+    message?: string;
+};
+
+export type RunRef = {
+    /**
+     * Launch mechanism that produced the run.
+     */
+    kind: 'sling' | 'order';
+    /**
+     * Run identifier; GET /v0/city/{cityName}/runs/{run_id} for detail.
+     */
+    run_id: string;
+    /**
+     * Closed lifecycle status at response time (a just-launched run is pending).
+     */
+    status: RunStatus;
+};
+
+export type RunScope = {
+    /**
+     * Scope kind (city or rig), when resolved.
+     */
+    kind?: string;
+    /**
+     * Scope reference within the kind, when resolved.
+     */
+    ref?: string;
+};
+
+/**
+ * Closed lifecycle state of a run.
+ */
+export type RunStatus = 'pending' | 'active' | 'waiting' | 'canceling' | 'completed' | 'failed' | 'canceled' | 'skipped';
+
+export type RunStep = {
+    /**
+     * Current assignee, when set.
+     */
+    assignee?: string;
+    /**
+     * Step (child bead) identifier.
+     */
+    id: string;
+    /**
+     * Step kind (bead type).
+     */
+    kind?: string;
+    /**
+     * Closed step lifecycle status.
+     */
+    status: RunStepStatus;
+    /**
+     * Step title.
+     */
+    title: string;
+};
+
+/**
+ * Closed lifecycle state of a run step.
+ */
+export type RunStepStatus = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped';
+
+export type RunStepsOutputBody = {
+    /**
+     * Run identifier the steps belong to.
+     */
+    run_id: string;
+    /**
+     * Steps of the run.
+     */
+    steps: Array<RunStep> | null;
+};
+
+export type RunsListOutputBody = {
+    /**
+     * True when some runs could not be fully projected.
+     */
+    partial?: boolean;
+    /**
+     * Reasons the projection was partial.
+     */
+    partial_errors?: Array<string> | null;
+    /**
+     * Runs in the city, newest activity first.
+     */
+    runs: Array<Run> | null;
+};
+
 export type ScopeGroup = {
     [key: string]: never;
 };
@@ -3152,6 +3287,10 @@ export type SlingResponse = {
     formula?: string;
     mode?: string;
     root_bead_id?: string;
+    /**
+     * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
+     */
+    run?: RunRef;
     status: string;
     target: string;
     warnings?: Array<string> | null;
@@ -13926,6 +14065,141 @@ export type CreateRigResponses = {
 };
 
 export type CreateRigResponse = CreateRigResponses[keyof CreateRigResponses];
+
+export type GetV0CityByCityNameRunsData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Maximum runs to return (0 uses the server default).
+         */
+        limit?: number;
+    };
+    url: '/v0/city/{cityName}/runs';
+};
+
+export type GetV0CityByCityNameRunsErrors = {
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsError = GetV0CityByCityNameRunsErrors[keyof GetV0CityByCityNameRunsErrors];
+
+export type GetV0CityByCityNameRunsResponses = {
+    /**
+     * OK
+     */
+    200: RunsListOutputBody;
+};
+
+export type GetV0CityByCityNameRunsResponse = GetV0CityByCityNameRunsResponses[keyof GetV0CityByCityNameRunsResponses];
+
+export type GetV0CityByCityNameRunsByRunIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Run identifier.
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/{run_id}';
+};
+
+export type GetV0CityByCityNameRunsByRunIdErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsByRunIdError = GetV0CityByCityNameRunsByRunIdErrors[keyof GetV0CityByCityNameRunsByRunIdErrors];
+
+export type GetV0CityByCityNameRunsByRunIdResponses = {
+    /**
+     * OK
+     */
+    200: Run;
+};
+
+export type GetV0CityByCityNameRunsByRunIdResponse = GetV0CityByCityNameRunsByRunIdResponses[keyof GetV0CityByCityNameRunsByRunIdResponses];
+
+export type GetV0CityByCityNameRunsByRunIdStepsData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Run identifier.
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/{run_id}/steps';
+};
+
+export type GetV0CityByCityNameRunsByRunIdStepsErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsByRunIdStepsError = GetV0CityByCityNameRunsByRunIdStepsErrors[keyof GetV0CityByCityNameRunsByRunIdStepsErrors];
+
+export type GetV0CityByCityNameRunsByRunIdStepsResponses = {
+    /**
+     * OK
+     */
+    200: RunStepsOutputBody;
+};
+
+export type GetV0CityByCityNameRunsByRunIdStepsResponse = GetV0CityByCityNameRunsByRunIdStepsResponses[keyof GetV0CityByCityNameRunsByRunIdStepsResponses];
 
 export type GetV0CityByCityNameServiceByNameData = {
     body?: never;

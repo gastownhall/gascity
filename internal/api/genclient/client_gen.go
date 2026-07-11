@@ -146,14 +146,14 @@ func (e RunRefKind) Valid() bool {
 
 // Defines values for RunStatus.
 const (
-	RunStatusActive     RunStatus = "active"
-	RunStatusCancelled  RunStatus = "cancelled"
-	RunStatusCancelling RunStatus = "cancelling"
-	RunStatusCompleted  RunStatus = "completed"
-	RunStatusFailed     RunStatus = "failed"
-	RunStatusPending    RunStatus = "pending"
-	RunStatusSkipped    RunStatus = "skipped"
-	RunStatusWaiting    RunStatus = "waiting"
+	RunStatusActive    RunStatus = "active"
+	RunStatusCanceled  RunStatus = "canceled"
+	RunStatusCanceling RunStatus = "canceling"
+	RunStatusCompleted RunStatus = "completed"
+	RunStatusFailed    RunStatus = "failed"
+	RunStatusPending   RunStatus = "pending"
+	RunStatusSkipped   RunStatus = "skipped"
+	RunStatusWaiting   RunStatus = "waiting"
 )
 
 // Valid indicates whether the value is a known member of the RunStatus enum.
@@ -161,9 +161,9 @@ func (e RunStatus) Valid() bool {
 	switch e {
 	case RunStatusActive:
 		return true
-	case RunStatusCancelled:
+	case RunStatusCanceled:
 		return true
-	case RunStatusCancelling:
+	case RunStatusCanceling:
 		return true
 	case RunStatusCompleted:
 		return true

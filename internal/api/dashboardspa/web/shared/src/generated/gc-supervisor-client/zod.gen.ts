@@ -1358,6 +1358,79 @@ export const zRotatedPayload = z.object({
     prior_last_seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zRunLastError = z.object({
+    code: z.string(),
+    message: z.string().optional()
+});
+
+export const zRunScope = z.object({
+    kind: z.string().optional(),
+    ref: z.string().optional()
+});
+
+/**
+ * Closed lifecycle state of a run.
+ */
+export const zRunStatus = z.enum([
+    'pending',
+    'active',
+    'waiting',
+    'canceling',
+    'completed',
+    'failed',
+    'canceled',
+    'skipped'
+]);
+
+export const zRun = z.object({
+    formula: z.string().optional(),
+    last_error: zRunLastError.optional(),
+    run_id: z.string(),
+    scope: zRunScope,
+    started_at: z.string().optional(),
+    status: zRunStatus,
+    target: z.string().optional(),
+    title: z.string(),
+    updated_at: z.string().optional()
+});
+
+export const zRunRef = z.object({
+    kind: z.enum(['sling', 'order']),
+    run_id: z.string(),
+    status: zRunStatus
+});
+
+/**
+ * Closed lifecycle state of a run step.
+ */
+export const zRunStepStatus = z.enum([
+    'pending',
+    'active',
+    'blocked',
+    'completed',
+    'failed',
+    'skipped'
+]);
+
+export const zRunStep = z.object({
+    assignee: z.string().optional(),
+    id: z.string(),
+    kind: z.string().optional(),
+    status: zRunStepStatus,
+    title: z.string()
+});
+
+export const zRunStepsOutputBody = z.object({
+    run_id: z.string(),
+    steps: z.array(zRunStep).nullable()
+});
+
+export const zRunsListOutputBody = z.object({
+    partial: z.boolean().optional(),
+    partial_errors: z.array(z.string()).nullish(),
+    runs: z.array(zRun).nullable()
+});
+
 export const zScopeGroup = z.record(z.string(), z.never());
 
 export const zServiceRestartOutputBody = z.object({
@@ -1602,6 +1675,7 @@ export const zSlingResponse = z.object({
     formula: z.string().optional(),
     mode: z.string().optional(),
     root_bead_id: z.string().optional(),
+    run: zRunRef.optional(),
     status: z.string(),
     target: z.string(),
     warnings: z.array(z.string()).nullish(),
@@ -6752,6 +6826,39 @@ export const zCreateRigPath = z.object({
  * Created
  */
 export const zCreateRigResponse = zRigCreatedOutputBody;
+
+export const zGetV0CityByCityNameRunsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+export const zGetV0CityByCityNameRunsQuery = z.object({
+    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameRunsResponse = zRunsListOutputBody;
+
+export const zGetV0CityByCityNameRunsByRunIdPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    run_id: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameRunsByRunIdResponse = zRun;
+
+export const zGetV0CityByCityNameRunsByRunIdStepsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    run_id: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameRunsByRunIdStepsResponse = zRunStepsOutputBody;
 
 export const zGetV0CityByCityNameServiceByNamePath = z.object({
     cityName: z.string().min(1).regex(/\S/),
