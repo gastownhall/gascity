@@ -2361,7 +2361,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if dismissCtx == nil {
 								dismissCtx = context.Background()
 							}
-							attempts := dialogDismissAttemptCount(session)
+							attempts := infoByID[id].DialogDismissAttempts
 							if derr := dp.DismissKnownDialogs(dismissCtx, name, stalledSessionDialogDismissTimeout); derr != nil {
 								fmt.Fprintf(stderr, "session reconciler: dismissing stalled-session dialog for %s: %v\n", name, derr) //nolint:errcheck
 							} else {
@@ -2373,7 +2373,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// screen as a confirmed dismissal before
 								// suppressing the lossy recycle (#3426 review F1).
 								cleared := false
-								if fresh, ferr := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, session.ID, rateLimitPeekLines, tp.Hints.ProcessNames); ferr == nil {
+								if fresh, ferr := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, id, rateLimitPeekLines, tp.Hints.ProcessNames); ferr == nil {
 									cleared = !runtime.ContainsDismissableMidSessionDialog(fresh)
 								} else {
 									fmt.Fprintf(stderr, "session reconciler: re-peeking after dialog dismiss for %s: %v\n", name, ferr) //nolint:errcheck
@@ -2381,13 +2381,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								switch {
 								case cleared:
 									dialogDismissed = true
-									recordDialogDismissAttempts(store, session, 0, stderr)
+									tick.set(id, recordDialogDismissAttempts(sessionFrontDoor(store), infoByID[id], 0, stderr))
 									rec.Record(events.Event{
 										Type:    events.SessionDialogDismissed,
 										Actor:   "gc",
 										Subject: tp.DisplayName(),
 										Message: "dismissed blocking dialog on progress-stalled session",
-										Payload: api.SessionLifecyclePayloadJSON(session.ID, tp.TemplateName, "dialog dismissed"),
+										Payload: api.SessionLifecyclePayloadJSON(id, tp.TemplateName, "dialog dismissed"),
 									})
 									fmt.Fprintf(stderr, "session reconciler: %s stalled at a known blocking dialog (no progress for >%s); dismissed instead of recycling\n", name, threshold) //nolint:errcheck
 								case attempts+1 < stalledSessionDialogDismissMaxAttempts:
@@ -2398,14 +2398,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									// no-op. Suppress the recycle for a few more
 									// ticks before giving up.
 									dialogDismissed = true
-									recordDialogDismissAttempts(store, session, attempts+1, stderr)
+									tick.set(id, recordDialogDismissAttempts(sessionFrontDoor(store), infoByID[id], attempts+1, stderr))
 								default:
 									// Bounded fallthrough: after N ineffective
 									// attempts, stop suppressing the recycle so a
 									// wedged session is not parked forever. Claim
 									// holders stay protected by the claim gate.
 									// recordDialogDismissAttempts clamps to the cap.
-									recordDialogDismissAttempts(store, session, attempts+1, stderr)
+									tick.set(id, recordDialogDismissAttempts(sessionFrontDoor(store), infoByID[id], attempts+1, stderr))
 									fmt.Fprintf(stderr, "session reconciler: %s still blocked after %d dialog-dismiss attempts; allowing recycle\n", name, attempts+1) //nolint:errcheck
 								}
 							}
@@ -2447,7 +2447,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
 				}
-			} else if lastActivityErr == nil && dialogDismissAttemptCount(session) > 0 {
+			} else if lastActivityErr == nil && infoByID[id].DialogDismissAttempts > 0 {
 				// The session is progressing again (or restarted fresh after a
 				// bounded fallthrough recycle): reset the persisted dialog-dismiss
 				// budget so a stale count from an earlier dialog episode cannot
@@ -2455,7 +2455,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// later, unrelated dialog stall. The count guard keeps this from
 				// writing metadata on every healthy tick; it costs one write per
 				// recovered session (#3426 review, non-blocking note 2).
-				recordDialogDismissAttempts(store, session, 0, stderr)
+				tick.set(id, recordDialogDismissAttempts(sessionFrontDoor(store), infoByID[id], 0, stderr))
 			}
 		}
 
@@ -3705,45 +3705,28 @@ func cachedSessionPeek(cityPath string, store beads.Store, sp runtime.Provider, 
 	}
 }
 
-// dialogDismissAttemptCount reads the persisted consecutive dialog-dismiss
-// attempt count for a session. The stateless per-tick reconciler stores it on
-// the session bead so the bounded fallthrough in the progress-stall path
-// survives across ticks (#3426 review F1).
-func dialogDismissAttemptCount(session *beads.Bead) int {
-	if session == nil || session.Metadata == nil {
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(session.Metadata[dialogDismissAttemptsMetadataKey]))
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
-}
-
-// recordDialogDismissAttempts persists the dialog-dismiss attempt count on the
-// session bead and mirrors it onto the in-memory copy so later reads in the
-// same tick observe it. It is a no-op when the value is unchanged to avoid a
-// redundant write every stalled tick.
-func recordDialogDismissAttempts(store beads.Store, session *beads.Bead, n int, stderr io.Writer) {
-	if session == nil {
-		return
-	}
+// recordDialogDismissAttempts persists the dialog-dismiss attempt count
+// through the session front door and returns the coherent post-write Info for
+// the caller's tick.set fold (the write-returns-Info shape; the stateless
+// per-tick reconciler keeps the count on the session bead so the bounded
+// fallthrough in the progress-stall path survives across ticks, #3426 review
+// F1). It clamps to the attempt cap and no-ops when the projected value
+// already matches, avoiding a redundant write every stalled tick. A failed
+// write is logged rather than propagated, and the returned Info then reflects
+// the store (ApplyPatchInfo returns the input unchanged on write failure): the
+// budget must not advance past a write the store rejected.
+func recordDialogDismissAttempts(front *sessionpkg.Store, info sessionpkg.Info, n int, stderr io.Writer) sessionpkg.Info {
 	if n > stalledSessionDialogDismissMaxAttempts {
 		n = stalledSessionDialogDismissMaxAttempts
 	}
-	val := strconv.Itoa(n)
-	if session.Metadata == nil {
-		session.Metadata = map[string]string{}
+	if info.DialogDismissAttempts == n {
+		return info
 	}
-	if session.Metadata[dialogDismissAttemptsMetadataKey] == val {
-		return
+	next, err := front.ApplyPatchInfo(info, sessionpkg.MetadataPatch{dialogDismissAttemptsMetadataKey: strconv.Itoa(n)})
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: persisting dialog-dismiss attempts for %s: %v\n", info.ID, err) //nolint:errcheck
 	}
-	session.Metadata[dialogDismissAttemptsMetadataKey] = val
-	if store != nil {
-		if err := store.SetMetadataBatch(session.ID, map[string]string{dialogDismissAttemptsMetadataKey: val}); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: persisting dialog-dismiss attempts for %s: %v\n", session.ID, err) //nolint:errcheck
-		}
-	}
+	return next
 }
 
 func rateLimitAliveFromObservation(alive bool, err error) bool {

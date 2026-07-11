@@ -217,6 +217,18 @@ var infoKeyCodec = []infoKeySpec{
 		}
 	}},
 
+	// dialog_dismiss_attempts: int, total form (explicit = 0 on parse failure)
+	// like wake_attempts. The stalled-session dialog-dismiss budget (#3426)
+	// reads the projected field and patches through the front door. No raw
+	// mirror: no consumer gates on string presence.
+	{"dialog_dismiss_attempts", func(i *Info, v string) {
+		if n, err := strconv.Atoi(v); err == nil {
+			i.DialogDismissAttempts = n
+		} else {
+			i.DialogDismissAttempts = 0
+		}
+	}},
+
 	// last_nudge_delivered_at: RFC3339 time. Reset-to-zero first (clears a
 	// carried-forward value in the patch direction; a no-op on a fresh Info).
 	{MetadataLastNudgeDeliveredAt, func(i *Info, v string) {
