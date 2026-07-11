@@ -17,7 +17,7 @@ import (
 // is NOT a copy of EnrichInfo's body — it reads the BEAD, EnrichInfo reads the
 // INFO.)
 func legacyEnrichFromBead(m *Manager, b beads.Bead) Info {
-	info := InfoFromPersistedBead(b)
+	info := infoFromPersistedBead(b)
 	sessName := info.SessionName
 	if !info.Closed {
 		transport, _ := m.transportForBead(b, sessName)
@@ -37,7 +37,7 @@ func legacyEnrichFromBead(m *Manager, b beads.Bead) Info {
 }
 
 // TestEnrichInfoMatchesBeadOverlay is the identity-refactor oracle for EnrichInfo:
-// EnrichInfo(InfoFromPersistedBead(b)) must equal the legacy bead-reading overlay
+// EnrichInfo(infoFromPersistedBead(b)) must equal the legacy bead-reading overlay
 // across a corpus that exercises every overlay branch (transport metadata fallback,
 // mcp→acp, pending-create resolver, running/attached enrichment, stale-active
 // downgrade, closed skip). Explicit outcome assertions guard against a vacuous pass.
@@ -72,35 +72,35 @@ func TestEnrichInfoMatchesBeadOverlay(t *testing.T) {
 
 	for name, b := range corpus {
 		want := legacyEnrichFromBead(m, b)
-		got := m.EnrichInfo(InfoFromPersistedBead(b))
+		got := m.EnrichInfo(infoFromPersistedBead(b))
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: EnrichInfo diverged from the bead overlay\n got=%+v\nwant=%+v", name, got, want)
 		}
 		// infoFromBead must be exactly the composition (the refactor identity).
 		if fb := m.infoFromBead(b); !reflect.DeepEqual(fb, got) {
-			t.Errorf("%s: infoFromBead != EnrichInfo(InfoFromPersistedBead(b))\n infoFromBead=%+v\n composed=%+v", name, fb, got)
+			t.Errorf("%s: infoFromBead != EnrichInfo(infoFromPersistedBead(b))\n infoFromBead=%+v\n composed=%+v", name, fb, got)
 		}
 	}
 
 	// Non-vacuous outcome checks.
-	if got := m.EnrichInfo(InfoFromPersistedBead(corpus["running-active"])); !got.Attached || !got.LastActive.Equal(activeAt) || got.State != StateActive {
+	if got := m.EnrichInfo(infoFromPersistedBead(corpus["running-active"])); !got.Attached || !got.LastActive.Equal(activeAt) || got.State != StateActive {
 		t.Errorf("running-active: attached=%v lastActive=%v state=%q, want attached, %v, active", got.Attached, got.LastActive, got.State, activeAt)
 	}
-	if got := m.EnrichInfo(InfoFromPersistedBead(corpus["stale-active"])); got.State != StateAsleep {
+	if got := m.EnrichInfo(infoFromPersistedBead(corpus["stale-active"])); got.State != StateAsleep {
 		t.Errorf("stale-active: state=%q, want asleep (stale-active downgrade)", got.State)
 	}
-	if got := m.EnrichInfo(InfoFromPersistedBead(corpus["mcp-identity"])); got.Transport != "acp" {
+	if got := m.EnrichInfo(infoFromPersistedBead(corpus["mcp-identity"])); got.Transport != "acp" {
 		t.Errorf("mcp-identity: transport=%q, want acp", got.Transport)
 	}
-	if got := m.EnrichInfo(InfoFromPersistedBead(corpus["pending-create"])); got.Transport != "tmux" {
+	if got := m.EnrichInfo(infoFromPersistedBead(corpus["pending-create"])); got.Transport != "tmux" {
 		t.Errorf("pending-create: transport=%q, want tmux (resolver)", got.Transport)
 	}
-	if got := m.EnrichInfo(InfoFromPersistedBead(corpus["closed-raw"])); got.Attached || got.State != "" {
+	if got := m.EnrichInfo(infoFromPersistedBead(corpus["closed-raw"])); got.Attached || got.State != "" {
 		t.Errorf("closed: attached=%v state=%q, want not-attached and blanked state", got.Attached, got.State)
 	}
 
 	// EnrichInfos applies the same overlay element-wise.
-	infos := []Info{InfoFromPersistedBead(corpus["running-active"]), InfoFromPersistedBead(corpus["stale-active"])}
+	infos := []Info{infoFromPersistedBead(corpus["running-active"]), infoFromPersistedBead(corpus["stale-active"])}
 	enriched := m.EnrichInfos(infos)
 	if len(enriched) != 2 || !enriched[0].Attached || enriched[1].State != StateAsleep {
 		t.Errorf("EnrichInfos = %+v, want [attached, asleep]", enriched)
@@ -128,7 +128,7 @@ func TestSessionMatchesFiltersInfoEquivalence(t *testing.T) {
 	templateFilters := []string{"", "worker", "w2", "none"}
 
 	for _, b := range corpus {
-		info := InfoFromPersistedBead(b)
+		info := infoFromPersistedBead(b)
 		for _, sf := range stateFilters {
 			for _, tf := range templateFilters {
 				want := sessionMatchesFilters(b, sf, tf)
@@ -149,7 +149,7 @@ func TestSessionMatchesFiltersInfoEquivalence(t *testing.T) {
 	// other filter (status not consulted as 'open'), so the delta is exactly
 	// scoped — not a general divergence.
 	exotic := beads.Bead{ID: "s", Type: BeadType, Status: "archived", Labels: []string{LabelSession}, Metadata: map[string]string{"state": "active"}}
-	exoticInfo := InfoFromPersistedBead(exotic)
+	exoticInfo := infoFromPersistedBead(exotic)
 	if got, want := sessionMatchesFiltersInfo(exoticInfo, "open", ""), sessionMatchesFilters(exotic, "open", ""); !got || want {
 		t.Errorf("exotic-status open-filter: Info form=%v bead form=%v, want the documented delta (twin matches on !Closed, bead requires status==open)", got, want)
 	}
@@ -176,7 +176,7 @@ func TestMailboxInfoTwinsMatchBeadForms(t *testing.T) {
 		{Metadata: map[string]string{}}, // empty everything
 	}
 	for i, b := range beadShapes {
-		info := InfoFromPersistedBead(b)
+		info := infoFromPersistedBead(b)
 		if got, want := MailboxAddressFromInfo(info), MailboxAddress(b); got != want {
 			t.Errorf("shape %d: MailboxAddressFromInfo=%q, MailboxAddress=%q", i, got, want)
 		}

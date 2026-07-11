@@ -17,10 +17,10 @@ import (
 //
 // It is byte-identical to a full re-projection of the patched metadata:
 //
-//	info.ApplyPatch(p)  ==  InfoFromPersistedBead(bead{Status, Type, Title, ...,
+//	info.ApplyPatch(p)  ==  infoFromPersistedBead(bead{Status, Type, Title, ...,
 //	                            Metadata: p.Apply(meta)})
 //
-// for the metadata-derived fields, where info == InfoFromPersistedBead(bead).
+// for the metadata-derived fields, where info == infoFromPersistedBead(bead).
 // Only fields whose source key appears in the patch are re-derived, from that
 // key's raw patch value, using the same per-key logic as InfoFromPersistedBead;
 // every other field carries forward unchanged. Bead-level fields (ID, Type,
@@ -272,8 +272,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 // re-projecting the raw working bead or issuing a store Get.
 //
 // TestInfoMarkClosedMatchesReprojection is the equivalence oracle: for any open
-// bead b, InfoFromPersistedBead(b).MarkClosed() equals
-// InfoFromPersistedBead(b with Status "closed").
+// bead b, infoFromPersistedBead(b).MarkClosed() equals
+// infoFromPersistedBead(b with Status "closed").
 func (info Info) MarkClosed() Info {
 	info.Closed = true
 	info.State = "" // closed beads have no runtime state

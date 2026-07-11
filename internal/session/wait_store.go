@@ -554,7 +554,7 @@ func (s *Store) WakeSession(id string, now time.Time, opts WakeOpts) (WakeResult
 		return WakeResult{}, fmt.Errorf("%w: %s", ErrNotSessionBead, id)
 	}
 	RepairEmptyType(s.store.Store, &b)
-	info := InfoFromPersistedBead(b)
+	info := infoFromPersistedBead(b)
 	if opts.RejectClosed && b.Status == "closed" {
 		return WakeResult{}, &WakeConflictError{SessionID: id, State: "closed"}
 	}

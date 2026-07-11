@@ -40,19 +40,21 @@ func richBead(id, status string) beads.Bead {
 }
 
 // TestSeedBeadMatchesCodec pins the load-bearing claim of the whole wave: reading
-// a verbatim-seeded bead back through the front door yields the SAME session.Info
-// the raw codec produces — so a test that swaps InfoFromPersistedBead(b) for
-// SeedBead(t, b) is behavior-identical, including the closed-status blanking, the
-// pinned CreatedAt, and the custom labels a CreateSpec cannot express.
+// a verbatim-seeded bead back through the front door yields the session.Info the
+// store's projection produces — so a test that swaps a raw-bead crack for
+// SeedBead(t, b) is behavior-identical. It asserts the fields SeedBead must
+// preserve verbatim (id / labels / pinned CreatedAt, which a store.Create would
+// rewrite) plus a representative spread of metadata-projected fields and the
+// closed-status blanking. (The exact byte-identity of the front-door read to the
+// codec is pinned inside internal/session, where the now-unexported codec lives;
+// this package cannot see it, and doesn't need to.)
 func TestSeedBeadMatchesCodec(t *testing.T) {
 	for _, status := range []string{"open", "closed"} {
 		t.Run(status, func(t *testing.T) {
 			b := richBead("s-seed-"+status, status)
 			got := sessiontest.SeedBead(t, b)
-			want := session.InfoFromPersistedBead(b)
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("SeedBead != InfoFromPersistedBead\n got: %+v\nwant: %+v", got, want)
-			}
+
+			// Verbatim preservation (the fields store.Create would rewrite).
 			if got.ID != b.ID {
 				t.Errorf("SeedBead dropped id: got %q, want %q", got.ID, b.ID)
 			}
@@ -62,16 +64,35 @@ func TestSeedBeadMatchesCodec(t *testing.T) {
 			if !got.CreatedAt.Equal(b.CreatedAt) {
 				t.Errorf("SeedBead dropped pinned CreatedAt: got %v, want %v", got.CreatedAt, b.CreatedAt)
 			}
+
+			// Metadata projected through the store front door (a representative spread).
+			if got.Title != "My Session" || got.Template != "polecat" || got.Alias != "pc-1" ||
+				got.AgentName != "polecat-7" || got.Provider != "claude" || got.Command != "claude --foo" ||
+				got.WorkDir != "/tmp/wd" || got.SessionKey != "uuid-abc" || got.SleepReason != "idle" ||
+				got.WakeAttempts != 3 || got.WakeAttemptsMetadata != "3" || got.HealthState != "degraded" ||
+				!got.PoolManaged || got.SessionName != "s-seed-"+status {
+				t.Errorf("SeedBead metadata projection wrong: %+v", got)
+			}
+
+			// closed blanks the runtime State; open keeps the stored state verbatim.
 			wantClosed := status == "closed"
 			if got.Closed != wantClosed {
 				t.Errorf("SeedBead Closed = %v, want %v", got.Closed, wantClosed)
+			}
+			wantState := "asleep"
+			if wantClosed {
+				wantState = ""
+			}
+			if string(got.State) != wantState {
+				t.Errorf("SeedBead State = %q, want %q", got.State, wantState)
 			}
 		})
 	}
 }
 
-// TestStoreVerbatimSeedReadsBack pins that Store(seed…) inserts verbatim and that
-// a front-door Get equals the codec projection — the multi-bead store-read path.
+// TestStoreVerbatimSeedReadsBack pins that Store(seed…) inserts each bead verbatim
+// and a front-door Get reads it back — the multi-bead store-read path — preserving
+// the id and pinned CreatedAt, honoring the closed status, and projecting metadata.
 func TestStoreVerbatimSeedReadsBack(t *testing.T) {
 	a := richBead("s-a", "open")
 	c := richBead("s-c", "closed")
@@ -82,8 +103,14 @@ func TestStoreVerbatimSeedReadsBack(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%q): %v", b.ID, err)
 		}
-		if want := session.InfoFromPersistedBead(b); !reflect.DeepEqual(got, want) {
-			t.Fatalf("Get(%q) != codec\n got: %+v\nwant: %+v", b.ID, got, want)
+		if got.ID != b.ID {
+			t.Errorf("Get(%q).ID = %q", b.ID, got.ID)
+		}
+		if wantClosed := b.Status == "closed"; got.Closed != wantClosed {
+			t.Errorf("Get(%q).Closed = %v, want %v", b.ID, got.Closed, wantClosed)
+		}
+		if got.Template != "polecat" || !got.CreatedAt.Equal(b.CreatedAt) {
+			t.Errorf("Get(%q) verbatim seed lost fields: %+v", b.ID, got)
 		}
 	}
 }

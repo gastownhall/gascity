@@ -35,7 +35,7 @@ func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
 
 	infos := make([]Info, 0, len(corpus))
 	for _, b := range corpus {
-		infos = append(infos, InfoFromPersistedBead(b))
+		infos = append(infos, infoFromPersistedBead(b))
 	}
 
 	mgr := NewManager(beads.NewMemStore(), runtime.NewFake())
@@ -57,7 +57,7 @@ func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
 				if !sessionMatchesFilters(b, sf, tf) {
 					continue
 				}
-				want = append(want, mgr.EnrichInfo(InfoFromPersistedBead(b)))
+				want = append(want, mgr.EnrichInfo(infoFromPersistedBead(b)))
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("ListFromInfos(state=%q,template=%q) diverged from the retired bead-form listing:\n got = %+v\nwant = %+v", sf, tf, got, want)

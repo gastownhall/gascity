@@ -9,7 +9,7 @@ import (
 // TestLifecycleIdentityReleasedInfoEquivalence is the load-bearing oracle for
 // the W-flip retire-lane migration: LifecycleIdentityReleasedInfo(info) must
 // agree byte-for-byte with LifecycleIdentityReleased(b.Status, b.Metadata) for
-// any info == InfoFromPersistedBead(b). The retire lane reads it off the typed
+// any info == infoFromPersistedBead(b). The retire lane reads it off the typed
 // Info feed instead of the raw bead, so a divergence would retire (or spare) the
 // wrong named-session identities. The corpus spans the eligible/ineligible ×
 // released/holding × open/closed matrix, and the direct-branch assertions below
@@ -109,7 +109,7 @@ func TestLifecycleIdentityReleasedInfoEquivalence(t *testing.T) {
 
 	// Byte-identical equivalence over the whole corpus.
 	for _, b := range beadsIn {
-		info := InfoFromPersistedBead(b)
+		info := infoFromPersistedBead(b)
 		got := LifecycleIdentityReleasedInfo(info)
 		want := LifecycleIdentityReleased(b.Status, b.Metadata)
 		if got != want {
@@ -119,15 +119,15 @@ func TestLifecycleIdentityReleasedInfoEquivalence(t *testing.T) {
 
 	// Direct-branch assertions so a mutation of either gate fails, independent of
 	// the raw twin (guards against both twins drifting together).
-	released := LifecycleIdentityReleasedInfo(InfoFromPersistedBead(beadsIn[0]))
+	released := LifecycleIdentityReleasedInfo(infoFromPersistedBead(beadsIn[0]))
 	if !released {
 		t.Fatal("ineligible + released identifiers must be released")
 	}
-	holding := LifecycleIdentityReleasedInfo(InfoFromPersistedBead(beadsIn[1]))
+	holding := LifecycleIdentityReleasedInfo(infoFromPersistedBead(beadsIn[1]))
 	if holding {
 		t.Fatal("ineligible but holding an alias must NOT be released")
 	}
-	eligible := LifecycleIdentityReleasedInfo(InfoFromPersistedBead(beadsIn[4]))
+	eligible := LifecycleIdentityReleasedInfo(infoFromPersistedBead(beadsIn[4]))
 	if eligible {
 		t.Fatal("continuity-eligible must NOT be released even with blank identifiers")
 	}
@@ -147,7 +147,7 @@ func TestLifecycleIdentifiersReleasedInfoEquivalence(t *testing.T) {
 	}
 	for i, meta := range cases {
 		b := beads.Bead{ID: "ga", Type: BeadType, Labels: []string{LabelSession}, Metadata: meta}
-		info := InfoFromPersistedBead(b)
+		info := infoFromPersistedBead(b)
 		if got, want := LifecycleIdentifiersReleasedInfo(info), LifecycleIdentifiersReleased(meta); got != want {
 			t.Errorf("case %d meta=%v: LifecycleIdentifiersReleasedInfo=%v want %v", i, meta, got, want)
 		}

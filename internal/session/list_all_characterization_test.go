@@ -86,7 +86,7 @@ func assertListAllEquivalent(t *testing.T, front *Store, raw beads.Store, opts L
 			opts, len(got), len(wantBeads), infoIDs(got), beadIDs(wantBeads))
 	}
 	for i := range wantBeads {
-		wantInfo := InfoFromPersistedBead(wantBeads[i])
+		wantInfo := infoFromPersistedBead(wantBeads[i])
 		if !reflect.DeepEqual(got[i], wantInfo) {
 			t.Fatalf("opts=%+v: row %d (%s) projection diverged\n got=%+v\nwant=%+v",
 				opts, i, wantBeads[i].ID, got[i], wantInfo)
@@ -150,7 +150,7 @@ func reconcileCorpus() []beads.Bead {
 // TestListAllForReconcileMatchesListAllSessionBeads is the ReconcileSession row
 // oracle: across the same option matrix as ListAll, ListAllForReconcile's row
 // set/order/errors equal ListAllSessionBeads, and per row Info ==
-// InfoFromPersistedBead(b) AND Circuit == CircuitStateFromMetadata(b.Metadata).
+// infoFromPersistedBead(b) AND Circuit == CircuitStateFromMetadata(b.Metadata).
 // The corpus carries the label-lost type-only bead, the label-only repairable
 // bead, closed beads, and a populated 9-key circuit cluster, so it fails loudly
 // if the row projection drops a leg, skips the filter/dedupe/sort, or diverges on
@@ -190,7 +190,7 @@ func TestListAllForReconcileMatchesListAllSessionBeads(t *testing.T) {
 				t.Fatalf("opts=%+v: row count got=%d want=%d", tc.opts, len(got), len(wantBeads))
 			}
 			for i := range wantBeads {
-				wantInfo := InfoFromPersistedBead(wantBeads[i])
+				wantInfo := infoFromPersistedBead(wantBeads[i])
 				wantCircuit := CircuitStateFromMetadata(wantBeads[i].Metadata)
 				if !reflect.DeepEqual(got[i].Info, wantInfo) {
 					t.Fatalf("opts=%+v row %d (%s): Info diverged\n got=%+v\nwant=%+v", tc.opts, i, wantBeads[i].ID, got[i].Info, wantInfo)
@@ -572,7 +572,7 @@ func TestStoreGetPersistedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPersistedResponse: %v", err)
 	}
-	if wantInfo := InfoFromPersistedBead(b); !reflect.DeepEqual(info, wantInfo) {
+	if wantInfo := infoFromPersistedBead(b); !reflect.DeepEqual(info, wantInfo) {
 		t.Fatalf("Info mismatch\n got=%+v\nwant=%+v", info, wantInfo)
 	}
 	wantPR := PersistedResponseFromBead(b)

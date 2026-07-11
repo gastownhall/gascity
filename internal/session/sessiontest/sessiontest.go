@@ -3,11 +3,11 @@
 // memstore-backed session front door and read the typed Info back through it.
 //
 // It exists so black-box tests in cmd/gc, internal/api, and internal/worker can
-// stop hand-crafting beads.Bead literals and cracking them with
-// session.InfoFromPersistedBead — the codec belongs at the store edge, not in
-// test setup. Reading a fixture back through session.Store.Get runs that exact
-// codec internally, so the projection is byte-identical to the raw-bead form
-// while the test never touches a raw *beads.Bead.
+// stop hand-crafting beads.Bead literals and cracking them with the raw session
+// projection codec — the codec belongs at the store edge, not in test setup.
+// Reading a fixture back through session.Store.Get runs that exact codec
+// internally, so the projection is byte-identical to the raw-bead form while the
+// test never touches a raw *beads.Bead.
 //
 // internal/session's OWN white-box tests must NOT import this package: it
 // imports session, so importing it back would create an import cycle. Those

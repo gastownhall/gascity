@@ -186,10 +186,10 @@ func reprojectBead(base beads.Bead, patch MetadataPatch) beads.Bead {
 // Step-6d snapshot refresh depends on.
 func TestInfoApplyPatchMatchesReprojection(t *testing.T) {
 	for _, base := range oracleBaseBeads() {
-		baseInfo := InfoFromPersistedBead(base)
+		baseInfo := infoFromPersistedBead(base)
 		for _, patch := range oraclePatches() {
 			got := baseInfo.ApplyPatch(patch)
-			want := InfoFromPersistedBead(reprojectBead(base, patch))
+			want := infoFromPersistedBead(reprojectBead(base, patch))
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("base=%s patch=%v: ApplyPatch diverged from full reprojection\n got=%+v\nwant=%+v", base.ID, patch, got, want)
 			}
@@ -215,8 +215,8 @@ func TestPendingCreateClaimMetadataIsVerbatim(t *testing.T) {
 	}
 	for _, tc := range cases {
 		b := beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{"pending_create_claim": tc.raw}}
-		fromBead := InfoFromPersistedBead(b)
-		fromPatch := InfoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
+		fromBead := infoFromPersistedBead(b)
+		fromPatch := infoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
 			ApplyPatch(MetadataPatch{"pending_create_claim": tc.raw})
 		for name, got := range map[string]Info{"InfoFromPersistedBead": fromBead, "ApplyPatch": fromPatch} {
 			if got.PendingCreateClaimMetadata != tc.wantMeta {
@@ -248,8 +248,8 @@ func TestDependencyOnlyMetadataIsVerbatim(t *testing.T) {
 	}
 	for _, tc := range cases {
 		b := beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{"dependency_only": tc.raw}}
-		fromBead := InfoFromPersistedBead(b)
-		fromPatch := InfoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
+		fromBead := infoFromPersistedBead(b)
+		fromPatch := infoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
 			ApplyPatch(MetadataPatch{"dependency_only": tc.raw})
 		for name, got := range map[string]Info{"InfoFromPersistedBead": fromBead, "ApplyPatch": fromPatch} {
 			if got.DependencyOnlyMetadata != tc.wantMeta {
@@ -277,8 +277,8 @@ func TestInfoMarkClosedMatchesReprojection(t *testing.T) {
 		closed := open
 		closed.Status = "closed"
 
-		got := InfoFromPersistedBead(open).MarkClosed()
-		want := InfoFromPersistedBead(closed)
+		got := infoFromPersistedBead(open).MarkClosed()
+		want := infoFromPersistedBead(closed)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("base=%s: MarkClosed diverged from full reprojection of the closed bead\n got=%+v\nwant=%+v", base.ID, got, want)
 		}
@@ -297,8 +297,8 @@ func TestInfoMarkClosedMatchesReprojection(t *testing.T) {
 // reconciler reuses the snapshot Info across reads within a tick.
 func TestInfoApplyPatchDoesNotMutateReceiver(t *testing.T) {
 	base := oracleBaseBeads()[0]
-	before := InfoFromPersistedBead(base)
-	snapshot := InfoFromPersistedBead(base) // independent copy to compare against
+	before := infoFromPersistedBead(base)
+	snapshot := infoFromPersistedBead(base) // independent copy to compare against
 	_ = before.ApplyPatch(MetadataPatch{
 		aliasHistoryMetadataKey: "brand,new,history",
 		"state":                 "idle",
@@ -312,7 +312,7 @@ func TestInfoApplyPatchDoesNotMutateReceiver(t *testing.T) {
 // TestInfoApplyPatchEmptyIsIdentity guards the no-op fast path shape: an empty
 // patch returns the Info unchanged.
 func TestInfoApplyPatchEmptyIsIdentity(t *testing.T) {
-	info := InfoFromPersistedBead(oracleBaseBeads()[0])
+	info := infoFromPersistedBead(oracleBaseBeads()[0])
 	if got := info.ApplyPatch(MetadataPatch{}); !reflect.DeepEqual(got, info) {
 		t.Fatalf("empty patch changed Info\n got=%+v\nwant=%+v", got, info)
 	}

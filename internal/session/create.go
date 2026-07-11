@@ -67,7 +67,7 @@ func (s *Store) CreateSessionInfo(spec CreateSpec) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	return InfoFromPersistedBead(created), nil
+	return infoFromPersistedBead(created), nil
 }
 
 // CreateSession creates a session bead from spec and returns its id. It is the

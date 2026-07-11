@@ -136,7 +136,7 @@ func TestReconcileRowsFromBeadsProjectsEachRow(t *testing.T) {
 		t.Fatalf("ReconcileRowsFromBeads len = %d, want %d (no filtering)", len(rows), len(in))
 	}
 	for i, b := range in {
-		if !reflect.DeepEqual(rows[i].Info, InfoFromPersistedBead(b)) {
+		if !reflect.DeepEqual(rows[i].Info, infoFromPersistedBead(b)) {
 			t.Errorf("row %d Info mismatch", i)
 		}
 		if !reflect.DeepEqual(rows[i].Circuit, CircuitStateFromMetadata(b.Metadata)) {

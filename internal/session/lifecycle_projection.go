@@ -342,7 +342,7 @@ func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]strin
 // LifecycleDisplayReasonWithLiveness: it reads the same status + metadata facts
 // off an already-projected session.Info instead of a raw metadata map, so
 // display callers holding a typed snapshot need not re-crack the bead. For any
-// info == InfoFromPersistedBead(bead) it is byte-identical to
+// info == infoFromPersistedBead(bead) it is byte-identical to
 // LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now,
 // info.SessionName, isRunning) — the sessionName the display path supplies is the
 // projected Info.SessionName. TestLifecycleDisplayReasonWithLivenessInfoEquivalence
@@ -531,7 +531,7 @@ func LifecycleIdentifiersReleased(metadata map[string]string) bool {
 // LifecycleIdentityReleased: it projects the lifecycle off an already-projected
 // session.Info (via LifecycleInputFromInfo) and reads the identifier markers off
 // Info, so the retire lane can run over the typed candidate feed without
-// re-cracking the raw bead. For any info == InfoFromPersistedBead(b) it equals
+// re-cracking the raw bead. For any info == infoFromPersistedBead(b) it equals
 // LifecycleIdentityReleased(b.Status, b.Metadata) — LifecycleInputFromInfo
 // reconstructs the only status fact the projection consumes (closed) from
 // Info.Closed, and LifecycleIdentifiersReleasedInfo mirrors the three identifier

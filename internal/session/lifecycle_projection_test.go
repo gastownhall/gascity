@@ -839,7 +839,7 @@ func TestLifecycleDisplayReasonWithLivenessInfoEquivalence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			bead := livenessInfoBead(tc.status, tc.meta)
-			info := InfoFromPersistedBead(bead)
+			info := infoFromPersistedBead(bead)
 			got := LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning)
 			if got != tc.want {
 				t.Fatalf("LifecycleDisplayReasonWithLivenessInfo = %q, want %q", got, tc.want)

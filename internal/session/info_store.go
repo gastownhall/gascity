@@ -20,7 +20,7 @@ import (
 // backends: a bead persisted to bd, sqlite, or postgres round-trips to the same
 // Info. Callers that need live runtime state (Attached, runtime-downgraded
 // State, detected transport) must go through Manager, not this function.
-func InfoFromPersistedBead(b beads.Bead) Info {
+func infoFromPersistedBead(b beads.Bead) Info {
 	sessName := b.Metadata["session_name"]
 	if sessName == "" {
 		sessName = sessionNameFor(b.ID)
@@ -211,7 +211,7 @@ func (s *Store) Get(id string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	return InfoFromPersistedBead(b), nil
+	return infoFromPersistedBead(b), nil
 }
 
 // GetPersistedResponse returns the persisted session.Info paired with the
@@ -229,7 +229,7 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 	if err != nil {
 		return Info{}, PersistedResponse{}, err
 	}
-	return InfoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+	return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
 }
 
 // validatedBead loads the session bead for id. A load failure (including an
@@ -283,7 +283,7 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
 			continue
 		}
-		out = append(out, InfoFromPersistedBead(b))
+		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, nil
 }
@@ -303,7 +303,7 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 	}
 	out := make([]Info, 0, len(found))
 	for _, b := range found {
-		out = append(out, InfoFromPersistedBead(b))
+		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, nil
 }
@@ -331,7 +331,7 @@ func (s *Store) ListLabeledSessionInfosUnfiltered() ([]Info, error) {
 		if b.Status == "closed" {
 			continue
 		}
-		out = append(out, InfoFromPersistedBead(b))
+		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, nil
 }

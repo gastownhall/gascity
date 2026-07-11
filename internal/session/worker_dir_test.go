@@ -9,7 +9,7 @@ import (
 )
 
 // TestWorkerDirFromInfoMatchesContract is the reprojection oracle for the
-// Info.WorkerDir field-add: WorkerDirFromInfo(InfoFromPersistedBead(b)) must be
+// Info.WorkerDir field-add: WorkerDirFromInfo(infoFromPersistedBead(b)) must be
 // byte-identical to contract.WorkerDirFromMetadata(b.Metadata) across the
 // canonical/legacy/both/neither/whitespace corpus. It is load-bearing: it fails
 // if WorkerDir stops mirroring the canonical worker_dir key, if the legacy
@@ -33,7 +33,7 @@ func TestWorkerDirFromInfoMatchesContract(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := beads.Bead{ID: "s-1", Type: BeadType, Status: "open", Labels: []string{LabelSession}, Metadata: tc.meta}
-			info := InfoFromPersistedBead(b)
+			info := infoFromPersistedBead(b)
 			got := WorkerDirFromInfo(info)
 			wantContract := contract.WorkerDirFromMetadata(b.Metadata)
 			if got != wantContract {

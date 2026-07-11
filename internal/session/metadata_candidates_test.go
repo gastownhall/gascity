@@ -61,8 +61,8 @@ func TestExactMetadataSessionCandidatesInfoMatchesRawProjection(t *testing.T) {
 			t.Fatalf("includeClosed=%v: len(infos)=%d len(raw)=%d", includeClosed, len(infos), len(raw))
 		}
 		for i := range raw {
-			if !reflect.DeepEqual(infos[i], InfoFromPersistedBead(raw[i])) {
-				t.Errorf("includeClosed=%v: infos[%d] (id %q) != InfoFromPersistedBead(raw[%d] id %q)", includeClosed, i, infos[i].ID, i, raw[i].ID)
+			if !reflect.DeepEqual(infos[i], infoFromPersistedBead(raw[i])) {
+				t.Errorf("includeClosed=%v: infos[%d] (id %q) != infoFromPersistedBead(raw[%d] id %q)", includeClosed, i, infos[i].ID, i, raw[i].ID)
 			}
 		}
 	}

@@ -123,7 +123,7 @@ func TestWaitsForIdleAfterInterrupt_WrappedClaude(t *testing.T) {
 
 // TestProviderFamilyFromInfoMatchesMetadata is the byte-identical oracle for the
 // ProviderFamilyFromInfo twin: for every representative provider-vocab shape, the
-// Info form (fed InfoFromPersistedBead(b)) must agree with the metadata form on
+// Info form (fed infoFromPersistedBead(b)) must agree with the metadata form on
 // the builtin_ancestor → provider_kind → provider precedence ladder. It is
 // self-sufficient (asserts the concrete family output, not only Info==metadata),
 // so mutating any precedence rung on either projection is caught here.
@@ -145,7 +145,7 @@ func TestProviderFamilyFromInfoMatchesMetadata(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := beads.Bead{ID: "s", Type: BeadType, Status: "open", Labels: []string{LabelSession}, Metadata: tc.meta}
 			fromMeta := ProviderFamilyFromMetadata(tc.meta, tc.fallback)
-			fromInfo := ProviderFamilyFromInfo(InfoFromPersistedBead(b), tc.fallback)
+			fromInfo := ProviderFamilyFromInfo(infoFromPersistedBead(b), tc.fallback)
 			if fromInfo != fromMeta {
 				t.Errorf("ProviderFamilyFromInfo = %q, ProviderFamilyFromMetadata = %q (want equal)", fromInfo, fromMeta)
 			}
@@ -800,7 +800,7 @@ func TestPollerKeyFromInfoMatchesBead(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			info := InfoFromPersistedBead(tc.bead)
+			info := infoFromPersistedBead(tc.bead)
 			got := PollerKeyFromInfo(info)
 			if got != tc.want {
 				t.Fatalf("PollerKeyFromInfo() = %q, want %q", got, tc.want)

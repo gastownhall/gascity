@@ -82,7 +82,7 @@ func TestApplyPatchInfoPersistsAndFoldsEqualsReprojection(t *testing.T) {
 		t.Errorf("ApplyPatchInfo fold diverged from pre.ApplyPatch\n got=%+v\nwant=%+v", got, want)
 	}
 	// ...which is byte-identical to a full reprojection of the patched bead.
-	if want := InfoFromPersistedBead(reprojectBead(b, patch)); !reflect.DeepEqual(got, want) {
+	if want := infoFromPersistedBead(reprojectBead(b, patch)); !reflect.DeepEqual(got, want) {
 		t.Errorf("ApplyPatchInfo fold diverged from full reprojection\n got=%+v\nwant=%+v", got, want)
 	}
 }
@@ -116,7 +116,7 @@ func TestApplyPatchInfoEmptyIsNoOp(t *testing.T) {
 func TestApplyPatchInfoWriteErrorReturnsInputUnchanged(t *testing.T) {
 	// A store with no such bead: SetMetadataBatch on a missing id errors.
 	is := NewStore(seedSessionStore(t))
-	pre := InfoFromPersistedBead(sessionBeadFixture("missing", "open", map[string]string{"state": "active"}))
+	pre := infoFromPersistedBead(sessionBeadFixture("missing", "open", map[string]string{"state": "active"}))
 
 	got, err := is.ApplyPatchInfo(pre, MetadataPatch{"state": "asleep"})
 	if err == nil {

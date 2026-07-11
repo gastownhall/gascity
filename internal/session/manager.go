@@ -1866,7 +1866,7 @@ func (m *Manager) Peek(id string, lines int) (string, error) {
 // detection, ACP routing, stale-state downgrade, attachment/last-active) lives
 // here, where the runtime provider is available.
 func (m *Manager) infoFromBead(b beads.Bead) Info {
-	return m.EnrichInfo(InfoFromPersistedBead(b))
+	return m.EnrichInfo(infoFromPersistedBead(b))
 }
 
 // EnrichInfo applies the live runtime overlay to a persisted Info projection:
@@ -1874,7 +1874,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 // attachment/last-active. It is the runtime half of infoFromBead extracted onto
 // an Info parameter, so a caller that already holds a persisted Info (e.g. from
 // Store.ListAll) can enrich it without a second bead read. infoFromBead is now
-// exactly EnrichInfo(InfoFromPersistedBead(b)); that refactoring identity, plus
+// exactly EnrichInfo(infoFromPersistedBead(b)); that refactoring identity, plus
 // the manager's existing Get/List tests, is the oracle.
 //
 // It reads only Info fields that mirror the exact bead metadata the raw overlay

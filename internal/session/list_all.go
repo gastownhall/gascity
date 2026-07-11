@@ -184,7 +184,7 @@ func (s *Store) ListAll(opts ListAllOptions) ([]Info, error) {
 	}
 	out := make([]Info, 0, len(rows))
 	for _, b := range rows {
-		out = append(out, InfoFromPersistedBead(b))
+		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, err
 }
@@ -221,7 +221,7 @@ func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, er
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    InfoFromPersistedBead(b),
+			Info:    infoFromPersistedBead(b),
 			Circuit: CircuitStateFromMetadata(b.Metadata),
 		})
 	}
@@ -241,7 +241,7 @@ func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
 	out := make([]ReconcileSession, 0, len(beadsIn))
 	for _, b := range beadsIn {
 		out = append(out, ReconcileSession{
-			Info:    InfoFromPersistedBead(b),
+			Info:    infoFromPersistedBead(b),
 			Circuit: CircuitStateFromMetadata(b.Metadata),
 		})
 	}
@@ -303,7 +303,7 @@ func (s *Store) ListAllForReconcileWithFingerprint(opts ListAllOptions) ([]Recon
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    InfoFromPersistedBead(b),
+			Info:    infoFromPersistedBead(b),
 			Circuit: CircuitStateFromMetadata(b.Metadata),
 		})
 	}
@@ -322,7 +322,7 @@ func (s *Store) ListAllWithResponses(opts ListAllOptions) ([]ListedSession, erro
 	out := make([]ListedSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ListedSession{
-			Info:     InfoFromPersistedBead(b),
+			Info:     infoFromPersistedBead(b),
 			Response: PersistedResponseFromBead(b),
 		})
 	}

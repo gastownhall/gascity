@@ -79,7 +79,7 @@ func ResolveSessionRecordByExactID(store beads.Store, identifier string) (Info, 
 	b, err := store.Get(identifier)
 	if err == nil && IsSessionBeadOrRepairable(b) {
 		normalizeEmptyType(&b)
-		return InfoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+		return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
 	}
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return Info{}, PersistedResponse{}, fmt.Errorf("looking up session %q: %w", identifier, err)

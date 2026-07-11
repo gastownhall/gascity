@@ -974,7 +974,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if len(sameWorkDirSessions) > 1 {
 		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
 		for _, s := range sameWorkDirSessions {
-			sameWorkDirInfos = append(sameWorkDirInfos, InfoFromPersistedBead(s))
+			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
 		}
 		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
 			return path, nil

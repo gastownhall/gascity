@@ -326,7 +326,7 @@ func providerKind(b beads.Bead) string {
 // it walks the same builtin_ancestor → provider_kind → provider precedence ladder,
 // reading the raw mirrors Info carries (BuiltinAncestor, ProviderKind, Provider)
 // instead of the bead metadata map. Byte-identical to the metadata form for any
-// bead b (ProviderFamilyFromInfo(InfoFromPersistedBead(b), fallback) ==
+// bead b (ProviderFamilyFromInfo(infoFromPersistedBead(b), fallback) ==
 // ProviderFamilyFromMetadata(b.Metadata, fallback)), so a caller holding a typed
 // Info can resolve the provider family without the raw bead.
 func ProviderFamilyFromInfo(info Info, fallback string) string {

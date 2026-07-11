@@ -33,7 +33,7 @@ func PollerKeyFromBead(b beads.Bead) string {
 // order (alias → agent_name → template → session_name → title).
 // SessionNameMetadata is the RAW session_name mirror (matching
 // PollerKeyFromBead's Metadata["session_name"], not the sessionNameFor-filled
-// SessionName). For any info == InfoFromPersistedBead(b) it equals
+// SessionName). For any info == infoFromPersistedBead(b) it equals
 // PollerKeyFromBead(b); TestPollerKeyFromInfoMatchesBead pins that.
 func PollerKeyFromInfo(info Info) string {
 	if id := strings.TrimSpace(info.ID); id != "" {

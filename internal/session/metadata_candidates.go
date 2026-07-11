@@ -32,7 +32,7 @@ func ExactMetadataSessionCandidatesInfo(store beads.Store, includeClosed bool, f
 	}
 	out := make([]Info, 0, len(candidates))
 	for _, b := range candidates {
-		out = append(out, InfoFromPersistedBead(b))
+		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, nil
 }
