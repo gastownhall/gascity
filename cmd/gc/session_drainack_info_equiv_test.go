@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // refRunningSessionMatchesPendingCreate is the raw-metadata reference
@@ -131,7 +132,7 @@ func TestDrainAckClassifierInfoEquivalence(t *testing.T) {
 
 	for shape, b := range shapes {
 		b := b
-		info := session.InfoFromPersistedBead(b)
+		info := sessiontest.SeedBead(t, b)
 		name := b.Metadata["session_name"]
 		for _, pc := range providerCases {
 			t.Run(shape+"/"+pc.name, func(t *testing.T) {

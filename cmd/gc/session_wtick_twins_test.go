@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // wtickSessionBead builds an open session bead with the given metadata for the
@@ -53,7 +54,7 @@ func TestFreshRestartSessionKeyInfoMatchesRaw(t *testing.T) {
 	for ti, tp := range tps {
 		for mi, meta := range metas {
 			b := wtickSessionBead("s-fr", meta)
-			info := session.InfoFromPersistedBead(b)
+			info := sessiontest.SeedBead(t, b)
 			rawKey, rawCap := freshRestartSessionKey(tp, b.Metadata)
 			infoKey, infoCap := freshRestartSessionKeyInfo(tp, info)
 			if (rawKey == "") != (infoKey == "") || rawCap != infoCap {
@@ -103,7 +104,7 @@ func TestNamedSessionWinsCanonicalRepairInfoMatchesRaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := namedSessionBeadWinsCanonicalRepair(tc.cand, tc.incb, canon)
 			info := namedSessionWinsCanonicalRepairInfo(
-				session.InfoFromPersistedBead(tc.cand), session.InfoFromPersistedBead(tc.incb), canon)
+				sessiontest.SeedBead(t, tc.cand), sessiontest.SeedBead(t, tc.incb), canon)
 			if raw != info {
 				t.Fatalf("winner rule diverged: raw=%v info=%v", raw, info)
 			}
@@ -126,7 +127,7 @@ func TestTopoOrderRowsMatchesTopoOrder(t *testing.T) {
 	}
 	rows := make([]session.ReconcileSession, len(sessions))
 	for i, b := range sessions {
-		rows[i] = session.ReconcileSession{Info: session.InfoFromPersistedBead(b)}
+		rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 	}
 	depsCases := map[string]map[string][]string{
 		"no-deps": {},
@@ -171,7 +172,7 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 			b := wtickSessionBead("s-stop", tc.meta)
 			var rawErr, infoErr bytes.Buffer
 			raw := stopRuntimeBeforeSessionBeadMutation(nil, tc.sp, nil, b, "duplicate", &rawErr)
-			info := stopRuntimeBeforeSessionBeadMutationInfo(nil, tc.sp, nil, session.InfoFromPersistedBead(b), "duplicate", &infoErr)
+			info := stopRuntimeBeforeSessionBeadMutationInfo(nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
 			if raw != info {
 				t.Fatalf("stop-runtime diverged: raw=%v info=%v", raw, info)
 			}
@@ -284,7 +285,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		rowBeads := loadOpen(t, store)
 		rows := make([]session.ReconcileSession, len(rowBeads))
 		for i, b := range rowBeads {
-			rows[i] = session.ReconcileSession{Info: session.InfoFromPersistedBead(b)}
+			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
 		retireDuplicateConfiguredNamedSessionRows(store, nil, sp, cfg, cityName, rows, now, nil)
 	}
