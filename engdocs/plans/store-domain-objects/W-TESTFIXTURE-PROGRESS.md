@@ -14,7 +14,32 @@ and `test-double-migration-plan.md` (the categorization). Branch
 | `86bc8a587` | **Batch 2** — `session_lifecycle_parallel_test.go` (89→0: 53 SeedBead-on-local + 36 struct-literal), `session_reconcile_test.go` (48→0 via `seedSessionInfo`), `session_wake_test.go` (29→1: `wakeInfo` + 10 SeedBead; 1 adapter deferred) | 166 → 1 |
 | `b3bc66e05` | Batch-2 red-team **APPROVE-with-nits (0 blockers)**; nit fixed (`wakeInfo`→`seedSessionInfo` delegate) | — |
 | `716ef1826` | **Batch 3** — build_desired_state (24→0), telemetry (17→0)+compute_awake_bridge (14→0), model_phase0_rare_state (14→0)+lifecycle_chaos (11→0). Red-team **APPROVE-with-nits (0 blockers)**; nit fixed (divergence comment). | 80 → 0 |
-| in flight | **Batch 4** (base `939c9affe`) — cmd_session(11)+assigned_work(8)+fork_launch(5)+pool_replacement(2) [w4-cmd DONE `ccca708fa`, 25/26, 1 deferred `sessionInfosFromBeads`]; tail cluster of 8 small files (20) [w4-tail running] | ~46 sites |
+| `ce5236b0c` | **Batch 4** — cmd_session(11→0)+assigned_work(8→1)+fork_launch(5→0)+pool_replacement(2→0); tail cluster of 8 small files (20→0). Red-team combined with batch 5. | 45/46 (1 deferred) |
+| `bb50b7537` | **Batch 5** — 13 mechanical 1-site tail files (14→0: 8 SeedBead, 3 struct-literal, 1 seedSessionInfo, 1 Info{}, 1 front-door-Get exception). | 14 → 0 |
+
+**cmd/gc: 454 → 101 codec sites (~78% done). 101 = twin/equiv ~66 + shared-adapters 24 + census-guard literals 8 (NOT conversions) + 2 deferred-adapter + 1.**
+Batches 1–3 red-team-APPROVED; batch 4+5 combined red-team = <pending, tracked below>.
+
+## ENDGAME PLAN (the nuanced remainder — needs careful, decision-laden execution, NOT blanket agent conversion)
+
+### 1. Twin/equiv oracles (~66 sites, 9 files) — the DECISION FORK
+These assert `bead_classifier(bead) == info_classifier(InfoFromPersistedBead(bead))` over a corpus. Only the **Info side** (`InfoFromPersistedBead(bead)`) is a codec needle; the raw side stays raw (not a needle). Per-file triage:
+- **Session-shaped corpus** (bead has ID+session type, or classifier ignores the degradation) → Info side to `seedSessionInfo(bead)` (or `SeedBead`); the raw side is untouched. Reaches 0. Candidates: `session_r3_info_equiv` (15, operands b/bead/closed/live/persisted), `session_wpool_twins` (7), `session_w3_split_equiv` (4, `sb`), `session_w4_split_equiv` (3, `sb`), `nudge_target_info_equiv` (2), `session_prepare_twin_coherence` (1), and much of `session_classifier_info_equiv` (28, `makeBead`/`beadsByShape`/`sb`/`pendFixtures` corpus).
+- **Deliberately-degraded / codec-under-test corpus** (the oracle's POINT is the codec's behavior on weird/whitespace/non-session beads — a store round-trip or Type-stamp would DEFEAT the comparison) → these genuine codec oracles **cannot** route through the front door. Two options: (a) **RELOCATE the oracle into `internal/session`** (as a white-box test) where the lowercase `infoFromPersistedBead` stays callable; or (b) keep + accept the codec stays exported (the census pin is then the boundary — the original endgame's honest under-reach). Known: `session_wtick_twins` (5, pins TrimSpace fidelity → keep raw/struct → relocate) and `session_drainack_info_equiv` (1, degraded). `session_classifier_info_equiv` may have a degraded sub-corpus — inspect.
+- **DECISION NEEDED (possibly Julian):** are we willing to RELOCATE the handful of genuine codec oracles into internal/session to achieve the FULL cmd/gc unexport, or accept the codec staying exported with the census pin as the boundary? This determines whether Phase 10's unexport is total.
+
+### 2. Shared cross-file adapters (coordinated pass owning ALL callers) — see CROSS-FILE BLOCKERS above
+- `session_sleep_test.go` (13) + `session_reconcile_ratelimit_test.go` (11): both call the `wakeReasonsForBead`/`healStateInfo`/`infoLookupFromBeadLookup` bridge helpers AND have their own sites. Convert own sites first (decision tree), then the bridge helpers in a pass that owns all callers.
+- `infoLookupFromBeadLookup` (wake:1, +sleep, +trace_integration) — projects any bead shape; needs per-shape split or a projector param.
+- `sessionInfosFromBeads` (assigned_work:1, +8 files) — batch codec, `t`-less; some callers pass deliberately-narrowed task beads → a Type-stamp breaks their narrowing tests. Own all 8 callers; likely thread a projector or convert callers to pass Infos.
+
+### 3. Cross-package (small, but api/worker gate the unexport build)
+- **`internal/api/session_response_wire_test.go` (1)** → `Store.GetPersistedResponse(id)` (drops BOTH `InfoFromPersistedBead` + `PersistedResponseFromBead`).
+- **`internal/worker/session_record_equiv_test.go` (2)** → `Store.Get(id)`. THE sole cross-package unexport-blocker per the original plan; if strict bead-form equivalence is required, relocate the oracle into internal/session.
+
+### 4. internal/session (~64 sites) — mechanical lowercase rename, done WITH the codec in Phase 10.
+
+### 5. Phase 10 (LAST, gated) — unchanged from below.
 
 ## KEYSTONE FINDING (adjusts the plan's categorization)
 `MemStore.Create` unconditionally rewrites **ID→gc-N, Status→open, CreatedAt→now**
