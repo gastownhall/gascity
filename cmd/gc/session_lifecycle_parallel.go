@@ -1676,83 +1676,29 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 }
 
 // asyncStartSessionStillCurrentInfo decides whether an async start result should
-// commit against the current session state. Identity is established by
-// instance_token: when the prepared and current tokens both exist and match, the
-// bead is the same session we spawned for, even if the generation has been bumped
-// by a concurrent reconciler phase (which is normal when a wave runs long enough
-// for other phases to write metadata between enqueue and result completion).
-//
-// Rejecting on generation drift alone caused stuck-creating zombies: the process
-// spawned successfully, but the result was discarded as "stale", so
-// pending_create_claim never cleared and the session never advanced past
-// state=creating. Falling back to generation only when the token is absent
-// preserves the prior behavior for callers that pre-date instance_token.
-//
-// It reads the closed flag off Info.Closed (Status=="closed"), the identity off
-// asyncStartIdentityMatchesInfo (instance_token/generation), the raw state off
-// Info.MetadataState (NOT the normalized/closed-blanked Info.State — the
-// reconciler classifiers key on the raw value), and the pending-create claim off
-// shouldRollbackPendingCreateInfo. It is the sole form (the raw sibling was
-// deleted in WI-6 R4). A live state (active/awake) means the spawn already
-// succeeded and another phase cleared pending_create_claim, so the result still
-// carries useful metadata (creation_complete_at, runtime_epoch) and is committed
-// rather than discarded. For sessions still mid-flight (creating/asleep/drained/
-// empty), reject if pending_create_claim was cleared from under us — another
-// reconciler phase already rolled the create back and our result would stomp it.
+// commit against the current session state. It is a thin delegation to the typed
+// sessionpkg.PendingCreateLease commit gate: instance_token is authoritative for
+// identity (generation drift with a matching token still commits, the #1542 fix),
+// a session already in a live state commits regardless of the claim, and a claim
+// cleared from under us discards (#2073). See PendingCreateLease.CommitVerdict.
 func asyncStartSessionStillCurrentInfo(prepared, current sessionpkg.Info) bool {
-	if current.Closed {
-		return false
-	}
-	if !asyncStartIdentityMatchesInfo(prepared, current) {
-		return false
-	}
-	currentState := sessionpkg.State(strings.TrimSpace(current.MetadataState))
-	if currentState == sessionpkg.StateAwake || currentState == sessionpkg.StateActive {
-		return true
-	}
-	if shouldRollbackPendingCreateInfo(prepared) && !shouldRollbackPendingCreateInfo(current) {
-		return false
-	}
-	return confirmPendingStart(string(currentState))
+	return sessionpkg.LeaseFromInfo(prepared).CommitVerdict(sessionpkg.LeaseFromInfo(current)) == sessionpkg.LeaseCommit
 }
 
 // asyncStartStaleRuntimeCleanupAllowedInfo reports whether the stale-runtime
-// cleanup may stop the spawned process, reading the same fields off Info as
-// asyncStartSessionStillCurrentInfo (Closed, identity, MetadataState, claim). It
-// is the sole form (the raw sibling was deleted in WI-6 R4).
+// cleanup may stop the spawned process. It is the exact complement of
+// asyncStartSessionStillCurrentInfo, expressed as the other outcome of the fused
+// PendingCreateLease commit gate.
 func asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current sessionpkg.Info) bool {
-	if current.Closed {
-		return true
-	}
-	if !asyncStartIdentityMatchesInfo(prepared, current) {
-		return true
-	}
-	currentState := sessionpkg.State(strings.TrimSpace(current.MetadataState))
-	if shouldRollbackPendingCreateInfo(prepared) && !shouldRollbackPendingCreateInfo(current) {
-		return currentState != sessionpkg.StateAwake && currentState != sessionpkg.StateActive
-	}
-	return !confirmPendingStart(string(currentState)) &&
-		currentState != sessionpkg.StateAwake &&
-		currentState != sessionpkg.StateActive
+	return sessionpkg.LeaseFromInfo(prepared).CommitVerdict(sessionpkg.LeaseFromInfo(current)) == sessionpkg.LeaseDiscardStopRuntime
 }
 
 // asyncStartIdentityMatchesInfo reports whether prepared and current describe the
-// same session. instance_token is authoritative (Info.InstanceToken) when the
-// prepared side has one; only fall back to generation (Info.Generation) when the
-// prepared token is absent (legacy pre-instance_token snapshots). Generation drift
-// with a matching token is a normal consequence of concurrent reconciler phases
-// and must not invalidate an in-flight start result. It is the sole form (the raw
-// sibling was deleted in WI-6 R4).
+// same session. It delegates to the typed lease identity fence: instance_token is
+// authoritative when the prepared side has one; generation is only the legacy
+// fallback.
 func asyncStartIdentityMatchesInfo(prepared, current sessionpkg.Info) bool {
-	preparedToken := strings.TrimSpace(prepared.InstanceToken)
-	if preparedToken != "" {
-		return strings.TrimSpace(current.InstanceToken) == preparedToken
-	}
-	preparedGeneration := strings.TrimSpace(prepared.Generation)
-	if preparedGeneration == "" {
-		return true
-	}
-	return strings.TrimSpace(current.Generation) == preparedGeneration
+	return sessionpkg.LeaseFromInfo(prepared).SameIdentity(sessionpkg.LeaseFromInfo(current))
 }
 
 // clonePreparedStartForAsync returns an independent copy of the prepared start so
@@ -1976,19 +1922,17 @@ func commitStartResult(
 	return commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, nil)
 }
 
-// confirmPendingStart reports whether a session in the given metadata
-// state should be transitioned to "active" after a successful runtime
-// spawn. Empty, "start-pending", "creating", "asleep", and "drained" all indicate the
-// session was pending a spawn; "awake" is treated by the reconciler as
-// equivalent to "active" and is intentionally NOT restamped (a no-op
-// metadata write on every spawn). Any other state ("draining",
-// "archived", "quarantined", ...) is left alone.
+// confirmPendingStart reports whether a session in the given metadata state
+// should be transitioned to "active" after a successful runtime spawn. It is a
+// thin string adapter over the single home for that frozen pending-start state
+// set, sessionpkg.StateConfirmsPendingStart: it trims and types the raw metadata
+// value, then delegates. Empty, "start-pending", "creating", "asleep", and
+// "drained" all indicate the session was pending a spawn; "awake" is treated by
+// the reconciler as equivalent to "active" and is intentionally NOT restamped (a
+// no-op metadata write on every spawn). Any other state ("draining", "archived",
+// "quarantined", ...) is left alone.
 func confirmPendingStart(currentState string) bool {
-	switch sessionpkg.State(strings.TrimSpace(currentState)) {
-	case "", sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
-		return true
-	}
-	return false
+	return sessionpkg.StateConfirmsPendingStart(sessionpkg.State(strings.TrimSpace(currentState)))
 }
 
 func commitStartResultTraced(
