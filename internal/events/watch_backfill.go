@@ -2,36 +2,48 @@ package events
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/json"
-	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// backfillConcurrency bounds how many watchers may walk archives concurrently.
-// A cold resume gunzips archives; without a cap, N simultaneous resumes multiply
-// the CPU/IO cost. Excess resumes queue on this semaphore rather than piling on.
+// backfillConcurrency bounds how many watchers may actively read archive/rotating
+// segments concurrently. A cold resume gunzips archives; without a cap, N
+// simultaneous resumes multiply the CPU/IO cost. Excess resumes queue on this
+// semaphore. The slot is held only during a single bounded batch read (not
+// across the consumer's drain), so it caps concurrent decode work without
+// pinning memory.
 const backfillConcurrency = 2
+
+// backfillBatch bounds how many events one backfill step buffers before yielding
+// to the consumer. It caps a watcher's resident backfill memory to O(batch)
+// events (not a whole archive segment), so many concurrent cold resumes cannot
+// aggregate into an OOM.
+const backfillBatch = 256
 
 var backfillSlots = make(chan struct{}, backfillConcurrency)
 
-func acquireBackfillSlot(ctx context.Context) error {
+// acquireBackfillSlot blocks for a decode slot, returning early if ctx is
+// canceled or done is closed (a Close mid-wait must unblock Next).
+func acquireBackfillSlot(ctx context.Context, done <-chan struct{}) error {
 	select {
 	case backfillSlots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-done:
+		return errWatcherClosed
 	}
 }
 
 func releaseBackfillSlot() { <-backfillSlots }
 
-// backfillSourceKind distinguishes a gzip archive from a plain-JSONL segment
-// (an in-flight rotating-* file or the captured active file) so the streamer
-// picks the right decoder.
+// backfillSourceKind distinguishes a gzip archive from a plain-JSONL segment.
 type backfillSourceKind int
 
 const (
@@ -40,9 +52,7 @@ const (
 )
 
 // backfillSource is one on-disk segment contributing to a resume backfill,
-// ordered by its first sequence. Archives and rotating files carry a
-// filename-encoded seq window used both to order them and to skip segments
-// wholly at or below the resume cursor.
+// ordered by its first sequence.
 type backfillSource struct {
 	path     string
 	kind     backfillSourceKind
@@ -53,10 +63,8 @@ type backfillSource struct {
 // listBackfillSources returns the .gz archives and in-flight rotating-* files in
 // dir whose seq window may contain events with Seq > afterSeq, sorted by first
 // sequence. A .gz archive and its not-yet-removed rotating source share a seq
-// window (equal FirstSeq); the streamed monotonic guard drops the duplicate, so
-// both are safe to include. The active file is appended by the caller (it reads
-// from a captured fd, not by path, to stay correct across a mid-backfill
-// rotation).
+// window; the streamed monotonic guard drops the duplicate, so both are safe to
+// include.
 func listBackfillSources(dir string, afterSeq uint64) ([]backfillSource, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -102,100 +110,104 @@ func listBackfillSources(dir string, afterSeq uint64) ([]backfillSource, error) 
 		if srcs[i].firstSeq != srcs[j].firstSeq {
 			return srcs[i].firstSeq < srcs[j].firstSeq
 		}
-		// A rotating file and its promoted .gz share FirstSeq; order is
-		// irrelevant to correctness (the monotonic guard dedupes), but keep it
-		// deterministic.
 		return srcs[i].kind < srcs[j].kind
 	})
 	return srcs, nil
 }
 
-// isCanonicalArchiveBasename reports whether name is a canonical .gz archive
-// (not a legacy pre-seq-window one, which parseArchiveBasename rejects anyway).
+// isCanonicalArchiveBasename reports whether name is a canonical .gz archive.
 func isCanonicalArchiveBasename(name string) bool {
 	return strings.HasPrefix(name, "events.jsonl.archive-") && strings.HasSuffix(name, ".gz")
 }
 
-// streamPlainJSONL streams filter-matching events from a plain-JSONL events file
-// (a rotating-* segment or the active file), invoking fn per event until fn
-// returns false or the file ends. It is the plain-text sibling of streamArchive.
-// A missing file yields no events and no error (a rotating file may be promoted
-// and removed between listing and read; its .gz counterpart covers the window).
-func streamPlainJSONL(path string, filter Filter, fn func(Event) bool) error {
-	f, err := os.Open(path)
+// segmentReader streams events from one open backfill segment line by line via
+// bufio.Reader.ReadBytes — which, unlike bufio.Scanner, imposes no maximum line
+// length, so an event larger than 1 MiB cannot poison the resume. It owns the
+// underlying file (and gzip stream, for archives) and is closed exactly once.
+type segmentReader struct {
+	f  *os.File
+	gz *gzip.Reader
+	br *bufio.Reader
+}
+
+// openSegmentReader opens src (a captured active fd, or an archive/rotating path)
+// bounded by limit bytes when limit >= 0 (the active leg). A missing file yields
+// (nil, nil): a rotating file may have been promoted to its .gz and removed
+// between listing and open; the .gz counterpart (also listed) covers the window.
+func openSegmentReader(src backfillSource) (*segmentReader, error) {
+	f, err := os.Open(src.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
-	defer f.Close() //nolint:errcheck // read-only file
-	return scanJSONL(f, filter, fn)
+	sr := &segmentReader{f: f}
+	var r io.Reader = f
+	if src.kind == sourceArchive {
+		gz, gerr := gzip.NewReader(f)
+		if gerr != nil {
+			_ = f.Close()
+			return nil, gerr
+		}
+		sr.gz = gz
+		r = gz
+	}
+	sr.br = bufio.NewReaderSize(r, 64*1024)
+	return sr, nil
 }
 
-// scanJSONL streams filter-matching events from r (a plain-JSONL reader),
-// stopping when fn returns false. Malformed lines are skipped.
-func scanJSONL(r interface{ Read([]byte) (int, error) }, filter Filter, fn func(Event) bool) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		var e Event
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
-			continue
-		}
-		if !matchesFilter(e, filter) {
-			continue
-		}
-		if !fn(e) {
-			return nil
-		}
+// activeSegmentReader wraps a captured active fd (0..size) as a segment reader.
+func activeSegmentReader(f *os.File, size int64) (*segmentReader, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scanning events: %w", err)
-	}
-	return nil
+	return &segmentReader{f: nil, br: bufio.NewReaderSize(&io.LimitedReader{R: f, N: size}, 64*1024)}, nil
 }
 
-// streamBackfillSource streams one source's filter-matching events with Seq
-// strictly greater than *lastDelivered into out, advancing *lastDelivered. It
-// stops early (returning ctx/done error) on cancellation.
-func streamBackfillSource(ctx context.Context, done <-chan struct{}, src backfillSource, filter Filter, lastDelivered *uint64, out *[]Event) error {
-	guard := func(e Event) bool {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-done:
-			return false
-		default:
+// readInto reads up to batch filter-matching events with Seq > *maxSeq from the
+// segment into out, advancing *maxSeq. It returns done=true at end of segment.
+// Malformed and oversized-but-unparseable lines are skipped, never fatal.
+func (sr *segmentReader) readInto(filter Filter, maxSeq *uint64, out *[]Event, batch int) (bool, error) {
+	added := 0
+	for added < batch {
+		line, err := sr.br.ReadBytes('\n')
+		if len(line) > 0 {
+			var e Event
+			if json.Unmarshal(trimLine(line), &e) == nil && matchesFilter(e, filter) && e.Seq > *maxSeq {
+				*maxSeq = e.Seq
+				*out = append(*out, e)
+				added++
+			}
 		}
-		if e.Seq <= *lastDelivered {
-			return true // dedupe / below cursor; keep scanning
+		if err != nil {
+			if err == io.EOF {
+				return true, nil
+			}
+			return false, err
 		}
-		*lastDelivered = e.Seq
-		*out = append(*out, e)
-		return true
 	}
-	// Apply the AfterSeq floor so the archive/rotating scan can skip cheaply.
-	f := filter
-	if f.AfterSeq < *lastDelivered {
-		f.AfterSeq = *lastDelivered
+	return false, nil
+}
+
+func trimLine(b []byte) []byte {
+	for len(b) > 0 && (b[len(b)-1] == '\n' || b[len(b)-1] == '\r') {
+		b = b[:len(b)-1]
 	}
-	var err error
-	switch src.kind {
-	case sourceArchive:
-		err = streamArchive(src.path, f, guard)
-	default:
-		err = streamPlainJSONL(src.path, f, guard)
+	return b
+}
+
+// close releases the segment's gzip stream and file. Safe to call once; the
+// owning fileWatcher is single-consumer, so no concurrent close occurs.
+func (sr *segmentReader) close() {
+	if sr == nil {
+		return
 	}
-	if err != nil {
-		return err
+	if sr.gz != nil {
+		_ = sr.gz.Close()
 	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-done:
-		return errWatcherClosed
-	default:
-		return nil
+	// A nil f means the reader wraps a caller-owned active fd (closed elsewhere).
+	if sr.f != nil {
+		_ = sr.f.Close()
 	}
 }

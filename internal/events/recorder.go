@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -512,11 +513,24 @@ func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, err
 	// Backfill is needed only when the cursor predates the active file's head.
 	if haveStat && afterSeq < latestSeq {
 		w.needsBackfill = true
+		w.bfActive = true
 	} else if activeFile != nil {
-		_ = activeFile.Close()
-		w.activeFile = nil
+		// No backfill: close the captured fd immediately (once).
+		w.closeFd()
 	}
 	return w, nil
+}
+
+// closeFd closes the captured active fd exactly once. The pointer is never
+// niled (writing it would race an unsynchronized read in the Next goroutine);
+// os.File tolerates a concurrent Close vs Read, so a mid-read Close just makes
+// the in-flight scan return an error, which the caller treats as cancellation.
+func (w *fileWatcher) closeFd() {
+	w.closeFdOnce.Do(func() {
+		if w.activeFile != nil {
+			_ = w.activeFile.Close()
+		}
+	})
 }
 
 // Close closes the underlying file. It is safe to call multiple times;
@@ -573,10 +587,26 @@ type fileWatcher struct {
 	done     chan struct{}
 
 	// Resume-backfill state (W1): the archive/rotating segments to replay before
-	// tailing, and the active file's fd + size captured at Watch time.
+	// tailing, and the active file's fd + size captured at Watch time. The fd is
+	// assigned once in Watch and never reassigned; closeFdOnce closes it exactly
+	// once from whichever of Close / finishBackfill runs first, so the pointer is
+	// never written after Watch and cannot race a read.
 	needsBackfill bool
 	activeFile    *os.File
 	activeSize    int64
+	closeFdOnce   sync.Once
+
+	// Incremental backfill iterator state (bounded memory): the remaining
+	// segments, the index into them, whether the active leg is pending, and the
+	// currently-open segment reader (persisted across Next batches so each
+	// segment is read exactly once).
+	bfSources  []backfillSource
+	bfIdx      int
+	bfListed   bool
+	bfActive   bool
+	bfReader   *segmentReader
+	bfCatchUp  bool // true while draining a mid-watch rotation catch-up
+	catchUpErr int  // consecutive catch-up failures, for backoff
 
 	closeOnce sync.Once
 }
@@ -604,10 +634,11 @@ func (w *fileWatcher) Next() (Event, error) {
 		}
 
 		// Resume backfill (W1): replay archived/rotating events before tailing.
-		// Runs lazily here, one source per batch, so a never-polled watcher pays
-		// nothing and memory stays bounded to one segment.
+		// Runs lazily here, at most backfillBatch events per call, so a
+		// never-polled watcher pays nothing and resident memory is bounded to one
+		// batch regardless of history size or connection count.
 		if w.needsBackfill {
-			if err := w.runResumeBackfill(); err != nil {
+			if err := w.stepBackfill(Filter{}, false); err != nil {
 				return Event{}, err
 			}
 			if len(w.buf) > 0 {
@@ -619,23 +650,39 @@ func (w *fileWatcher) Next() (Event, error) {
 		// across the just-rotated archive (W2): events appended to the OLD active
 		// file after the last poll now live only in the rotating/.gz file, so a
 		// bare offset reset would drop them. Commit the fresh identity only after
-		// a successful catch-up; on error keep the old identity and retry next
-		// poll (an early commit would make the next poll see no rotation).
+		// the catch-up fully drains; on error do NOT poll the fresh file at the
+		// stale offset (that would advance maxSeq past the unread window and lose
+		// it forever) — sleep and retry with a bounded backoff instead.
 		if info, err := os.Stat(w.path); err == nil {
 			if curr := inodeOf(info); curr != 0 {
 				if w.inode != 0 && curr != w.inode {
-					if cerr := w.catchUpRotation(); cerr != nil {
+					done, cerr := w.stepCatchUp()
+					if cerr != nil {
 						if isCancelErr(cerr) {
 							return Event{}, cerr
 						}
-						// Transient read error: leave identity/offset, retry.
-					} else {
-						w.inode = curr
-						w.offset = 0
-						if len(w.buf) > 0 {
-							continue
+						// Transient read error: keep the old identity/offset, back
+						// off, and retry — never fall through to the stale-offset
+						// poll below.
+						w.catchUpErr++
+						if w.catchUpErr == 1 || w.catchUpErr%40 == 0 {
+							log.Printf("events: watcher rotation catch-up failed (attempt %d) for %q: %v", w.catchUpErr, w.path, cerr)
 						}
+						if !w.sleepBackoff() {
+							return Event{}, errWatcherClosed
+						}
+						continue
 					}
+					if len(w.buf) > 0 {
+						return w.pop(), nil
+					}
+					if !done {
+						continue // more catch-up batches pending
+					}
+					// Catch-up drained: commit the fresh identity and re-tail.
+					w.catchUpErr = 0
+					w.inode = curr
+					w.offset = 0
 				} else {
 					w.inode = curr
 				}
@@ -662,134 +709,208 @@ func (w *fileWatcher) Next() (Event, error) {
 		}
 
 		// No new events — wait and retry.
-		select {
-		case <-w.ctx.Done():
-			return Event{}, w.ctx.Err()
-		case <-w.done:
+		if !w.sleep() {
 			return Event{}, errWatcherClosed
-		case <-time.After(w.poll):
 		}
 	}
 }
 
-// runResumeBackfill streams the next resume segment (archive, rotating file, or
-// the captured active-file tail) into w.buf, advancing w.maxSeq. It processes
-// one segment per call so memory stays bounded and the consumer paces it; when
-// every segment is exhausted it clears needsBackfill and positions the tail at
-// the captured active size. The archive walk holds a concurrency slot so N cold
-// resumes queue instead of multiplying gunzip cost.
-func (w *fileWatcher) runResumeBackfill() error {
-	if err := acquireBackfillSlot(w.ctx); err != nil {
-		return err
-	}
-	defer releaseBackfillSlot()
-
-	srcs, err := listBackfillSources(filepath.Dir(w.path), w.maxSeq)
-	if err != nil {
-		// Directory listing failed: skip straight to the active-file leg + tail.
-		srcs = nil
-	}
-	filter := Filter{}
-	for i := range srcs {
-		if err := streamBackfillSource(w.ctx, w.done, srcs[i], filter, &w.maxSeq, &w.buf); err != nil {
-			return err
-		}
-		if len(w.buf) > 0 {
-			return nil // one segment per batch; resume on the next Next
-		}
-	}
-	// Active-file leg: read from the captured fd (not the path) up to the size
-	// captured at Watch time, so a rotation mid-backfill cannot swap the bytes.
-	if w.activeFile != nil {
-		if err := w.streamActiveLeg(filter); err != nil {
-			return err
-		}
-	}
-	w.finishBackfill()
-	return nil
+func (w *fileWatcher) pop() Event {
+	e := w.buf[0]
+	w.buf = w.buf[1:]
+	return e
 }
 
-// streamActiveLeg replays the captured active-file fd (0..activeSize) into
-// w.buf, honoring the monotonic guard and cancellation.
-func (w *fileWatcher) streamActiveLeg(filter Filter) error {
-	if _, err := w.activeFile.Seek(0, 0); err != nil {
-		return err
-	}
-	lr := &io.LimitedReader{R: w.activeFile, N: w.activeSize}
-	guard := func(e Event) bool {
-		select {
-		case <-w.ctx.Done():
-			return false
-		case <-w.done:
-			return false
-		default:
-		}
-		if e.Seq > w.maxSeq {
-			w.maxSeq = e.Seq
-			w.buf = append(w.buf, e)
-		}
+// sleep waits one poll interval, returning false on ctx cancel / Close.
+func (w *fileWatcher) sleep() bool {
+	select {
+	case <-w.ctx.Done():
+		return false
+	case <-w.done:
+		return false
+	case <-time.After(w.poll):
 		return true
 	}
-	if err := scanJSONL(lr, filter, guard); err != nil {
-		return err
+}
+
+// sleepBackoff waits poll * min(catchUpErr, 8) so a persistently failing
+// catch-up (e.g. a poisoned archive) does not re-gunzip at 4/sec and starve
+// other watchers' backfill slots.
+func (w *fileWatcher) sleepBackoff() bool {
+	mult := time.Duration(w.catchUpErr)
+	if mult > 8 {
+		mult = 8
 	}
 	select {
 	case <-w.ctx.Done():
-		return w.ctx.Err()
+		return false
 	case <-w.done:
-		return errWatcherClosed
-	default:
-		return nil
+		return false
+	case <-time.After(w.poll * mult):
+		return true
 	}
 }
 
-// finishBackfill releases the captured fd and positions the incremental tail at
-// the captured active size so it re-reads only bytes appended after Watch.
-func (w *fileWatcher) finishBackfill() {
-	w.needsBackfill = false
-	if w.activeFile != nil {
-		_ = w.activeFile.Close()
-		w.activeFile = nil
-	}
-	if w.offset < w.activeSize {
-		w.offset = w.activeSize
-	}
-}
-
-// catchUpRotation streams events after w.maxSeq from the archives/rotating files
-// (where the just-rotated tail now lives) into w.buf before the caller resets
-// the offset. AfterSeq = maxSeq bounds it to the rotation window.
-func (w *fileWatcher) catchUpRotation() error {
-	if err := acquireBackfillSlot(w.ctx); err != nil {
+// stepBackfill advances the resume backfill by up to backfillBatch events. It
+// keeps the current segment reader open across calls so each segment is read
+// exactly once, holding a decode slot only for the duration of one batch read.
+// When every segment and the active leg are exhausted it clears needsBackfill
+// and positions the tail at the captured active size.
+func (w *fileWatcher) stepBackfill(filter Filter, catchUp bool) error {
+	if err := acquireBackfillSlot(w.ctx, w.done); err != nil {
 		return err
 	}
 	defer releaseBackfillSlot()
 
-	srcs, err := listBackfillSources(filepath.Dir(w.path), w.maxSeq)
-	if err != nil {
-		return err
+	if !w.bfListed {
+		srcs, err := listBackfillSources(filepath.Dir(w.path), w.maxSeq)
+		if err != nil {
+			if catchUp {
+				return err
+			}
+			srcs = nil // resume: fall through to the active leg + tail
+		}
+		w.bfSources = srcs
+		w.bfIdx = 0
+		w.bfListed = true
 	}
-	filter := Filter{AfterSeq: w.maxSeq}
-	for i := range srcs {
-		if err := streamBackfillSource(w.ctx, w.done, srcs[i], filter, &w.maxSeq, &w.buf); err != nil {
+
+	// Advance through segments, one batch per call.
+	for w.bfIdx < len(w.bfSources) {
+		if w.bfReader == nil {
+			f := filter
+			if f.AfterSeq < w.maxSeq {
+				f.AfterSeq = w.maxSeq
+			}
+			sr, err := openSegmentReader(w.bfSources[w.bfIdx])
+			if err != nil {
+				return err
+			}
+			if sr == nil { // vanished (promoted rotating file); its .gz covers it
+				w.bfIdx++
+				continue
+			}
+			w.bfReader = sr
+		}
+		eof, err := w.bfReader.readInto(withAfterSeq(filter, w.maxSeq), &w.maxSeq, &w.buf, backfillBatch)
+		if err != nil {
+			w.bfReader.close()
+			w.bfReader = nil
 			return err
 		}
+		if eof {
+			w.bfReader.close()
+			w.bfReader = nil
+			w.bfIdx++
+		}
+		if len(w.buf) > 0 {
+			return nil // yield this batch; resume on the next call
+		}
+	}
+
+	// Active leg (resume only): read the captured fd up to the captured size.
+	if w.bfActive && w.activeFile != nil {
+		if w.bfReader == nil {
+			sr, err := activeSegmentReader(w.activeFile, w.activeSize)
+			if err != nil {
+				return err
+			}
+			w.bfReader = sr
+		}
+		eof, err := w.bfReader.readInto(withAfterSeq(filter, w.maxSeq), &w.maxSeq, &w.buf, backfillBatch)
+		if err != nil {
+			w.bfReader.close()
+			w.bfReader = nil
+			return err
+		}
+		if !eof && len(w.buf) > 0 {
+			return nil
+		}
+		if eof {
+			w.bfReader.close() // closes the wrapper, not the caller-owned fd
+			w.bfReader = nil
+			w.finishResume()
+		}
+		return nil
+	}
+
+	if !catchUp {
+		w.finishResume()
 	}
 	return nil
+}
+
+// stepCatchUp advances a mid-watch rotation catch-up by up to backfillBatch
+// events. It reuses the same incremental segment machinery bounded by
+// AfterSeq=maxSeq (the rotation window). Returns done=true when the catch-up has
+// drained every segment; a fresh catch-up resets the iterator state first.
+func (w *fileWatcher) stepCatchUp() (bool, error) {
+	if !w.bfCatchUp {
+		// Starting a new catch-up: reset the segment iterator to re-list.
+		w.resetBackfillIter()
+		w.bfCatchUp = true
+	}
+	before := len(w.buf)
+	if err := w.stepBackfill(Filter{AfterSeq: w.maxSeq}, true); err != nil {
+		return false, err
+	}
+	// Not done while a batch was produced or segments remain.
+	if len(w.buf) > before {
+		return false, nil
+	}
+	done := w.bfIdx >= len(w.bfSources) && w.bfReader == nil
+	if done {
+		w.bfCatchUp = false
+		w.resetBackfillIter()
+	}
+	return done, nil
+}
+
+// withAfterSeq returns filter with AfterSeq raised to at least floor.
+func withAfterSeq(filter Filter, floor uint64) Filter {
+	if filter.AfterSeq < floor {
+		filter.AfterSeq = floor
+	}
+	return filter
+}
+
+// finishResume ends the W1 resume: closes the captured fd (once) and positions
+// the incremental tail at the captured active size so it re-reads only bytes
+// appended after Watch.
+func (w *fileWatcher) finishResume() {
+	w.needsBackfill = false
+	w.bfActive = false
+	w.closeFd()
+	if w.offset < w.activeSize {
+		w.offset = w.activeSize
+	}
+	w.resetBackfillIter()
+}
+
+// resetBackfillIter clears the segment-iterator state, closing any open reader.
+func (w *fileWatcher) resetBackfillIter() {
+	if w.bfReader != nil {
+		w.bfReader.close()
+		w.bfReader = nil
+	}
+	w.bfSources = nil
+	w.bfIdx = 0
+	w.bfListed = false
 }
 
 func isCancelErr(err error) bool {
 	return errors.Is(err, errWatcherClosed) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// Close unblocks any pending Next call and releases the captured active fd.
+// Close unblocks any pending Next call and releases the captured active fd. It
+// does not touch the segment-iterator state — the single Next goroutine owns
+// that and will observe w.done. The fd pointer is never niled; closeFd closes it
+// exactly once whether Close or finishResume runs first, so no field write races
+// the Next goroutine's reads.
 func (w *fileWatcher) Close() error {
 	w.closeOnce.Do(func() {
 		close(w.done)
-		if w.activeFile != nil {
-			_ = w.activeFile.Close()
-			w.activeFile = nil
-		}
+		w.closeFd()
 	})
 	return nil
 }

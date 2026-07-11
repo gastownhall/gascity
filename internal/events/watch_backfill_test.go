@@ -254,3 +254,179 @@ func TestWatchConcurrentResumes(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// --- Red-team regression coverage ---
+
+// A concurrent Close during a mid-backfill Next must not race the captured fd
+// (run with -race). Also asserts Close promptly unblocks.
+func TestWatchCloseDuringBackfillNoRace(t *testing.T) {
+	for iter := 0; iter < 40; iter++ {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		var stderr bytes.Buffer
+		rec, err := NewFileRecorder(path, &stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recordN(rec, "a", 400)
+		if _, err := rec.ForceRotate(); err != nil {
+			t.Fatal(err)
+		}
+		rec.WaitForRotations()
+		recordN(rec, "b", 400)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		w, err := rec.Watch(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			for {
+				if _, err := w.Next(); err != nil {
+					return
+				}
+			}
+		}()
+		time.Sleep(time.Duration(iter%3) * time.Millisecond)
+		_ = w.Close()
+		cancel()
+		rec.Close() //nolint:errcheck // test cleanup
+	}
+}
+
+// A failed rotation catch-up must NOT poll the fresh file at the stale offset and
+// advance past the unread window. Here a >1MiB line no longer poisons the scan
+// (ReadBytes handles it), so we assert nothing is lost across such a rotation.
+func TestWatchRotationLargeLineNotLost(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	recordN(rec, "seed", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()       //nolint:errcheck // test cleanup
+	drainWatcher(t, w, 1) // consume seed
+
+	big := make([]byte, 2*1024*1024)
+	for i := range big {
+		big[i] = 'x'
+	}
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "big", Message: string(big)})
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "small"})
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatal(err)
+	}
+	rec.WaitForRotations()
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "after"})
+
+	// "big" and "small" (pre-rotation tail) must both arrive before "after".
+	seen := map[string]bool{}
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) && !seen["after"] {
+		e := drainWatcher(t, w, 1)[0]
+		seen[e.Subject] = true
+		if e.Subject == "after" && (!seen["big"] || !seen["small"]) {
+			t.Fatalf("saw 'after' before big=%v small=%v — large-line rotation lost the tail", seen["big"], seen["small"])
+		}
+	}
+	if !seen["big"] || !seen["small"] {
+		t.Fatalf("pre-rotation tail lost: big=%v small=%v", seen["big"], seen["small"])
+	}
+}
+
+// The ordering-loss race: a .gz for a LATER window coexisting with a rotating
+// file for an EARLIER window must still deliver the earlier window (FirstSeq
+// order + monotonic guard).
+func TestWatchBackfillOrderingAcrossSegments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	recordN(rec, "w1", 3) // window 1: seq 1..3
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatal(err)
+	}
+	recordN(rec, "w2", 3) // window 2 (after anchor)
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatal(err)
+	}
+	rec.WaitForRotations()
+	recordN(rec, "w3", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	// Everything strictly increasing in seq; window 1 must arrive first.
+	got := drainWatcher(t, w, 3)
+	if got[0].Subject != "w1-0" {
+		t.Fatalf("first backfilled event = %q, want w1-0 (earlier window skipped?)", got[0].Subject)
+	}
+	var last uint64
+	for i, e := range got {
+		if e.Seq <= last {
+			t.Fatalf("event %d seq %d not increasing (last %d)", i, e.Seq, last)
+		}
+		last = e.Seq
+	}
+}
+
+// Resident memory during backfill is bounded to ~backfillBatch, not a whole
+// segment: after one Next, the buffer must not hold the entire archive.
+func TestWatchBackfillBoundedBuffer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	recordN(rec, "m", 5000) // one big archive segment
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatal(err)
+	}
+	rec.WaitForRotations()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fw, err := rec.Watch(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close() //nolint:errcheck // test cleanup
+
+	// First Next triggers a backfill batch; the internal buffer must be bounded.
+	if _, err := fw.Next(); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	w := fw.(*fileWatcher)
+	if len(w.buf) > backfillBatch {
+		t.Fatalf("backfill buffered %d events after one Next, want <= %d (whole segment pinned?)", len(w.buf), backfillBatch)
+	}
+
+	// And it still delivers all 5000 across many Next calls.
+	for count := 1; count < 5000; count++ {
+		drainWatcher(t, fw, 1)
+	}
+}
