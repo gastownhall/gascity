@@ -950,10 +950,9 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	sessionBead beads.Bead,
 	fallbackRoute string,
 	stderr io.Writer,
-) unclaimResult {
-	var res unclaimResult
+) {
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
-		return res
+		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -989,15 +988,11 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					// reopen, orphan-pool, and closed-session release paths.
 					if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
-						res.Failed++
-						continue
 					}
-					res.Released++
 				}
 			}
 		}
 	}
-	return res
 }
 
 func reassignWorkAssignedToRetiredSessionBead(
@@ -1311,7 +1306,6 @@ func syncSessionBeads(
 }
 
 func syncSessionBeadsWithSnapshot(
-	cityPath string,
 	store beads.Store,
 	desiredState map[string]TemplateParams,
 	sp runtime.Provider,
@@ -1319,11 +1313,10 @@ func syncSessionBeadsWithSnapshot(
 	cfg *config.City,
 	clk clock.Clock,
 	stderr io.Writer,
-	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
 	return syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, sessionBeads,
+		"", beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, false, sessionBeads,
 	)
 }
 

@@ -3594,21 +3594,6 @@ func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
 		containsString(i.Labels, "agent:"+canonical)
 }
 
-func queueClearPoolAliasConflictMetadata(metadata, existing map[string]string) {
-	if existing == nil {
-		return
-	}
-	for _, key := range []string{
-		poolAliasConflictMetadataKey,
-		poolAliasConflictCountMetadataKey,
-		poolAliasConflictAtMetadataKey,
-	} {
-		if existing[key] != "" {
-			metadata[key] = ""
-		}
-	}
-}
-
 func createPoolSessionBeadWithGuardedAlias(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,

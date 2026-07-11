@@ -605,12 +605,12 @@ func transportFromMetadata(b beads.Bead) string {
 	return normalizeTransport(b.Metadata["provider"], b.Metadata["transport"])
 }
 
-func (m *Manager) resolveConfiguredTransport(template, provider string) (string, bool) {
+func (m *Manager) resolveConfiguredTransport(template, provider string) string {
 	if m.transportResolver == nil {
-		return "", false
+		return ""
 	}
 	resolution := m.transportResolver(strings.TrimSpace(template), strings.TrimSpace(provider))
-	return normalizeTransport(provider, resolution.transport), resolution.allowStoppedFallback
+	return normalizeTransport(provider, resolution.transport)
 }
 
 func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool) {
@@ -623,7 +623,7 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 		return "acp", false
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
-		transport, _ = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+		transport = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
 		if transport != "" {
 			return transport, true
 		}
@@ -657,7 +657,7 @@ func (m *Manager) transportForInfo(info Info) (string, bool) {
 		return "acp", false
 	}
 	if info.PendingCreateClaim {
-		transport, _ = m.resolveConfiguredTransport(info.Template, info.Provider)
+		transport = m.resolveConfiguredTransport(info.Template, info.Provider)
 		if transport != "" {
 			return transport, true
 		}

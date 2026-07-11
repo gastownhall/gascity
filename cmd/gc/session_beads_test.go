@@ -362,7 +362,7 @@ func TestSyncSessionBeads_ExistingDesiredUsesSnapshotStateWithoutWorkerLookup(t 
 
 	var stderr bytes.Buffer
 	syncSessionBeadsWithSnapshot(
-		"", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false,
+		store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr,
 		newSessionBeadSnapshot([]beads.Bead{sessionBead}),
 	)
 	if stderr.Len() > 0 {
@@ -3081,7 +3081,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 		},
 	}
 	var stderr bytes.Buffer
-	syncSessionBeadsWithSnapshot("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false, staleSnapshot)
+	syncSessionBeadsWithSnapshot(store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, staleSnapshot)
 
 	all := allSessionBeads(t, store)
 	if len(all) != 1 {
@@ -4367,7 +4367,7 @@ func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *t
 
 	var stderr bytes.Buffer
 	openIndex, updated := syncSessionBeadsWithSnapshot(
-		"", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false, staleSnapshot,
+		store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, staleSnapshot,
 	)
 
 	if got := openIndex["mayor"]; got != existing.ID {
@@ -8334,7 +8334,7 @@ func TestSyncTailReturnsFreshStoreLoadNotLocalSlice(t *testing.T) {
 
 	var stderr bytes.Buffer
 	_, updated := syncSessionBeadsWithSnapshot(
-		"", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false, newSessionBeadSnapshot(nil),
+		store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, newSessionBeadSnapshot(nil),
 	)
 	if !store.injected {
 		t.Fatal("sync issued no metadata write; the concurrent-insert injection never fired (fixture no longer exercises a sync write)")
