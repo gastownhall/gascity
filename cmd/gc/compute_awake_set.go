@@ -430,7 +430,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// Drain-ack agents are unaffected — they manage their own
 		// lifecycle by calling drain-ack before this check matters.
 		if !decision.ShouldWake && !bead.Drained && !bead.WaitHold &&
-			bead.SleepReason != string(sessionpkg.SleepReasonIdleTimeout) {
+			bead.SleepReason != "idle-timeout" {
 			if input.RunningSessions[name] && isOnDemandSession(input.NamedSessions, bead) {
 				decision.ShouldWake = true
 				decision.Reason = "on-demand:running"
@@ -645,7 +645,7 @@ func countMinActiveCovered(beads []AwakeSessionBead, desired map[string]string, 
 func cityStopPoolBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
 	var out []AwakeSessionBead
 	for _, b := range beads {
-		if isMinActivePoolBead(b, template) && b.State == "asleep" && b.SleepReason == string(sessionpkg.SleepReasonCityStop) {
+		if isMinActivePoolBead(b, template) && b.State == "asleep" && b.SleepReason == "city-stop" {
 			out = append(out, b)
 		}
 	}

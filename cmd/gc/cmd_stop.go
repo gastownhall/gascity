@@ -54,6 +54,8 @@ straight to kill.`,
 
 var sessionProviderForStopCity = newSessionProviderForCity
 
+const sleepReasonCityStop = "city-stop"
+
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
 //
@@ -364,7 +366,7 @@ func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) 
 		if strings.TrimSpace(s.Metadata["sleep_reason"]) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(s.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
+		if err := sessFront.SetMarker(s.ID, "sleep_reason", sleepReasonCityStop); err != nil {
 			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}

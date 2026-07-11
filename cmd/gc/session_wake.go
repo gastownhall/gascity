@@ -50,10 +50,10 @@ func preWakeCommit(
 	}
 
 	sleepReason := ""
-	if session.Metadata["sleep_reason"] == string(sessions.SleepReasonIdleTimeout) {
+	if session.Metadata["sleep_reason"] == "idle-timeout" {
 		// Preserve the idle-timeout wake override until the replacement
 		// session has actually started. Failed starts must retry next tick.
-		sleepReason = string(sessions.SleepReasonIdleTimeout)
+		sleepReason = "idle-timeout"
 	}
 
 	freshWake := session.Metadata["wake_mode"] == "fresh" || pendingContinuationResetNeedsFreshStart(session.Metadata)
