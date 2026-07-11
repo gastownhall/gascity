@@ -13,8 +13,9 @@ import (
 // SlingOutput is the Huma response for POST /v0/sling.
 // The HTTP status code is supplied by the domain sling result.
 type SlingOutput struct {
-	Status int `header:"_status" doc:"HTTP status code."`
-	Body   slingResponse
+	Status   int    `header:"_status" doc:"HTTP status code."`
+	Location string `header:"Location" doc:"Canonical Run resource URL: the specific run when a graph workflow was launched, otherwise the runs list."`
+	Body     slingResponse
 }
 
 // humaHandleSling is the Huma-typed handler for POST /v0/sling.
@@ -132,9 +133,20 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	// (wisps, plain bead routes, idempotent skips → runs list), matching the
 	// CLI's link policy.
 	resp.DashboardURL = s.slingDashboardURL(input.CityName, resp.WorkflowID)
+
+	// Point the caller at the canonical Run resource. A graph-workflow launch has
+	// an addressable run root (resp.WorkflowID); every other successful shape
+	// (wisps, plain bead routes, idempotent skips) has no single run, so its
+	// Location is the runs list — matching resp.DashboardURL's own discriminator.
+	location := runsListPath(input.CityName)
+	if resp.WorkflowID != "" {
+		location = runResourcePath(input.CityName, resp.WorkflowID)
+		resp.Run = &RunRef{RunID: resp.WorkflowID, Kind: RunKindSling, Status: RunStatusPending}
+	}
 	return &SlingOutput{
-		Status: status,
-		Body:   *resp,
+		Status:   status,
+		Location: location,
+		Body:     *resp,
 	}, nil
 }
 

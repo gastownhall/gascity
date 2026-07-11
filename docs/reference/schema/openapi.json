@@ -6577,6 +6577,33 @@
         ],
         "type": "object"
       },
+      "RunRef": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Launch mechanism that produced the run.",
+            "enum": [
+              "sling",
+              "order"
+            ],
+            "type": "string"
+          },
+          "run_id": {
+            "description": "Run identifier; GET /v0/city/{cityName}/runs/{run_id} for detail.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus",
+            "description": "Closed lifecycle status at response time (a just-launched run is pending)."
+          }
+        },
+        "required": [
+          "run_id",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
       "RunScope": {
         "additionalProperties": false,
         "properties": {
@@ -7599,6 +7626,10 @@
           },
           "root_bead_id": {
             "type": "string"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunRef",
+            "description": "Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."
           },
           "status": {
             "type": "string"
@@ -30777,6 +30808,12 @@
             },
             "description": "Accepted",
             "headers": {
+              "Location": {
+                "schema": {
+                  "description": "Runs-list URL. An order dispatches asynchronously, so no single run root is known at response time; the dispatched run appears in the list once it materializes.",
+                  "type": "string"
+                }
+              },
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }
@@ -39712,6 +39749,12 @@
             },
             "description": "OK",
             "headers": {
+              "Location": {
+                "schema": {
+                  "description": "Canonical Run resource URL: the specific run when a graph workflow was launched, otherwise the runs list.",
+                  "type": "string"
+                }
+              },
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }

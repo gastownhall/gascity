@@ -47,6 +47,7 @@ type slingResponse struct {
 	Mode           string   `json:"mode,omitempty"`
 	Warnings       []string `json:"warnings,omitempty"`
 	DashboardURL   string   `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
+	Run            *RunRef  `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
 }
 
 var apiSlingStderr = func() io.Writer { return os.Stderr }

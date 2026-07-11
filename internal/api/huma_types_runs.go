@@ -115,6 +115,21 @@ type RunStep struct {
 	Assignee string        `json:"assignee,omitempty" doc:"Current assignee, when set."`
 }
 
+// RunRef is the lightweight run reference a launch endpoint returns in its body,
+// pointing the caller at the canonical Run resource. The Location header on the
+// same response carries the URL; this stanza carries the ids for a client reading
+// the body. It is emitted only when the launch produced an addressable run (a
+// graph-workflow sling); launches that produce no single run (order dispatch,
+// wisps) point their Location at the runs list instead.
+type RunRef struct {
+	RunID  string    `json:"run_id" doc:"Run identifier; GET /v0/city/{cityName}/runs/{run_id} for detail."`
+	Kind   string    `json:"kind" enum:"sling,order" doc:"Launch mechanism that produced the run."`
+	Status RunStatus `json:"status" doc:"Closed lifecycle status at response time (a just-launched run is pending)."`
+}
+
+// RunKindSling marks a run launched via POST /sling.
+const RunKindSling = "sling"
+
 // RunsListInput is the request for GET /v0/city/{cityName}/runs.
 type RunsListInput struct {
 	CityScope

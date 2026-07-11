@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,18 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runproj"
 )
+
+// runResourcePath is the canonical Run resource URL for one run — the value a
+// launch endpoint puts in its Location header when it produced an addressable run.
+func runResourcePath(cityName, runID string) string {
+	return "/v0/city/" + url.PathEscape(cityName) + "/runs/" + url.PathEscape(runID)
+}
+
+// runsListPath is the runs-list URL — the Location a launch endpoint uses when it
+// produced no single addressable run (order dispatch, wisps, idempotent skips).
+func runsListPath(cityName string) string {
+	return "/v0/city/" + url.PathEscape(cityName) + "/runs"
+}
 
 // The canonical Run resource. These handlers project the city's append-only
 // event log (.gc/events.jsonl) into ONE typed run shape with a closed RunStatus

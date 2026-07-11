@@ -126,6 +126,24 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 	}
 }
 
+// Defines values for RunRefKind.
+const (
+	Order RunRefKind = "order"
+	Sling RunRefKind = "sling"
+)
+
+// Valid indicates whether the value is a known member of the RunRefKind enum.
+func (e RunRefKind) Valid() bool {
+	switch e {
+	case Order:
+		return true
+	case Sling:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RunStatus.
 const (
 	RunStatusActive     RunStatus = "active"
@@ -2792,6 +2810,21 @@ type RunLastError struct {
 	Message *string `json:"message,omitempty"`
 }
 
+// RunRef defines model for RunRef.
+type RunRef struct {
+	// Kind Launch mechanism that produced the run.
+	Kind RunRefKind `json:"kind"`
+
+	// RunId Run identifier; GET /v0/city/{cityName}/runs/{run_id} for detail.
+	RunId string `json:"run_id"`
+
+	// Status Closed lifecycle state of a run.
+	Status RunStatus `json:"status"`
+}
+
+// RunRefKind Launch mechanism that produced the run.
+type RunRefKind string
+
 // RunScope defines model for RunScope.
 type RunScope struct {
 	// Kind Scope kind (city or rig), when resolved.
@@ -3228,6 +3261,7 @@ type SlingResponse struct {
 	Formula      *string   `json:"formula,omitempty"`
 	Mode         *string   `json:"mode,omitempty"`
 	RootBeadId   *string   `json:"root_bead_id,omitempty"`
+	Run          *RunRef   `json:"run,omitempty"`
 	Status       string    `json:"status"`
 	Target       string    `json:"target"`
 	Warnings     *[]string `json:"warnings,omitempty"`
