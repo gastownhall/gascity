@@ -2360,33 +2360,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// flips to in_progress and stops matching), persists its bounded
 	// observe→nudge→backoff state on the session bead, and never spams a tick.
 	// See nudgeStalledPoolClaims for the full invariant.
-	//
-	// Port-time perf adaptation (Strategy-R reapply of #1129): main's version
-	// passes the reconciler's raw `open` snapshot slice, but on this typed tree
-	// session.Info does not project the idle-claim marker keys, so this lane
-	// does its own loadSessionBeads edge read. Un-gated, that store list would
-	// run on every reconcile tick for every runtime. Skip the whole block when
-	// no work is routed: nudgeStalledPoolClaims can only nudge a slot whose
-	// trigger bead is present in assignedWorkBeads (its workByID index is built
-	// from that slice), so an empty assignedWorkBeads provably yields no nudge.
-	// A slot's open trigger bead is always assigned — an unassigned pool-routed
-	// bead never stamps trigger_bead_id (see idle-claim-nudge-followups.md) — so
-	// an empty assignedWorkBeads means no slot has an open trigger to act on;
-	// the only skipped effect, clearing a stale marker, is re-derived on the
-	// next tick that carries the bead. Behavior-neutral on healthy snapshots.
-	if len(assignedWorkBeads) > 0 {
-		phaseStart = time.Now()
-		// The idle-claim nudge lane reads idle-claim marker keys that session.Info
-		// does not project, so it needs raw beads. Now that the snapshot no longer
-		// holds a raw half, this branch does its own edge read rather than a
-		// snapshot raw-half read.
-		if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
-		} else {
-			nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
-		}
-		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
+	phaseStart = time.Now()
+	// The idle-claim nudge lane reads idle-claim marker keys that session.Info
+	// does not project, so it needs raw beads. Now that the snapshot no longer
+	// holds a raw half, this lane does its own loadSessionBeads edge read every
+	// tick (main passes its in-memory raw snapshot slice here; this tree pays a
+	// store list instead — kept unconditional for exact parity with #1129's
+	// per-tick marker-clear semantics).
+	if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
+	} else {
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
 	}
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
 
 // recordReconcileTraceInputs records the per-template baseline, the cycle input

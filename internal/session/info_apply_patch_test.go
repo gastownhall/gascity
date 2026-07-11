@@ -99,6 +99,18 @@ func oracleBaseBeads() []beads.Bead {
 		"sleep_capability": "full", "sleep_policy_adjustment_reason": "capped",
 		"config_wake_suppressed": "true",
 	}
+	// Backfill: every projected key carries a UNIQUE non-empty value so the
+	// frozen-reference parity oracle (TestInfoCodecProjectionParity) can
+	// distinguish every single-field setter — a same-shape setter swap between
+	// two keys fails DeepEqual instead of comparing zero-vs-zero. Keys with
+	// typed semantics above keep their explicit values; only absent keys are
+	// filled. (S09b port red-team finding: pool_alias_conflict trio et al were
+	// never populated, leaving the table blind to a future swap.)
+	for _, k := range allProjectedMetadataKeys {
+		if _, ok := populated[k]; !ok {
+			populated[k] = "v-" + k
+		}
+	}
 	clone := func(m map[string]string) map[string]string {
 		out := make(map[string]string, len(m))
 		for k, v := range m {
