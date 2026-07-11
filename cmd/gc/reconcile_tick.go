@@ -101,3 +101,17 @@ func (t *reconcileTick) set(id string, info sessionpkg.Info) sessionpkg.Info {
 	t.infoByID[id] = info
 	return info
 }
+
+// applyStore is the atomic store-write + snapshot-fold mutator: it persists
+// patch through the session front door (ApplyPatchInfo) and folds the returned
+// coherent Info into the tick snapshot in one call. It carries the same
+// discarded-error semantics the open-coded `infoByID[id], _ = front.ApplyPatchInfo(...)`
+// tuple sites had: on a store-write failure ApplyPatchInfo still returns the
+// locally-folded Info, so the snapshot stays coherent for the rest of the tick
+// and the store self-heals on a later pass. Routing tuples through this mutator
+// lets the fold front-door guard forbid the bare tuple form outright.
+func (t *reconcileTick) applyStore(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) sessionpkg.Info {
+	next, _ := front.ApplyPatchInfo(t.infoByID[id], patch)
+	t.infoByID[id] = next
+	return next
+}

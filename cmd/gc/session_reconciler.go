@@ -2776,7 +2776,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// step (Step 6d write-returns-Info): started_live_hash is
 							// Info-projected, so the backfill folds onto the snapshot too — a fold
 							// this site lacked while the blanket pre-pass masked it.
-							infoByID[id], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[id], sessionpkg.MetadataPatch{
+							tick.applyStore(id, sessionFrontDoor(store), sessionpkg.MetadataPatch{
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
@@ -2809,7 +2809,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Persist + fold in one step (Step 6d write-returns-Info):
 								// started_live_hash is Info-projected, so the re-apply folds onto the
 								// snapshot too — a fold this site lacked while the pre-pass masked it.
-								infoByID[id], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[id], sessionpkg.MetadataPatch{
+								tick.applyStore(id, sessionFrontDoor(store), sessionpkg.MetadataPatch{
 									"live_hash":         currentLive,
 									"started_live_hash": currentLive,
 								})
@@ -2968,7 +2968,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
 					// coupling mirror is gone (WI-6 R4): its only consumer was the
 					// start-execution cluster's raw bead pointer, now deleted.
-					infoByID[id], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[id], batch)
+					tick.applyStore(id, sessionFrontDoor(store), batch)
 					alive = false
 				}
 			}
@@ -3047,7 +3047,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
 					// coupling mirror is gone (WI-6 R4): its only consumer was the
 					// start-execution cluster's raw bead pointer, now deleted.
-					infoByID[id], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[id], batch)
+					tick.applyStore(id, sessionFrontDoor(store), batch)
 					alive = false
 				}
 			}
@@ -3317,7 +3317,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// raw session.Metadata mirror.
 				// The single-key clear now rides ApplyPatchInfo's SetMetadataBatch
 				// (empty-string clear), byte-equivalent to the raw SetMetadata it replaced.
-				infoByID[target.info.ID], _ = sessionFrontDoor(store).ApplyPatchInfo(infoByID[target.info.ID], sessionpkg.MetadataPatch{"sleep_intent": ""})
+				tick.applyStore(target.info.ID, sessionFrontDoor(store), sessionpkg.MetadataPatch{"sleep_intent": ""})
 			}
 		}
 

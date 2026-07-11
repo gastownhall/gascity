@@ -152,6 +152,16 @@ func TestReconcileTickSet(t *testing.T) {
 // fold is inherent to the call's return and cannot be forgotten.
 var infoByIDBareAssign = regexp.MustCompile(`\binfoByID\[[^\]]*\]\s*=[^=]`)
 
+// infoByIDTupleAssign matches the tuple assignment form (`infoByID[id], _ = ...`),
+// which the single-assign regex above cannot see (the char after `]` is `,`).
+// Anchored to line start AND requiring a single `=` later on the same line: a
+// tuple-assignment LHS begins the statement under gofmt and carries its `=` on
+// that line, while argument-list READS of infoByID[...] appear either mid-line
+// (`f(infoByID[id], x)`) or as a wrapped arg line with no `=`
+// (`\tinfoByID[id],`) and must not trip the guard. The atomic store-write+fold shape that used this form now routes
+// through tick.applyStore, so ANY tuple write into the bare map is a violation.
+var infoByIDTupleAssign = regexp.MustCompile(`^\s*infoByID\[[^\]]*\]\s*,[^=]*=[^=]`)
+
 // TestReconcileTickFoldFrontDoor forbids reintroducing a direct
 // `infoByID[...] =` fold in session_reconciler.go: every manual mutation of the
 // tick snapshot must route through the reconcileTick front door (apply /
@@ -173,7 +183,7 @@ func TestReconcileTickFoldFrontDoor(t *testing.T) {
 		if idx := strings.Index(code, "//"); idx >= 0 {
 			code = code[:idx] // strip line/inline comment
 		}
-		if infoByIDBareAssign.MatchString(code) {
+		if infoByIDBareAssign.MatchString(code) || infoByIDTupleAssign.MatchString(code) {
 			t.Errorf("session_reconciler.go:%d writes infoByID directly (%q); route the fold through the reconcileTick front door (tick.apply / tick.applyResult / tick.markClosed / tick.set) instead", i+1, strings.TrimSpace(line))
 		}
 	}
