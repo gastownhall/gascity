@@ -3681,6 +3681,28 @@ func TestBdStoreDepAddRetriesTransientDoltConnectionError(t *testing.T) {
 	}
 }
 
+// TestBdStoreDepAddRetriesSqliteBusyError proves a sqlite-backed bd write
+// that loses a lock race ("database is locked (5) (SQLITE_BUSY)") goes
+// through the same transient-write retry loop as Dolt serialization
+// failures instead of failing permanently on first contention.
+func TestBdStoreDepAddRetriesSqliteBusyError(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("exit status 1: adding dependency: database is locked (5) (SQLITE_BUSY)")
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("bd-42", "bd-41", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (1 sqlite busy + 1 retry success)", calls)
+	}
+}
+
 func TestBdStoreDepAddError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")

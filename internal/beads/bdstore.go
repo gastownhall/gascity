@@ -1878,7 +1878,24 @@ func isBdTransientWriteError(err error) bool {
 	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
 		strings.Contains(msg, "this transaction conflicts with a committed transaction") ||
 		strings.Contains(msg, "failed to prepare catalog") ||
+		isBdSqliteBusyError(msg) ||
 		isBdAmbiguousWriteError(err)
+}
+
+// isBdSqliteBusyError reports whether msg carries an explicit sqlite
+// busy/locked result-code marker ("database is locked (5) (SQLITE_BUSY)"
+// and friends) — the sqlite analog of a Dolt serialization failure: the
+// write lost a lock race without applying, so it is safe to retry. Only
+// the unambiguous SQLITE_BUSY / SQLITE_LOCKED code markers match. bd's
+// sqlite driver (modernc.org/sqlite) always appends the code marker, so
+// this loses no real coverage, while bare "database is locked" phrasings
+// stay excluded on purpose: Dolt's embedded mode emits "database is
+// locked by another dolt process" for a persistent lock-file condition
+// that a bounded retry cannot clear and must keep failing fast.
+func isBdSqliteBusyError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "sqlite_busy") ||
+		strings.Contains(lower, "sqlite_locked")
 }
 
 func isBdAmbiguousWriteError(err error) bool {
