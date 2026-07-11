@@ -159,6 +159,9 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n
 	}
+	if n, err := strconv.Atoi(b.Metadata["dialog_dismiss_attempts"]); err == nil {
+		info.DialogDismissAttempts = n
+	}
 	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
 		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
 			info.LastNudgeDeliveredAt = parsed

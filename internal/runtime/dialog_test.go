@@ -1002,6 +1002,7 @@ func TestContainsRateLimitDialog(t *testing.T) {
 	}{
 		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
+		{name: "claude session limit chooser", content: "You've hit your session limit · resets 8:40am", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "generic rate limit", content: "rate limit exceeded", want: true},
 		{name: "Rate limit caps", content: "Rate limit: try again later", want: true},
@@ -1026,6 +1027,7 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 	}{
 		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
+		{name: "claude session limit chooser", content: "You've hit your session limit · resets 8:40am", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
 		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
@@ -1060,6 +1062,97 @@ func TestProviderTerminalErrorReason(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ProviderTerminalErrorReason(tt.content); got != tt.want {
 				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsProviderRateLimitChooser(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "slash command entry point", content: "You've hit your limit, Pro plan\n\n/rate-limit-options", want: true},
+		{name: "session chooser menu", content: "You've hit your session limit · resets 8:40am\n❯ 1. Stop and wait for limit to reset\n  2. Upgrade", want: true},
+		{name: "gemini chooser menu", content: "Usage limit reached for gemini-3-flash-preview.\n❯ Keep trying\n  Stop", want: true},
+		{name: "bare session-limit phrase, live prompt", content: "You've hit your session limit · resets 8:40am\n❯ ", want: false},
+		{name: "bare usage-limit phrase, no menu", content: "Usage limit reached for gemini-3-flash-preview.", want: false},
+		{name: "scrollback mentioning rate limit", content: "respect the API rate limit\n❯ ", want: false},
+		{name: "empty", content: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsProviderRateLimitChooser(tt.content); got != tt.want {
+				t.Errorf("containsProviderRateLimitChooser(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsDismissableMidSessionDialog(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "rate-limit session chooser",
+			content: "You've hit your session limit · resets 8:40am\n❯ 1. Stop and wait for limit to reset\n  2. Upgrade",
+			want:    true,
+		},
+		{
+			name:    "rate-limit options screen",
+			content: "You've hit your limit, Pro plan\n\n/rate-limit-options",
+			want:    true,
+		},
+		{
+			name:    "claude resume dialog",
+			content: "Resume previous conversation?\n❯ Resume from summary\n  Resume full session as-is\nEnter to confirm · Esc to cancel",
+			want:    true,
+		},
+		{
+			name:    "codex update dialog",
+			content: "Update available!\n❯ Update now\n  Skip until next version\nPress enter to continue",
+			want:    true,
+		},
+		{
+			name:    "codex hook review dialog",
+			content: "Hooks need review\n❯ Trust all and continue\n  Continue without trusting",
+			want:    true,
+		},
+		{
+			// The permissive startup matcher would flag this; the
+			// mid-session aggregate must not - it is ordinary scrollback
+			// that merely talks about rate limits.
+			name:    "scrollback discussing rate limits",
+			content: "Next I'll add retry logic so we respect the API rate limit.\n❯ ",
+			want:    false,
+		},
+		{
+			// F3: a session-limit phrase left in 120 lines of scrollback
+			// above a LIVE prompt has no chooser anchor; treating it as a
+			// dialog would inject Down/Enter into the working prompt.
+			name:    "session-limit phrase in scrollback above live prompt",
+			content: "You've hit your session limit · resets 8:40am\nresumed; continuing the task\n❯ ",
+			want:    false,
+		},
+		{
+			// Workspace-trust is a startup-only dialog with single-phrase
+			// anchors; deliberately excluded from the mid-session set.
+			name:    "workspace trust dialog excluded",
+			content: "Do you trust the files in this folder?",
+			want:    false,
+		},
+		{name: "plain idle prompt", content: "❯ ", want: false},
+		{name: "empty", content: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsDismissableMidSessionDialog(tt.content); got != tt.want {
+				t.Errorf("ContainsDismissableMidSessionDialog(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}

@@ -257,6 +257,7 @@ type Info struct {
 	PendingCreateClaimMetadata string
 	PendingCreateStartedAt     string   // pending_create_started_at (raw RFC3339; stale-create sweep parses it)
 	WakeAttempts               int      // wake_attempts parsed as int (0 on missing/invalid)
+	DialogDismissAttempts      int      // dialog_dismiss_attempts parsed as int (0 on missing/invalid)
 	QuarantinedUntil           string   // quarantined_until (raw RFC3339; quarantine check parses it)
 	AliasHistory               []string // prior aliases (alias_history, normalized via session.AliasHistory)
 	// ContinuityEligible is the RAW continuity_eligible metadata, verbatim.
