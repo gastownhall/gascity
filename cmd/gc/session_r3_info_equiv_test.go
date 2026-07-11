@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // setMetadataBatchFailStore rejects every SetMetadataBatch so the persist
@@ -147,7 +148,7 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			if tc.created != 0 {
 				b.CreatedAt = clk.Now().Add(tc.created)
 			}
-			got := healStatePatchWithRollbackInfo(sessionpkg.InfoFromPersistedBead(b), tc.alive, clk, tc.timeout, tc.rollback)
+			got := healStatePatchWithRollbackInfo(seedSessionInfo(b), tc.alive, clk, tc.timeout, tc.rollback)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("healStatePatchWithRollbackInfo = %#v, want %#v", got, tc.want)
 			}
@@ -170,7 +171,7 @@ func TestHealStateWithRollbackInfoClosedGuardAndWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed, _ = store.Get(closed.ID)
-	if batch := healStateWithRollbackInfo(sessionpkg.InfoFromPersistedBead(closed), false, sessionFrontDoor(store), clk, 0, true); batch != nil {
+	if batch := healStateWithRollbackInfo(sessiontest.SeedBead(t, closed), false, sessionFrontDoor(store), clk, 0, true); batch != nil {
 		t.Fatalf("closed bead heal batch = %#v, want nil (terminal beads must not move)", batch)
 	}
 
@@ -178,7 +179,7 @@ func TestHealStateWithRollbackInfoClosedGuardAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch := healStateWithRollbackInfo(sessionpkg.InfoFromPersistedBead(live), false, sessionFrontDoor(store), clk, 0, true)
+	batch := healStateWithRollbackInfo(sessiontest.SeedBead(t, live), false, sessionFrontDoor(store), clk, 0, true)
 	if batch["state"] != "asleep" {
 		t.Fatalf("heal batch = %#v, want state=asleep", batch)
 	}
@@ -209,12 +210,12 @@ func TestPersistSleepPolicyMetadataInfo(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(bead), cfg, sp)
-				got := persistSleepPolicyMetadataInfo(sessionpkg.InfoFromPersistedBead(bead), sessionFrontDoor(store), policy, suppressed)
+				policy := resolveSessionSleepPolicyInfo(sessiontest.SeedBead(t, bead), cfg, sp)
+				got := persistSleepPolicyMetadataInfo(sessiontest.SeedBead(t, bead), sessionFrontDoor(store), policy, suppressed)
 
 				persisted, _ := store.Get(bead.ID)
 				// Write-returns-Info: local fold == re-projection of the persisted bead.
-				if want := sessionpkg.InfoFromPersistedBead(persisted); !reflect.DeepEqual(got, want) {
+				if want := sessiontest.SeedBead(t, persisted); !reflect.DeepEqual(got, want) {
 					t.Fatalf("folded Info diverged from re-projection:\n got = %#v\nwant = %#v", got, want)
 				}
 				// The seven policy keys landed with the resolved policy values.
@@ -248,8 +249,8 @@ func TestPersistSleepPolicyMetadataInfoSwallowsWriteError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := resolveSessionSleepPolicyInfo(sessionpkg.InfoFromPersistedBead(bead), cfg, sp)
-	in := sessionpkg.InfoFromPersistedBead(bead)
+	policy := resolveSessionSleepPolicyInfo(sessiontest.SeedBead(t, bead), cfg, sp)
+	in := sessiontest.SeedBead(t, bead)
 	// A change IS pending (the seven policy keys are absent), so only the write
 	// error prevents the fold.
 	front := sessionFrontDoor(setMetadataBatchFailStore{Store: base})
@@ -277,7 +278,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 
 	t.Run("markIdleSleepPending-fresh", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
-		got := markIdleSleepPendingInfo(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store))
+		got := markIdleSleepPendingInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store))
 		if !reflect.DeepEqual(got, sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}) {
 			t.Fatalf("patch = %#v, want sleep_intent=idle-stop-pending", got)
 		}
@@ -288,13 +289,13 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("markIdleSleepPending-noop", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "sleep_intent": "idle-stop-pending"})
-		if got := markIdleSleepPendingInfo(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store)); got != nil {
+		if got := markIdleSleepPendingInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store)); got != nil {
 			t.Fatalf("patch = %#v, want nil (already pending)", got)
 		}
 	})
 	t.Run("recoverPendingIdleSleep-recovers", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "sleep_intent": "idle-stop-pending", "sleep_policy_fingerprint": "fp"})
-		if !recoverPendingIdleSleepInfo(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), false, clk) {
+		if !recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
 			t.Fatal("recoverPendingIdleSleepInfo = false, want true")
 		}
 		persisted, _ := store.Get(b.ID)
@@ -307,7 +308,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-noop", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
-		if recoverPendingIdleSleepInfo(sessionpkg.InfoFromPersistedBead(b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
 			t.Fatal("recoverPendingIdleSleepInfo = true, want false (no pending intent)")
 		}
 	})
@@ -315,7 +316,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "detached_at": clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339)})
 		// A NonInteractive policy takes the early clear branch (no runtime probe).
 		policy := resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}
-		got := reconcileDetachedAtInfo(sessionpkg.InfoFromPersistedBead(b), store, policy, true, runtime.NewFake(), clk)
+		got := reconcileDetachedAtInfo(sessiontest.SeedBead(t, b), store, policy, true, runtime.NewFake(), clk)
 		if !reflect.DeepEqual(got, map[string]string{"detached_at": ""}) {
 			t.Fatalf("detach batch = %#v, want detached_at cleared", got)
 		}
@@ -327,7 +328,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	t.Run("reconcileDetachedAt-noop-when-absent", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
 		policy := resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}
-		if got := reconcileDetachedAtInfo(sessionpkg.InfoFromPersistedBead(b), store, policy, true, runtime.NewFake(), clk); got != nil {
+		if got := reconcileDetachedAtInfo(sessiontest.SeedBead(t, b), store, policy, true, runtime.NewFake(), clk); got != nil {
 			t.Fatalf("detach batch = %#v, want nil (nothing to clear)", got)
 		}
 	})
@@ -365,7 +366,7 @@ func TestPendingInteractionKeepsAwakeInfoReflectsMidTickQuarantineClear(t *testi
 	sp := runtime.NewFake()
 	sp.SetPendingInteraction("witness", &runtime.PendingInteraction{RequestID: "r", Kind: "question", Prompt: "approve?"})
 
-	info := sessionpkg.InfoFromPersistedBead(bead)
+	info := sessiontest.SeedBead(t, bead)
 	// Precondition: while the still-future quarantine is present, the quarantine
 	// blocker suppresses the pending-interaction deferral.
 	if pendingInteractionKeepsAwakeInfo(info, sp, "witness", clk) {
