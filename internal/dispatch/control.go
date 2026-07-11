@@ -419,6 +419,12 @@ func IsTransientControllerError(err error) bool {
 		"database is locked",
 		"database table is locked",
 		"sqlite_busy",
+		// bd's client-side dolt breaker fails fast with a cooldown while the
+		// server is down; the outage is recoverable, so serve loops must keep
+		// sweeping instead of exiting (ga-8jx: rig dispatcher died mid-outage).
+		"dolt circuit breaker is open",
+		"server appears down, failing fast",
+		"dolt server unreachable",
 	}
 	for _, needle := range transientNeedles {
 		if strings.Contains(msg, needle) {

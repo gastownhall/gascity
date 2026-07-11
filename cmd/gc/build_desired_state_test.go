@@ -11007,9 +11007,101 @@ func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
 			"gc.routed_to": config.ControlDispatcherAgentName, // bare, pre-1.3 route
 		},
 	}}
-	demand := openControlDispatcherDemand(cfg, work)
+	demand := openControlDispatcherDemand(t.TempDir(), cfg, work, []string{"city"})
 	if !demand["core.control-dispatcher"] {
 		t.Fatalf("openControlDispatcherDemand = %v, want demand keyed by qualified name from bare route", demand)
+	}
+}
+
+// TestOpenControlDispatcherDemandAttributesRigStoreBeadsToRigDispatcher guards
+// the ga-8jx wedge: control-step routing stamps the CITY singleton's qualified
+// name ("core.control-dispatcher") for every scope, so control beads minted
+// into a rig store carry the unprefixed city name. Demand for those beads must
+// wake the RIG dispatcher serving that store — the city dispatcher never
+// queries rig stores, so attributing the demand to it wakes a dispatcher that
+// finds an empty city store while the rig-store bead wedges forever.
+func TestOpenControlDispatcherDemandAttributesRigStoreBeadsToRigDispatcher(t *testing.T) {
+	maxActive := 1
+	rigMaxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name: "fixture",
+			Path: "/tmp/fixture",
+		}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &rigMaxActive,
+			},
+		},
+	}
+	work := []beads.Bead{
+		{
+			ID:     "rig-ralph-container",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.kind":      "ralph",
+				"gc.routed_to": "core.control-dispatcher",
+			},
+		},
+		{
+			ID:     "city-finalize",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.kind":      "workflow-finalize",
+				"gc.routed_to": "core.control-dispatcher",
+			},
+		},
+	}
+	demand := openControlDispatcherDemand(t.TempDir(), cfg, work, []string{"fixture", "city"})
+	if !demand["fixture/core.control-dispatcher"] {
+		t.Fatalf("openControlDispatcherDemand = %v, want rig-store bead to wake the rig dispatcher", demand)
+	}
+	if !demand["core.control-dispatcher"] {
+		t.Fatalf("openControlDispatcherDemand = %v, want city-store bead to keep waking the city dispatcher", demand)
+	}
+}
+
+// TestOpenControlDispatcherDemandRigStoreFallsBackToCityWithoutRigDispatcher
+// pins the fallback: a rig-store bead routed to the city singleton still
+// creates city-dispatcher demand when the config has no rig-scoped dispatcher
+// copy, preserving pre-ga-8jx behavior for cities without per-rig dispatchers.
+func TestOpenControlDispatcherDemandRigStoreFallsBackToCityWithoutRigDispatcher(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name: "fixture",
+			Path: "/tmp/fixture",
+		}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	work := []beads.Bead{{
+		ID:     "rig-ralph-container",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "ralph",
+			"gc.routed_to": "core.control-dispatcher",
+		},
+	}}
+	demand := openControlDispatcherDemand(t.TempDir(), cfg, work, []string{"fixture"})
+	if !demand["core.control-dispatcher"] {
+		t.Fatalf("openControlDispatcherDemand = %v, want fallback to city dispatcher demand", demand)
 	}
 }
 

@@ -1054,6 +1054,14 @@ func (cr *CityRuntime) tick(
 
 	if !configChanged && cr.shouldSkipTickForFSPressure(trace, trigger) {
 		cr.processConvergenceRequests(ctx)
+		// Keep the singleton control dispatchers alive even while shedding full
+		// ticks: they are the only agents that advance workflow control beads
+		// (ralph containers, workflow-finalize), so a dispatcher that dies
+		// during a sustained IO-pressure episode would otherwise stay dead for
+		// the whole episode and wedge every in-flight run (ga-8jx). The
+		// dispatcher-only pass reconciles just the city + rig control
+		// dispatchers — a bounded fraction of a full tick.
+		cr.controlDispatcherTick(ctx)
 		completion = TraceCompletionCompleted
 		tickCompleted = true
 		return

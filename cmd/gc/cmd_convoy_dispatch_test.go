@@ -3172,6 +3172,72 @@ func TestControlDispatcherBareRoute(t *testing.T) {
 	}
 }
 
+// TestControlDispatcherCitySingletonRoute pins the dir-stripping alias
+// derivation (ga-8jx): a rig dispatcher must also claim control beads stamped
+// with the city singleton's qualified name, because control-step routing
+// prefers the city singleton for every scope while the beads land in the rig
+// store the city dispatcher never queries.
+func TestControlDispatcherCitySingletonRoute(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"rig/core.control-dispatcher", "core.control-dispatcher"},
+		{"rig/control-dispatcher", "control-dispatcher"},
+		{"core.control-dispatcher", ""}, // city target: already the city alias
+		{"control-dispatcher", ""},      // city bare target: already the city alias
+		{"rig/gascity.polecat", ""},     // not a control dispatcher
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := controlDispatcherCitySingletonRoute(tc.in); got != tc.want {
+			t.Errorf("controlDispatcherCitySingletonRoute(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryHonorsCitySingletonRoute guards the
+// ga-8jx wedge at the query layer: a rig-scoped dispatcher's serve query must
+// scan for control beads routed to the unprefixed city-singleton name, and
+// the city dispatcher's own query must not grow a redundant self-alias.
+func TestWorkflowServeControlReadyQueryHonorsCitySingletonRoute(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "fixture"})
+	if !strings.Contains(query, "GC_CONTROL_TARGET='fixture/core.control-dispatcher'") {
+		t.Fatalf("serve query missing qualified target: %q", query)
+	}
+	if !strings.Contains(query, "GC_CONTROL_CITY_TARGET='core.control-dispatcher'") {
+		t.Fatalf("serve query missing city-singleton target: %q", query)
+	}
+	if !strings.Contains(query, `routed_ready "${GC_CONTROL_CITY_TARGET:-}"`) {
+		t.Fatalf("serve query missing city-singleton routed_ready scan: %q", query)
+	}
+
+	cityQuery := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, BindingName: "core"})
+	if strings.Contains(cityQuery, "GC_CONTROL_CITY_TARGET=") {
+		t.Fatalf("city serve query should not carry a redundant city-singleton alias: %q", cityQuery)
+	}
+}
+
+// TestWorkflowServeControlReadyQueryClaimsCityRoutedRigStoreControlWork is the
+// end-to-end regression for the ga-8jx wedge: a ralph container in a rig store
+// routed to "core.control-dispatcher" must surface in the rig dispatcher's
+// ready queue.
+func TestWorkflowServeControlReadyQueryClaimsCityRoutedRigStoreControlWork(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "fixture"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME": "fixture--core__control-dispatcher",
+		"GC_ALIAS":        "fixture/core.control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "--readonly --sandbox ready --metadata-field gc.routed_to=core.control-dispatcher --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+    printf '[{"id":"tlp-ralph-container","metadata":{"gc.routed_to":"core.control-dispatcher","gc.kind":"ralph"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	assertJSONEqual(t, out, `[{"id":"tlp-ralph-container","metadata":{"gc.routed_to":"core.control-dispatcher","gc.kind":"ralph"}}]`)
+}
+
 func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
@@ -5263,6 +5329,56 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("workflowServeList calls = %d, want 2 (survive transient, then exit on fatal)", calls)
+	}
+}
+
+// TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage guards the ga-8jx
+// serve-loop death: when the rig dolt sql-server goes down, bd's client-side
+// breaker first surfaces "connection refused (circuit breaker tripped)" and
+// then flips to fail-fast "dolt circuit breaker is open: server appears down,
+// failing fast (cooldown 5s)". Both are recoverable outage shapes — the follow
+// loop must keep sweeping through them instead of exiting, otherwise the rig
+// dispatcher dies mid-outage and every in-flight run wedges once dolt returns.
+func TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevList := workflowServeList
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+	})
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+		return false, nil
+	}
+
+	trippedErr := fmt.Errorf(`querying control work: running work query %q: exit status 1: begin read tx: dial tcp 127.0.0.1:52022: connect: connection refused (circuit breaker tripped)`, "bd ready")
+	breakerOpenErr := fmt.Errorf(`querying control work: running work query %q: exit status 1: Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)`, "bd ready")
+	fatalErr := errors.New("malformed work query: jq: command not found")
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		switch calls {
+		case 1:
+			return nil, trippedErr
+		case 2:
+			return nil, breakerOpenErr
+		}
+		return nil, fatalErr
+	}
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, fatalErr) {
+		t.Fatalf("runWorkflowServeFollow err = %v, want fatal error after surviving the breaker outage", err)
+	}
+	if calls != 3 {
+		t.Fatalf("workflowServeList calls = %d, want 3 (survive tripped + open breaker, then exit on fatal)", calls)
 	}
 }
 

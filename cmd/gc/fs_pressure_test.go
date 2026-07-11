@@ -281,6 +281,81 @@ func TestCityRuntimeTickSkipsBeforeManagedDoltAndDemandUnderFSPressure(t *testin
 	}
 }
 
+// TestCityRuntimeTickReconcilesControlDispatchersUnderFSPressure guards the
+// ga-8jx liveness hole: the FS-pressure gate sheds the whole tick, so a
+// control dispatcher that died during a sustained IO-pressure episode was
+// never restarted and every in-flight run's control beads (ralph containers,
+// workflow-finalize) wedged. A skipped tick must still run the bounded
+// dispatcher-only reconcile pass while continuing to shed the full tick.
+func TestCityRuntimeTickReconcilesControlDispatchersUnderFSPressure(t *testing.T) {
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+
+	var buildCalls atomic.Int32
+	var managedDoltCalls atomic.Int32
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "test-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: beads.NewMemStore(),
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			buildCalls.Add(1)
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		dops:          newDrainOps(sp),
+		rec:           rec,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        &stderr,
+		managedDoltOwned: func(string) (bool, error) {
+			managedDoltCalls.Add(1)
+			return true, nil
+		},
+		managedDoltPort: func(string) string {
+			return ""
+		},
+		managedDoltHealth: func(string) error {
+			managedDoltCalls.Add(1)
+			return nil
+		},
+	}
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if got := buildCalls.Load(); got != 0 {
+		t.Fatalf("build desired calls = %d, want full tick still shed under FS pressure", got)
+	}
+	if got := managedDoltCalls.Load(); got == 0 {
+		t.Fatal("managed dolt preflight never ran: control-dispatcher-only pass was skipped under FS pressure")
+	}
+	evts, err := rec.List(events.Filter{Type: events.SupervisorFSPressureSkippedTick})
+	if err != nil {
+		t.Fatalf("list FS pressure events: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("FS pressure skip events = %#v, want the shed tick still recorded", evts)
+	}
+}
+
 func TestCityRuntimeTickSkipsDueOrderDispatchUnderFSPressure(t *testing.T) {
 	withFakePressureFile(t, []byte(samplePressureHigh), nil)
 	t.Setenv(fsPressureThresholdEnv, "")

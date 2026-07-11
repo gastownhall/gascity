@@ -763,9 +763,9 @@ func buildDesiredStateWithSessionBeads(
 		// string, so the route must be canonicalized before demand is counted or
 		// the cold pool never wakes for it.
 		subPhaseStart = time.Now()
-		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
+		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
+		controlDispatcherOpenDemand := openControlDispatcherDemand(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStoreRefs)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -1703,7 +1703,7 @@ func controllerDemandRouteCandidates(b beads.Bead) []string {
 	return routedToAndLegacyWorkflowCandidates(b)
 }
 
-func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {
+func openControlDispatcherDemand(cityPath string, cfg *config.City, workBeads []beads.Bead, workStoreRefs []string) map[string]bool {
 	demand := make(map[string]bool)
 	if cfg == nil || len(workBeads) == 0 {
 		return demand
@@ -1715,6 +1715,15 @@ func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[s
 	// upgrade scaling the qualified dispatcher (keyed by the template name the
 	// scaler matches).
 	aliasToCanonical := make(map[string]string)
+	// Control-step routing deliberately stamps the CITY singleton's qualified
+	// name for every scope (config.PreferredDeterministicControlDispatcher), so
+	// control beads minted into a rig store carry a city-singleton alias. Only
+	// the rig dispatcher serving that store can claim them (the city dispatcher
+	// never queries rig stores), so demand for those beads must wake the RIG
+	// dispatcher, not the city one — otherwise the city dispatcher wakes to an
+	// empty city store while the rig-store bead wedges forever (ga-8jx).
+	citySingletonAliases := make(map[string]bool)
+	rigDispatcherByDir := make(map[string]string)
 	for i := range cfg.Agents {
 		if !config.IsDeterministicControlDispatcher(&cfg.Agents[i]) {
 			continue
@@ -1726,19 +1735,42 @@ func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[s
 				aliasToCanonical[bare] = qualified
 			}
 		}
+		if strings.TrimSpace(cfg.Agents[i].Dir) != "" {
+			if rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs); rigName != "" {
+				if _, taken := rigDispatcherByDir[rigName]; !taken {
+					rigDispatcherByDir[rigName] = qualified
+				}
+			}
+		} else {
+			citySingletonAliases[qualified] = true
+			if bare := controlDispatcherBareRoute(qualified); bare != "" {
+				citySingletonAliases[bare] = true
+			}
+		}
 	}
 	if len(aliasToCanonical) == 0 {
 		return demand
 	}
-	for _, wb := range workBeads {
+	for i, wb := range workBeads {
 		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
+		storeRef := ""
+		if i < len(workStoreRefs) {
+			storeRef = workStoreRefs[i]
+		}
 		for _, candidate := range controllerDemandRouteCandidates(wb) {
-			if canonical, ok := aliasToCanonical[candidate]; ok {
-				demand[canonical] = true
-				break
+			canonical, ok := aliasToCanonical[candidate]
+			if !ok {
+				continue
 			}
+			if citySingletonAliases[candidate] && storeRef != "" && storeRef != "city" {
+				if rigCanonical, ok := rigDispatcherByDir[storeRef]; ok {
+					canonical = rigCanonical
+				}
+			}
+			demand[canonical] = true
+			break
 		}
 	}
 	return demand
@@ -4194,9 +4226,9 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
 // migration re-home needs its own scan. Active-only List queries are served from
 // the CachingStore in steady state, so this adds no backing-store round trip.
-func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store) {
+func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string) {
 	if cfg == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Work arm (unassigned-routed re-home scan): iterate the work-class
 	// candidate fan-out, labeling the city store "city" for the diagnostic
@@ -4205,6 +4237,7 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 
 	var workBeads []beads.Bead
 	var workStores []beads.Store
+	var workStoreRefs []string
 	seen := make(map[string]struct{})
 	for _, source := range stores {
 		if source.store == nil {
@@ -4228,9 +4261,10 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 			seen[b.ID] = struct{}{}
 			workBeads = append(workBeads, b)
 			workStores = append(workStores, source.store)
+			workStoreRefs = append(workStoreRefs, source.ref)
 		}
 	}
-	return workBeads, workStores
+	return workBeads, workStores, workStoreRefs
 }
 
 func selectOrCreateDependencyPoolSessionBead(

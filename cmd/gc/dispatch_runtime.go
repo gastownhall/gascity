@@ -800,6 +800,9 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	if bare := controlDispatcherBareRoute(target); bare != "" {
 		queryPrefix += ` GC_CONTROL_BARE_TARGET=` + shellquote.Quote(bare)
 	}
+	if cityAlias := controlDispatcherCitySingletonRoute(target); cityAlias != "" {
+		queryPrefix += ` GC_CONTROL_CITY_TARGET=` + shellquote.Quote(cityAlias)
+	}
 	query := queryPrefix + ` sh -c '` +
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
@@ -821,6 +824,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`routed_ready "$GC_CONTROL_TARGET"; ` +
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
 		`routed_ready "${GC_CONTROL_BARE_TARGET:-}"; ` +
+		`routed_ready "${GC_CONTROL_CITY_TARGET:-}"; ` +
 		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
 	return query
 }
@@ -913,6 +917,31 @@ func controlDispatcherBareRoute(target string) string {
 		return dir + "/" + config.ControlDispatcherAgentName
 	}
 	return config.ControlDispatcherAgentName
+}
+
+// controlDispatcherCitySingletonRoute returns the dir-stripped city-singleton
+// alias of a rig-scoped control dispatcher's qualified name, e.g.
+// "rig/core.control-dispatcher" -> "core.control-dispatcher". Control-step
+// routing deliberately stamps the city singleton's qualified name for every
+// scope (config.PreferredDeterministicControlDispatcher), so control beads
+// minted into a rig store carry the unprefixed city name — and only the rig
+// dispatcher serving that store can ever claim them, because the city
+// dispatcher never queries rig stores (ga-8jx: wedged ralph containers and
+// workflow-finalize steps). Returns "" when target has no rig prefix or is
+// not a control-dispatcher route.
+func controlDispatcherCitySingletonRoute(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	dir, name := config.ParseQualifiedName(target)
+	if dir == "" {
+		return ""
+	}
+	if name != config.ControlDispatcherAgentName && !strings.HasSuffix(name, "."+config.ControlDispatcherAgentName) {
+		return ""
+	}
+	return name
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
