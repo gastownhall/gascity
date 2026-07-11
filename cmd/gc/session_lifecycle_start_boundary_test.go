@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T) {
@@ -27,7 +28,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(bead),
+				info: sessiontest.SeedBead(t, bead),
 				tp:   TemplateParams{TemplateName: "worker"},
 			},
 			cfg: runtime.Config{
@@ -67,17 +68,12 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 
 func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *testing.T) {
 	sp := runtime.NewFake()
-	sessionBead := &beads.Bead{
-		Metadata: map[string]string{
-			"session_name": "legacy-runtime-only",
-		},
-	}
 
 	usedWorker, err := startPreparedStartCandidate(
 		context.Background(),
 		preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(*sessionBead),
+				info: sessionpkg.Info{SessionName: "legacy-runtime-only", SessionNameMetadata: "legacy-runtime-only"},
 				tp:   TemplateParams{TemplateName: "worker"},
 			},
 			cfg: runtime.Config{

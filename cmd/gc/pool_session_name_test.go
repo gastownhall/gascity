@@ -2174,7 +2174,7 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 ) []releasedPoolAssignment {
 	var infos []session.Info
 	for _, b := range openSessionBeads {
-		infos = append(infos, session.InfoFromPersistedBead(b))
+		infos = append(infos, seedSessionInfo(b))
 	}
 	return releaseOrphanedPoolAssignments(store, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores)
 }
@@ -2185,7 +2185,7 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 func gcSweepSessionBeadsFromBeads(store beads.Store, rigStores map[string]beads.Store, sessionBeads []beads.Bead) []string {
 	var infos []session.Info
 	for _, b := range sessionBeads {
-		infos = append(infos, session.InfoFromPersistedBead(b))
+		infos = append(infos, seedSessionInfo(b))
 	}
 	return GCSweepSessionBeads(store, rigStores, infos)
 }
