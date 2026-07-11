@@ -36,7 +36,9 @@ func TestGCNonTestFilesStayOnWorkerBoundary(t *testing.T) {
 			"worker.SessionHandle",
 			"worker.SessionSpec",
 			"worker.SessionLogAdapter{",
-			"session.NewManagerWithOptions(",
+			"session.NewManager(",
+			"session.NewManagerWithCityPath(",
+			"session.NewManagerWithTransportResolverAndCityPath(",
 			"sp.Start(ctx,",
 			"setBeadRestartRequested(",
 		} {

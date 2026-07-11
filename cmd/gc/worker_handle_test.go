@@ -64,9 +64,9 @@ STUB_ENV = "present"
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Transport: "", Resume: session.ProviderResume{
+	info, err := mgr.CreateBeadOnly("worker", "Probe", "", t.TempDir(), "stub", "", nil, session.ProviderResume{
 		SessionIDFlag: "--old-session-id",
-	}})
+	})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -1244,12 +1244,21 @@ session_id_flag = "--session-id"
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.CreateSession(
-		context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{
+	info, err := mgr.Create(
+		context.Background(),
+		"worker",
+		"Probe",
+		"legacy-agent",
+		t.TempDir(),
+		"stub",
+		nil,
+		session.ProviderResume{
 			ResumeFlag:    "--old-resume",
 			ResumeStyle:   "flag",
 			SessionIDFlag: "--session-id",
-		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		},
+		runtime.Config{},
+	)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1310,8 +1319,17 @@ session_id_flag = "--session-id"
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.CreateSession(
-		context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.Create(
+		context.Background(),
+		"worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"stub",
+		nil,
+		session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+		runtime.Config{},
+	)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1362,7 +1380,7 @@ command = "/bin/echo"
 	}
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.Create(context.Background(), "worker", "Probe", "/bin/echo", t.TempDir(), "stub", nil, session.ProviderResume{}, runtime.Config{Command: "/bin/echo"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1460,7 +1478,7 @@ command = "/bin/echo"
 	}
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "stub", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.Create(context.Background(), "worker", "Probe", "stub", t.TempDir(), "stub", nil, session.ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

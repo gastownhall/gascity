@@ -93,7 +93,7 @@ func sessionHandleRecordedInputTokens(t *testing.T) int64 {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManager(store, sp)
 
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager:     manager,

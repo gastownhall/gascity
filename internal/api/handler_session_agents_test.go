@@ -18,9 +18,18 @@ import (
 
 func createTranscriptBackedSession(t *testing.T, store beads.Store, sp *runtime.Fake, workDir string) session.Info {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, sp)
-	info, err := mgr.CreateSession(
-		context.Background(), session.CreateOptions{Template: "default", Title: "Transcript Backed", Command: "echo test", WorkDir: workDir, Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	mgr := session.NewManager(store, sp)
+	info, err := mgr.Create(
+		context.Background(),
+		"default",
+		"Transcript Backed",
+		"echo test",
+		workDir,
+		"test",
+		nil,
+		session.ProviderResume{},
+		runtime.Config{},
+	)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

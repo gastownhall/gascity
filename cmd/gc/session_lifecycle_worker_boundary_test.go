@@ -16,7 +16,7 @@ func TestStopTargetsBoundedUsesWorkerBoundaryForKnownSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestInterruptTargetsBoundedStopsPoolManagedSessionsThroughWorkerBoundary(t 
 	if err := sp.Start(context.Background(), "human-worker", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
-	poolInfo, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "pool", Title: "Pool", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	poolInfo, err := mgr.Create(context.Background(), "pool", "Pool", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

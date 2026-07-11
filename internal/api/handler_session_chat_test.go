@@ -113,13 +113,13 @@ func TestBuildSessionResumeAppliesTemplateOverridesToExplicitResumeCommand(t *te
 			},
 		},
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "codex-provider", Title: "chat", Command: "codex --ask-for-approval on-request", WorkDir: "/tmp/workdir", Provider: "codex-provider", Env: nil, Resume: session.ProviderResume{
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "codex-provider", "chat", "codex --ask-for-approval on-request", "/tmp/workdir", "codex-provider", nil, session.ProviderResume{
 		ResumeFlag:    "resume",
 		ResumeStyle:   "subcommand",
 		ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
 		SessionIDFlag: "--session-id",
-	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

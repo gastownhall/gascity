@@ -129,7 +129,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	tmuxCfg.SocketName = socketName
 
 	provider := runtimetmux.NewProviderWithConfig(tmuxCfg)
-	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	manager := sessionpkg.NewManager(store, provider)
 	sessionEnv := mergeStringMaps(envMapFromAcceptanceEnv(env), resolved.Env)
 	handle, err := workerpkg.NewSessionHandle(workerpkg.SessionHandleConfig{
 		Manager: manager,

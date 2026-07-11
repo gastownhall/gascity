@@ -108,7 +108,7 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManager(store, sp)
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -1699,7 +1699,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 func TestSessionCatalogUsesWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	mgr := sessionpkg.NewManagerWithCityPath(store, sp, t.TempDir())
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager: mgr,
 		Session: SessionSpec{
@@ -1965,14 +1965,23 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManager(store, sp)
 
-	info, err := manager.CreateSession(
-		context.Background(), sessionpkg.CreateOptions{Template: "probe", Title: "Probe", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "legacy-agent", Env: nil, Resume: sessionpkg.ProviderResume{
+	info, err := manager.Create(
+		context.Background(),
+		"probe",
+		"Probe",
+		"legacy-agent",
+		t.TempDir(),
+		"legacy-agent",
+		nil,
+		sessionpkg.ProviderResume{
 			ResumeFlag:    "--old-resume",
 			ResumeStyle:   "flag",
 			SessionIDFlag: "--session-id",
-		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		},
+		runtime.Config{},
+	)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2038,7 +2047,7 @@ func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder e
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManager(store, sp)
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:  manager,
 		Recorder: recorder,

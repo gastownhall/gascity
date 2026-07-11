@@ -150,9 +150,9 @@ func TestPhase0SessionResolution_RigScopedBareNamedIdentityRequiresAmbientRig(t 
 func TestPhase0CanonicalMetadata_ManualCreateWritesSessionOrigin(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManager(store, sp)
 
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "echo test", WorkDir: t.TempDir(), Provider: "test-provider", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "echo test", t.TempDir(), "test-provider", nil, session.ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

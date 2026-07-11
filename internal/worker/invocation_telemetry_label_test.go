@@ -27,7 +27,7 @@ func TestMessageRecordsNormalizedProviderFamilyLabel(t *testing.T) {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManager(store, sp)
 
 	// No Profile is set, so the label/pricing derivation cannot lean on
 	// profileFamily and must normalize the claude-family alias provider itself.
