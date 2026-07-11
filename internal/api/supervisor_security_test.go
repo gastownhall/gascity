@@ -111,12 +111,15 @@ func TestSupervisorHostAllowlistAcceptsLoopbackAndConfiguredHost(t *testing.T) {
 
 // TestDashboardSurfacesServedBehindHostAllowlist is the mount-topology guard
 // for the dashboard half of #2723. The allowlist logic itself is pinned by
-// TestIsAllowedSupervisorHost; what this test protects is the wiring — the
-// embedded SPA "/" catch-all and the host-side "/api/" plane must stay INSIDE
-// the host gate that SupervisorMux.Handler() wraps around the whole mux. A
-// future refactor that mounts either surface on a separate listener or ahead
-// of withHostAllowing would reopen DNS rebinding against the dashboard and
-// fail here.
+// TestIsAllowedSupervisorHost; what this test pins is the SupervisorMux-internal
+// wiring — surfaces attached via WithStaticHandler (SPA "/" catch-all) and
+// WithAPIPlane ("/api/" plane) are served INSIDE the host gate that
+// SupervisorMux.Handler() wraps around the whole mux, so remounting either
+// ahead of withHostAllowing within the mux fails here. It exercises only
+// SupervisorMux with fake handlers and cannot see cmd/gc topology: a refactor
+// that serves the real dashboard from a separate listener would bypass this
+// guard entirely (production attach site: attachDashboard in
+// cmd/gc/supervisor_dashboard.go).
 func TestDashboardSurfacesServedBehindHostAllowlist(t *testing.T) {
 	spa := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("spa-shell"))
@@ -191,12 +194,10 @@ func TestSupervisorHostAllowlistRawRequestLine(t *testing.T) {
 			"200",
 		},
 		{
-			"duplicate host headers loopback first",
-			"GET /v0/cities HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
-			"400",
-		},
-		{
-			"duplicate host headers attacker first",
+			// Pins net/http stdlib behavior (400 before the handler runs),
+			// not repo code — kept as one canary so a Go release that
+			// relaxes duplicate-Host handling surfaces here.
+			"duplicate host headers rejected before handler",
 			"GET /v0/cities HTTP/1.1\r\nHost: evil.example\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
 			"400",
 		},
