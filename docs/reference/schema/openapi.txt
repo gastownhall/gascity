@@ -6569,7 +6569,7 @@
             "type": "integer"
           },
           "run_id": {
-            "description": "The cancelled run.",
+            "description": "The canceled run.",
             "type": "string"
           },
           "status": {
@@ -6696,7 +6696,7 @@
           "completed",
           "failed",
           "skipped",
-          "cancelled"
+          "canceled"
         ],
         "type": "string"
       },

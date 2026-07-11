@@ -59,8 +59,8 @@ func TestRunCancelClosesRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("humaHandleRunCancel error: %v", err)
 	}
-	if out.Body.Status != RunStatusCancelled {
-		t.Errorf("status = %q, want cancelled", out.Body.Status)
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
 	}
 	if out.Body.Closed != 2 {
 		t.Errorf("closed = %d, want 2 (root + one step)", out.Body.Closed)
@@ -129,7 +129,7 @@ func TestRunCancelLeavesCompletedStepsUntouched(t *testing.T) {
 }
 
 // TestRunCancelStoreFailureReports503 guards the false-success finding: a store
-// write failure must surface as a 5xx, never a phantom 202 cancelled.
+// write failure must surface as a 5xx, never a phantom 202 canceled.
 func TestRunCancelStoreFailureReports503(t *testing.T) {
 	fs := newFakeState(t)
 	mem := fs.stores["myrig"]
@@ -154,7 +154,7 @@ func TestRunCancelStoreFailureReports503(t *testing.T) {
 	if !strings.Contains(err.Error(), "run cancel failed") {
 		t.Errorf("error = %q, want a cancel-failed 5xx", err.Error())
 	}
-	// The run must remain open — nothing was cancelled.
+	// The run must remain open — nothing was canceled.
 	after, err := mem.Get(root.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -186,8 +186,8 @@ func TestRunCancelGraphV2OnlyRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel of a graph.v2-only root errored: %v (want it cancellable, not a 404)", err)
 	}
-	if out.Body.Status != RunStatusCancelled {
-		t.Errorf("status = %q, want cancelled", out.Body.Status)
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
 	}
 }
 
@@ -250,8 +250,8 @@ func TestRunCancelWireRoute(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v; raw=%s", err, rec.Body.String())
 	}
-	if body.RunID != root.ID || body.Status != string(RunStatusCancelled) {
-		t.Errorf("body = %+v, want run_id=%s status=cancelled", body, root.ID)
+	if body.RunID != root.ID || body.Status != string(RunStatusCanceled) {
+		t.Errorf("body = %+v, want run_id=%s status=canceled", body, root.ID)
 	}
 
 	rec404 := httptest.NewRecorder()
@@ -263,7 +263,7 @@ func TestRunCancelWireRoute(t *testing.T) {
 
 func TestRunCancelAlreadyTerminalConflict(t *testing.T) {
 	s, store, runID := newWorkflowRun(t)
-	// Close the root before cancelling — the run is already terminal.
+	// Close the root before canceling — the run is already terminal.
 	if _, err := store.CloseAll([]string{runID}, map[string]string{"gc.outcome": "pass"}); err != nil {
 		t.Fatal(err)
 	}

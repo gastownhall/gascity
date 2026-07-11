@@ -66,8 +66,8 @@ const (
 	RunStepStatusFailed RunStepStatus = "failed"
 	// RunStepStatusSkipped is a step that terminated as skipped.
 	RunStepStatusSkipped RunStepStatus = "skipped"
-	// RunStepStatusCancelled is a step closed because its run was cancelled.
-	RunStepStatusCancelled RunStepStatus = "cancelled"
+	// RunStepStatusCanceled is a step closed because its run was canceled.
+	RunStepStatusCanceled RunStepStatus = "canceled"
 )
 
 // Schema registers RunStepStatus as a named, closed string enum.
@@ -76,7 +76,7 @@ func (RunStepStatus) Schema(r huma.Registry) *huma.Schema {
 		"Closed lifecycle state of a run step.",
 		string(RunStepStatusPending), string(RunStepStatusActive), string(RunStepStatusBlocked),
 		string(RunStepStatusCompleted), string(RunStepStatusFailed), string(RunStepStatusSkipped),
-		string(RunStepStatusCancelled),
+		string(RunStepStatusCanceled),
 	)
 }
 
@@ -182,7 +182,7 @@ type RunCancelInput struct {
 // RunCancelOutput is the response body for a run cancel (HTTP 202).
 type RunCancelOutput struct {
 	Body struct {
-		RunID  string    `json:"run_id" doc:"The cancelled run."`
+		RunID  string    `json:"run_id" doc:"The canceled run."`
 		Status RunStatus `json:"status" doc:"Run status after the cancel wind-down."`
 		Closed int       `json:"closed" doc:"Count of the run's beads closed by the cancel."`
 	}

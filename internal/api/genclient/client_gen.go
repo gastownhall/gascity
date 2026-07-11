@@ -184,7 +184,7 @@ func (e RunStatus) Valid() bool {
 const (
 	RunStepStatusActive    RunStepStatus = "active"
 	RunStepStatusBlocked   RunStepStatus = "blocked"
-	RunStepStatusCancelled RunStepStatus = "cancelled"
+	RunStepStatusCanceled  RunStepStatus = "canceled"
 	RunStepStatusCompleted RunStepStatus = "completed"
 	RunStepStatusFailed    RunStepStatus = "failed"
 	RunStepStatusPending   RunStepStatus = "pending"
@@ -198,7 +198,7 @@ func (e RunStepStatus) Valid() bool {
 		return true
 	case RunStepStatusBlocked:
 		return true
-	case RunStepStatusCancelled:
+	case RunStepStatusCanceled:
 		return true
 	case RunStepStatusCompleted:
 		return true
@@ -2809,7 +2809,7 @@ type RunCancelOutputBody struct {
 	// Closed Count of the run's beads closed by the cancel.
 	Closed int64 `json:"closed"`
 
-	// RunId The cancelled run.
+	// RunId The canceled run.
 	RunId string `json:"run_id"`
 
 	// Status Closed lifecycle state of a run.

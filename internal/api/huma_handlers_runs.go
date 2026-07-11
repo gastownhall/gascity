@@ -264,7 +264,7 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 				return res, err
 			}
 			res.closed += n
-			res.status = RunStatusCancelled
+			res.status = RunStatusCanceled
 		}
 	}
 	if res.found && res.status == "" {
@@ -361,14 +361,14 @@ func deriveRunStatus(lane runproj.RunLane, root beads.Bead, rootFound bool, star
 		case beadmeta.OutcomeSkipped:
 			return RunStatusSkipped
 		case beadmeta.OutcomeCanceled:
-			return RunStatusCancelled
+			return RunStatusCanceled
 		}
 		return RunStatusCompleted
 	}
 	// A cancel was requested but the run root has not yet reached its terminal
-	// close (in-flight steps still winding down): report cancelling.
+	// close (in-flight steps still winding down): report canceling.
 	if rootFound && strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
-		return RunStatusCancelling
+		return RunStatusCanceling
 	}
 	switch lane.Phase {
 	case "blocked":
@@ -392,7 +392,7 @@ func deriveRunStepStatus(b beads.Bead) RunStepStatus {
 		case beadmeta.OutcomeSkipped:
 			return RunStepStatusSkipped
 		case beadmeta.OutcomeCanceled:
-			return RunStepStatusCancelled
+			return RunStepStatusCanceled
 		}
 		return RunStepStatusCompleted
 	case "in_progress":
