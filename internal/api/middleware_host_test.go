@@ -23,12 +23,15 @@ func TestIsAllowedSupervisorHost(t *testing.T) {
 		{"uppercase localhost", "LOCALHOST:8080", nil, true},
 		{"ipv4 loopback", "127.0.0.1", nil, true},
 		{"ipv4 loopback with port", "127.0.0.1:8080", nil, true},
-		{"ipv4 loopback empty port", "127.0.0.1:", nil, true},
 		{"ipv4 loopback range", "127.0.0.2:8080", nil, true},
 		{"ipv6 loopback", "::1", nil, true},
 		{"ipv6 loopback bracketed", "[::1]", nil, true},
 		{"ipv6 loopback with port", "[::1]:8080", nil, true},
 		{"ipv4-mapped ipv6 loopback", "[::ffff:127.0.0.1]", nil, true},
+		// The next two pin incidental parser tolerance (SplitHostPort accepts
+		// an empty port; ParseIP accepts unbracketed expanded IPv6), not
+		// contract — tightening them to rejection is an acceptable change.
+		{"ipv4 loopback empty port", "127.0.0.1:", nil, true},
 		{"fully expanded ipv6 loopback", "0:0:0:0:0:0:0:1", nil, true},
 
 		// Attack forms — all rejected.

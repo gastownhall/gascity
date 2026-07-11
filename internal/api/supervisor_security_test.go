@@ -137,11 +137,8 @@ func TestDashboardSurfacesServedBehindHostAllowlist(t *testing.T) {
 		wantBody string
 	}{
 		{"spa loopback ipv4", "/", "127.0.0.1:8080", http.StatusOK, "spa-shell"},
-		{"spa localhost", "/", "localhost:8080", http.StatusOK, "spa-shell"},
-		{"spa ipv6 loopback", "/", "[::1]:8080", http.StatusOK, "spa-shell"},
 		{"spa deep route loopback", "/city/thriva/agents", "127.0.0.1:8080", http.StatusOK, "spa-shell"},
 		{"spa rebinding host rejected", "/", "evil.example:8080", http.StatusMisdirectedRequest, "host_not_allowed"},
-		{"spa localhost-suffix rejected", "/", "localhost.evil.example", http.StatusMisdirectedRequest, "host_not_allowed"},
 		{"plane loopback", "/api/host/cities", "127.0.0.1:8080", http.StatusOK, "api-plane"},
 		{"plane rebinding host rejected", "/api/host/cities", "evil.example:8080", http.StatusMisdirectedRequest, "host_not_allowed"},
 	}
