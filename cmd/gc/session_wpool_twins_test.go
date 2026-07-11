@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // wpoolSessionBead builds an open (or closed) session bead for the W-pool twin
@@ -115,7 +116,7 @@ func TestPoolReuseTwinsCharacterization(t *testing.T) {
 
 	gotAliasDeferred := map[string]bool{}
 	for _, b := range corpus {
-		gotAliasDeferred[b.ID] = poolRuntimeAliasIsDeferredInfo(session.InfoFromPersistedBead(b))
+		gotAliasDeferred[b.ID] = poolRuntimeAliasIsDeferredInfo(sessiontest.SeedBead(t, b))
 	}
 	gotReusable := map[string]bool{}
 	gotDepReusable := map[string]bool{}
@@ -124,7 +125,7 @@ func TestPoolReuseTwinsCharacterization(t *testing.T) {
 		bp := &agentBuildParams{city: &config.City{Agents: []config.Agent{*agent}}, assignedWorkBeads: work}
 		cfg := &config.City{}
 		for _, b := range corpus {
-			info := session.InfoFromPersistedBead(b)
+			info := sessiontest.SeedBead(t, b)
 			k := fmt.Sprintf("%d/%s", ai, b.ID)
 			gotReusable[k] = reusablePoolSessionInfo(bp, agent, "claude", info, nil)
 			gotDepReusable[k] = reusableDependencyPoolSessionInfo(bp, "claude", info)
@@ -134,7 +135,7 @@ func TestPoolReuseTwinsCharacterization(t *testing.T) {
 	}
 	gotStamp := map[string]string{}
 	for _, b := range corpus {
-		info := session.InfoFromPersistedBead(b)
+		info := sessiontest.SeedBead(t, b)
 		for _, alias := range []string{"claude-1", "mayor", ""} {
 			tp := TemplateParams{SessionName: "sess", Env: map[string]string{"X": "1"}}
 			setPoolTemplateRuntimeIdentityInfo(&tp, alias, info)
@@ -178,7 +179,7 @@ func TestClaimDesiredPoolSlotInfoMarksUsedSlot(t *testing.T) {
 	claimed := false
 	for ai, agent := range wpoolTwinAgents() {
 		for _, b := range wpoolTwinCorpus() {
-			info := session.InfoFromPersistedBead(b)
+			info := sessiontest.SeedBead(t, b)
 			for si, seed := range seeds {
 				used := map[int]bool{}
 				for k := range seed {
@@ -289,7 +290,7 @@ func TestNormalizeNonExpandingPoolSessionInfoIsAuthoritative(t *testing.T) {
 	infoStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
 	infoBP := &agentBuildParams{cityPath: cityPath, beadStore: infoStore, city: cfg}
 
-	foldedInfo, err := normalizeNonExpandingPoolSessionInfo(infoBP, cfgAgent, session.InfoFromPersistedBead(seed()))
+	foldedInfo, err := normalizeNonExpandingPoolSessionInfo(infoBP, cfgAgent, sessiontest.SeedBead(t, seed()))
 	if err != nil {
 		t.Fatalf("info normalize: %v", err)
 	}
@@ -323,7 +324,7 @@ func TestRecordDeferredNonExpandingPoolAliasConflictInfoFold(t *testing.T) {
 	infoStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
 	infoBP := &agentBuildParams{beadStore: infoStore}
 
-	foldedInfo, err := recordDeferredNonExpandingPoolAliasConflictInfo(infoBP, cfgAgent, session.InfoFromPersistedBead(seed()))
+	foldedInfo, err := recordDeferredNonExpandingPoolAliasConflictInfo(infoBP, cfgAgent, sessiontest.SeedBead(t, seed()))
 	if err != nil {
 		t.Fatalf("info recordDeferred: %v", err)
 	}
@@ -359,7 +360,7 @@ func TestSnapshotAddInfoConcurrentAndCoherent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := "gc-add-" + string(rune('a'+i))
-			snap.addInfo(session.InfoFromPersistedBead(wpoolSessionBead(id, "open", "claude", nil, map[string]string{
+			snap.addInfo(sessiontest.SeedBead(t, wpoolSessionBead(id, "open", "claude", nil, map[string]string{
 				"template": "worker", "agent_name": "worker", "session_name": "s-" + id,
 			})))
 		}(i)

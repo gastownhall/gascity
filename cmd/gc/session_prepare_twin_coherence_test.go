@@ -8,7 +8,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestPrepareStartCandidateTwinNeverConsumedStale is the WI-6 W5 red-team drift
@@ -45,7 +44,7 @@ func TestPrepareStartCandidateTwinNeverConsumedStale(t *testing.T) {
 
 	// The append-captured twin carries a STALE override — the divergence the re-Get
 	// boundary must correct (out-of-band template_overrides change since append).
-	staleInfo := sessionpkg.InfoFromPersistedBead(beads.Bead{
+	staleInfo := seedSessionInfo(beads.Bead{
 		ID: session.ID,
 		Metadata: map[string]string{
 			"session_name":       "worker",

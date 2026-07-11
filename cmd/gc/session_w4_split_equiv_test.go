@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // WI-5 W4 identity-resolution-chain oracles. The reconciler's session-bead
@@ -63,7 +64,7 @@ func TestSessionBeadQualifiedNameInfoMatchesRaw(t *testing.T) {
 	rigs := []config.Rig{}
 	for _, cfgAgent := range w4OracleAgents() {
 		for _, sb := range w4OracleSessionBeads() {
-			info := session.InfoFromPersistedBead(sb)
+			info := sessiontest.SeedBead(t, sb)
 			got := sessionBeadQualifiedNameInfo("", cfgAgent, rigs, info)
 			want := sessionBeadQualifiedName("", cfgAgent, rigs, sb)
 			if got != want {
@@ -85,7 +86,7 @@ func TestExistingPoolSlotWithConfigInfoMatchesRaw(t *testing.T) {
 	for _, cfgUnderTest := range []*config.City{cfg, nil} {
 		for _, cfgAgent := range w4OracleAgents() {
 			for _, sb := range w4OracleSessionBeads() {
-				info := session.InfoFromPersistedBead(sb)
+				info := sessiontest.SeedBead(t, sb)
 				got := existingPoolSlotWithConfigInfo(cfgUnderTest, cfgAgent, info)
 				want := existingPoolSlotWithConfig(cfgUnderTest, cfgAgent, sb)
 				if got != want {
@@ -108,7 +109,7 @@ func TestCanonicalSessionIdentityWithConfigInfoMatchesRaw(t *testing.T) {
 	}}
 	for _, cfgAgent := range w4OracleAgents() {
 		for _, sb := range w4OracleSessionBeads() {
-			info := session.InfoFromPersistedBead(sb)
+			info := sessiontest.SeedBead(t, sb)
 			gotAgent, gotQN := canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, info)
 			wantAgent, wantQN := canonicalSessionIdentityWithConfig(cfg, cfgAgent, sb)
 			if gotQN != wantQN {

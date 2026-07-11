@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestNudgeTargetFromSessionInfoGolden pins the behavior of
@@ -146,7 +147,7 @@ func TestNudgeTargetFromSessionInfoGolden(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveNudgeTargetFromSessionInfo(cityPath, cfg, session.InfoFromPersistedBead(tc.bead))
+			got := resolveNudgeTargetFromSessionInfo(cityPath, cfg, sessiontest.SeedBead(t, tc.bead))
 
 			if got.sessionID != tc.wantSessionID {
 				t.Errorf("sessionID = %q, want %q", got.sessionID, tc.wantSessionID)
@@ -210,7 +211,7 @@ func TestNudgeTargetFromSessionInfoFullGolden(t *testing.T) {
 		},
 	}
 
-	got := resolveNudgeTargetFromSessionInfo(cityPath, cfg, session.InfoFromPersistedBead(b))
+	got := resolveNudgeTargetFromSessionInfo(cityPath, cfg, sessiontest.SeedBead(t, b))
 	want := nudgeTarget{
 		cityPath:          "/tmp/test-city",
 		cityName:          "test-city",
