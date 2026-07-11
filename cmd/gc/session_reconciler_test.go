@@ -1140,7 +1140,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1181,14 +1181,14 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", firstTracker, &stderr)
+	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", secondTracker, &stderr)
+	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1214,7 +1214,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1257,7 +1257,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1294,7 +1294,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1338,7 +1338,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1371,7 +1371,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1380,6 +1380,51 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 	}
 	if got := stderr.String(); strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, unexpected mismatch on matching token", got)
+	}
+}
+
+// TestQueueDrainAckAsyncStopConfirmsRuntimeDead verifies that the async
+// drain-ack stop re-observes liveness after its kill and keeps re-issuing the
+// kill until the runtime is confirmed dead (or a bounded deadline passes),
+// instead of assuming a single Stop call was sufficient. A survivor runtime
+// (one that ignores SIGHUP, reparents, or races the kill grace period) stays
+// observably alive after Stop returns nil; without confirm-dead, the pool
+// slot it occupies never frees and the reassigned next step stays
+// runtime-missing forever (root cause under investigation in this change).
+func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 300 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Survivor: Stop reports success but the fake leaves the session (and thus
+	// IsRunning/ProcessAlive) observably alive, mirroring a claude process that
+	// ignores SIGHUP / reparents / races the kill grace period.
+	sp.StopLeavesRunning["worker"] = true
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	stopCalls := 0
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "worker" {
+			stopCalls++
+		}
+	}
+	if stopCalls < 2 {
+		t.Fatalf("Stop call count = %d, want >= 2 (confirm-dead must re-issue the kill on a survivor)", stopCalls)
 	}
 }
 
@@ -1398,7 +1443,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", &cr.asyncStops, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
