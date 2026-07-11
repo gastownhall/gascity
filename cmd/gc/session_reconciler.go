@@ -2547,10 +2547,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
 								// On success it is the rebaseline patch; on the prepare/skew/relaunch
 								// failure paths it is the buildPreparedStart prepare residue — only
-								// started_config_hash and instance_token are folded, while session_key
-								// and continuation_reset_pending stay intentionally unthreaded (no
-								// same-tick Info reader) and self-heal on the next store reload.
-								// ApplyPatch(nil) is a no-op.
+								// started_config_hash and instance_token are folded. session_key and
+								// continuation_reset_pending stay intentionally unthreaded: the one
+								// same-tick snapshot reader of session_key after this fold
+								// (resetConfiguredNamedSessionForConfigDriftInfo's preserve-resume
+								// gate) is CONJUNCTIVE on started_config_hash, which IS folded as ""
+								// on every abort path, so a stale snapshot key cannot change its
+								// rotate-vs-preserve verdict; both self-heal on the next store
+								// reload. ApplyPatch(nil) is a no-op.
 								infoByID[id] = infoByID[id].ApplyPatch(launchBatch)
 								if relaunched {
 									continue
@@ -2624,10 +2628,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Fold the returned batch unconditionally (Step 6d write-returns-Info).
 								// On success it is the rebaseline patch; on the prepare/skew/relaunch
 								// failure paths it is the buildPreparedStart prepare residue — only
-								// started_config_hash and instance_token are folded, while session_key
-								// and continuation_reset_pending stay intentionally unthreaded (no
-								// same-tick Info reader) and self-heal on the next store reload.
-								// ApplyPatch(nil) is a no-op.
+								// started_config_hash and instance_token are folded. session_key and
+								// continuation_reset_pending stay intentionally unthreaded: the one
+								// same-tick snapshot reader of session_key after this fold
+								// (resetConfiguredNamedSessionForConfigDriftInfo's preserve-resume
+								// gate) is CONJUNCTIVE on started_config_hash, which IS folded as ""
+								// on every abort path, so a stale snapshot key cannot change its
+								// rotate-vs-preserve verdict; both self-heal on the next store
+								// reload. ApplyPatch(nil) is a no-op.
 								infoByID[id] = infoByID[id].ApplyPatch(launchBatch)
 								if relaunched {
 									continue
