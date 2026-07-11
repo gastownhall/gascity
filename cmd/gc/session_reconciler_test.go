@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // fakeIdleTracker is a test double for idleTracker.
@@ -344,12 +345,11 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 }
 
 // sessionInfo reads the persisted session.Info for id through the front door over
-// the env's store — the store-read replacement for
-// session.InfoFromPersistedBead(bead) on a bead this env already created (or
-// mutated in place). Get runs the codec internally, so the projection is
-// byte-identical to cracking the bead directly, but no raw *beads.Bead crosses
-// into the test's assertions. It panics on a load failure, matching
-// createSessionBead's fail-fast style (a missing id is a test-setup bug).
+// the env's store — the store-read replacement for the raw-bead codec on a bead
+// this env already created (or mutated in place). Get runs the codec internally,
+// so the projection is byte-identical to cracking the bead directly, but no raw
+// *beads.Bead crosses into the test's assertions. It panics on a load failure,
+// matching createSessionBead's fail-fast style (a missing id is a test-setup bug).
 func (e *reconcilerTestEnv) sessionInfo(id string) sessionpkg.Info {
 	info, err := sessionFrontDoor(e.store).Get(id)
 	if err != nil {
@@ -810,7 +810,7 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
-	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], env.sessionInfo(session.ID))
 	env.setSessionMetadata(&session, map[string]string{
 		"started_config_hash": runtime.CoreFingerprint(agentCfg),
 		"started_live_hash":   runtime.LiveFingerprint(agentCfg),
@@ -1356,7 +1356,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{sessionpkg.InfoFromPersistedBead(session)},
+		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
@@ -2100,12 +2100,16 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 	t.Helper()
 	rec := &capturingRecorder{}
 	var stderr bytes.Buffer
+	info, err := sessionFrontDoor(store).Get(session.ID)
+	if err != nil {
+		t.Fatalf("sessionFrontDoor.Get(%s): %v", session.ID, err)
+	}
 	emitSessionStrandedDiagnostic(
 		"",
 		nil,
 		store,
 		nil,
-		sessionpkg.InfoFromPersistedBead(*session),
+		info,
 		nil, // snapshot carrier not exercised here; ApplyOpenInfoPatch is nil-safe
 		"worker",
 		rec,
@@ -2567,7 +2571,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, sessionpkg.InfoFromPersistedBead(session), "worker", false,
+		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -2594,7 +2598,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, sessionpkg.InfoFromPersistedBead(session), "worker", true,
+		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -5504,7 +5508,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 	if err != nil {
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
-	if !isDrainAckStopPendingInfo(sessionpkg.InfoFromPersistedBead(got)) {
+	if !isDrainAckStopPendingInfo(env.sessionInfo(session.ID)) {
 		t.Fatalf("session metadata = %+v, want drain-ack stop-pending", got.Metadata)
 	}
 }
@@ -5767,7 +5771,7 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicate
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "on_demand",
 	})
-	sessionInfo := sessionpkg.InfoFromPersistedBead(session)
+	sessionInfo := env.sessionInfo(session.ID)
 
 	// A store-only-closed twin sharing the same session_name, earlier in the
 	// feed. It would win the first-match GC_SESSION_ID scan if not filtered.
@@ -5802,7 +5806,7 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "on_demand",
 	})
-	sessionInfo := sessionpkg.InfoFromPersistedBead(session)
+	sessionInfo := env.sessionInfo(session.ID)
 	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
@@ -6049,7 +6053,7 @@ func TestReconcileAndWake_RestartRequestBumpsContinuationEpoch(t *testing.T) {
 	}
 
 	// Phase 2: preWakeCommit consumes continuation_reset_pending → bumps epoch.
-	if _, _, _, err := preWakeCommit(sessionpkg.InfoFromPersistedBead(got), sessionFrontDoor(env.store), env.clk); err != nil {
+	if _, _, _, err := preWakeCommit(env.sessionInfo(session.ID), sessionFrontDoor(env.store), env.clk); err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	woke, _ := env.store.Get(session.ID)
@@ -6788,6 +6792,11 @@ func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t 
 
 func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	// Deliberately degraded fixture: no id, no session type/label, and a case
+	// with a zero CreatedAt. It cannot be seeded through a store double — the
+	// session front door rejects empty-id / non-session beads, and a store.Create
+	// would stamp CreatedAt. The raw-bead codec below is the sanctioned path for
+	// this non-session corpus (see sessiontest.SeedBead's godoc).
 	base := beads.Bead{
 		Metadata: map[string]string{
 			"pending_create_claim": "true",
@@ -6855,6 +6864,10 @@ func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
 
 func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLastWokeAt(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	// Deliberately degraded fixture: no id, no session type/label, a custom
+	// CreatedAt. It cannot round-trip through a store double (the session front
+	// door rejects empty-id / non-session beads); the raw-bead codec below is the
+	// sanctioned path for this non-session corpus (see sessiontest.SeedBead godoc).
 	base := beads.Bead{
 		Metadata: map[string]string{
 			"pending_create_claim": "true",
@@ -7463,7 +7476,7 @@ func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesOrdinarySession(t *testi
 
 	// Stored baseline = the running config with ONLY the launch half (Command)
 	// changed, so the provision hash matches and the launch hash differs.
-	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], env.sessionInfo(session.ID))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{
@@ -7522,7 +7535,7 @@ func TestReconcileSessionBeads_LaunchAndLiveDriftRelaunchThenLiveNextTick(t *tes
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 
-	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], env.sessionInfo(session.ID))
 	// Launch-only Core drift (Command), plus a stale live hash so live also drifts.
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
@@ -7598,7 +7611,7 @@ func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesNamedSession(t *testing.
 	session := env.createSessionBead(sessionName, "worker")
 	env.markSessionActive(&session)
 
-	agentCfg := sessionCoreConfigForHashInfo(env.desiredState[sessionName], sessionpkg.InfoFromPersistedBead(session))
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState[sessionName], env.sessionInfo(session.ID))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{
@@ -7640,7 +7653,7 @@ func TestReconcileSessionBeads_ProvisionDriftDoesNotRelaunch(t *testing.T) {
 
 	// Stored baseline differs in a provision-half field (PreStart): both the
 	// provision hash AND the core hash move, so this is not launch-only.
-	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], env.sessionInfo(session.ID))
 	oldCfg := agentCfg
 	oldCfg.PreStart = append([]string{"echo stale-prestart"}, agentCfg.PreStart...)
 	env.setSessionMetadata(&session, map[string]string{
@@ -7672,7 +7685,7 @@ func TestReconcileSessionBeads_LaunchOnlyDriftFallsBackWhenRelaunchFails(t *test
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 
-	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], sessionpkg.InfoFromPersistedBead(session))
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState["worker"], env.sessionInfo(session.ID))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{
@@ -8060,7 +8073,11 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckAttachmentErrorDefersStop(t *t
 	if err != nil {
 		t.Fatalf("Get after reconcile: %v", err)
 	}
-	if isDrainAckStopPendingInfo(sessionpkg.InfoFromPersistedBead(after)) {
+	afterInfo, err := sessionFrontDoor(backing).Get(session.ID)
+	if err != nil {
+		t.Fatalf("front-door Get after reconcile: %v", err)
+	}
+	if isDrainAckStopPendingInfo(afterInfo) {
 		t.Fatalf("attachment observation error should not mark drain-ack stop pending; metadata=%v", after.Metadata)
 	}
 	if !env.sp.IsRunning("worker") {
@@ -8111,7 +8128,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferral(t *
 		"started_config_hash":        oldHash,
 		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
 	})
-	driftKey := sessionConfigDriftKey(sessionpkg.InfoFromPersistedBead(session), env.cfg, env.desiredState[sessionName])
+	driftKey := sessionConfigDriftKey(env.sessionInfo(session.ID), env.cfg, env.desiredState[sessionName])
 	if driftKey == "" {
 		t.Fatal("expected config drift key")
 	}
@@ -8196,7 +8213,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferralForP
 	if err != nil {
 		t.Fatalf("Get after attached deferral: %v", err)
 	}
-	driftKey := sessionConfigDriftKey(sessionpkg.InfoFromPersistedBead(got), env.cfg, env.desiredState["worker"])
+	driftKey := sessionConfigDriftKey(env.sessionInfo(session.ID), env.cfg, env.desiredState["worker"])
 	if driftKey == "" {
 		t.Fatal("expected config drift key")
 	}
@@ -9227,7 +9244,7 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 
 	env.stderr.Reset()
-	recordResetStallIfDue(sessionpkg.InfoFromPersistedBead(session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
@@ -9239,13 +9256,13 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	})
-	recordResetStallIfDue(sessionpkg.InfoFromPersistedBead(session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
 	})
 	env.stderr.Reset()
-	recordResetStallIfDue(sessionpkg.InfoFromPersistedBead(session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}
