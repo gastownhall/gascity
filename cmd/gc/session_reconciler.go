@@ -3400,7 +3400,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// that stranded, was respawned on this same bead, and recovered must
 			// re-age a FRESH marker here — a recovered-then-drained worker cannot
 			// fire the repair on the first episode's stale timestamp. Reuses
-			// unclaimWorkAssignedToRetiredSessionBead, the same detach primitive
+			// unclaimWorkAssignedToRetiredSessionInfo, the Info form of the same detach primitive
 			// named-session retirement uses.
 			if !storeQueryPartial &&
 				repairStrandedPoolWorkerBead(store, rigStores, infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {

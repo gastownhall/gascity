@@ -892,6 +892,11 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		info func(session.Info) string
 	}{
 		"sessionOrigin": {sessionOrigin, sessionOriginInfo},
+		// retiredSessionFallbackRoute twin (added by the #4088 stranded-repair port):
+		// pins the run_target fallback (template-first, agent_name second) byte-
+		// identical across the raw named-session-retirement path and the Info-form
+		// stranded-repair reopen path.
+		"retiredSessionFallbackRoute": {retiredSessionFallbackRoute, retiredSessionFallbackRouteInfo},
 		// sessionMetadataStateInfo's raw sibling sessionMetadataState was deleted in
 		// WI-6 R2 (its last caller, the wake-reason display lane, typed onto Info), so
 		// this row pins the Info form against a reference implementation of the same
