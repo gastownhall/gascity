@@ -37,8 +37,7 @@ type nudgeMailSweepResult struct {
 //
 // Nudge candidates are open beads with label gc:nudge created before now-nudgeTTL
 // whose nudge_id is not present in nudgeState.Pending or nudgeState.InFlight.
-// Terminal metadata is stamped via nudgequeue.Store.SweepStale before each close
-// so the bead audit trail is intact.
+// Terminal metadata is recorded before each close so the bead audit trail is intact.
 //
 // Mail candidates are open message beads with label "read" created before now-mailTTL.
 //
@@ -55,7 +54,6 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	var beadErrs []error
 
 	liveIDs := liveNudgeIDSet(nudgeState)
-	nq := nudgequeue.NewStore(nudgeStore)
 
 	// Phase 1: close stale nudge beads.
 	nudgeCutoff := now.Add(-nudgeTTL)
@@ -76,12 +74,22 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if b.Status != "open" {
 			continue
 		}
-		nudgeID := strings.TrimSpace(nudgequeue.DecodeShadow(b).ID)
+		nudgeID := strings.TrimSpace(b.Metadata["nudge_id"])
 		if nudgeID != "" && liveIDs[nudgeID] {
 			continue
 		}
-		if err := nq.SweepStale(b.ID, nudgeMailSweepNudgeCloseReason, now); err != nil {
-			beadErrs = append(beadErrs, err)
+		if err := nudgeStore.SetMetadataBatch(b.ID, map[string]string{
+			"state":           "gc-swept",
+			"terminal_reason": "gc-swept-stale",
+			"commit_boundary": "gc-swept",
+			"terminal_at":     now.UTC().Format(time.RFC3339),
+			"close_reason":    nudgeMailSweepNudgeCloseReason,
+		}); err != nil {
+			beadErrs = append(beadErrs, fmt.Errorf("nudge %s: set metadata: %w", b.ID, err))
+			continue
+		}
+		if err := nudgeStore.Close(b.ID); err != nil {
+			beadErrs = append(beadErrs, fmt.Errorf("nudge %s: close: %w", b.ID, err))
 			continue
 		}
 		result.NudgeClosed++
@@ -147,7 +155,7 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if b.Status != "open" {
 			continue
 		}
-		nudgeID := strings.TrimSpace(nudgequeue.DecodeShadow(b).ID)
+		nudgeID := strings.TrimSpace(b.Metadata["nudge_id"])
 		if nudgeID != "" && liveIDs[nudgeID] {
 			continue
 		}
