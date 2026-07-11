@@ -18,7 +18,13 @@ and `test-double-migration-plan.md` (the categorization). Branch
 | `bb50b7537` | **Batch 5** — 13 mechanical 1-site tail files (14→0: 8 SeedBead, 3 struct-literal, 1 seedSessionInfo, 1 Info{}, 1 front-door-Get exception). | 14 → 0 |
 
 **cmd/gc: 454 → 101 codec sites (~78% done). 101 = twin/equiv ~66 + shared-adapters 24 + census-guard literals 8 (NOT conversions) + 2 deferred-adapter + 1.**
-Batches 1–3 red-team-APPROVED; batch 4+5 combined red-team = <pending, tracked below>.
+Batches 1–5 ALL red-team-APPROVED (0 blockers each). Batch 4+5 combined red-team APPROVE-with-nits at `bb50b7537`.
+Endgame plan committed `ed28e65b5`. **Clean verified checkpoint.**
+
+DEFERRED cleanliness follow-up (batch-4+5 red-team nit, non-blocking, behavior-identical): `cmd_wait_test.go`
+`TestWaitNudgePollerKeyFallbackOrder` still holds `beads.Bead` table rows and maps `tc.bead.Metadata[...]`
+into the inline `Info` (correct plan branch — empty-ID fallback cases the front door would reject). Restructure
+the table to hold `sessionpkg.Info` fixtures directly to drop the last raw-bead shape from that file.
 
 ## ENDGAME PLAN (the nuanced remainder — needs careful, decision-laden execution, NOT blanket agent conversion)
 
