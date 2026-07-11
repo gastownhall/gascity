@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // buildEquivFactory returns a factory whose resolved-runtime hook records the
@@ -167,9 +168,13 @@ func TestResolveSessionRecordByExactIDMatchesBeadForm(t *testing.T) {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
 
-	wantInfo := sessionpkg.InfoFromPersistedBead(bead)
+	// SeedBead(t, bead) verbatim-seeds the resolved bead through the session front
+	// door and reads it back — byte-identical to the raw-codec projection of bead,
+	// but keeping bead serialization at the store edge. The record resolver must
+	// match it.
+	wantInfo := sessiontest.SeedBead(t, bead)
 	if !reflect.DeepEqual(recInfo, wantInfo) {
-		t.Fatalf("record Info = %#v, want InfoFromPersistedBead(bead) %#v", recInfo, wantInfo)
+		t.Fatalf("record Info = %#v, want the front-door projection of the resolved bead %#v", recInfo, wantInfo)
 	}
 	if id != info.ID || recInfo.ID != info.ID {
 		t.Fatalf("id mismatch: bead=%q record=%q want %q", id, recInfo.ID, info.ID)

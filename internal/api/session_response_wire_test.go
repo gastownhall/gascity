@@ -177,14 +177,22 @@ func TestSessionResponseFromInfoWireByteIdentical(t *testing.T) {
 	for _, b := range wireSessionBeadFixtures() {
 		b := b
 		t.Run(b.ID, func(t *testing.T) {
-			info := session.InfoFromPersistedBead(b)
+			// Info + PR from the front-door single fetch: GetPersistedResponse runs
+			// both projection codecs at the store edge, so info/pr are byte-identical
+			// to the raw per-bead projections — but no raw codec is called in the
+			// test. The same info feeds both builders, so this stays a
+			// builder-vs-builder oracle (raw-bead path vs Info+PR path).
+			store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+			info, pr, err := session.NewStore(beads.SessionStore{Store: store}).GetPersistedResponse(b.ID)
+			if err != nil {
+				t.Fatalf("GetPersistedResponse: %v", err)
+			}
 
 			// Golden: built from the raw bead (the pre-S2 path).
 			golden := sessionResponseFromBead(info, &b, cfg, nil, true)
 
 			// New: built from Info + the persisted-response projection, with no
 			// raw *beads.Bead crossing into the response builder.
-			pr := session.PersistedResponseFromBead(b)
 			got := sessionResponseWithReason(info, pr, cfg, nil, true)
 
 			goldenJSON, err := json.Marshal(golden)
