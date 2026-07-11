@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestSessionLifecycleChaos keeps the default package run bounded and
@@ -250,7 +251,7 @@ func TestSessionLifecycleChaosPendingInteractionCancelsExistingCancelableDrain(t
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	if ds := h.env.dt.get(h.sessionID); ds == nil || ds.reason != "idle" {
 		h.failf("expected idle drain before pending interaction, got %+v", ds)
 	}
@@ -281,7 +282,7 @@ func TestSessionLifecycleChaosPendingInteractionPreservesExplicitDrainRequest(t 
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	if err := h.env.sp.SetMeta(h.sessionName, "GC_DRAIN", "manual"); err != nil {
 		h.failf("set explicit GC_DRAIN: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestSessionLifecycleChaosPendingInteractionClearsReconcilerDrainAckBeforeSt
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	ds := h.env.dt.get(h.sessionID)
 	if ds == nil {
 		h.failf("expected idle drain before pending interaction")
@@ -347,7 +348,7 @@ func TestSessionLifecycleChaosPendingInteractionClearsRecoveredReconcilerDrainAc
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	ds := h.env.dt.get(h.sessionID)
 	if ds == nil {
 		h.failf("expected idle drain before pending interaction")
@@ -383,7 +384,7 @@ func TestSessionLifecycleChaosClearsStaleRecoveredReconcilerDrainAck(t *testing.
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	ds := h.env.dt.get(h.sessionID)
 	if ds == nil {
 		h.failf("expected idle drain before stale ack setup")
@@ -469,7 +470,7 @@ func TestSessionLifecycleChaosAgentDrainAckClearsRecoveredReconcilerProvenance(t
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	ds := h.env.dt.get(h.sessionID)
 	if ds == nil {
 		h.failf("expected idle drain before agent drain ack")
@@ -507,7 +508,7 @@ func TestSessionLifecycleChaosAgentDrainAckClearsLiveControllerDrain(t *testing.
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	ds := h.env.dt.get(h.sessionID)
 	if ds == nil {
 		h.failf("expected idle drain before agent drain ack")
@@ -544,7 +545,7 @@ func TestSessionLifecycleChaosAgentDrainAckStopFailurePreservesRetry(t *testing.
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	ds := h.env.dt.get(h.sessionID)
 	if ds == nil {
 		h.failf("expected idle drain before agent drain ack")
@@ -651,7 +652,7 @@ func TestSessionLifecycleChaosPendingInteractionCancelsExistingConfigDriftDrain(
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "config-drift", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "config-drift", h.env.clk, defaultDrainTimeout)
 	if ds := h.env.dt.get(h.sessionID); ds == nil || ds.reason != "config-drift" {
 		h.failf("expected config-drift drain before pending interaction, got %+v", ds)
 	}
@@ -729,7 +730,7 @@ func TestSessionLifecycleChaosPendingInteractionCancelsExistingDrainBeforeIdleTi
 	h.reconcileTick()
 	h.assertStarted()
 
-	beginSessionDrainInfo(sessionpkg.InfoFromPersistedBead(h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
+	beginSessionDrainInfo(sessiontest.SeedBead(h.t, h.mustBead()), h.env.sp, h.env.dt, "idle", h.env.clk, defaultDrainTimeout)
 	if ds := h.env.dt.get(h.sessionID); ds == nil || ds.reason != "idle" {
 		h.failf("expected idle drain before idle timeout, got %+v", ds)
 	}
@@ -1533,7 +1534,7 @@ func (h *sessionChaosHarness) assertPostReconcileInvariants() {
 	if runtimeName == "" {
 		return
 	}
-	if pendingInteractionKeepsAwakeInfo(sessionpkg.InfoFromPersistedBead(b), h.env.sp, runtimeName, h.env.clk) {
+	if pendingInteractionKeepsAwakeInfo(sessiontest.SeedBead(h.t, b), h.env.sp, runtimeName, h.env.clk) {
 		if ds := h.env.dt.get(b.ID); ds != nil {
 			if !drainReasonCancelable(ds.reason) {
 				return
