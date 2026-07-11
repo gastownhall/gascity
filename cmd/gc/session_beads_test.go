@@ -3832,7 +3832,7 @@ func TestSyncSessionBeads_RebaselinesDriftHashOnPoolAliasChange(t *testing.T) {
 			PreStart: []string{"worktree-setup.sh /rig /wt/pack.worker-2 pack.worker-2 --sync"},
 		},
 	}
-	startedCore := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(startedTP, session.InfoFromPersistedBead(beads.Bead{})))
+	startedCore := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(startedTP, session.Info{}))
 
 	live, err := store.Create(beads.Bead{
 		Title:  "pool worker",
@@ -3865,7 +3865,7 @@ func TestSyncSessionBeads_RebaselinesDriftHashOnPoolAliasChange(t *testing.T) {
 			PreStart: []string{"worktree-setup.sh /rig /wt/pack.worker-1 pack.worker-1 --sync"},
 		},
 	}
-	wantCore := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(repairedTP, session.InfoFromPersistedBead(beads.Bead{})))
+	wantCore := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(repairedTP, session.Info{}))
 	if wantCore == startedCore {
 		t.Fatal("test setup: alias-driven pre_start change must alter CoreFingerprint")
 	}

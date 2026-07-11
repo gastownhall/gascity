@@ -11,7 +11,7 @@ import (
 // helpers now consume, so the family-resolution precedence stays exercised at
 // this boundary (the resolution itself lives in session.ProviderFamilyFromInfo).
 func familyInfo(meta map[string]string) sessionpkg.Info {
-	return sessionpkg.InfoFromPersistedBead(beads.Bead{ID: "gc-fam", Type: "session", Labels: []string{"gc:session"}, Metadata: meta})
+	return seedSessionInfo(beads.Bead{ID: "gc-fam", Type: "session", Labels: []string{"gc:session"}, Metadata: meta})
 }
 
 // TestSessionProviderFamily_BuiltinAncestorWins verifies that

@@ -32,7 +32,7 @@ func TestPoolSessionIsLiveInfo_Matrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := poolSessionIsLiveInfo(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: tc.meta}))
+			got := poolSessionIsLiveInfo(sessionpkg.Info{MetadataState: tc.meta["state"], SleepReason: tc.meta["sleep_reason"]})
 			if got != tc.want {
 				t.Fatalf("poolSessionIsLiveInfo(%v) = %v, want %v", tc.meta, got, tc.want)
 			}

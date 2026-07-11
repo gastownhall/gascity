@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestPrepareStartCandidateRejectsNonSessionBead is the SYNC-path sibling of
@@ -109,7 +110,7 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 		result := startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					info: session.InfoFromPersistedBead(preparedBead),
+					info: sessiontest.SeedBead(t, preparedBead),
 					tp:   TemplateParams{TemplateName: "worker"},
 				},
 			},
