@@ -7,7 +7,7 @@ import (
 
 // leaseInfo builds a session Info carrying just the fields the pending-create
 // lease reads: closed (derived from status), raw state, identity tokens, and
-// the pending_create_claim bool. It is the typed-fixture analogue of the raw
+// the pending_create_claim bool. It is the typed-fixture analog of the raw
 // session bead the pre-migration lease was constructed from.
 func leaseInfo(status, state, tok, gen, claim string) Info {
 	return Info{

@@ -44,7 +44,7 @@ func (s *Store) Get(handle string) (OrderRun, error) {
 	if s.store.Store == nil {
 		return OrderRun{}, fmt.Errorf("orders get %q: nil store", handle)
 	}
-	b, err := s.store.Store.Get(handle)
+	b, err := s.store.Get(handle)
 	if err != nil {
 		return OrderRun{}, fmt.Errorf("orders get %q: %w", handle, err)
 	}
@@ -71,7 +71,7 @@ func (s *Store) RunDetail(handle string) (RunDetail, error) {
 	if s.store.Store == nil {
 		return RunDetail{}, fmt.Errorf("orders run detail %q: nil store", handle)
 	}
-	b, err := s.store.Store.Get(handle)
+	b, err := s.store.Get(handle)
 	if err != nil {
 		return RunDetail{}, fmt.Errorf("orders run detail %q: %w", handle, err)
 	}
@@ -131,7 +131,7 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.Store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.Store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +228,7 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	closed := 0
 	var lastErr error
 	for attempt := 1; attempt <= closeVerifyAttempts; attempt++ {
-		n, err := s.store.Store.CloseAll(ids, metadata)
+		n, err := s.store.CloseAll(ids, metadata)
 		closed += n
 		if closed > len(ids) {
 			closed = len(ids)
@@ -281,7 +281,7 @@ func (s *Store) waitCloseRetry(ctx context.Context) error {
 func (s *Store) openIDs(ids []string) ([]string, error) {
 	var openIDs []string
 	for _, id := range ids {
-		b, err := s.store.Store.Get(id)
+		b, err := s.store.Get(id)
 		if errors.Is(err, beads.ErrNotFound) {
 			continue
 		}

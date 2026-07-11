@@ -3299,7 +3299,7 @@ func (cr *CityRuntime) installDemandSnapshotSideEffects(result DesiredStateResul
 }
 
 // sessionBeadSnapshotFingerprint returns the snapshot's config-change cache key,
-// computed from the raw beads at the store edge (session.SessionSetFingerprint) and
+// computed from the raw beads at the store edge (session.SetFingerprint) and
 // carried on the snapshot as a field. It hashes every open bead's ID + Status +
 // Assignee + ALL metadata keys — a shape session.Info deliberately drops, which is
 // why it must be computed at construction, not reconstructed here. An empty string is

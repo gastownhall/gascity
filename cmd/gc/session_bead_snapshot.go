@@ -83,7 +83,7 @@ func newSessionBeadSnapshotWithError(err error) *sessionBeadSnapshot {
 func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	if store == nil {
 		snap := newSessionBeadSnapshotFromInfos(nil)
-		snap.fingerprint = sessionpkg.SessionSetFingerprint(nil)
+		snap.fingerprint = sessionpkg.SetFingerprint(nil)
 		return snap, nil
 	}
 	// Typed reconcile feed via the session front door: the same Type+Label union

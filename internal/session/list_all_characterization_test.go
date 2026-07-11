@@ -28,26 +28,36 @@ func listAllCorpus() []beads.Bead {
 	return []beads.Bead{
 		// canonical: type + label — the healthy shape; appears in BOTH legs and
 		// must be deduped to exactly one row.
-		{ID: "s-canonical", Type: BeadType, Status: "open", Title: "canon", Labels: []string{LabelSession},
-			CreatedAt: at(1), Metadata: map[string]string{"session_name": "canonical", "state": "active"}},
+		{
+			ID: "s-canonical", Type: BeadType, Status: "open", Title: "canon", Labels: []string{LabelSession},
+			CreatedAt: at(1), Metadata: map[string]string{"session_name": "canonical", "state": "active"},
+		},
 		// label-only repairable: empty Type carrying gc:session — the legacy
 		// crash/migration shape. A Store.List(Type=session) scan MISSES it.
-		{ID: "s-label-only", Type: "", Status: "open", Title: "labelonly", Labels: []string{LabelSession},
-			CreatedAt: at(2), Metadata: map[string]string{"session_name": "label-only"}},
+		{
+			ID: "s-label-only", Type: "", Status: "open", Title: "labelonly", Labels: []string{LabelSession},
+			CreatedAt: at(2), Metadata: map[string]string{"session_name": "label-only"},
+		},
 		// type-only: label lost after a crash/partial write — THE fixture that
 		// catches a naive Store.List(Label=gc:session) substitution silently
 		// dropping repairable beads (session_bead_snapshot.go stranding bug).
-		{ID: "s-type-only", Type: BeadType, Status: "open", Title: "typeonly", Labels: nil,
-			CreatedAt: at(3), Metadata: map[string]string{"session_name": "type-only", "state": "asleep"}},
+		{
+			ID: "s-type-only", Type: BeadType, Status: "open", Title: "typeonly", Labels: nil,
+			CreatedAt: at(3), Metadata: map[string]string{"session_name": "type-only", "state": "asleep"},
+		},
 		// label-carrying non-session bead: has gc:session but a non-session,
 		// non-empty Type — surfaced by the label leg, dropped by
 		// IsSessionBeadOrRepairable. Must never appear in the result.
-		{ID: "s-nonsession", Type: "task", Status: "open", Title: "task", Labels: []string{LabelSession},
-			CreatedAt: at(4), Metadata: map[string]string{"session_name": "nonsession"}},
+		{
+			ID: "s-nonsession", Type: "task", Status: "open", Title: "task", Labels: []string{LabelSession},
+			CreatedAt: at(4), Metadata: map[string]string{"session_name": "nonsession"},
+		},
 		// closed canonical: excluded unless IncludeClosed. Carries a raw state so
 		// the closed-blanking projection is exercised.
-		{ID: "s-closed", Type: BeadType, Status: "closed", Title: "closed", Labels: []string{LabelSession},
-			CreatedAt: at(5), Metadata: map[string]string{"session_name": "closed", "state": "active"}},
+		{
+			ID: "s-closed", Type: BeadType, Status: "closed", Title: "closed", Labels: []string{LabelSession},
+			CreatedAt: at(5), Metadata: map[string]string{"session_name": "closed", "state": "active"},
+		},
 	}
 }
 

@@ -81,21 +81,21 @@ func TestSessionByHandleCharacterizesResolverAndSpec(t *testing.T) {
 	sp := runtime.NewFake()
 	info := seedEquivSession(t, store, sp)
 
-	var cap resolverCapture
-	factory := buildEquivFactory(t, store, sp, &cap)
+	var captured resolverCapture
+	factory := buildEquivFactory(t, store, sp, &captured)
 
 	handle, err := factory.SessionByHandle(info.ID)
 	if err != nil {
 		t.Fatalf("SessionByHandle: %v", err)
 	}
-	if cap.sessionKind != "provider" {
-		t.Fatalf("resolver sessionKind = %q, want provider", cap.sessionKind)
+	if captured.sessionKind != "provider" {
+		t.Fatalf("resolver sessionKind = %q, want provider", captured.sessionKind)
 	}
-	if cap.metadata["real_world_app_session_kind"] != "provider" {
-		t.Fatalf("resolver metadata[real_world_app_session_kind] = %q, want provider", cap.metadata["real_world_app_session_kind"])
+	if captured.metadata["real_world_app_session_kind"] != "provider" {
+		t.Fatalf("resolver metadata[real_world_app_session_kind] = %q, want provider", captured.metadata["real_world_app_session_kind"])
 	}
-	if cap.metadata["worker_profile"] != string(ProfileClaudeTmuxCLI) {
-		t.Fatalf("resolver metadata[worker_profile] = %q, want %q", cap.metadata["worker_profile"], ProfileClaudeTmuxCLI)
+	if captured.metadata["worker_profile"] != string(ProfileClaudeTmuxCLI) {
+		t.Fatalf("resolver metadata[worker_profile] = %q, want %q", captured.metadata["worker_profile"], ProfileClaudeTmuxCLI)
 	}
 	sh, ok := handle.(*SessionHandle)
 	if !ok {
@@ -110,11 +110,11 @@ func TestSessionByHandleCharacterizesResolverAndSpec(t *testing.T) {
 	// The resolver receives the PERSISTED Info (before it overlays its own
 	// runtime): Provider is the stored legacy-provider, not the resolver's own
 	// stub result that applyResolvedRuntimeToSessionSpec later writes onto the spec.
-	if cap.info.ID != info.ID {
-		t.Fatalf("resolver Info.ID = %q, want %q", cap.info.ID, info.ID)
+	if captured.info.ID != info.ID {
+		t.Fatalf("resolver Info.ID = %q, want %q", captured.info.ID, info.ID)
 	}
-	if cap.info.Provider != "legacy-provider" {
-		t.Fatalf("resolver Info.Provider = %q, want legacy-provider", cap.info.Provider)
+	if captured.info.Provider != "legacy-provider" {
+		t.Fatalf("resolver Info.Provider = %q, want legacy-provider", captured.info.Provider)
 	}
 }
 

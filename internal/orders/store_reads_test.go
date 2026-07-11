@@ -138,7 +138,7 @@ func assertAllLive(t *testing.T, name string, queries []beads.ListQuery) {
 // resolvable order name — matching the dispatcher's index fold.
 func TestRecentRunsAllFoldsTrackingBeads(t *testing.T) {
 	mem := beads.NewMemStore()
-	// Labelled tracking bead.
+	// Labeled tracking bead.
 	if _, err := mem.Create(beads.Bead{Title: "order:a", Labels: []string{"order-run:a", "order-tracking"}}); err != nil {
 		t.Fatal(err)
 	}

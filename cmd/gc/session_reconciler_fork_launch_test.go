@@ -409,7 +409,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: ""})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: ""})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -423,7 +423,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -437,7 +437,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -451,7 +451,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, _, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}

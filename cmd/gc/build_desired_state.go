@@ -2621,7 +2621,7 @@ func realizePoolDesiredSessions(
 		// directly (W-pool), so the former raw pool-loop projection is gone; the
 		// bind fold and every downstream identity read flow through Info.
 		sbInfo := item.sessionInfo
-		if bound, _, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
+		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
@@ -2738,27 +2738,27 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 // (same sorted --set-metadata args); only the FAILURE-path error text changes,
 // now carrying the front door's wrap ("setting metadata on..." vs "updating
 // bead..."). The patch folds onto the returned Info in the same step. It
-// returns the bound Info plus the applied patch; the caller folds the returned
-// boundInfo into the Info-taking resolveTemplateForSessionBeadInfo chain (WI-5 W4
-// dropped the former raw-bead mirror and retired the raw wrapper). A dry-run build
+// returns the bound Info; the caller folds the returned boundInfo into the
+// Info-taking resolveTemplateForSessionBeadInfo chain (WI-5 W4 dropped the
+// former raw-bead mirror and retired the raw wrapper). A dry-run build
 // with no store folds locally without a write.
-func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, session.MetadataPatch, error) {
+func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, error) {
 	if info.ID == "" {
-		return info, nil, nil
+		return info, nil
 	}
 	workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
-		return info, nil, nil
+		return info, nil
 	}
 	if bp == nil || bp.beadStore == nil {
-		return info.ApplyPatch(patch), patch, nil
+		return info.ApplyPatch(patch), nil
 	}
 	boundInfo, err := sessionFrontDoor(bp.beadStore).ApplyPatchInfo(info, patch)
 	if err != nil {
-		return info, nil, err
+		return info, err
 	}
-	return boundInfo, patch, nil
+	return boundInfo, nil
 }
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {

@@ -3,8 +3,9 @@ package api
 import (
 	"context"
 	"errors"
-	"github.com/gastownhall/gascity/internal/api/apierr"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/api/apierr"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"

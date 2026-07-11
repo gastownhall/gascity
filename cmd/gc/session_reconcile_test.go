@@ -135,8 +135,8 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 
 // healStatePatchFromBead is the test shim for the retired raw healStatePatch /
 // healStatePatchWithRollback: it projects the bead to Info and calls the Info form.
-func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
-	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, clk, startupTimeout, rollbackAvailable)
+func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration) map[string]string {
+	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, clk, startupTimeout, true)
 }
 
 // syncBeadFromStore mirrors the persisted metadata writes for session.ID back
@@ -1860,7 +1860,7 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	if pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(inFlight), clk, startupTimeout) {
 		t.Fatal("configured startup lease reported expired while Start is still in flight")
 	}
-	got := healStatePatchFromBead(inFlight, false, clk, startupTimeout, true)
+	got := healStatePatchFromBead(inFlight, false, clk, startupTimeout)
 	if _, ok := got["pending_create_claim"]; ok {
 		t.Fatalf("healStatePatchWithRollback cleared pending_create_claim while configured startup lease is active: %#v", got)
 	}
@@ -1880,7 +1880,7 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	if !pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(expired), clk, startupTimeout) {
 		t.Fatal("configured startup lease stayed active after startup timeout and stale-key delay elapsed")
 	}
-	got = healStatePatchFromBead(expired, false, clk, startupTimeout, true)
+	got = healStatePatchFromBead(expired, false, clk, startupTimeout)
 	if got["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim clear = %q, want empty after configured lease expiry", got["pending_create_claim"])
 	}
@@ -2061,7 +2061,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := healStatePatchFromBead(tt.session, tt.alive, clk, 0, true)
+			got := healStatePatchFromBead(tt.session, tt.alive, clk, 0)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("healStatePatch = %#v, want %#v", got, tt.want)
 			}
@@ -2085,7 +2085,7 @@ func TestHealStatePatch_NamedAlwaysAwakeFlapsToAsleepWithoutReasonOnAliveFalse(t
 		namedSessionModeMetadata:     "always",
 	})
 
-	patch := healStatePatchFromBead(session, false, clk, 0, true)
+	patch := healStatePatchFromBead(session, false, clk, 0)
 	if patch["state"] != "asleep" {
 		t.Fatalf("baseline: expected state=asleep on heal-from-awake when !alive, got %q (patch=%#v)", patch["state"], patch)
 	}
@@ -2103,7 +2103,7 @@ func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
 	})
 	session.CreatedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	if got := healStatePatchFromBead(session, false, nil, 0, true); got != nil {
+	if got := healStatePatchFromBead(session, false, nil, 0); got != nil {
 		t.Fatalf("healStatePatch with nil clock = %#v, want nil patch for fresh-compatible creating", got)
 	}
 }

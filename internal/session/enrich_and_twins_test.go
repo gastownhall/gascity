@@ -50,7 +50,7 @@ func TestEnrichInfoMatchesBeadOverlay(t *testing.T) {
 	activeAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	fake.SetActivity("s-running", activeAt)
 
-	m := NewManagerWithOptions(beads.NewMemStore(), fake, WithCityPath(""), WithTransportResolver(func(template, provider string) string {
+	m := NewManagerWithOptions(beads.NewMemStore(), fake, WithCityPath(""), WithTransportResolver(func(template, _ string) string {
 		if template == "pending-tmpl" {
 			return "tmux"
 		}

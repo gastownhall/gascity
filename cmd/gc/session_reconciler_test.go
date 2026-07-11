@@ -391,11 +391,11 @@ func (e *reconcilerTestEnv) markSessionActive(session *beads.Bead) {
 func TestReconcilerTestEnvSessionInfoHelpers(t *testing.T) {
 	e := newReconcilerTestEnv()
 
-	info := e.createSessionInfo("w1", "worker")
+	info := e.createSessionInfo("w1", "sky")
 	if info.ID == "" {
 		t.Fatal("createSessionInfo returned an empty id")
 	}
-	if info.AgentName != "w1" || info.Template != "worker" || string(info.State) != "asleep" {
+	if info.AgentName != "w1" || info.Template != "sky" || string(info.State) != "asleep" {
 		t.Fatalf("createSessionInfo fixture wrong: agent=%q template=%q state=%q", info.AgentName, info.Template, info.State)
 	}
 

@@ -327,12 +327,12 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
 		// serve via the generic gc:wait beads endpoint instead.
 		if api.IsRouteMissing(err) {
-			if lr, lerr := c.ListWaitsViaBeads(); lerr == nil {
+			lr, lerr := c.ListWaitsViaBeads()
+			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
 				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
-			} else {
-				err = lerr
 			}
+			err = lerr
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")

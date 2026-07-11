@@ -8258,7 +8258,7 @@ type concurrentInsertSessionStore struct {
 func (s *concurrentInsertSessionStore) fire() {
 	if !s.injected {
 		s.injected = true
-		created, _ := s.Store.Create(s.inject)
+		created, _ := s.Create(s.inject)
 		s.injectedID = created.ID
 	}
 }

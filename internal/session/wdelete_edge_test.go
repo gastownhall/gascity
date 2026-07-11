@@ -12,12 +12,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// inlineSessionSetFingerprint is a verbatim copy of the pre-migration
+// inlineSetFingerprint is a verbatim copy of the pre-migration
 // cmd/gc.sessionBeadSnapshotFingerprint hash body (ID + Status + Assignee + ALL
 // sorted metadata keys, beads sorted by ID). It is the golden reference the
-// edge SessionSetFingerprint must reproduce byte-for-byte: config-change caching
+// edge SetFingerprint must reproduce byte-for-byte: config-change caching
 // keys off this value, so a byte drift silently re-runs or skips demand rebuilds.
-func inlineSessionSetFingerprint(beadsIn []beads.Bead) string {
+func inlineSetFingerprint(beadsIn []beads.Bead) string {
 	open := make([]beads.Bead, len(beadsIn))
 	copy(open, beadsIn)
 	sort.Slice(open, func(i, j int) bool { return open[i].ID < open[j].ID })
@@ -50,30 +50,36 @@ func fingerprintCorpus() []beads.Bead {
 		// Out-of-ID-order so the internal sort is exercised. Diverse metadata,
 		// including a key session.Info does NOT project (a bespoke tag), so a
 		// naive Info-derived fingerprint would drop it.
-		{ID: "s-b", Type: BeadType, Status: "open", Assignee: "gm-2", CreatedAt: at(2),
-			Metadata: map[string]string{"session_name": "beta", "state": "active", "bespoke_unprojected_tag": "v1"}},
-		{ID: "s-a", Type: BeadType, Status: "open", Assignee: "", CreatedAt: at(1),
-			Metadata: map[string]string{"session_name": "alpha", "state": "asleep"}},
-		{ID: "s-c", Type: BeadType, Status: "open", Assignee: "gm-9", CreatedAt: at(3),
-			Metadata: map[string]string{"template": "worker"}},
+		{
+			ID: "s-b", Type: BeadType, Status: "open", Assignee: "gm-2", CreatedAt: at(2),
+			Metadata: map[string]string{"session_name": "beta", "state": "active", "bespoke_unprojected_tag": "v1"},
+		},
+		{
+			ID: "s-a", Type: BeadType, Status: "open", Assignee: "", CreatedAt: at(1),
+			Metadata: map[string]string{"session_name": "alpha", "state": "asleep"},
+		},
+		{
+			ID: "s-c", Type: BeadType, Status: "open", Assignee: "gm-9", CreatedAt: at(3),
+			Metadata: map[string]string{"template": "worker"},
+		},
 	}
 }
 
-// TestSessionSetFingerprintMatchesInlineHash pins SessionSetFingerprint byte-for-byte
+// TestSetFingerprintMatchesInlineHash pins SetFingerprint byte-for-byte
 // against the pre-migration inline hash (the config-change cache key), and proves it
 // reflects EVERY metadata key — including ones Info drops. A mutation that changes the
 // byte layout, drops a metadata key, or stops sorting fails here.
-func TestSessionSetFingerprintMatchesInlineHash(t *testing.T) {
+func TestSetFingerprintMatchesInlineHash(t *testing.T) {
 	corpus := fingerprintCorpus()
-	if got, want := SessionSetFingerprint(corpus), inlineSessionSetFingerprint(corpus); got != want {
-		t.Fatalf("SessionSetFingerprint = %q, want inline golden %q", got, want)
+	if got, want := SetFingerprint(corpus), inlineSetFingerprint(corpus); got != want {
+		t.Fatalf("SetFingerprint = %q, want inline golden %q", got, want)
 	}
 
 	// Order-independence: shuffling the input must not change the fingerprint (the
 	// internal ID sort makes it set-shaped).
 	reordered := []beads.Bead{corpus[2], corpus[0], corpus[1]}
-	if SessionSetFingerprint(reordered) != SessionSetFingerprint(corpus) {
-		t.Fatal("SessionSetFingerprint is order-dependent; the internal ID sort regressed")
+	if SetFingerprint(reordered) != SetFingerprint(corpus) {
+		t.Fatal("SetFingerprint is order-dependent; the internal ID sort regressed")
 	}
 
 	// Sensitivity to an UNPROJECTED metadata key: two sets differing only in a key
@@ -81,13 +87,13 @@ func TestSessionSetFingerprintMatchesInlineHash(t *testing.T) {
 	// computed from Info — a regression to Info-only hashing collapses these.
 	mutated := fingerprintCorpus()
 	mutated[0].Metadata["bespoke_unprojected_tag"] = "v2"
-	if SessionSetFingerprint(mutated) == SessionSetFingerprint(corpus) {
-		t.Fatal("SessionSetFingerprint ignored an unprojected metadata key; it must hash ALL keys")
+	if SetFingerprint(mutated) == SetFingerprint(corpus) {
+		t.Fatal("SetFingerprint ignored an unprojected metadata key; it must hash ALL keys")
 	}
 }
 
 // TestListAllForReconcileWithFingerprintMatchesSet pins the paired edge method: its
-// fingerprint equals SessionSetFingerprint over the same union rows, and its rows are
+// fingerprint equals SetFingerprint over the same union rows, and its rows are
 // row-for-row identical to ListAllForReconcile.
 func TestListAllForReconcileWithFingerprintMatchesSet(t *testing.T) {
 	corpus := listAllCorpus()
@@ -106,14 +112,14 @@ func TestListAllForReconcileWithFingerprintMatchesSet(t *testing.T) {
 		t.Fatalf("rows diverge from ListAllForReconcile:\nwith=%+v\nplain=%+v", rows, plain)
 	}
 
-	// The fingerprint must be SessionSetFingerprint over the raw union rows (the set
+	// The fingerprint must be SetFingerprint over the raw union rows (the set
 	// the snapshot projects), computed here independently through the raw union.
 	rawUnion, err := ListAllSessionBeads(mem, beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
-	if want := SessionSetFingerprint(rawUnion); fingerprint != want {
-		t.Fatalf("fingerprint = %q, want SessionSetFingerprint(union) %q", fingerprint, want)
+	if want := SetFingerprint(rawUnion); fingerprint != want {
+		t.Fatalf("fingerprint = %q, want SetFingerprint(union) %q", fingerprint, want)
 	}
 	if fingerprint == "" {
 		t.Fatal("fingerprint is empty on a non-empty union")
@@ -125,8 +131,10 @@ func TestListAllForReconcileWithFingerprintMatchesSet(t *testing.T) {
 // order, with no union/dedupe/filter applied.
 func TestReconcileRowsFromBeadsProjectsEachRow(t *testing.T) {
 	in := []beads.Bead{
-		{ID: "s-open", Type: BeadType, Status: "open", Labels: []string{LabelSession},
-			Metadata: map[string]string{"session_name": "one", SessionCircuitStateMetadataKey: SessionCircuitStateOpen}},
+		{
+			ID: "s-open", Type: BeadType, Status: "open", Labels: []string{LabelSession},
+			Metadata: map[string]string{"session_name": "one", SessionCircuitStateMetadataKey: SessionCircuitStateOpen},
+		},
 		// A non-session bead is NOT filtered out (unlike the store union) — the input
 		// is taken as-is, row for row.
 		{ID: "s-task", Type: "task", Status: "open", Metadata: map[string]string{}},
@@ -151,14 +159,20 @@ func TestReconcileRowsFromBeadsProjectsEachRow(t *testing.T) {
 // is still returned) and excludes closed beads.
 func TestListLabeledSessionInfosUnfilteredContract(t *testing.T) {
 	corpus := []beads.Bead{
-		{ID: "s-open", Type: BeadType, Status: "open", Labels: []string{LabelSession},
-			Metadata: map[string]string{"session_name": "open", "state": "active"}},
+		{
+			ID: "s-open", Type: BeadType, Status: "open", Labels: []string{LabelSession},
+			Metadata: map[string]string{"session_name": "open", "state": "active"},
+		},
 		// gc:session label but a non-empty non-"session" type: Store.List drops this
 		// via IsSessionBeadOrRepairable; the unfiltered lister keeps it.
-		{ID: "s-damaged", Type: "task", Status: "open", Labels: []string{LabelSession},
-			Metadata: map[string]string{"session_name": "damaged", "state": "active"}},
-		{ID: "s-closed", Type: BeadType, Status: "closed", Labels: []string{LabelSession},
-			Metadata: map[string]string{"session_name": "closed"}},
+		{
+			ID: "s-damaged", Type: "task", Status: "open", Labels: []string{LabelSession},
+			Metadata: map[string]string{"session_name": "damaged", "state": "active"},
+		},
+		{
+			ID: "s-closed", Type: BeadType, Status: "closed", Labels: []string{LabelSession},
+			Metadata: map[string]string{"session_name": "closed"},
+		},
 	}
 	mem := beads.NewMemStoreFrom(len(corpus), corpus, nil)
 	front := NewStore(beads.SessionStore{Store: mem})

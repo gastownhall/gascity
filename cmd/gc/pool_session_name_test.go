@@ -147,7 +147,7 @@ func TestGCSweepSessionBeads_ClosesOrphans(t *testing.T) {
 
 	sessionBeads := []beads.Bead{orphan, active}
 
-	closed := gcSweepSessionBeadsFromBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 1 {
 		t.Fatalf("closed %d beads, want 1", len(closed))
@@ -191,7 +191,7 @@ func TestGCSweepSessionBeads_KeepsBlockedAssigned(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := gcSweepSessionBeadsFromBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (blocked work keeps session alive)", len(closed))
@@ -220,7 +220,7 @@ func TestGCSweepSessionBeads_ClosesWhenAllWorkClosed(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := gcSweepSessionBeadsFromBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 1 {
 		t.Errorf("closed %d beads, want 1 (all work done)", len(closed))
@@ -236,7 +236,7 @@ func TestGCSweepSessionBeads_SkipsAlreadyClosed(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := gcSweepSessionBeadsFromBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (already closed)", len(closed))
@@ -2182,10 +2182,10 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
 // calls GCSweepSessionBeads, letting the raw-bead fixtures exercise the WI-5 W4
 // typed signature.
-func gcSweepSessionBeadsFromBeads(store beads.Store, rigStores map[string]beads.Store, sessionBeads []beads.Bead) []string {
+func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) []string {
 	var infos []session.Info
 	for _, b := range sessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return GCSweepSessionBeads(store, rigStores, infos)
+	return GCSweepSessionBeads(store, nil, infos)
 }

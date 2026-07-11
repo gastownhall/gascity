@@ -434,7 +434,7 @@ func TestSessionBeadSnapshotIndexesCanonicalSingletonPoolManagedBead(t *testing.
 // TestSessionBeadSnapshotFingerprintReflectsRawMetadata pins the config-change cache
 // key across the W-delete raw-half deletion: sessionBeadSnapshotFingerprint returns the
 // snapshot's stored field, computed at construction from the raw beads via
-// session.SessionSetFingerprint over the OPEN set — so it reflects EVERY metadata key,
+// session.SetFingerprint over the OPEN set — so it reflects EVERY metadata key,
 // including ones session.Info drops. This is what makes the fingerprint survivable when
 // the raw half is gone: it is a field, not a recomputation. A regression that dropped
 // the field (empty string) or recomputed from Info (dropping unprojected keys) fails
@@ -455,9 +455,9 @@ func TestSessionBeadSnapshotFingerprintReflectsRawMetadata(t *testing.T) {
 	}
 
 	snapV1 := newSessionBeadSnapshot([]beads.Bead{beadWith("v1")})
-	// The getter returns exactly SessionSetFingerprint over the open beads.
-	if got, want := sessionBeadSnapshotFingerprint(snapV1), session.SessionSetFingerprint([]beads.Bead{beadWith("v1")}); got != want {
-		t.Fatalf("fingerprint = %q, want SessionSetFingerprint(open) %q", got, want)
+	// The getter returns exactly SetFingerprint over the open beads.
+	if got, want := sessionBeadSnapshotFingerprint(snapV1), session.SetFingerprint([]beads.Bead{beadWith("v1")}); got != want {
+		t.Fatalf("fingerprint = %q, want SetFingerprint(open) %q", got, want)
 	}
 	if sessionBeadSnapshotFingerprint(snapV1) == "" {
 		t.Fatal("fingerprint is empty on a non-empty snapshot")

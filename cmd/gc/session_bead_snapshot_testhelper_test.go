@@ -24,6 +24,6 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		open = append(open, b)
 	}
 	snap := newSessionBeadSnapshotFromReconcileRows(session.ReconcileRowsFromBeads(beadsIn))
-	snap.fingerprint = session.SessionSetFingerprint(open)
+	snap.fingerprint = session.SetFingerprint(open)
 	return snap
 }

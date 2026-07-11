@@ -46,7 +46,7 @@ func orderFrontDoorsForStores(stores []beads.Store) []*orders.Store {
 func orderFrontDoorsForTypedStores(stores []beads.OrdersStore) []*orders.Store {
 	out := make([]*orders.Store, 0, len(stores))
 	for _, s := range stores {
-		out = append(out, orders.NewStoreWithGraph(s, beads.GraphStore{Store: s.Store}))
+		out = append(out, orders.NewStoreWithGraph(s, beads.GraphStore(s)))
 	}
 	return out
 }

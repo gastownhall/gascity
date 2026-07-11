@@ -248,7 +248,7 @@ func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
 	return out
 }
 
-// SessionSetFingerprint hashes the identity-affecting shape of a raw session-bead
+// SetFingerprint hashes the identity-affecting shape of a raw session-bead
 // set: each bead's ID + Status + Assignee + every metadata key/value, order-
 // independent (beads sorted by ID, keys sorted per bead). It is the config-change
 // detector's cache key and MUST reflect ALL metadata keys — session.Info deliberately
@@ -257,8 +257,8 @@ func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
 // where the raw beads are still in hand and carried onto the snapshot as a field. The
 // byte layout is the reference the config-change caching depends on — a drift re-runs or
 // skips demand rebuilds — so it is pinned byte-for-byte against the pre-migration inline
-// hash by TestSessionSetFingerprintMatchesInlineHash.
-func SessionSetFingerprint(beadsIn []beads.Bead) string {
+// hash by TestSetFingerprintMatchesInlineHash.
+func SetFingerprint(beadsIn []beads.Bead) string {
 	sorted := make([]beads.Bead, len(beadsIn))
 	copy(sorted, beadsIn)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -288,7 +288,7 @@ func SessionSetFingerprint(beadsIn []beads.Bead) string {
 }
 
 // ListAllForReconcileWithFingerprint is ListAllForReconcile paired with the
-// SessionSetFingerprint of the same raw bead set, computed in a single list so the
+// SetFingerprint of the same raw bead set, computed in a single list so the
 // snapshot can carry the config-change fingerprint without a second store scan or a
 // raw bead escaping the package. The fingerprint is over the surviving union rows
 // (post-dedupe/filter), matching the set the snapshot projects. Error semantics match
@@ -299,7 +299,7 @@ func (s *Store) ListAllForReconcileWithFingerprint(opts ListAllOptions) ([]Recon
 	if rows == nil {
 		return nil, "", err
 	}
-	fingerprint := SessionSetFingerprint(rows)
+	fingerprint := SetFingerprint(rows)
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{

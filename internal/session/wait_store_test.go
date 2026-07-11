@@ -54,7 +54,7 @@ func TestCancelWait_EmitsCanceledBatchThenClose(t *testing.T) {
 	if err := s.CancelWait("w-1", waitStoreNow, ""); err != nil {
 		t.Fatalf("CancelWait: %v", err)
 	}
-	assertBatchThenClose(t, rec, "w-1", map[string]string{
+	assertBatchThenClose(t, rec, map[string]string{
 		"state":       "canceled",
 		"canceled_at": waitStoreNow.UTC().Format(time.RFC3339),
 	})
@@ -67,7 +67,7 @@ func TestCancelWait_WithLastErrorAddsKey(t *testing.T) {
 	if err := s.CancelWait("w-1", waitStoreNow, "continuation-stale"); err != nil {
 		t.Fatalf("CancelWait: %v", err)
 	}
-	assertBatchThenClose(t, rec, "w-1", map[string]string{
+	assertBatchThenClose(t, rec, map[string]string{
 		"state":       "canceled",
 		"canceled_at": waitStoreNow.UTC().Format(time.RFC3339),
 		"last_error":  "continuation-stale",
@@ -81,7 +81,7 @@ func TestExpireWait_EmitsExpiredBatchThenClose(t *testing.T) {
 	if err := s.ExpireWait("w-1", waitStoreNow); err != nil {
 		t.Fatalf("ExpireWait: %v", err)
 	}
-	assertBatchThenClose(t, rec, "w-1", map[string]string{
+	assertBatchThenClose(t, rec, map[string]string{
 		"state":      "expired",
 		"expired_at": waitStoreNow.UTC().Format(time.RFC3339),
 	})
@@ -94,7 +94,7 @@ func TestFailWait_EmitsFailedBatchThenClose(t *testing.T) {
 	if err := s.FailWait("w-1", waitStoreNow, "dependency gc-9: bead not found"); err != nil {
 		t.Fatalf("FailWait: %v", err)
 	}
-	assertBatchThenClose(t, rec, "w-1", map[string]string{
+	assertBatchThenClose(t, rec, map[string]string{
 		"state":      "failed",
 		"failed_at":  waitStoreNow.UTC().Format(time.RFC3339),
 		"last_error": "dependency gc-9: bead not found",
@@ -108,7 +108,7 @@ func TestCloseWaitFromNudge_EmitsClosedBatchThenClose(t *testing.T) {
 	if err := s.CloseWaitFromNudge("w-1", waitStoreNow, "wait-nudge", "commit-abc"); err != nil {
 		t.Fatalf("CloseWaitFromNudge: %v", err)
 	}
-	assertBatchThenClose(t, rec, "w-1", map[string]string{
+	assertBatchThenClose(t, rec, map[string]string{
 		"state":           "closed",
 		"closed_at":       waitStoreNow.UTC().Format(time.RFC3339),
 		"nudge_id":        "wait-nudge",
@@ -123,7 +123,7 @@ func TestFailWaitFromNudge_EmitsFailedBatchThenClose(t *testing.T) {
 	if err := s.FailWaitFromNudge("w-1", waitStoreNow, "wait-nudge", "nudge expired", "commit-abc"); err != nil {
 		t.Fatalf("FailWaitFromNudge: %v", err)
 	}
-	assertBatchThenClose(t, rec, "w-1", map[string]string{
+	assertBatchThenClose(t, rec, map[string]string{
 		"state":           "failed",
 		"failed_at":       waitStoreNow.UTC().Format(time.RFC3339),
 		"nudge_id":        "wait-nudge",
@@ -628,19 +628,19 @@ func padIndex(i int) string {
 	return string(out)
 }
 
-func assertBatchThenClose(t *testing.T, rec *beadstest.RecordingStore, id string, wantBatch map[string]string) {
+func assertBatchThenClose(t *testing.T, rec *beadstest.RecordingStore, wantBatch map[string]string) {
 	t.Helper()
 	if ops := opsOf(rec.Calls()); !reflect.DeepEqual(ops, []string{"SetMetadataBatch", "Close"}) {
 		t.Fatalf("ops = %v, want [SetMetadataBatch Close]", ops)
 	}
 	batch := rec.CallsForOp("SetMetadataBatch")[0]
-	if batch.ID != id {
-		t.Errorf("batch target = %q, want %q", batch.ID, id)
+	if batch.ID != "w-1" {
+		t.Errorf("batch target = %q, want %q", batch.ID, "w-1")
 	}
 	if !reflect.DeepEqual(batch.Metadata, wantBatch) {
 		t.Errorf("batch = %#v, want %#v", batch.Metadata, wantBatch)
 	}
-	if closeCall := rec.CallsForOp("Close")[0]; closeCall.ID != id {
-		t.Errorf("close target = %q, want %q", closeCall.ID, id)
+	if closeCall := rec.CallsForOp("Close")[0]; closeCall.ID != "w-1" {
+		t.Errorf("close target = %q, want %q", closeCall.ID, "w-1")
 	}
 }

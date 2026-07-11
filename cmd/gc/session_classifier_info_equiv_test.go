@@ -1307,8 +1307,8 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		info func(session.Info) (time.Time, bool)
 	}{
 		"staleReapStartBoundary": {
-			func(b beads.Bead) (time.Time, bool) { return staleReapStartBoundary(b) },
-			func(i session.Info) (time.Time, bool) { return staleReapStartBoundaryInfo(i) },
+			staleReapStartBoundary,
+			staleReapStartBoundaryInfo,
 		},
 	}
 

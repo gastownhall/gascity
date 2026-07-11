@@ -15,20 +15,26 @@ import (
 // (including the type-only label-lost and label-only repairable beads the union
 // feed surfaces) and the state/template filter matrix.
 func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
-	at := func(min int) time.Time {
-		return time.Date(2026, 1, 2, 3, 4, min, 0, time.UTC)
+	at := func(minN int) time.Time {
+		return time.Date(2026, 1, 2, 3, 4, minN, 0, time.UTC)
 	}
 	corpus := []beads.Bead{
-		{ID: "canonical", Type: BeadType, Status: "open", Labels: []string{LabelSession},
-			Metadata: map[string]string{"state": "asleep", "template": "polecat", "session_name": "canonical"}, CreatedAt: at(1)},
+		{
+			ID: "canonical", Type: BeadType, Status: "open", Labels: []string{LabelSession},
+			Metadata: map[string]string{"state": "asleep", "template": "polecat", "session_name": "canonical"}, CreatedAt: at(1),
+		},
 		{ID: "type-only", Type: BeadType, Status: "open", // label lost after a crash
 			Metadata: map[string]string{"state": "active", "template": "polecat", "session_name": "type-only"}, CreatedAt: at(2)},
 		{ID: "label-only", Type: "", Status: "open", Labels: []string{LabelSession}, // type lost, repairable
 			Metadata: map[string]string{"state": "asleep", "template": "sky", "session_name": "label-only"}, CreatedAt: at(3)},
-		{ID: "non-session", Type: "task", Status: "open", Labels: []string{"work"},
-			Metadata: map[string]string{"state": "active"}, CreatedAt: at(4)},
-		{ID: "closed", Type: BeadType, Status: "closed", Labels: []string{LabelSession},
-			Metadata: map[string]string{"state": "asleep", "template": "polecat", "session_name": "closed"}, CreatedAt: at(5)},
+		{
+			ID: "non-session", Type: "task", Status: "open", Labels: []string{"work"},
+			Metadata: map[string]string{"state": "active"}, CreatedAt: at(4),
+		},
+		{
+			ID: "closed", Type: BeadType, Status: "closed", Labels: []string{LabelSession},
+			Metadata: map[string]string{"state": "asleep", "template": "polecat", "session_name": "closed"}, CreatedAt: at(5),
+		},
 		{ID: "no-state", Type: BeadType, Status: "open", Labels: []string{LabelSession}, // StateNone: no "state" metadata key
 			Metadata: map[string]string{"template": "polecat", "session_name": "no-state"}, CreatedAt: at(6)},
 	}
