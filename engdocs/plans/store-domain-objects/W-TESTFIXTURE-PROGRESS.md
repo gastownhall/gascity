@@ -11,6 +11,7 @@ and `test-double-migration-plan.md` (the categorization). Branch
 | `b0dac0708` | **Pilot** — `session_reconciler_drift_defer_test.go` | 15 → 0 |
 | `47a395447` | **Batch 1** — `session_reconciler_test.go` (24→0, incl. 3 struct-literal), `session_reconciler_drift_resume_test.go`+`session_reconciler_trace_integration_test.go` (7→0) | 31 → 0 |
 | `d5f76a6f1` | plan-doc SeedBead signature fix (red-team nit) | — |
+| `86bc8a587` | **Batch 2** — `session_lifecycle_parallel_test.go` (89→0: 53 SeedBead-on-local + 36 struct-literal), `session_reconcile_test.go` (48→0 via `seedSessionInfo`), `session_wake_test.go` (29→1: `wakeInfo` + 10 SeedBead; 1 adapter deferred) | 166 → 1 (red-team in flight) |
 
 ## KEYSTONE FINDING (adjusts the plan's categorization)
 `MemStore.Create` unconditionally rewrites **ID→gc-N, Status→open, CreatedAt→now**
@@ -27,12 +28,23 @@ via Create. Consequences the downstream waves MUST honor:
 
 ## THE DECISION TREE (proven + red-team-approved in batch 1 — use for every site)
 For each `session.InfoFromPersistedBead(<bead>)`, by how `<bead>` is obtained:
-1. **From a store the test drives** (`store.Create` / seeded store; reconciler-env)
-   → `sessionFrontDoor(store).Get(id)` (or `env.sessionInfo(id)` / `env.createSessionInfo(n,t)`).
-   Byte-identical (`Store.Get` runs the codec). Confirm NO intervening store write between
-   the original crack point and the new front-door read changes the projection.
-2. **Standalone VALID session bead** (inline literal / make-helper; non-empty ID, session
-   Type+label, Status open/closed; never stored) → `sessiontest.SeedBead(t, bead)`.
+1. **Cracking a captured LOCAL bead** `InfoFromPersistedBead(localBead)` where the bead is a
+   VALID session bead (non-empty ID + session Type/label) → `sessiontest.SeedBead(t, localBead)`.
+   **This is the SAFER DEFAULT (batch-2 insight):** `SeedBead(t,X)` is UNCONDITIONALLY ==
+   `InfoFromPersistedBead(X)` (verbatim seed of the captured snapshot), whereas
+   `sessionFrontDoor(store).Get(id)` re-reads CURRENT store state — which diverges if the test
+   later mutates the store on purpose (stale-snapshot tests, e.g. `IgnoresStaleSessionSnapshot`).
+   Use `sessionFrontDoor(store).Get(id)` / `env.sessionInfo(id)` ONLY when the intent is to read
+   the CURRENT persisted state (operand was itself a fresh `store.Get(id)`, reconciler-env lockstep).
+2. **NON-session-shaped bead that is conceptually a session** (from `makeBead` → Type="" no label,
+   or `store.Create` default → Type="task"): the front door NARROWS it away, so stamp the type and
+   verbatim-seed. **REUSE the existing helpers — do NOT redefine (package-main duplicate = compile
+   error):** `seedSessionInfo(b beads.Bead) session.Info` (in `session_reconcile_test.go`, `t`-less,
+   panics) or `wakeInfo(t, b)` (in `session_wake_test.go`). Both stamp `Type=session` then
+   verbatim-seed + front-door Get. Delta vs raw codec = ONLY `Info.Type`; behavior-identical because
+   NO consumer reads `Info.Type` (the sole cmd/gc-source read is `resolveOpenQualifiedAliasBasename`,
+   a store-lister, unreachable from these consumers). Red-team-verified in batch 2.
+2b. **Standalone VALID session bead** never stored → `sessiontest.SeedBead(t, bead)`.
 3. **Standalone DEGRADED / non-session / deliberately-divergent** (empty ID, no session
    type/label, pinned CreatedAt a Create would stamp, stale/`ID:"missing"` shapes) → the
    front door rejects/normalizes it, so build the `session.Info{...}` STRUCT LITERAL the
@@ -46,6 +58,17 @@ For each `session.InfoFromPersistedBead(<bead>)`, by how `<bead>` is obtained:
 - Mock-store sites (write-tracking / error-injection, e.g. in `session_reconcile*`): a naive
   memstore swap changes how writes are asserted — read Info through the SAME store the raw
   code read, or use SeedBead (throwaway store, doesn't perturb the mock).
+
+## CROSS-FILE BLOCKERS (a raw-bead adapter shared by callers in ≥2 test files) — need a coordinated pass
+These project ANY bead shape (session AND task) and are called from multiple files, so no
+single-file agent can zero them (front door narrows task beads; signature is locked by other
+callers). Handle in a dedicated pass that owns ALL callers together (retire the adapter or split
+per-shape), THEN they stop blocking the unexport:
+- `infoLookupFromBeadLookup` (`*b`) — 1 site left in `session_wake_test.go:~843`; also called from
+  `session_sleep_test.go` + `session_reconciler_trace_integration_test.go`. Doc says "drain tests
+  still carry raw beads."
+- `wakeReasonsForBead` / `healStateInfo` bridge helpers — called from `session_reconcile_test.go`
+  (converted) + `session_sleep_test.go` + `session_reconcile_ratelimit_test.go` (NOT yet converted).
 
 ## In flight — Batch 2 (3 solo Opus agents, base d5f76a6f1, worktrees /data/projects/gascity-sdo-w2-*)
 - `session_lifecycle_parallel_test.go` (89) — bare-memstore + standalone
