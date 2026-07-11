@@ -839,7 +839,9 @@ func infoLookupFromBeadLookup(sessionLookup func(id string) *beads.Bead) func(id
 		if b == nil {
 			return sessionpkg.Info{}, false
 		}
-		return sessionpkg.InfoFromPersistedBead(*b), true
+		// The looked-up bead has a non-empty id and is session-shaped; project it
+		// through the shared front-door seeder (type-stamp is a no-op / unread).
+		return seedSessionInfo(*b), true
 	}
 }
 

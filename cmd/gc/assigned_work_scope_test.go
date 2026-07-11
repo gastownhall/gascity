@@ -11,16 +11,18 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
-// sessionInfosFromBeads projects raw session beads through the production codec
-// (session.InfoFromPersistedBead), matching how the reconciler feeds
-// snapshot.OpenInfos() into the pool-demand/session-wake filters.
+// sessionInfosFromBeads projects raw session beads to session.Info through the
+// session store front door (via the shared seedSessionInfo seeder), matching how
+// the reconciler feeds snapshot.OpenInfos() into the pool-demand/session-wake
+// filters. Every caller passes session-shaped fixtures and no consumer reads
+// Info.Type, so the seeder's type-stamp is behavior-neutral here.
 func sessionInfosFromBeads(bs []beads.Bead) []sessionpkg.Info {
 	if bs == nil {
 		return nil
 	}
 	infos := make([]sessionpkg.Info, len(bs))
 	for i, b := range bs {
-		infos[i] = sessionpkg.InfoFromPersistedBead(b)
+		infos[i] = seedSessionInfo(b)
 	}
 	return infos
 }
