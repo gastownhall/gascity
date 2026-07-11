@@ -12,6 +12,25 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// waitProblemBody picks the enumerated problem body matching status from the
+// generated per-status response fields. The waits ops joined the P12 closed
+// error contract (enumerated errorStatuses), so the catch-all
+// ApplicationproblemJSONDefault response no longer exists on their generated
+// response types; 422/500 are Huma's own additions.
+func waitProblemBody(status int, p404, p422, p500, p503 *genclient.ErrorModel) *genclient.ErrorModel {
+	switch status {
+	case http.StatusNotFound:
+		return p404
+	case http.StatusUnprocessableEntity:
+		return p422
+	case http.StatusInternalServerError:
+		return p500
+	case http.StatusServiceUnavailable:
+		return p503
+	}
+	return nil
+}
+
 // client_waits.go is the wire-serialization EDGE for durable waits: it decodes
 // the generated WaitView wire type into the typed session.WaitInfo at the client
 // boundary (the typed rung), and — for the deprecation window — projects raw
@@ -84,10 +103,11 @@ func (c *Client) ListWaits(state, sessionID string) (CachedRead[WaitList], error
 	if resp == nil {
 		return CachedRead[WaitList]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if rmErr := routeMissingFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault, "/waits"); rmErr != nil {
+	problem := waitProblemBody(resp.StatusCode(), resp.ApplicationproblemJSON404, resp.ApplicationproblemJSON422, resp.ApplicationproblemJSON500, resp.ApplicationproblemJSON503)
+	if rmErr := routeMissingFromResponse(resp.StatusCode(), problem, "/waits"); rmErr != nil {
 		return CachedRead[WaitList]{}, rmErr
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), problem); err != nil {
 		return CachedRead[WaitList]{}, err
 	}
 	return CachedRead[WaitList]{
@@ -110,19 +130,20 @@ func (c *Client) GetWait(id string) (CachedRead[session.WaitInfo], error) {
 	if resp == nil {
 		return CachedRead[session.WaitInfo]{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if rmErr := routeMissingFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault, "/wait/"+id); rmErr != nil {
+	problem := waitProblemBody(resp.StatusCode(), resp.ApplicationproblemJSON404, resp.ApplicationproblemJSON422, resp.ApplicationproblemJSON500, resp.ApplicationproblemJSON503)
+	if rmErr := routeMissingFromResponse(resp.StatusCode(), problem, "/wait/"+id); rmErr != nil {
 		return CachedRead[session.WaitInfo]{}, rmErr
 	}
-	if resp.StatusCode() == http.StatusNotFound && resp.ApplicationproblemJSONDefault != nil {
+	if resp.StatusCode() == http.StatusNotFound && problem != nil {
 		detail := ""
-		if resp.ApplicationproblemJSONDefault.Detail != nil {
-			detail = *resp.ApplicationproblemJSONDefault.Detail
+		if problem.Detail != nil {
+			detail = *problem.Detail
 		}
 		if strings.HasPrefix(detail, "not_a_wait:") {
 			return CachedRead[session.WaitInfo]{}, &NotAWaitError{ID: id}
 		}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), problem); err != nil {
 		return CachedRead[session.WaitInfo]{}, err
 	}
 	if resp.JSON200 == nil {

@@ -2198,6 +2198,7 @@
               "urn:gascity:error:sling-source-workflow-conflict",
               "urn:gascity:error:store-unavailable",
               "urn:gascity:error:validation-failed",
+              "urn:gascity:error:wait-not-found",
               "urn:gascity:error:webhook-rejected",
               "urn:gascity:error:workflow-not-found"
             ],
@@ -2241,6 +2242,7 @@
               "urn:gascity:error:sling-source-workflow-conflict",
               "urn:gascity:error:store-unavailable",
               "urn:gascity:error:validation-failed",
+              "urn:gascity:error:wait-not-found",
               "urn:gascity:error:webhook-rejected",
               "urn:gascity:error:workflow-not-found"
             ]
@@ -39556,7 +39558,7 @@
               }
             }
           },
-          "default": {
+          "404": {
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -39564,7 +39566,52 @@
                 }
               }
             },
-            "description": "Error",
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -39635,7 +39682,7 @@
               }
             }
           },
-          "default": {
+          "404": {
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -39643,7 +39690,52 @@
                 }
               }
             },
-            "description": "Error",
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

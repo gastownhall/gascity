@@ -1936,6 +1936,29 @@ export const zUnboundEventPayload = z.object({
     session_id: z.string()
 });
 
+export const zWaitView = z.object({
+    created_at: z.string().optional(),
+    delivery_attempt: z.string().optional(),
+    dep_ids: z.array(z.string()).nullish(),
+    dep_mode: z.string().optional(),
+    expires_at: z.string().optional(),
+    id: z.string(),
+    kind: z.string(),
+    labels: z.array(z.string()).nullish(),
+    note: z.string().optional(),
+    nudge_id: z.string().optional(),
+    registered_epoch: z.string().optional(),
+    session_id: z.string(),
+    session_name: z.string().optional(),
+    state: z.string(),
+    status: z.string()
+});
+
+export const zWaitListBody = z.object({
+    capped: z.boolean(),
+    waits: z.array(zWaitView).nullable()
+});
+
 export const zWebhookReceivedPayload = z.object({
     body_size: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     dedup_id: z.string().optional(),
@@ -7115,6 +7138,30 @@ export const zPostV0CityByCityNameUnregisterPath = z.object({
  * Accepted
  */
 export const zPostV0CityByCityNameUnregisterResponse = zAsyncAcceptedResponse;
+
+export const zGetV0CityByCityNameWaitByIdPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameWaitByIdResponse = zWaitView;
+
+export const zGetV0CityByCityNameWaitsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+export const zGetV0CityByCityNameWaitsQuery = z.object({
+    state: z.string().optional(),
+    session: z.string().optional()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameWaitsResponse = zWaitListBody;
 
 export const zDeleteV0CityByCityNameWorkflowByWorkflowIdHeaders = z.object({
     'X-GC-Request': z.string().min(1)

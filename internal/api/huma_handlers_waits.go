@@ -3,9 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -22,7 +22,7 @@ import (
 func (s *Server) humaHandleWaitList(_ context.Context, input *WaitListInput) (*WaitListOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := cacheLiveOr503(store.Store); err != nil {
 		return nil, err
@@ -51,7 +51,7 @@ func (s *Server) humaHandleWaitList(_ context.Context, input *WaitListInput) (*W
 func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*WaitGetOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := cacheLiveOr503(store.Store); err != nil {
 		return nil, err
@@ -59,7 +59,7 @@ func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*Wai
 	w, err := session.NewStore(store).GetWait(input.ID)
 	if err != nil {
 		if errors.Is(err, session.ErrNotAWait) {
-			return nil, huma.Error404NotFound("not_a_wait: " + input.ID)
+			return nil, apierr.WaitNotFound.Msg("not_a_wait: " + input.ID)
 		}
 		return nil, humaStoreError(err)
 	}

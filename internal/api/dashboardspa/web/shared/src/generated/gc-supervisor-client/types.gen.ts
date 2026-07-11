@@ -6606,6 +6606,80 @@ export type UnboundEventPayload = {
     session_id: string;
 };
 
+export type WaitListBody = {
+    /**
+     * True when the lookup hit the per-scope cap and the list is partial.
+     */
+    capped: boolean;
+    /**
+     * Durable session waits, newest first.
+     */
+    waits: Array<WaitView> | null;
+};
+
+export type WaitView = {
+    /**
+     * Bead creation time (RFC3339, UTC).
+     */
+    created_at?: string;
+    /**
+     * Current delivery attempt counter.
+     */
+    delivery_attempt?: string;
+    /**
+     * Dependency bead IDs the wait watches.
+     */
+    dep_ids?: Array<string> | null;
+    /**
+     * all or any.
+     */
+    dep_mode?: string;
+    /**
+     * Raw RFC3339 expiry string, kept verbatim.
+     */
+    expires_at?: string;
+    /**
+     * Wait bead ID.
+     */
+    id: string;
+    /**
+     * Wait kind, e.g. deps.
+     */
+    kind: string;
+    /**
+     * Bead labels.
+     */
+    labels?: Array<string> | null;
+    /**
+     * Reminder text delivered when the wait is satisfied.
+     */
+    note?: string;
+    /**
+     * Shadow wait-nudge ID once dispatched.
+     */
+    nudge_id?: string;
+    /**
+     * Session continuation epoch at registration.
+     */
+    registered_epoch?: string;
+    /**
+     * Session bead ID the wait is registered against.
+     */
+    session_id: string;
+    /**
+     * Runtime session name recorded at registration.
+     */
+    session_name?: string;
+    /**
+     * Wait lifecycle state (pending/ready/closed/...).
+     */
+    state: string;
+    /**
+     * Persisted bead status (open/closed).
+     */
+    status: string;
+};
+
 export type WebhookReceivedPayload = {
     /**
      * Raw request body size in bytes (never the body itself).
@@ -15374,6 +15448,103 @@ export type PostV0CityByCityNameUnregisterResponses = {
 };
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];
+
+export type GetV0CityByCityNameWaitByIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Wait bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/wait/{id}';
+};
+
+export type GetV0CityByCityNameWaitByIdErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWaitByIdError = GetV0CityByCityNameWaitByIdErrors[keyof GetV0CityByCityNameWaitByIdErrors];
+
+export type GetV0CityByCityNameWaitByIdResponses = {
+    /**
+     * OK
+     */
+    200: WaitView;
+};
+
+export type GetV0CityByCityNameWaitByIdResponse = GetV0CityByCityNameWaitByIdResponses[keyof GetV0CityByCityNameWaitByIdResponses];
+
+export type GetV0CityByCityNameWaitsData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Filter by wait state.
+         */
+        state?: string;
+        /**
+         * Filter by session ID.
+         */
+        session?: string;
+    };
+    url: '/v0/city/{cityName}/waits';
+};
+
+export type GetV0CityByCityNameWaitsErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWaitsError = GetV0CityByCityNameWaitsErrors[keyof GetV0CityByCityNameWaitsErrors];
+
+export type GetV0CityByCityNameWaitsResponses = {
+    /**
+     * OK
+     */
+    200: WaitListBody;
+};
+
+export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;

@@ -19,6 +19,7 @@ var (
 	MailNotFound        = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
 	RigNotFound         = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
 	SessionNotFound     = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
+	WaitNotFound        = Register(ProblemType{Code: "wait-not-found", Status: http.StatusNotFound, Title: "Wait Not Found"})
 	AgentNotFound       = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
 	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
 	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})

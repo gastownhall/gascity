@@ -352,8 +352,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 
 	// Durable session waits (session coordination-class).
-	cityGet(sm, "/waits", (*Server).humaHandleWaitList)
-	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet)
+	cityGet(sm, "/waits", (*Server).humaHandleWaitList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// Session SSE stream.
 	registerSSE(sm.humaAPI, huma.Operation{
