@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestWakeFairnessInfoTwinCharacterization is the #2574-class regression guard for
@@ -44,7 +45,7 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	// candidateFor builds a startCandidate the way the reconciler append site does:
 	// the raw bead plus the coherent Info twin projected from it.
 	candidateFor := func(bead beads.Bead) startCandidate {
-		return startCandidate{info: session.InfoFromPersistedBead(bead)}
+		return startCandidate{info: sessiontest.SeedBead(t, bead)}
 	}
 
 	beadWithMeta := func(id string, created time.Time, meta map[string]string) beads.Bead {

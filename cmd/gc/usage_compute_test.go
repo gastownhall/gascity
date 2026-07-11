@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/usage"
 )
 
@@ -21,7 +22,7 @@ import (
 // present, or interval-not-already-emitted) flips a case and fails.
 func TestComputeFactGetCandidate(t *testing.T) {
 	info := func(state, awake, emitted string) session.Info {
-		return session.InfoFromPersistedBead(beads.Bead{
+		return sessiontest.SeedBead(t, beads.Bead{
 			ID: "gc-x", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
 			Metadata: map[string]string{"state": state, "awake_started_at": awake, "usage_compute_emitted_at": emitted},
 		})

@@ -6,7 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // codexEffortResolvedProvider builds a ResolvedProvider backed by the real
@@ -73,7 +73,7 @@ func newOptionSessionWithWork(t *testing.T, rp *config.ResolvedProvider, baseCom
 		TemplateName:     "worker",
 		ResolvedProvider: rp,
 	}
-	return startCandidate{info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}, cfg, store
+	return startCandidate{info: sessiontest.SeedBead(t, session), tp: tp, order: 0}, cfg, store
 }
 
 func TestBuildPreparedStart_CodexDispatchEffortOptionPresent(t *testing.T) {
