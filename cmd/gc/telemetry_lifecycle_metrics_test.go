@@ -612,6 +612,13 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 // same store fails first), so this helper-level test is the only way to pin
 // it.
 func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
+	// The fixtures below are deliberately degraded (empty ID / no session type),
+	// so they cannot round-trip through a store double — the front door would
+	// reject them. They are built as session.Info struct literals directly.
+	// recordSessionKillStop reads only SessionNameMetadata and the agent-identity
+	// fields (AgentName / "agent:" Labels / Template / PoolSlot), never
+	// Info.SessionName, so leaving SessionName zero is intentional and
+	// outcome-identical to the former InfoFromPersistedBead projection.
 	t.Run("bead load failure records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
