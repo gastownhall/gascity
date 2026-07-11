@@ -1041,6 +1041,7 @@ verify_counts() {
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
   verify_counts_failure_guidance=""
+  verify_counts_drift_details=""
   preflight_tables=""
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -1097,6 +1098,7 @@ verify_counts() {
       if [ "$actual" -lt "$expected" ]; then
         printf 'compact: db=%s row count decreased after flatten table=%s before=%s after=%s\n' \
           "$db" "$t" "$expected" "$actual" >&2
+        verify_counts_drift_details="${verify_counts_drift_details};table=$t,before_rows=$expected,after_rows=$actual,before_hash=$expected_hash,after_hash=$actual_hash,category=row_count_decrease"
         verify_counts_saw_row_decrease=1
         table_had_row_decrease=1
         if [ "$fail" -ne 1 ]; then
@@ -1115,6 +1117,7 @@ verify_counts() {
       if [ "$table_gained_rows" = "1" ]; then
         verify_counts_saw_gain_hash_drift=1
         verify_counts_gain_drift_tables="$verify_counts_gain_drift_tables $t"
+        verify_counts_drift_details="${verify_counts_drift_details};table=$t,before_rows=$expected,after_rows=$actual,before_hash=$expected_hash,after_hash=$actual_hash,category=row_count_gain_hash_drift"
         printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         if [ "$fail" -ne 1 ]; then
@@ -1124,9 +1127,11 @@ verify_counts() {
         fi
       elif [ "$table_had_row_decrease" = "1" ]; then
         verify_counts_saw_decrease_hash_drift=1
+        verify_counts_drift_details="${verify_counts_drift_details};table=$t,before_rows=$expected,after_rows=$actual,before_hash=$expected_hash,after_hash=$actual_hash,category=row_count_decrease_hash_drift"
         printf 'compact: db=%s table=%s value hash changed with row-count decrease before=%s after=%s\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
       else
+        verify_counts_drift_details="${verify_counts_drift_details};table=$t,before_rows=$expected,after_rows=$actual,before_hash=$expected_hash,after_hash=$actual_hash,category=same_row_count_hash_drift"
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         verify_counts_saw_same_count_hash_drift=1
@@ -1400,6 +1405,52 @@ compact_marker_value() {
   marker=$(compact_marker_path "$dir" "$db")
   [ -f "$marker" ] || return 1
   awk -v prefix="$key=" 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$marker"
+}
+
+compact_marker_summary_value() {
+  dir="$1"
+  db="$2"
+  key="$3"
+  value=$(compact_marker_value "$dir" "$db" "$key" || true)
+  if [ -n "$value" ]; then
+    printf ' %s=%s' "$key" "$value"
+  fi
+}
+
+print_existing_quarantine_marker() {
+  db="$1"
+  marker="$2"
+  reason="$3"
+  created_at="$4"
+
+  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
+    "$db" "$marker" "${reason:-<unknown>}" "${created_at:-<unknown>}" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" integrity_table_drift)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" database_value_hash_drift)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_preflight_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_pre_reset_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_post_verify_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
+  printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
+    "$db" "$marker" "$db" >&2
+}
+
+write_quarantine_marker() {
+  db="$1"
+  reason="$2"
+  shift 2
+
+  write_compact_marker "$quarantine_dir" "$db" "$reason" \
+    "flatten_preflight_head=${head:-}" \
+    "flatten_pre_reset_head=${head_before_reset:-}" \
+    "flatten_head=${flatten_head:-}" \
+    "flatten_post_verify_head=${post_verify_head:-}" \
+    "preflight_db_value_hash=${preflight_hash:-}" \
+    "postflight_db_value_hash=${postflight_hash:-}" \
+    "decision=preserve_marker_manual_review_required" \
+    "clear_decision=clear_only_after_clean_worktree_reachable_server_healthy_bead_queries_and_diff_hash_evidence_proves_no_loss" \
+    "$@"
 }
 
 compact_marker_created_at_epoch() {
@@ -1798,8 +1849,12 @@ flatten_database() {
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
   verify_counts_failure_guidance=""
+  head=""
   head_before_reset=""
+  flatten_head=""
   post_verify_head=""
+  preflight_hash=""
+  postflight_hash=""
   writer_race_detected=0
 
   if [ -n "$only_dbs" ]; then
@@ -1816,8 +1871,7 @@ flatten_database() {
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
     quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
-      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
     send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
     return 1
   fi
@@ -2203,7 +2257,7 @@ flatten_database() {
   if [ -z "$flatten_head" ]; then
     printf 'compact: db=%s post-flatten HEAD probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten HEAD probe failed" || {
+    write_quarantine_marker "$db" "post-flatten HEAD probe failed" || {
       rm -f "$preflight_tmp"
       return 1
     }
@@ -2325,7 +2379,9 @@ flatten_database() {
     fi
     printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (%s)\n' \
       "$db" "$integrity_guidance" >&2
-    write_compact_marker "$quarantine_dir" "$db" "$integrity_reason" || {
+    write_quarantine_marker "$db" "$integrity_reason" \
+      "integrity_table_drift=${verify_counts_drift_details#;}" \
+      "integrity_failure_guidance=$integrity_guidance" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -2338,7 +2394,7 @@ flatten_database() {
   if ! postflight_hash=$(db_value_hash "$db"); then
     printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash probe failed" || {
+    write_quarantine_marker "$db" "post-flatten value hash probe failed" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -2350,7 +2406,7 @@ flatten_database() {
   if [ -z "$postflight_hash" ]; then
     printf 'compact: db=%s post-flatten value hash probe returned empty value — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash probe returned empty value" || {
+    write_quarantine_marker "$db" "post-flatten value hash probe returned empty value" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -2420,7 +2476,8 @@ flatten_database() {
       # default here; revisit only if a real incident shows this path reachable.
       printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {
+      write_quarantine_marker "$db" "post-flatten value hash changed with row-count increase" \
+        "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=row_count_gain_db_hash_drift" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
         rm -f "$preflight_tmp"
         return 1
@@ -2449,7 +2506,8 @@ flatten_database() {
       fi
       printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed without row-count increase" || {
+      write_quarantine_marker "$db" "post-flatten value hash changed without row-count increase" \
+        "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=same_row_count_db_hash_drift" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
         rm -f "$preflight_tmp"
         return 1
@@ -2503,8 +2561,7 @@ bare_gc_database() {
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
     quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
-      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
     send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
     return 1
   fi
@@ -2561,8 +2618,7 @@ gc_only_database() {
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
     quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
-      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
     return 1
   fi
 
