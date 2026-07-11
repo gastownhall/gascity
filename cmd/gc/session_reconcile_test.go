@@ -1015,6 +1015,44 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 	}
 }
 
+// TestComputeWorkSet_NilStderrToleratesProbeEnvError pins the boundary
+// guard: computeWorkSet accepts a nil stderr (reconciler tests and
+// fire-and-forget callers pass nil), so the probe-env error branch must
+// degrade to skipping the agent instead of panicking on
+// fmt.Fprintf(nil, ...). The fixture reproduces a real failure mode:
+// a city scope that resolves to an authoritative postgres backend with
+// no resolvable password makes controllerQueryRuntimeEnv return an error.
+func TestComputeWorkSet_NilStderrToleratesProbeEnvError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "agent"}}}
+
+	// Prove the fixture still errors — otherwise this test silently stops
+	// exercising the guarded branch.
+	if _, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0]); err == nil {
+		t.Fatal("fixture did not produce a probe-env error; the guarded branch is no longer reachable from this test")
+	}
+
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		return `[{"id":"BL-1"}]`, nil
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", cityPath, nil, nil, nil)
+	if len(work) != 0 {
+		t.Errorf("work = %v, want empty when the probe env cannot be built", work)
+	}
+}
+
 // TestComputeWorkSet_SkipsAllWhenCitySuspended verifies that no agent is
 // probed when the whole city is suspended — suspension inherits downward.
 func TestComputeWorkSet_SkipsAllWhenCitySuspended(t *testing.T) {

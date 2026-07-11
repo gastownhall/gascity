@@ -271,6 +271,12 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	if cfg == nil || runner == nil {
 		return nil
 	}
+	if stderr == nil {
+		// Callers that don't care about diagnostics pass nil; the error
+		// branches below must degrade to skipping the agent, not panic
+		// inside fmt.Fprintf.
+		stderr = io.Discard
+	}
 	// Collect the per-agent probe work first so the bd subprocess
 	// calls can run concurrently. Each work_query shells out to `bd`,
 	// which serializes on the shared dolt sql-server, so a sequential
