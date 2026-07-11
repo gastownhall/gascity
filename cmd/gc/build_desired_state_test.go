@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 type listFailStore struct {
@@ -3760,8 +3761,8 @@ func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testi
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(canonical))
+	snapshot.addInfo(sessiontest.SeedBead(t, stale))
+	snapshot.addInfo(sessiontest.SeedBead(t, canonical))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -3847,7 +3848,7 @@ func TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName(t *test
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(adopted))
+	snapshot.addInfo(sessiontest.SeedBead(t, adopted))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -4070,7 +4071,7 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(reusable))
+	snapshot.addInfo(sessiontest.SeedBead(t, reusable))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -4141,7 +4142,7 @@ func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *test
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(reusable))
+	snapshot.addInfo(sessiontest.SeedBead(t, reusable))
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	bp.sessionBeads = snapshot
@@ -4513,8 +4514,8 @@ func TestSyncSessionBeads_ReclaimsDeferredSingletonAliasAfterConflictClears(t *t
 		}},
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(canonical))
+	snapshot.addInfo(sessiontest.SeedBead(t, stale))
+	snapshot.addInfo(sessiontest.SeedBead(t, canonical))
 	var buildStderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &buildStderr)
 	bp.sessionBeads = snapshot
@@ -4607,7 +4608,7 @@ func TestNormalizeNonExpandingPoolSessionBeadReclaimsDeferredAlias(t *testing.T)
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 
-	result, err := normalizeNonExpandingPoolSessionInfo(bp, &cfg.Agents[0], sessionpkg.InfoFromPersistedBead(stale))
+	result, err := normalizeNonExpandingPoolSessionInfo(bp, &cfg.Agents[0], sessiontest.SeedBead(t, stale))
 	if err != nil {
 		t.Fatalf("normalizeNonExpandingPoolSessionInfo: %v", err)
 	}
@@ -4984,7 +4985,7 @@ func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testi
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
+	snapshot.addInfo(sessiontest.SeedBead(t, stale))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -9358,7 +9359,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(drained))
+	snapshot.addInfo(sessiontest.SeedBead(t, drained))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -9410,7 +9411,7 @@ func TestSelectOrCreatePoolSessionBead_PrefersConcreteAgentSlotOverStalePoolMeta
 		agents:       cfg.Agents,
 	}
 
-	preferredPoisoned := sessionpkg.InfoFromPersistedBead(poisoned)
+	preferredPoisoned := sessiontest.SeedBead(t, poisoned)
 	result, slot, err := selectOrCreatePoolSessionBead(bp, cfgAgent, "frontend/worker", &preferredPoisoned, map[string]bool{}, map[int]bool{})
 	if err != nil {
 		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
@@ -9453,7 +9454,7 @@ func TestSelectOrCreatePoolSessionBead_DoesNotRetagDuplicateConcreteSlot(t *test
 		agents:       cfg.Agents,
 	}
 
-	preferredDuplicate := sessionpkg.InfoFromPersistedBead(duplicate)
+	preferredDuplicate := sessiontest.SeedBead(t, duplicate)
 	_, _, err = selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "kimi", &preferredDuplicate, map[string]bool{}, map[int]bool{9: true})
 	if err == nil {
 		t.Fatal("selectOrCreatePoolSessionBead returned nil error, want duplicate slot rejection")
@@ -9551,7 +9552,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesPreferredDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(drained))
+	snapshot.addInfo(sessiontest.SeedBead(t, drained))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -9559,7 +9560,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesPreferredDrained(t *testing.T) {
 		agents:       []config.Agent{cfgAgent},
 	}
 
-	preferredDrained := sessionpkg.InfoFromPersistedBead(drained)
+	preferredDrained := sessiontest.SeedBead(t, drained)
 	result, slot, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "claude", &preferredDrained, map[string]bool{}, map[int]bool{})
 	if err != nil {
 		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
@@ -9592,7 +9593,7 @@ func TestSelectOrCreateDependencyPoolSessionBead_SkipsDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(drained))
+	snapshot.addInfo(sessiontest.SeedBead(t, drained))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -9687,7 +9688,7 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOneNormalizesExistingStaleId
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
+	snapshot.addInfo(sessiontest.SeedBead(t, stale))
 	cfgAgent := config.Agent{
 		Name:              "refinery",
 		Dir:               "cashmaster",
@@ -9782,8 +9783,8 @@ func TestSelectOrCreateDependencyPoolSessionBead_MaxOnePrefersCanonicalDependenc
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(stale))
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(canonical))
+	snapshot.addInfo(sessiontest.SeedBead(t, stale))
+	snapshot.addInfo(sessiontest.SeedBead(t, canonical))
 	cfgAgent := config.Agent{
 		Name:              "refinery",
 		Dir:               "cashmaster",
@@ -9906,8 +9907,8 @@ func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t 
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(later))
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(earliest))
+	snapshot.addInfo(sessiontest.SeedBead(t, later))
+	snapshot.addInfo(sessiontest.SeedBead(t, earliest))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -9989,7 +9990,7 @@ func TestSelectOrCreateDependencyPoolSessionBead_ReusesLegacyUnqualifiedTemplate
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(legacy))
+	snapshot.addInfo(sessiontest.SeedBead(t, legacy))
 	cfg := &config.City{Agents: []config.Agent{{
 		Name:              "db",
 		Dir:               "gascity",
@@ -10035,7 +10036,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesAvailableForNewTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(awake))
+	snapshot.addInfo(sessiontest.SeedBead(t, awake))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
@@ -10072,7 +10073,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesLegacyUnqualifiedTemplateWithFullCo
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(legacy))
+	snapshot.addInfo(sessiontest.SeedBead(t, legacy))
 	cfg := &config.City{Agents: []config.Agent{{
 		Name:              "refinery",
 		Dir:               "cashmaster",
@@ -10113,7 +10114,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsAssignedForNewTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &sessionBeadSnapshot{}
-	snapshot.addInfo(sessionpkg.InfoFromPersistedBead(assigned))
+	snapshot.addInfo(sessiontest.SeedBead(t, assigned))
 	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 	bp := &agentBuildParams{
 		beadStore:    store,
