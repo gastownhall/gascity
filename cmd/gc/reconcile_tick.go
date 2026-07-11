@@ -134,11 +134,9 @@ func (t *reconcileTick) applyStore(id string, front *sessionpkg.Store, patch ses
 // the same tick — or its stale last_woke_at would skew wake-budget fairness and
 // steal a peer's slot. applyStore is wrong here for exactly that reason: it
 // reflects the (failed) persistence rather than the completed kill.
-func (t *reconcileTick) applyOptimistic(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) sessionpkg.Info {
+func (t *reconcileTick) applyOptimistic(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) {
 	// Error intentionally discarded (matches origin/main's `_ = ApplyPatch` at these
 	// sites): the local fold below must survive a failed sleep write.
 	_ = front.ApplyPatch(id, patch)
-	next := t.infoByID[id].ApplyPatch(patch)
-	t.infoByID[id] = next
-	return next
+	t.infoByID[id] = t.infoByID[id].ApplyPatch(patch)
 }
