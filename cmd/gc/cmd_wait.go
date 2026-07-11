@@ -322,6 +322,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 		cr, err := c.ListWaits(stateFilter, sessionFilter)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
+			emitWaitListPartialNotice(stderr, cr.Body)
 			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 		}
 		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
@@ -330,6 +331,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 			lr, lerr := c.ListWaitsViaBeads()
 			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
+				emitWaitListPartialNotice(stderr, lr.Body)
 				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 			}
 			err = lerr
@@ -344,6 +346,22 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
 	return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+// emitWaitListPartialNotice surfaces a degraded (partial) wait read on stderr
+// without failing the command, matching the generic /beads partial contract: the
+// surviving rows still render, and the operator sees the degradation. The typed
+// /waits rung carries Partial/PartialErrors; the legacy generic-beads rung never
+// sets them, so this is a no-op there.
+func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
+	if !wl.Partial {
+		return
+	}
+	detail := strings.Join(wl.PartialErrors, "; ")
+	if detail == "" {
+		detail = "partial wait read"
+	}
+	fmt.Fprintf(stderr, "gc wait list: %s; showing partial results\n", detail) //nolint:errcheck
 }
 
 // renderWaitList applies the idempotent client-side stable ascending sort and
@@ -383,11 +401,18 @@ func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput 
 		items, err = sessFront.ListWaits("", "")
 	}
 	if err != nil {
-		if !isWaitLookupLimitError(err) {
+		switch {
+		case isWaitLookupLimitError(err):
+			fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
+		case beads.IsPartialResult(err):
+			// The typed store folded the surviving rows through with a
+			// PartialResultError (mirrors the /waits handler and the generic /beads
+			// contract): show them and flag the degradation instead of dying.
+			fmt.Fprintf(stderr, "gc wait list: %v; showing partial results\n", err) //nolint:errcheck
+		default:
 			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
 	filtered := filterWaitListItems(items, stateFilter, "")

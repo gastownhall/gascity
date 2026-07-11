@@ -55,6 +55,13 @@ func (s *Store) GetWait(id string) (WaitInfo, error) {
 // one session, located via the "session:<id>" label, created DESC and capped at
 // SessionWaitLookupLimit. When the lookup is capped it returns the partial slice
 // plus a beads.LookupLimitError.
+//
+// PartialResultError semantics mirror ListAllSessionBeads: a degraded-but-non-empty
+// store read (some rows parsed, some skipped) still projects the returned rows and
+// folds the beads.PartialResultError through as the returned error, so callers that
+// can render a degraded view (the /waits handler, the CLI fallback) keep the
+// reachable waits instead of dropping them. A hard (non-partial) store error still
+// short-circuits with nil rows.
 func (s *Store) WaitsForSession(sessionID string) ([]WaitInfo, error) {
 	if s == nil || s.store.Store == nil {
 		return nil, nil
@@ -69,9 +76,10 @@ func (s *Store) WaitsForSession(sessionID string) ([]WaitInfo, error) {
 		Limit:  SessionWaitLookupLimit + 1,
 		Sort:   beads.SortCreatedDesc,
 	})
-	if err != nil {
+	if err != nil && !beads.IsPartialResult(err) {
 		return nil, err
 	}
+	partialErr := err
 	capped := len(waits) > SessionWaitLookupLimit
 	if capped {
 		waits = waits[:SessionWaitLookupLimit]
@@ -89,7 +97,7 @@ func (s *Store) WaitsForSession(sessionID string) ([]WaitInfo, error) {
 	if capped {
 		return result, beads.LookupLimitError{Kind: "wait", Label: "session:" + sessionID, Limit: SessionWaitLookupLimit}
 	}
-	return result, nil
+	return result, partialErr
 }
 
 // ListWaits returns durable waits. When sessionID is set it delegates to
@@ -97,7 +105,9 @@ func (s *Store) WaitsForSession(sessionID string) ([]WaitInfo, error) {
 // (closed excluded, IsWaitBead-filtered, created DESC, capped). A non-empty
 // state filters the projected waits in memory. The result is DESC — callers that
 // need a stable tie order apply their own sort. A capped lookup returns the
-// partial slice plus a beads.LookupLimitError.
+// partial slice plus a beads.LookupLimitError; a degraded store read returns the
+// surviving rows plus a beads.PartialResultError (both folded through from the
+// delegate).
 func (s *Store) ListWaits(state, sessionID string) ([]WaitInfo, error) {
 	var (
 		waits []WaitInfo
@@ -122,7 +132,9 @@ func (s *Store) ListWaits(state, sessionID string) ([]WaitInfo, error) {
 
 // listWaitsByLabel is the global gc:wait scan behind ListWaits: closed beads are
 // excluded, non-wait beads filtered, results are DESC and capped at
-// SessionWaitLookupLimit with a LookupLimitError on overflow.
+// SessionWaitLookupLimit with a LookupLimitError on overflow. A degraded store
+// read folds its beads.PartialResultError through alongside the surviving rows
+// (same fold-through as WaitsForSession); a hard error returns nil rows.
 func (s *Store) listWaitsByLabel() ([]WaitInfo, error) {
 	if s == nil || s.store.Store == nil {
 		return nil, nil
@@ -132,9 +144,10 @@ func (s *Store) listWaitsByLabel() ([]WaitInfo, error) {
 		Limit: SessionWaitLookupLimit + 1,
 		Sort:  beads.SortCreatedDesc,
 	})
-	if err != nil {
+	if err != nil && !beads.IsPartialResult(err) {
 		return nil, err
 	}
+	partialErr := err
 	capped := len(all) > SessionWaitLookupLimit
 	if capped {
 		all = all[:SessionWaitLookupLimit]
@@ -152,7 +165,7 @@ func (s *Store) listWaitsByLabel() ([]WaitInfo, error) {
 	if capped {
 		return result, beads.LookupLimitError{Kind: "wait", Label: WaitBeadLabel, Limit: SessionWaitLookupLimit}
 	}
-	return result, nil
+	return result, partialErr
 }
 
 // WaitNudgeIDs returns the deduplicated queued nudge IDs for the session's

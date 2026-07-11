@@ -1956,6 +1956,8 @@ export const zWaitView = z.object({
 
 export const zWaitListBody = z.object({
     capped: z.boolean(),
+    partial: z.boolean().optional(),
+    partial_errors: z.array(z.string()).nullish(),
     waits: z.array(zWaitView).nullable()
 });
 

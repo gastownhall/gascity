@@ -44,8 +44,10 @@ func waitProblemBody(status int, p404, p422, p500, p503 *genclient.ErrorModel) *
 
 // WaitList is the client-edge decode of the /v0/waits list body.
 type WaitList struct {
-	Waits  []session.WaitInfo
-	Capped bool
+	Waits         []session.WaitInfo
+	Capped        bool
+	Partial       bool
+	PartialErrors []string
 }
 
 // routeMissingError marks a 404 that carried no problem+json body — the shape an
@@ -198,6 +200,12 @@ func waitListFromGen(body *genclient.WaitListBody) WaitList {
 		return WaitList{Waits: []session.WaitInfo{}}
 	}
 	out := WaitList{Capped: body.Capped, Waits: []session.WaitInfo{}}
+	if body.Partial != nil {
+		out.Partial = *body.Partial
+	}
+	if body.PartialErrors != nil {
+		out.PartialErrors = append([]string(nil), *body.PartialErrors...)
+	}
 	if body.Waits != nil {
 		for _, v := range *body.Waits {
 			out.Waits = append(out.Waits, waitInfoFromGen(v))

@@ -5837,6 +5837,12 @@ type WaitListBody struct {
 	// Capped True when the lookup hit the per-scope cap and the list is partial.
 	Capped bool `json:"capped"`
 
+	// Partial True when a backing store returned a partial result and the list may be incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from the degraded wait lookup when partial is true.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Waits Durable session waits, newest first.
 	Waits *[]WaitView `json:"waits"`
 }

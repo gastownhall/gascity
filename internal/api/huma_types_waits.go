@@ -41,9 +41,14 @@ type WaitGetInput struct {
 }
 
 // WaitListBody is the response body for GET /v0/city/{cityName}/waits.
+// Partial/PartialErrors mirror the generic /beads list contract (ListBody): a
+// degraded backing-store read surfaces the surviving rows with partial=true and
+// the per-read error(s) rather than failing the whole request.
 type WaitListBody struct {
-	Waits  []WaitView `json:"waits" doc:"Durable session waits, newest first."`
-	Capped bool       `json:"capped" doc:"True when the lookup hit the per-scope cap and the list is partial."`
+	Waits         []WaitView `json:"waits" doc:"Durable session waits, newest first."`
+	Capped        bool       `json:"capped" doc:"True when the lookup hit the per-scope cap and the list is partial."`
+	Partial       bool       `json:"partial,omitempty" doc:"True when a backing store returned a partial result and the list may be incomplete."`
+	PartialErrors []string   `json:"partial_errors,omitempty" doc:"Human-readable errors from the degraded wait lookup when partial is true."`
 }
 
 // WaitListOutput is the response envelope for GET /v0/city/{cityName}/waits.

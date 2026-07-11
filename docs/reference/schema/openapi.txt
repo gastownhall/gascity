@@ -17111,6 +17111,20 @@
             "description": "True when the lookup hit the per-scope cap and the list is partial.",
             "type": "boolean"
           },
+          "partial": {
+            "description": "True when a backing store returned a partial result and the list may be incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from the degraded wait lookup when partial is true.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "waits": {
             "description": "Durable session waits, newest first.",
             "items": {

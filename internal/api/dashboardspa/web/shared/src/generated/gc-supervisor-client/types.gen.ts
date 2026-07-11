@@ -6612,6 +6612,14 @@ export type WaitListBody = {
      */
     capped: boolean;
     /**
+     * True when a backing store returned a partial result and the list may be incomplete.
+     */
+    partial?: boolean;
+    /**
+     * Human-readable errors from the degraded wait lookup when partial is true.
+     */
+    partial_errors?: Array<string> | null;
+    /**
      * Durable session waits, newest first.
      */
     waits: Array<WaitView> | null;
