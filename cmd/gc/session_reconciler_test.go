@@ -6792,16 +6792,18 @@ func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t 
 
 func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
-	// Deliberately degraded fixture: no id, no session type/label, and a case
-	// with a zero CreatedAt. It cannot be seeded through a store double — the
-	// session front door rejects empty-id / non-session beads, and a store.Create
-	// would stamp CreatedAt. The raw-bead codec below is the sanctioned path for
-	// this non-session corpus (see sessiontest.SeedBead's godoc).
-	base := beads.Bead{
-		Metadata: map[string]string{
-			"pending_create_claim": "true",
-			"state":                "creating",
-		},
+	// Deliberately degraded (no id / non-session) fixture built as the session.Info
+	// the classifier consumes directly — the info-struct-literal path. It cannot go
+	// through a store double: the front door rejects empty-id / non-session beads,
+	// and a store.Create would stamp CreatedAt (the zero-CreatedAt case needs the
+	// pin). The fields map 1:1 to what InfoFromPersistedBead derived from the bead
+	// metadata; the classifier chain reads only PendingCreateClaim / MetadataState /
+	// LastWokeAt / PendingCreateStartedAt / CreatedAt, so this is outcome-identical.
+	base := sessionpkg.Info{
+		PendingCreateClaim:         true,
+		PendingCreateClaimMetadata: "true",
+		MetadataState:              "creating",
+		State:                      sessionpkg.StateCreating,
 	}
 
 	tests := []struct {
@@ -6846,16 +6848,10 @@ func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bead := base
-			if tt.startedAt != "" {
-				bead.Metadata = map[string]string{
-					"pending_create_claim":      "true",
-					"pending_create_started_at": tt.startedAt,
-					"state":                     "creating",
-				}
-			}
-			bead.CreatedAt = tt.createdAt
-			if got := pendingCreateNeverStartedExpiredInfo(sessionpkg.InfoFromPersistedBead(bead), clk); got != tt.want {
+			info := base
+			info.PendingCreateStartedAt = tt.startedAt
+			info.CreatedAt = tt.createdAt
+			if got := pendingCreateNeverStartedExpiredInfo(info, clk); got != tt.want {
 				t.Fatalf("pendingCreateNeverStartedExpiredInfo() = %v, want %v", got, tt.want)
 			}
 		})
@@ -6864,27 +6860,29 @@ func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
 
 func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLastWokeAt(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
-	// Deliberately degraded fixture: no id, no session type/label, a custom
-	// CreatedAt. It cannot round-trip through a store double (the session front
-	// door rejects empty-id / non-session beads); the raw-bead codec below is the
-	// sanctioned path for this non-session corpus (see sessiontest.SeedBead godoc).
-	base := beads.Bead{
-		Metadata: map[string]string{
-			"pending_create_claim": "true",
-			"state":                "creating",
-			"last_woke_at":         "not-a-timestamp",
-		},
+	// Deliberately degraded (no id / non-session) fixture built as the session.Info
+	// the classifier consumes directly — the info-struct-literal path (a store
+	// double would reject the empty-id bead). Fields map 1:1 to the codec's
+	// projection of the bead metadata; the classifier chain reads only
+	// PendingCreateClaim / MetadataState / LastWokeAt / PendingCreateStartedAt /
+	// CreatedAt, so this is outcome-identical. The invalid last_woke_at is the point.
+	base := sessionpkg.Info{
+		PendingCreateClaim:         true,
+		PendingCreateClaimMetadata: "true",
+		MetadataState:              "creating",
+		State:                      sessionpkg.StateCreating,
+		LastWokeAt:                 "not-a-timestamp",
 	}
 
 	recent := base
 	recent.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout - time.Second))
-	if pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(recent), clk, time.Minute) {
+	if pendingCreateLeaseExpiredForRollbackInfo(recent, clk, time.Minute) {
 		t.Fatal("invalid last_woke_at used never-started lease; want legacy stale window before rollback")
 	}
 
 	stale := base
 	stale.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout + time.Second))
-	if !pendingCreateLeaseExpiredForRollbackInfo(sessionpkg.InfoFromPersistedBead(stale), clk, time.Minute) {
+	if !pendingCreateLeaseExpiredForRollbackInfo(stale, clk, time.Minute) {
 		t.Fatal("invalid last_woke_at preserved after stale window; want rollback")
 	}
 }
