@@ -104,7 +104,7 @@ func (s *Server) humaHandlePackAdd(_ context.Context, input *PackAddInput) (*Pac
 	// Idempotency: import at most once per Idempotency-Key — a pack add shells
 	// out to git and is exactly the expensive, retry-prone create the key is
 	// for. The cached value is the AddResult the response body echoes.
-	res, err := withIdempotency(s, "/v0/packs", input.IdempotencyKey, input.Body,
+	res, err := withIdempotency(s.idem, "/v0/packs", input.IdempotencyKey, input.Body,
 		func() (importsvc.AddResult, error) {
 			// SSRF fence: AddImport shells `git ls-remote <source>` synchronously and
 			// its contract requires HTTP callers to validate the source first. Reject

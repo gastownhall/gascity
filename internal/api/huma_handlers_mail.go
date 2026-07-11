@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -437,7 +438,7 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	// Idempotency: send at most once per Idempotency-Key. On replay the closure
 	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
 	// fires. The helper guarantees the reservation is released on a send error.
-	msg, err := withIdempotency(s, "/v0/mail", input.IdempotencyKey, input.Body,
+	msg, err := withIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body,
 		func() (mail.Message, error) {
 			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
 			telemetry.RecordMailOp(ctx, "send", sendErr)
@@ -687,21 +688,35 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	id := input.ID
 	rig := input.Rig
 
-	mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
-	if mpErr != nil {
-		return nil, apierr.Internal.Msg(mpErr.Error())
-	}
-	if mp == nil {
-		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
-	}
+	// Idempotency: reply at most once per Idempotency-Key. The message ID is
+	// folded into the cache path because it lives in the URL, not the body —
+	// the same key + body against two different messages must not collide.
+	// PathEscape keeps a crafted ID (%2F-encoded slash) from forging the
+	// "/reply:" boundary and aliasing another (id, key) pair's scope. The
+	// provider lookup stays INSIDE the closure so a replay still succeeds
+	// after the original message was archived (the closure is skipped).
+	msg, err := withIdempotency(s.idem, "/v0/mail/"+url.PathEscape(id)+"/reply", input.IdempotencyKey, input.Body,
+		func() (mail.Message, error) {
+			mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
+			if mpErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(mpErr.Error())
+			}
+			if mp == nil {
+				return mail.Message{}, apierr.MailNotFound.Msg("message " + id + " not found")
+			}
 
-	msg, err := mp.Reply(id, input.Body.From, input.Body.Subject, input.Body.Body)
-	telemetry.RecordMailOp(ctx, "reply", err)
+			sent, replyErr := mp.Reply(id, input.Body.From, input.Body.Subject, input.Body.Body)
+			telemetry.RecordMailOp(ctx, "reply", replyErr)
+			if replyErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(replyErr.Error())
+			}
+			sent.Rig = resolvedRig
+			s.recordMailEvent(events.MailReplied, sent.From, sent.ID, resolvedRig, &sent)
+			return sent, nil
+		})
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, err
 	}
-	msg.Rig = resolvedRig
-	s.recordMailEvent(events.MailReplied, msg.From, msg.ID, resolvedRig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),

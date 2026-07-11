@@ -214,7 +214,7 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 	// Idempotency: create at most once per Idempotency-Key. Item validation,
 	// the convoy bead create, and the link loop (with its rollback) all live in
 	// the closure so a failed create releases the reservation for retry.
-	convoy, err := withIdempotency(s, "/v0/convoys", input.IdempotencyKey, input.Body,
+	convoy, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
 		func() (beads.Bead, error) {
 			store := s.findStore(input.Body.Rig)
 			if store == nil {

@@ -200,7 +200,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/mail/{id}/reply",
 		Summary:       "Reply to a mail message",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleMailReply)
 	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
@@ -230,7 +231,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/events",
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleEventEmit)
 	cityRegister(sm, huma.Operation{
 		OperationID: "rotate-events",
@@ -426,7 +428,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/extmsg/adapters",
 		Summary:       "Register an external messaging adapter",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgAdapterRegister)
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 }

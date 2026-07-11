@@ -159,20 +159,30 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 // Body validation (Type and Actor required) is enforced by struct tags
 // on EventEmitInput.
 func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
-	ep := s.state.EventProvider()
-	if ep == nil {
-		return nil, apierr.ServiceUnavailable.Msg("events not enabled")
+	// Idempotency: append at most once per Idempotency-Key — the log is
+	// append-only, so a timed-out retry would otherwise double-emit (and
+	// double any projection built over the log). The cached value is just the
+	// status constant; the whole point is skipping the duplicate Record.
+	status, err := withIdempotency(s.idem, "/v0/events", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			ep := s.state.EventProvider()
+			if ep == nil {
+				return "", apierr.ServiceUnavailable.Msg("events not enabled")
+			}
+			ep.Record(events.Event{
+				Type:    input.Body.Type,
+				Actor:   input.Body.Actor,
+				Subject: input.Body.Subject,
+				Message: input.Body.Message,
+			})
+			return "recorded", nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
-	ep.Record(events.Event{
-		Type:    input.Body.Type,
-		Actor:   input.Body.Actor,
-		Subject: input.Body.Subject,
-		Message: input.Body.Message,
-	})
-
 	resp := &EventEmitOutput{}
-	resp.Body.Status = "recorded"
+	resp.Body.Status = status
 	return resp, nil
 }
 
