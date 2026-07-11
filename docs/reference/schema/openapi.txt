@@ -2177,6 +2177,7 @@
               "urn:gascity:error:idempotency-in-flight",
               "urn:gascity:error:idempotency-mismatch",
               "urn:gascity:error:internal",
+              "urn:gascity:error:invalid-cursor",
               "urn:gascity:error:invalid-request",
               "urn:gascity:error:mail-not-found",
               "urn:gascity:error:method-not-allowed",
@@ -2222,6 +2223,7 @@
               "urn:gascity:error:idempotency-in-flight",
               "urn:gascity:error:idempotency-mismatch",
               "urn:gascity:error:internal",
+              "urn:gascity:error:invalid-cursor",
               "urn:gascity:error:invalid-request",
               "urn:gascity:error:mail-not-found",
               "urn:gascity:error:method-not-allowed",
@@ -21975,6 +21977,21 @@
                   "type": "integer"
                 }
               },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }

@@ -27,15 +27,26 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
+	// The cursor is a versioned keyset token carrying the (created_at, id)
+	// boundary of the last row served — stable under the concurrent writes an
+	// active work ledger guarantees, where the old integer offsets skipped or
+	// duplicated rows. Anything else (garbage, a legacy offset cursor, a
+	// wrong-kind token) is a typed 400; silently restarting at page 1 was the
+	// old failure mode and it duplicates rows.
+	var seek *beads.SeekBoundary
 	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
+		c, err := decodeKeysetCursor(input.Cursor)
+		if err != nil || c.Kind != cursorKindCreatedID {
+			return nil, apierr.InvalidCursor.Msg("cursor is not a valid pagination token; re-fetch the first page")
+		}
+		seek = &beads.SeekBoundary{CreatedAt: c.CreatedAt, ID: c.ID}
 	}
 
 	// all=true reads bypass the CachingStore (closed history lives only in
@@ -89,7 +100,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	boundedFetch := 0
 	var boundedCounts map[string]int
 	if input.All && !dedupe && len(assigneeTerms) == 1 {
-		boundedFetch = pp.Offset + pp.Limit
+		// limit+1: the keyset boundary is pushed into each store query, so a
+		// store returns only rows after the boundary — one extra row is the
+		// has-more signal (Counts are un-seeked totals and cannot tell).
+		boundedFetch = limit + 1
 		boundedMode, boundedCounts = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
 	}
 
@@ -115,8 +129,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			}
 			if boundedMode {
 				// Each store need only return enough rows to cover this page;
-				// the cross-rig merge below cuts the exact global prefix.
+				// the cross-rig merge below cuts the exact global prefix. The
+				// seek boundary rides down too, so the per-store fetch is
+				// O(limit) after the boundary instead of O(cursor depth).
 				query.Limit = boundedFetch
+				query.SeekAfter = seek
 			}
 			pa.attempt()
 			list, err := store.List(query)
@@ -177,33 +194,63 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	// A non-cursor request is offset-0 paging: a truncated first page carries
-	// the continuation cursor too, otherwise the remainder of a limit-bounded
-	// read is unfetchable by design (#3208).
+	// A non-cursor request is first-page paging: a truncated first page
+	// carries the continuation cursor too, otherwise the remainder of a
+	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
+	// keyset boundary of the last row served.
 	var page []beads.Bead
 	var total int
-	var nextCursor string
+	hasMore := false
 	if boundedMode {
 		// Total is the exact Count summed over the rigs whose List actually
-		// returned rows, not len(all) (which holds only the bounded prefix) and
-		// not the upfront count of every rig: a rig counted then dropped at List
-		// time is removed from boundedCounts above, so Total tracks reachable
-		// rows and next_cursor still points at the real remainder (gascity#3253).
+		// returned rows — the count of the whole (un-seeked) result set, so it
+		// stays constant across a walk. The stores already applied the seek
+		// boundary; the merged rows are the global page prefix plus the one
+		// extra has-more row from the limit+1 overfetch (gascity#3253).
 		for _, n := range boundedCounts {
 			total += n
 		}
-		if pp.Offset < len(all) {
-			end := pp.Offset + pp.Limit
-			if end > len(all) {
-				end = len(all)
-			}
-			page = all[pp.Offset:end]
+		if len(all) > limit {
+			hasMore = true
+			all = all[:limit]
 		}
-		if pp.Offset+pp.Limit < total {
-			nextCursor = encodeCursor(pp.Offset + pp.Limit)
+		page = all
+		// A degraded rig (partial-result read) can return fewer rows than it
+		// has, leaving the merged page short of the limit+1 has-more signal.
+		// Mint a resume cursor anyway on a non-empty partial page: the walk
+		// continues past the degradation instead of silently terminating
+		// while Total still advertises the full count. Termination is safe —
+		// the boundary strictly advances past every served row, and an empty
+		// page mints nothing.
+		if pa.partial() && len(page) > 0 {
+			hasMore = true
 		}
 	} else {
-		page, total, nextCursor = paginate(all, pp)
+		// Full-scan path: `all` holds the complete (un-seeked) result set in
+		// (created_at DESC, id DESC) order, so Total keeps its full-set
+		// meaning and the page after the boundary is a contiguous suffix.
+		total = len(all)
+		start := 0
+		if seek != nil {
+			for start < len(all) && !seek.After(all[start], beads.SortCreatedDesc) {
+				start++
+			}
+		}
+		end := start + limit
+		if end > len(all) {
+			end = len(all)
+		}
+		page = all[start:end]
+		hasMore = end < len(all)
+	}
+	var nextCursor string
+	if hasMore && len(page) > 0 {
+		last := page[len(page)-1]
+		nextCursor = encodeKeysetCursor(keysetCursor{
+			Kind:      cursorKindCreatedID,
+			CreatedAt: last.CreatedAt,
+			ID:        last.ID,
+		})
 	}
 	if page == nil {
 		page = []beads.Bead{}

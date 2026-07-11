@@ -154,7 +154,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// the handler stamps through the apierr catalog. Mutations additionally declare
 	// 403 because the always-installed CSRF middleware (and read-only mode) reject
 	// a mutation with a 403 before the handler runs; reads never emit it.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// GET /beads also declares 400: an invalid pagination cursor is a typed
+	// invalid-cursor problem response, never a silent page-1 restart.
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{

@@ -8661,6 +8661,10 @@ export type GetV0CityByCityNameBeadsData = {
 
 export type GetV0CityByCityNameBeadsErrors = {
     /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
      * Not Found
      */
     404: ErrorModel;
