@@ -12,13 +12,14 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestSessionClassifierInfoEquivalence is the byte-identical oracle for P2 of
 // NONWORK-BEAD-FIELDDOOR-PLAN.md. Each converted classifier has a *Info sibling
 // that reads typed session.Info fields instead of raw bead metadata. For every
-// representative session-bead shape, the Info form (fed
-// session.InfoFromPersistedBead(b)) must agree with the original bead form.
+// representative session-bead shape, the Info form (seeded through the session
+// store front door) must agree with the original bead form.
 //
 // This proves the Info projection plus the predicate mirror are semantically
 // identical to the existing metadata reads, so later caller migration (P4) is
@@ -1310,7 +1311,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// leaseStartupTimeout so the equivalence case above is a real true-branch
 	// comparison (exercising the Info.StartedConfigHash gate + the lease tail),
 	// not a trivial both-false pass.
-	if !pendingResumePreservingNamedRestartInfo(session.InfoFromPersistedBead(beadsByShape["pending-resume-preserve"]), clk, leaseStartupTimeout) {
+	if !pendingResumePreservingNamedRestartInfo(sessiontest.SeedBead(t, beadsByShape["pending-resume-preserve"]), clk, leaseStartupTimeout) {
 		t.Fatal("pendingResumePreservingNamedRestartInfo(pending-resume-preserve) = false; fixture no longer exercises the resume-preserve true branch")
 	}
 	// The "pending-create-inflight-lease" fixture MUST decide
@@ -1320,7 +1321,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// attempt-stale tail and wrongly report the lease inactive. This makes the
 	// clkBoolChecks equivalence row for pendingCreateLeaseActive a real in-flight
 	// true-branch decision, not a both-agree-by-accident pass.
-	inflightInfo := session.InfoFromPersistedBead(beadsByShape["pending-create-inflight-lease"])
+	inflightInfo := sessiontest.SeedBead(t, beadsByShape["pending-create-inflight-lease"])
 	if !pendingCreateStartInFlightInfo(inflightInfo, clk, leaseStartupTimeout) {
 		t.Fatal("pendingCreateStartInFlightInfo(pending-create-inflight-lease) = false; fixture no longer exercises the in-flight lease window")
 	}
@@ -1334,33 +1335,33 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// (not CreatedAt) on the recent-wake fixture, exercising the woke-upgrade branch
 	// so a regression that returns CreatedAt is caught (both here and in the
 	// timeBoolChecks equivalence row above).
-	if got, ok := staleReapStartBoundaryInfo(session.InfoFromPersistedBead(beadsByShape["reap-boundary-recent-wake"])); !ok || !got.Equal(recentWoke) {
+	if got, ok := staleReapStartBoundaryInfo(sessiontest.SeedBead(t, beadsByShape["reap-boundary-recent-wake"])); !ok || !got.Equal(recentWoke) {
 		t.Fatalf("staleReapStartBoundaryInfo(reap-boundary-recent-wake) = (%v, %v); want the last_woke_at time %v — fixture no longer exercises the woke-upgrade branch", got, ok, recentWoke)
 	}
 	// The drain-ack fixture must hit the true branch so isDrainAckStopPendingInfo
 	// is exercised on a real stop-pending shape, not a trivial both-false pass.
-	if !isDrainAckStopPendingInfo(session.InfoFromPersistedBead(beadsByShape["drain-ack-stop-pending"])) {
+	if !isDrainAckStopPendingInfo(sessiontest.SeedBead(t, beadsByShape["drain-ack-stop-pending"])) {
 		t.Fatal("isDrainAckStopPendingInfo(drain-ack-stop-pending) = false; fixture no longer exercises the true branch")
 	}
 	// The hold/quarantine fixture must drive lifecycleTimerBlockerInfo's non-empty
 	// branch so it is exercised on a real blocker shape, not a both-empty pass.
-	if lifecycleTimerBlockerInfo(session.InfoFromPersistedBead(beadsByShape["hold-and-quarantine"]), clk.Now()) == "" {
+	if lifecycleTimerBlockerInfo(sessiontest.SeedBead(t, beadsByShape["hold-and-quarantine"]), clk.Now()) == "" {
 		t.Fatal(`lifecycleTimerBlockerInfo(hold-and-quarantine) = ""; fixture no longer exercises the blocker branch`)
 	}
 	// The rapid-crash-candidate fixture must classify ExitRapidCrash under alive=false
 	// so sessionExitFactsInfo is exercised on the crash lane, not a both-ExitNone pass.
-	if got := session.DecideSessionExit(sessionExitFactsInfo(session.InfoFromPersistedBead(beadsByShape["rapid-crash-candidate"]), leaseCfg, false, nil, clk)); got != session.ExitRapidCrash {
+	if got := session.DecideSessionExit(sessionExitFactsInfo(sessiontest.SeedBead(t, beadsByShape["rapid-crash-candidate"]), leaseCfg, false, nil, clk)); got != session.ExitRapidCrash {
 		t.Fatalf("DecideSessionExit(rapid-crash-candidate, alive=false) = %v; want ExitRapidCrash — fixture no longer exercises the crash lane", got)
 	}
 	// stableLongEnoughInfo must be true on the old-marker fixture (past RFC3339
 	// last_woke_at) so its true branch is exercised, not a trivial both-false pass.
-	if !stableLongEnoughInfo(session.InfoFromPersistedBead(beadsByShape["pending-create-claim-old-markers"]), clk) {
+	if !stableLongEnoughInfo(sessiontest.SeedBead(t, beadsByShape["pending-create-claim-old-markers"]), clk) {
 		t.Fatal("stableLongEnoughInfo(pending-create-claim-old-markers) = false; fixture no longer exercises the stable-long-enough true branch")
 	}
 
 	for shape, b := range beadsByShape {
 		b := b
-		info := session.InfoFromPersistedBead(b)
+		info := sessiontest.SeedBead(t, b)
 		t.Run(shape, func(t *testing.T) {
 			for name, c := range boolChecks {
 				if got, want := c.info(info), c.bead(b); got != want {
@@ -1489,7 +1490,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	}
 	for currentShape, currentBead := range beadsByShape {
 		currentBead := currentBead
-		currentInfo := session.InfoFromPersistedBead(currentBead)
+		currentInfo := sessiontest.SeedBead(t, currentBead)
 		t.Run("asyncCommandStale/"+currentShape, func(t *testing.T) {
 			for _, cmd := range []string{"", "claude --resume", "codex exec", "  claude --resume  "} {
 				pr := preparedWithCommand(cmd)
@@ -1507,10 +1508,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// all covered on both the prepared and current sides.
 	for prepShape, prepBead := range beadsByShape {
 		prepBead := prepBead
-		prepInfo := session.InfoFromPersistedBead(prepBead)
+		prepInfo := sessiontest.SeedBead(t, prepBead)
 		for curShape, curBead := range beadsByShape {
 			curBead := curBead
-			curInfo := session.InfoFromPersistedBead(curBead)
+			curInfo := sessiontest.SeedBead(t, curBead)
 			t.Run("asyncPair/"+prepShape+"->"+curShape, func(t *testing.T) {
 				if got, want := asyncStartIdentityMatchesInfo(prepInfo, curInfo), refIdentityMatches(prepBead, curBead); got != want {
 					t.Errorf("asyncStartIdentityMatches: info=%v bead=%v", got, want)
@@ -1547,7 +1548,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	wakePools := []map[string]int{nil, {"worker": 1}, {"mayor": 1}}
 	for shape, b := range beadsByShape {
 		b := b
-		info := session.InfoFromPersistedBead(b)
+		info := sessiontest.SeedBead(t, b)
 		t.Run("wakeTwins/"+shape, func(t *testing.T) {
 			// The raw sleep-read forms were deleted in WI-6 R3; the *Info twins are
 			// now the only form. Their non-trivial branches are pinned by the
@@ -1589,22 +1590,22 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// Load-bearing: pending-clear keeps the session awake (true); pending-held does
 	// NOT (BlockerHeld), exercising the LifecycleInputFromInfo blocker read rather
 	// than a trivial both-false pass.
-	if !pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-clear"]), pendSP, "worker-pending", clk) {
+	if !pendingInteractionKeepsAwakeInfo(seedSessionInfo(pendFixtures["pending-clear"]), pendSP, "worker-pending", clk) {
 		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-clear) = false; want true — fixture no longer exercises the keep-awake true branch")
 	}
-	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-held"]), pendSP, "worker-pending", clk) {
+	if pendingInteractionKeepsAwakeInfo(seedSessionInfo(pendFixtures["pending-held"]), pendSP, "worker-pending", clk) {
 		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-held) = true; want false — fixture no longer exercises the held-blocker branch")
 	}
 	// pending-quar: a still-future quarantine blocks the deferral (BlockerQuarantined).
-	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-quar"]), pendSP, "worker-pending", clk) {
+	if pendingInteractionKeepsAwakeInfo(seedSessionInfo(pendFixtures["pending-quar"]), pendSP, "worker-pending", clk) {
 		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-quar) = true; want false — the quarantine-blocker branch regressed")
 	}
 	// pending-waithold: a non-empty (trimmed) wait_hold suppresses the deferral.
-	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["pending-waithold"]), pendSP, "worker-pending", clk) {
+	if pendingInteractionKeepsAwakeInfo(seedSessionInfo(pendFixtures["pending-waithold"]), pendSP, "worker-pending", clk) {
 		t.Fatal("pendingInteractionKeepsAwakeInfo(pending-waithold) = true; want false — the trimmed wait_hold gate regressed")
 	}
 	// no-pending: without a live pending interaction the readiness gate is closed.
-	if pendingInteractionKeepsAwakeInfo(session.InfoFromPersistedBead(pendFixtures["no-pending"]), pendSP, "worker-none", clk) {
+	if pendingInteractionKeepsAwakeInfo(seedSessionInfo(pendFixtures["no-pending"]), pendSP, "worker-none", clk) {
 		t.Fatal("pendingInteractionKeepsAwakeInfo(no-pending) = true; want false — the runtime readiness gate regressed")
 	}
 
@@ -1612,7 +1613,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// the resolved policy is config-wake-suppressed via the exact fingerprint branch.
 	// fpPolicy is computed from a template/session-name-only bead so its fingerprint
 	// is independent of the sleep_reason/fingerprint metadata below.
-	fpPolicy := resolveSessionSleepPolicyInfo(session.InfoFromPersistedBead(makeBead("ga-fp0", map[string]string{"template": "worker", "session_name": "worker-fp"})), wakeCfg, wakeSP)
+	fpPolicy := resolveSessionSleepPolicyInfo(seedSessionInfo(makeBead("ga-fp0", map[string]string{"template": "worker", "session_name": "worker-fp"})), wakeCfg, wakeSP)
 	fpBead := makeBead("ga-fp", map[string]string{
 		"template":                 "worker",
 		"session_name":             "worker-fp",
@@ -1620,7 +1621,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sleep_reason":             "idle",
 		"sleep_policy_fingerprint": fpPolicy.Fingerprint,
 	})
-	fpInfo := session.InfoFromPersistedBead(fpBead)
+	fpInfo := seedSessionInfo(fpBead)
 	if !configWakeSuppressedInfo(fpInfo, fpPolicy, wakeSP, clk) {
 		t.Fatal("configWakeSuppressedInfo(idle-fingerprint-match) = false; want true — fixture no longer exercises the fingerprint-match branch")
 	}
@@ -1628,7 +1629,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// Load-bearing: sessionIdleReferenceInfo reads the detached_at branch (non-zero)
 	// on a recently-detached session, and sessionKeepWarmEligibleInfo is true while
 	// that session is still inside its idle window (keep-warm true branch).
-	warmInfo := session.InfoFromPersistedBead(makeBead("ga-warm", map[string]string{
+	warmInfo := seedSessionInfo(makeBead("ga-warm", map[string]string{
 		"template":     "worker",
 		"session_name": "worker-warm",
 		"state":        "active",
@@ -1645,7 +1646,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// Load-bearing: the always-named fixture must be config-eligible AND (under an
 	// enabled interactive policy with no demand) still earn WakeConfig via the
 	// isAlwaysNamed arm, so namedSessionModeInfo's "always" read is exercised.
-	alwaysInfo := session.InfoFromPersistedBead(beadsByShape["always-named"])
+	alwaysInfo := sessiontest.SeedBead(t, beadsByShape["always-named"])
 	if _, ok := sessionWithinDesiredConfigInfo(alwaysInfo, wakeCfg, nil); !ok {
 		t.Fatal("sessionWithinDesiredConfigInfo(always-named, pd=nil) = false; want true — fixture no longer exercises the always-named eligible branch")
 	}
@@ -1656,7 +1657,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// dependency-only (raw == "true" fails on the padded value), so it stays
 	// config-eligible under demand — a trimmed DependencyOnly read would wrongly
 	// exclude it.
-	depPadInfo := session.InfoFromPersistedBead(beadsByShape["dependency-only-padded"])
+	depPadInfo := sessiontest.SeedBead(t, beadsByShape["dependency-only-padded"])
 	if _, ok := sessionWithinDesiredConfigInfo(depPadInfo, wakeCfg, map[string]int{"worker": 1}); !ok {
 		t.Fatal("sessionWithinDesiredConfigInfo(dependency-only-padded) = false; want true — the untrimmed dependency_only trap regressed")
 	}
@@ -1675,7 +1676,7 @@ func TestStaleNonExpandingPoolSessionBeadInfo(t *testing.T) {
 
 	gotSingleton := map[string]bool{}
 	for _, sb := range oracleSessionBeadShapes() {
-		info := session.InfoFromPersistedBead(sb)
+		info := sessiontest.SeedBead(t, sb)
 		gotSingleton[sb.ID] = staleNonExpandingPoolSessionBeadInfo(singletonAgent, info)
 		// A non-canonical-singleton agent short-circuits to false on every shape.
 		if staleNonExpandingPoolSessionBeadInfo(nonSingleton, info) {
@@ -1712,7 +1713,7 @@ func TestLifecycleTimerBlockerInfo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info := session.InfoFromPersistedBead(makeBead("b1", tt.md))
+			info := seedSessionInfo(makeBead("b1", tt.md))
 			if got := lifecycleTimerBlockerInfo(info, now); got != tt.want {
 				t.Errorf("lifecycleTimerBlockerInfo = %q, want %q", got, tt.want)
 			}
@@ -1735,7 +1736,7 @@ func TestResetPendingCommittedAtInfo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info := session.InfoFromPersistedBead(makeBead("b1", tt.md))
+			info := seedSessionInfo(makeBead("b1", tt.md))
 			raw, ts, ok := resetPendingCommittedAtInfo(info)
 			if raw != tt.wantRaw || ok != tt.wantOK {
 				t.Fatalf("resetPendingCommittedAtInfo = (%q, %v, %v), want raw=%q ok=%v", raw, ts, ok, tt.wantRaw, tt.wantOK)
@@ -1774,7 +1775,7 @@ func TestSessionHasProviderTerminalErrorInfo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info := session.InfoFromPersistedBead(makeBead("b1", tt.md))
+			info := seedSessionInfo(makeBead("b1", tt.md))
 			if got := sessionHasProviderTerminalErrorInfo(info); got != tt.want {
 				t.Errorf("sessionHasProviderTerminalErrorInfo = %v, want %v", got, tt.want)
 			}
@@ -1787,7 +1788,7 @@ func TestSessionExitFactsInfo(t *testing.T) {
 	clk := &clock.Fake{Time: now}
 	cfg := &config.City{}
 	recent := now.Add(-15 * time.Second).UTC().Format(time.RFC3339)
-	info := session.InfoFromPersistedBead(makeBead("b1", map[string]string{
+	info := seedSessionInfo(makeBead("b1", map[string]string{
 		"state":        "awake",
 		"last_woke_at": recent,
 	}))
