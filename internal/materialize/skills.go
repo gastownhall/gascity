@@ -36,6 +36,7 @@ package materialize
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -45,6 +46,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // vendorSinks maps an agent provider to the relative directory under the
@@ -352,6 +354,69 @@ type Result struct {
 	Warnings []string
 }
 
+// ownershipManifestFile is the name of the small bookkeeping file the
+// materializer keeps inside each sink directory (gastownhall/gascity#4130).
+const ownershipManifestFile = ".gc-skill-ownership.json"
+
+// ownershipManifest durably records, per sink entry name, the last
+// canonicalized absolute target this materializer wrote a symlink to.
+// It exists solely so a symlink can still be recognized as gc's own once
+// its target's root falls out of the CURRENT pass's OwnedRoots — e.g. a
+// pinned pack sha bump moves an imported catalog's root to a new
+// content-addressed cache checkout with an unrelated path (cache keys
+// are sha256(source+commit), so there is no stable parent directory to
+// widen ownership to instead). Without this, the cleanup walk's
+// targetUnderOwnedRoot check treats the old-sha symlink as
+// user-placed and leaves it alone, and the create step then finds the
+// occupied path and reports "user-owned symlink at sink path" forever
+// (gastownhall/gascity#4130).
+//
+// A missing or corrupt manifest is treated as empty: ownership
+// recognition falls back to today's targetUnderOwnedRoot-only behavior,
+// so there is no migration step and no new failure mode for existing
+// sinks — self-healing only starts working going forward from the first
+// pass that writes a manifest entry for a given name.
+type ownershipManifest struct {
+	Targets map[string]string `json:"targets"`
+}
+
+// loadOwnershipManifest is best-effort: any read or parse failure (file
+// absent, corrupt JSON, permission error) yields an empty manifest so
+// the cleanup walk falls back to today's targetUnderOwnedRoot-only
+// ownership check rather than failing the pass.
+func loadOwnershipManifest(absSink string) ownershipManifest {
+	data, err := os.ReadFile(filepath.Join(absSink, ownershipManifestFile))
+	if err != nil {
+		return ownershipManifest{Targets: map[string]string{}}
+	}
+	var m ownershipManifest
+	if err := json.Unmarshal(data, &m); err != nil || m.Targets == nil {
+		return ownershipManifest{Targets: map[string]string{}}
+	}
+	return m
+}
+
+// saveOwnershipManifest writes the manifest atomically (temp file +
+// rename, matching this package's other on-disk writes). Callers treat a
+// save failure as a warning, not a pass-level error: it only affects
+// self-healing on a future pass, not the correctness of this one.
+func saveOwnershipManifest(absSink string, m ownershipManifest) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("encoding ownership manifest: %w", err)
+	}
+	return fsys.WriteFileAtomic(fsys.OSFS{}, filepath.Join(absSink, ownershipManifestFile), data, 0o644)
+}
+
+// manifestRecordsTarget reports whether the manifest's last-known target
+// for name matches canonTarget exactly — i.e. this materializer itself
+// wrote this symlink in a previous pass, even if canonTarget's root is no
+// longer in the current pass's OwnedRoots.
+func manifestRecordsTarget(m ownershipManifest, name, canonTarget string) bool {
+	recorded, ok := m.Targets[name]
+	return ok && recorded == canonTarget
+}
+
 // Run runs one materialization pass for an agent's sink.
 //
 // Pass order:
@@ -403,6 +468,9 @@ func Run(req Request) (Result, error) {
 		owned = append(owned, canon)
 	}
 
+	manifest := loadOwnershipManifest(absSink)
+	manifestDirty := false
+
 	// Step 2: legacy stub migration.
 	for _, name := range req.LegacyNames {
 		path := filepath.Join(absSink, name)
@@ -449,8 +517,11 @@ func Run(req Request) (Result, error) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize target %q: %v", target, terr))
 			continue
 		}
-		if !targetUnderOwnedRoot(canonTarget, owned) {
-			// External target — symlink the user placed themselves.
+		if !targetUnderOwnedRoot(canonTarget, owned) && !manifestRecordsTarget(manifest, name, canonTarget) {
+			// External target — symlink the user placed themselves. Not
+			// under any currently-owned root, and not a target this
+			// materializer's own manifest remembers writing for this name
+			// in a previous pass.
 			continue
 		}
 		desired, want := desiredByName[name]
@@ -458,6 +529,9 @@ func Run(req Request) (Result, error) {
 			// Owned but not desired — delete (covers dangling and orphaned).
 			if rmErr := os.Remove(path); rmErr != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("removing orphan symlink %q: %v", path, rmErr))
+			} else if _, had := manifest.Targets[name]; had {
+				delete(manifest.Targets, name)
+				manifestDirty = true
 			}
 			continue
 		}
@@ -475,6 +549,10 @@ func Run(req Request) (Result, error) {
 			// Already correct — record and move on. The create loop
 			// will see this name has been satisfied via desiredByName
 			// removal below.
+			if manifest.Targets[name] != canonTarget {
+				manifest.Targets[name] = canonTarget
+				manifestDirty = true
+			}
 			result.Materialized = append(result.Materialized, name)
 			delete(desiredByName, name)
 			continue
@@ -486,6 +564,8 @@ func Run(req Request) (Result, error) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("replacing symlink %q: %v", path, rerr))
 			continue
 		}
+		manifest.Targets[name] = canonDesired
+		manifestDirty = true
 		result.Materialized = append(result.Materialized, name)
 		delete(desiredByName, name)
 	}
@@ -534,7 +614,17 @@ func Run(req Request) (Result, error) {
 		if cerr := atomicSymlink(desiredAbs, path); cerr != nil {
 			return result, fmt.Errorf("creating symlink %q -> %q: %w", path, desiredAbs, cerr)
 		}
+		if canonDesired, cerr := canonicalizePath(desiredAbs); cerr == nil {
+			manifest.Targets[name] = canonDesired
+			manifestDirty = true
+		}
 		result.Materialized = append(result.Materialized, name)
+	}
+
+	if manifestDirty {
+		if serr := saveOwnershipManifest(absSink, manifest); serr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("saving ownership manifest: %v", serr))
+		}
 	}
 
 	sort.Strings(result.Materialized)
