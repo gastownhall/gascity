@@ -220,7 +220,7 @@ func runKind(formula RunLaneFormula) string {
 
 // runLane builds a single lane. Port of TS runLane.
 func runLane(rootID string, issues []runIssue, feedScopes map[string]RunFeedScope) RunLane {
-	phase := mapRunPhase(issues)
+	phase := mapRunPhase(rootID, issues)
 	updatedAt := latestUpdatedAt(issues)
 	formula := runFormula(rootID, issues)
 	formulaName, hasFormula := runFormulaName(formula)

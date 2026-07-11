@@ -481,7 +481,7 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 	for i := range input.beads {
 		issues = append(issues, fromRunSnapshotBead(input.beads[i]))
 	}
-	phase := mapRunPhase(issues)
+	phase := mapRunPhase(input.runID, issues)
 	formulaName, hasFormulaName := "", false
 	if formula.Kind == "known" {
 		formulaName, hasFormulaName = formula.Name, true

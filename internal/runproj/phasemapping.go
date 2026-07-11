@@ -32,15 +32,15 @@ type phaseMapping struct {
 	hasRound    bool // TS reviewRound: number | null
 }
 
-// mapRunPhase classifies a run group into a phase. Port of TS mapRunPhase.
-func mapRunPhase(issues []runIssue) phaseMapping {
-	// Status-based branches first — authoritative.
-	for _, i := range issues {
-		if i.status == "blocked" || strings.Contains(textForIssue(i), "blocked") {
-			return phaseMapping{phase: "blocked", label: "blocked"}
-		}
-	}
-
+// mapRunPhase classifies a run group into a phase. Port of TS mapRunPhase,
+// with the terminal check hoisted above the blocked check: a fully-closed run
+// is history, even when a member's status or text mentions "blocked" (the old
+// order pinned aborted runs into the blocked lane with a claim-a-worker remedy
+// that could do nothing). rootID names the group root so a terminal run whose
+// ROOT closed with gc.outcome=fail keeps the honest "failed" label — the phase
+// stays "complete" (the RunPhase union has no failed member, and complete is
+// what routes the lane to history).
+func mapRunPhase(rootID string, issues []runIssue) phaseMapping {
 	if len(issues) > 0 {
 		allClosed := true
 		for _, i := range issues {
@@ -50,7 +50,25 @@ func mapRunPhase(issues []runIssue) phaseMapping {
 			}
 		}
 		if allClosed {
-			return phaseMapping{phase: "complete", label: "complete"}
+			label := "complete"
+			for _, i := range issues {
+				if i.id != rootID {
+					continue
+				}
+				outcome := strings.ToLower(stringValue(i.metadata[beadmeta.OutcomeMetadataKey]))
+				if outcome == "fail" || outcome == "failed" {
+					label = "failed"
+				}
+				break
+			}
+			return phaseMapping{phase: "complete", label: label}
+		}
+	}
+
+	// Status-based blocked branch — authoritative for open runs.
+	for _, i := range issues {
+		if i.status == "blocked" || strings.Contains(textForIssue(i), "blocked") {
+			return phaseMapping{phase: "blocked", label: "blocked"}
 		}
 	}
 
@@ -125,7 +143,7 @@ var (
 	approvalStageTokens       = map[string]bool{"approval": true, "approve": true, "approved": true, "gate": true}
 	finalizationStageTokens   = map[string]bool{"finalize": true, "finalization": true, "merge": true, "cleanup": true, "publish": true}
 	reviewStageTokens         = map[string]bool{"review": true, "reviewer": true, "scorecard": true, "persona": true, "personas": true, "audit": true, "repro": true, "baseline": true, "investigation": true, "classify": true, "classification": true}
-	implementationStageTokens = map[string]bool{"implement": true, "implementation": true, "patch": true, "fixes": true, "work": true, "design": true}
+	implementationStageTokens = map[string]bool{"implement": true, "implementation": true, "patch": true, "fixes": true, "repair": true, "work": true, "design": true}
 	intakeStageTokens         = map[string]bool{"intake": true, "bootstrap": true, "context": true, "router": true, "request": true, "preflight": true, "setup": true, "rebase": true}
 )
 
@@ -139,7 +157,10 @@ func stepIDPhase(stepID string) string {
 	if hasStageToken(tokens, finalizationStageTokens, true) {
 		return "finalization"
 	}
-	if hasStageToken(tokens, reviewStageTokens, false) {
+	// Review rejects lead-up qualifiers like approval/finalization do: a
+	// pre-review CI repair step ("repair-PRE-REVIEW-ci-failures") leads up to
+	// review, it is not the review.
+	if hasStageToken(tokens, reviewStageTokens, true) {
 		return "review"
 	}
 	if hasStageToken(tokens, implementationStageTokens, false) {
@@ -443,6 +464,7 @@ func stagesForFormula(formula string, hasFormula bool) []formulaStage {
 		return []formulaStage{
 			{"preflight", "Preflight", []string{"preflight"}},
 			{"rebase", "Worktree / rebase", []string{"rebase-check"}},
+			{"pre-review-ci", "Pre-review CI", []string{"pre-review-ci", "repair-pre-review-ci-failures"}},
 			{"review", "Review loop", []string{
 				"review-loop",
 				"review-pipeline.review-claude",
@@ -452,7 +474,8 @@ func stagesForFormula(formula string, hasFormula bool) []formulaStage {
 				"review-pipeline.quality-scorecard",
 				"apply-fixes",
 			}},
-			{"ci", "Pre-approval CI", []string{"pre-approval-ci", "repair-ci-failures"}},
+			// repair-ci-failures is the pre-rename id kept for older runs.
+			{"ci", "Pre-approval CI", []string{"pre-approval-ci", "repair-pre-approval-ci-failures", "repair-ci-failures"}},
 			{"approval", "Human approval", []string{"human-approval"}},
 			{"finalize", "Merge-ready", []string{"finalize"}},
 			{"cleanup", "Cleanup", []string{"cleanup-worktree"}},
@@ -541,12 +564,30 @@ func formulaActiveStageIndex(stages []formulaStage, primary []runIssue) int {
 	if !hasActiveStep {
 		return firstOpenStageIndex(stages, primary)
 	}
+	// Retry iterations carry attempt-suffixed step ids
+	// (repair-x-failures.attempt.1); the tables list the authored base ids.
+	activeStepID = stripAttemptSuffix(activeStepID)
 	for idx, s := range stages {
 		if containsString(s.steps, activeStepID) {
 			return idx
 		}
 	}
 	return -1
+}
+
+// attemptSuffixRE matches the .attempt.N suffix runtime retries append to a
+// step id (possibly stacked, e.g. ".attempt.1.attempt.2").
+var attemptSuffixRE = regexp.MustCompile(`(\.attempt\.\d+)+$`)
+
+// stripAttemptSuffix reduces an attempt-suffixed step id to its authored base
+// id. A value that is nothing but the suffix is returned unchanged rather than
+// stripped to the empty string.
+func stripAttemptSuffix(id string) string {
+	stripped := attemptSuffixRE.ReplaceAllString(id, "")
+	if stripped == "" {
+		return id
+	}
+	return stripped
 }
 
 // formulaStageStatus resolves one stage's status relative to the active and
@@ -694,12 +735,13 @@ func byMostRecentThenStage(a, b runIssue) int {
 	return 0
 }
 
-// stepIssues returns the issues whose gc.step_id equals step. Port of TS
+// stepIssues returns the issues whose gc.step_id equals step, treating an
+// attempt-suffixed id (step.attempt.N) as its authored base id. Port of TS
 // stepIssues.
 func stepIssues(issues []runIssue, step string) []runIssue {
 	var out []runIssue
 	for _, i := range issues {
-		if stringValue(i.metadata[beadmeta.StepIDMetadataKey]) == step {
+		if stripAttemptSuffix(stringValue(i.metadata[beadmeta.StepIDMetadataKey])) == step {
 			out = append(out, i)
 		}
 	}

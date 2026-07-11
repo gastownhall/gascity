@@ -210,6 +210,12 @@ func aliasVariants(value, formulaName string) []string {
 	}
 	stripped := stripFormulaPrefix(clean, formulaName)
 	candidates := []string{clean, stripped, stripScopeCheckSuffix(clean), stripScopeCheckSuffix(stripped)}
+	// Retry iterations suffix step ids with .attempt.N; the compiled formula
+	// ranks the authored base id, so each candidate also contributes its
+	// attempt-stripped form (else those groups rank +Inf and sort last).
+	for _, c := range candidates {
+		candidates = append(candidates, stripAttemptSuffix(c))
+	}
 	seen := make(map[string]bool)
 	var out []string
 	for _, candidate := range candidates {
