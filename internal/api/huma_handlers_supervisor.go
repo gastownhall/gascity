@@ -767,10 +767,17 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	mux := sm.buildMultiplexer()
 	var cursors map[string]uint64
 	if cursor == "" {
+		// Head-start (no resume cursor): every city streams from now. Fail
+		// closed on a LatestCursor error rather than let unresolved cities fall
+		// through to cursor 0, which Watch now treats as "replay the entire
+		// retained history" (across archives) — a head-start client must not get
+		// a full-history flood for a city whose head read hiccuped. The client
+		// can reconnect.
 		var err error
 		cursors, err = mux.LatestCursor()
 		if err != nil {
-			log.Printf("api: supervisor events-stream: latest cursor failed: %v", err)
+			log.Printf("api: supervisor events-stream: latest cursor failed, refusing head-start replay: %v", err)
+			return
 		}
 	} else {
 		cursors = events.ParseCursor(cursor)

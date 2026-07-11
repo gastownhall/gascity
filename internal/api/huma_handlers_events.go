@@ -270,12 +270,17 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 	ep := s.state.EventProvider()
 	afterSeq := input.resolveAfterSeq()
 	if strings.TrimSpace(input.LastEventID) == "" && strings.TrimSpace(input.AfterSeq) == "" {
+		// Head-start (no resume cursor): stream from now. Fail closed on a
+		// LatestSeq error rather than fall through to afterSeq=0, which Watch now
+		// treats as "replay the entire retained history" (across archives) — a
+		// head-start client must not get a full-history flood. The client can
+		// reconnect.
 		seq, err := ep.LatestSeq()
 		if err != nil {
-			log.Printf("api: events-stream: latest seq failed: %v", err)
-		} else {
-			afterSeq = seq
+			log.Printf("api: events-stream: latest seq failed, refusing head-start replay: %v", err)
+			return
 		}
+		afterSeq = seq
 	}
 	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {

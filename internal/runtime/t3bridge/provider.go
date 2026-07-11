@@ -1821,9 +1821,13 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
 	_ = cache.Prime(ctx)
 
+	// Fail closed on a LatestSeq error: Watch now treats afterSeq=0 as "replay
+	// the entire retained history" (across archives), so defaulting to 0 here
+	// would flood the bead cache with the whole log. This watcher only needs
+	// events from now on, so skip this poll rather than replay everything.
 	afterSeq, err := recorder.LatestSeq()
 	if err != nil {
-		afterSeq = 0
+		return
 	}
 	watcher, err := recorder.Watch(ctx, afterSeq)
 	if err != nil {

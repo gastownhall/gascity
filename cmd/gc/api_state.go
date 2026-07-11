@@ -392,6 +392,16 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 		return
 	}
 	seq := cs.beadEventStartSeq
+	// Fail closed if the start seq could not be resolved at construction: Watch
+	// now treats afterSeq=0 as "replay the entire retained history" (across
+	// archives), so a seq of 0 from a transient LatestSeq error would flood the
+	// bead caches with the whole log. Re-resolve the head here; only a genuinely
+	// empty log legitimately yields 0.
+	if seq == 0 {
+		if latest, err := ep.LatestSeq(); err == nil {
+			seq = latest
+		}
+	}
 	go func() {
 		for {
 			watcher, err := ep.Watch(ctx, seq)
