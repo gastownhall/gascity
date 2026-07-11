@@ -274,6 +274,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
