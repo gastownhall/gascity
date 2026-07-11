@@ -2517,16 +2517,13 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 // pool slot, and gc restart could not recover because bd is the source of
 // truth (#2085).
 func TestReconcile_InterruptedCloseStateReaped(t *testing.T) {
-	// Covers the uncontroversial terminal codes plus the higher-risk
-	// hold-flavored reasons the pool retire path passes through
-	// (sleep_reason vocabulary) — all of which can only land on a
-	// pool-managed bead at their sole write site, so all must reap.
-	states := []string{
-		"duplicate", "stale-session", "gc_swept", "idle-timeout",
-		"idle", "no-wake-reason", "config-drift", "city-stop",
-		"user-hold", "wait-hold", "rate_limit", "provider-terminal-error",
-	}
-	for _, state := range states {
+	// Every stateCode in interruptedCloseSessionStates must reap: each can only
+	// land on a pool-managed bead at its sole close write site, and all share
+	// the identical guarded-close path. Iterate the production set directly so
+	// a future addition is covered without a parallel list that can silently
+	// drift (Copilot review on #4003: reconfigured, dead-runtime, and
+	// runtime-missing were omitted from the old hand-list).
+	for state := range interruptedCloseSessionStates {
 		t.Run(state, func(t *testing.T) {
 			env := newReconcilerTestEnv()
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
