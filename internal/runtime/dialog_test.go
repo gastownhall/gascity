@@ -437,6 +437,105 @@ func TestAcceptStartupDialogsFromStreamAcceptsMCPTrustDialog(t *testing.T) {
 	}
 }
 
+func TestContainsExternalImportsDialog(t *testing.T) {
+	t.Parallel()
+
+	if !containsExternalImportsDialog(externalImportsDialogFixture()) {
+		t.Error("containsExternalImportsDialog should match the external imports modal")
+	}
+	if containsExternalImportsDialog(mcpTrustDialogFixture()) {
+		t.Error("containsExternalImportsDialog should not match the MCP trust dialog")
+	}
+	if containsExternalImportsDialog("Do you trust the contents of this directory?") {
+		t.Error("containsExternalImportsDialog should not match the workspace trust dialog")
+	}
+	if containsExternalImportsDialog("› Implement {feature}") {
+		t.Error("containsExternalImportsDialog should not match a ready prompt")
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsExternalImportsDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return externalImportsDialogFixture(), nil
+			}
+			return "› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsHandlesTrustThenExternalImportsThenMCP(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			switch len(sent) {
+			case 0:
+				return "Do you trust the contents of this directory?", nil
+			case 1:
+				return externalImportsDialogFixture(), nil
+			case 2:
+				return mcpTrustDialogFixture(), nil
+			default:
+				return "› Implement {feature}", nil
+			}
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter,Enter,Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamAcceptsExternalImportsDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- externalImportsDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
 func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 2)
@@ -867,6 +966,17 @@ func mcpTrustDialogFixture() string {
 		"❯ 1. Use this MCP server\n" +
 		"  2. Use this and all future MCP servers in this project\n" +
 		"  3. Continue without using this MCP server\n" +
+		"Enter to confirm · Esc to cancel"
+}
+
+func externalImportsDialogFixture() string {
+	return "Allow external CLAUDE.md file imports?\n" +
+		"This project's CLAUDE.md imports files outside the current working directory. Never allow this for third-party repositories.\n" +
+		"External imports:\n" +
+		"  /data/projects/gascity/AGENTS.md\n" +
+		"Important: Only use Claude Code with files you trust...\n" +
+		"❯ 1. Yes, allow external imports\n" +
+		"  2. No, disable external imports\n" +
 		"Enter to confirm · Esc to cancel"
 }
 

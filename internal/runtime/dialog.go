@@ -33,10 +33,11 @@ func StartupDialogTimeout() time.Duration {
 //  1. Claude resume selector — requires Down+Enter to resume the full session
 //  2. Codex update dialog ("Update available") — requires Down+Enter to skip
 //  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
-//  4. MCP trust dialog (Claude "New MCP server found in this project") — requires Down+Enter to trust all project MCP servers
-//  5. Codex hook review dialog — requires Down+Enter to trust hooks
-//  6. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
-//  7. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  4. External CLAUDE.md imports dialog (Claude "Allow external CLAUDE.md file imports?") — requires Enter to allow (option 1 pre-selected)
+//  5. MCP trust dialog (Claude "New MCP server found in this project") — requires Down+Enter to trust all project MCP servers
+//  6. Codex hook review dialog — requires Down+Enter to trust hooks
+//  7. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
+//  8. Claude custom API key confirmation — requires Up+Enter to select "Yes"
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
@@ -104,6 +105,17 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptExternalImportsDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("external imports dialog: %w", err)
 	}
 	observed = observed || phaseObserved
 	if !phaseObserved && !observed {
@@ -202,6 +214,12 @@ func AcceptStartupDialogsWithTimeout(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := acceptExternalImportsDialog(ctx, timeout, peek, sendKeys); err != nil {
+		return fmt.Errorf("external imports dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := acceptMCPTrustDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("mcp trust dialog: %w", err)
 	}
@@ -264,6 +282,7 @@ func acceptClaudeResumeDialog(
 		if containsPromptIndicator(content) ||
 			containsCodexUpdateDialog(content) ||
 			containsWorkspaceTrustDialog(content) ||
+			containsExternalImportsDialog(content) ||
 			containsMCPTrustDialog(content) ||
 			containsCodexHookReviewDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
@@ -301,6 +320,7 @@ func acceptClaudeResumeDialogFromStream(
 func containsPostClaudeResumeStartupDialog(content string) bool {
 	return containsCodexUpdateDialog(content) ||
 		containsWorkspaceTrustDialog(content) ||
+		containsExternalImportsDialog(content) ||
 		containsMCPTrustDialog(content) ||
 		containsCodexHookReviewDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
@@ -337,6 +357,7 @@ func acceptCodexUpdateDialog(
 
 		if containsPromptIndicator(content) ||
 			containsWorkspaceTrustDialog(content) ||
+			containsExternalImportsDialog(content) ||
 			containsMCPTrustDialog(content) ||
 			containsCodexHookReviewDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
@@ -373,6 +394,7 @@ func acceptCodexUpdateDialogFromStream(
 
 func containsPostUpdateStartupDialog(content string) bool {
 	return containsWorkspaceTrustDialog(content) ||
+		containsExternalImportsDialog(content) ||
 		containsMCPTrustDialog(content) ||
 		containsCodexHookReviewDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
@@ -413,7 +435,8 @@ func acceptWorkspaceTrustDialog(
 			return nil
 		}
 
-		if containsMCPTrustDialog(content) ||
+		if containsExternalImportsDialog(content) ||
+			containsMCPTrustDialog(content) ||
 			containsCodexHookReviewDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
@@ -449,6 +472,85 @@ func containsWorkspaceTrustDialog(content string) bool {
 }
 
 func containsPostTrustStartupDialog(content string) bool {
+	return containsExternalImportsDialog(content) ||
+		containsMCPTrustDialog(content) ||
+		containsCodexHookReviewDialog(content) ||
+		strings.Contains(content, "Bypass Permissions mode") ||
+		containsCustomAPIKeyDialog(content) ||
+		ContainsRateLimitDialog(content)
+}
+
+// acceptExternalImportsDialog dismisses Claude Code's "Allow external
+// CLAUDE.md file imports?" modal. It appears at startup when the project's
+// CLAUDE.md @-imports a file outside the current working directory (this fork's
+// CLAUDE.md imports ../AGENTS.md). A headless managed agent cannot answer it, so
+// gc accepts the pre-selected option 1, "Yes, allow external imports", with
+// Enter. The modal appears after workspace trust and before MCP server
+// discovery, so this runs after acceptWorkspaceTrustDialog. See Claude Code
+// v2.1.207.
+func acceptExternalImportsDialog(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+
+		if containsExternalImportsDialog(content) {
+			if err := sendKeys("Enter"); err != nil {
+				return err
+			}
+			sleep(ctx, startupDialogAcceptDelay)
+			return nil
+		}
+
+		if containsPromptIndicator(content) {
+			return nil
+		}
+
+		if containsMCPTrustDialog(content) ||
+			containsCodexHookReviewDialog(content) ||
+			strings.Contains(content, "Bypass Permissions mode") ||
+			containsCustomAPIKeyDialog(content) ||
+			ContainsRateLimitDialog(content) {
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func acceptExternalImportsDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsExternalImportsDialog,
+		matchKeys:   []string{"Enter"},
+		matchDelay:  startupDialogAcceptDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostExternalImportsStartupDialog,
+	})
+}
+
+func containsExternalImportsDialog(content string) bool {
+	return strings.Contains(content, "Allow external CLAUDE.md") &&
+		strings.Contains(content, "allow external imports")
+}
+
+func containsPostExternalImportsStartupDialog(content string) bool {
 	return containsMCPTrustDialog(content) ||
 		containsCodexHookReviewDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
