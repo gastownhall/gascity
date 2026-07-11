@@ -434,39 +434,23 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 		return nil, apierr.InvalidRequest.Msg("no mail provider available")
 	}
 
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/mail:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: send at most once per Idempotency-Key. On replay the closure
+	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
+	// fires. The helper guarantees the reservation is released on a send error.
+	msg, err := withIdempotency(s, "/v0/mail", input.IdempotencyKey, input.Body,
+		func() (mail.Message, error) {
+			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
+			telemetry.RecordMailOp(ctx, "send", sendErr)
+			if sendErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(sendErr.Error())
 			}
-			if existing.pending {
-				return nil, apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
-			}
-			// Replay cached typed response (Fix 3l).
-			if msg, ok := replayAs[mail.Message](existing); ok {
-				return &IndexOutput[mail.Message]{
-					Index: s.latestIndex(),
-					Body:  msg,
-				}, nil
-			}
-		}
-	}
-
-	msg, err := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
-	telemetry.RecordMailOp(ctx, "send", err)
+			sent.Rig = input.Body.Rig
+			s.recordMailEvent(events.MailSent, sent.From, sent.ID, input.Body.Rig, &sent)
+			return sent, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, err
 	}
-	msg.Rig = input.Body.Rig
-	s.idem.storeResponse(idemKey, bodyHash, msg)
-	s.recordMailEvent(events.MailSent, msg.From, msg.ID, input.Body.Rig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),

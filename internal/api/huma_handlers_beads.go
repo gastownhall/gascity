@@ -458,63 +458,43 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/beads:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: run the create at most once per Idempotency-Key. The helper
+	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
+	// released on any error, so every fallible step lives in the closure.
+	b, err := withIdempotency(s, "/v0/beads", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			if existing.pending {
-				return nil, apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
+			assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			if err != nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
 			}
-			// Replay cached typed response (Fix 3l).
-			if b, ok := replayAs[beads.Bead](existing); ok {
-				return &IndexOutput[beads.Bead]{
-					Index: s.latestIndex(),
-					Body:  b,
-				}, nil
+			created, err := store.Create(beads.Bead{
+				Title:       input.Body.Title,
+				Type:        input.Body.Type,
+				Priority:    input.Body.Priority,
+				Assignee:    assignee,
+				Description: input.Body.Description,
+				Labels:      input.Body.Labels,
+				ParentID:    input.Body.Parent,
+				Metadata:    input.Body.Metadata,
+				DeferUntil:  input.Body.DeferUntil,
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
 			}
-		}
-	}
-
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		s.idem.unreserve(idemKey)
-		return nil, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
-	}
-	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			// Some stores return a minimal create envelope and require a
+			// follow-up read for the canonical persisted bead state.
+			if persisted, getErr := store.Get(created.ID); getErr == nil {
+				created = persisted
+			}
+			return created, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, apierr.InvalidRequest.Msg(err.Error())
+		return nil, err
 	}
-
-	b, err := store.Create(beads.Bead{
-		Title:       input.Body.Title,
-		Type:        input.Body.Type,
-		Priority:    input.Body.Priority,
-		Assignee:    assignee,
-		Description: input.Body.Description,
-		Labels:      input.Body.Labels,
-		ParentID:    input.Body.Parent,
-		Metadata:    input.Body.Metadata,
-		DeferUntil:  input.Body.DeferUntil,
-	})
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, apierr.Internal.Msg(err.Error())
-	}
-
-	// Some stores return a minimal create envelope and require a follow-up
-	// read for the canonical persisted bead state.
-	if persisted, getErr := store.Get(b.ID); getErr == nil {
-		b = persisted
-	}
-	s.idem.storeResponse(idemKey, bodyHash, b)
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
