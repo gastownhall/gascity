@@ -41,6 +41,15 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
     statement: Upstream bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). gh cleared by v2.94.0 (Go 1.26.4) on base-image rebuild.
+  - id: CVE-2026-39822
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+      - "usr/bin/gh"
+    expired_at: 2026-08-07
+    statement: Go stdlib os.Root symlink CVE disclosed 2026-07; fixed in Go 1.26.5 / 1.25.12. bd, br, dolt (1.26.2) and kubectl pend upstream rebuilds; gh (cli/cli v2.94.0, Go 1.26.4) clears when upstream ships a 1.26.5+ build. gc itself builds with Go 1.26.5 as of this change (no waiver).
   - id: CVE-2026-39823
     paths:
       - "usr/local/bin/bd"
@@ -159,6 +168,11 @@ vulnerabilities:
       - "usr/local/bin/dolt"
     expired_at: 2026-08-07
     statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
+  - id: CVE-2026-39831
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-08-07
+    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
   - id: CVE-2026-39832
     paths:
       - "usr/local/bin/dolt"
@@ -268,6 +282,11 @@ vulnerabilities:
       - "usr/local/bin/gc"
     expired_at: 2026-08-07
     statement: golang.org/x/crypto/ssh CVE; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and gc (indirect x/crypto v0.49.0). Remove once bd rebuilds and gc bumps golang.org/x/crypto >= 0.52.0.
+  - id: CVE-2026-39831
+    paths:
+      - "usr/local/bin/bd"
+    expired_at: 2026-08-07
+    statement: golang.org/x/crypto/ssh CVE disclosed 2026-07; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
   - id: CVE-2026-39832
     paths:
       - "usr/local/bin/bd"
