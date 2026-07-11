@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,6 +104,127 @@ func TestSupervisorHostAllowlistAcceptsLoopbackAndConfiguredHost(t *testing.T) {
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestDashboardSurfacesServedBehindHostAllowlist is the mount-topology guard
+// for the dashboard half of #2723. The allowlist logic itself is pinned by
+// TestIsAllowedSupervisorHost; what this test protects is the wiring — the
+// embedded SPA "/" catch-all and the host-side "/api/" plane must stay INSIDE
+// the host gate that SupervisorMux.Handler() wraps around the whole mux. A
+// future refactor that mounts either surface on a separate listener or ahead
+// of withHostAllowing would reopen DNS rebinding against the dashboard and
+// fail here.
+func TestDashboardSurfacesServedBehindHostAllowlist(t *testing.T) {
+	spa := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("spa-shell"))
+	})
+	plane := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("api-plane"))
+	})
+	handler := newTestSupervisorMux(t, map[string]*fakeState{}).
+		WithStaticHandler(spa).
+		WithAPIPlane(plane).
+		Handler()
+
+	cases := []struct {
+		name     string
+		path     string
+		host     string
+		wantCode int
+		wantBody string
+	}{
+		{"spa loopback ipv4", "/", "127.0.0.1:8080", http.StatusOK, "spa-shell"},
+		{"spa localhost", "/", "localhost:8080", http.StatusOK, "spa-shell"},
+		{"spa ipv6 loopback", "/", "[::1]:8080", http.StatusOK, "spa-shell"},
+		{"spa deep route loopback", "/city/thriva/agents", "127.0.0.1:8080", http.StatusOK, "spa-shell"},
+		{"spa rebinding host rejected", "/", "evil.example:8080", http.StatusMisdirectedRequest, "host_not_allowed"},
+		{"spa localhost-suffix rejected", "/", "localhost.evil.example", http.StatusMisdirectedRequest, "host_not_allowed"},
+		{"plane loopback", "/api/host/cities", "127.0.0.1:8080", http.StatusOK, "api-plane"},
+		{"plane rebinding host rejected", "/api/host/cities", "evil.example:8080", http.StatusMisdirectedRequest, "host_not_allowed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://"+tc.host+tc.path, nil)
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Fatalf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
+			}
+			if tc.wantCode == http.StatusMisdirectedRequest && strings.Contains(rec.Body.String(), "spa-shell") {
+				t.Fatalf("body = %q, SPA content must not leak on a rejected Host", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestSupervisorHostAllowlistRawRequestLine covers the request-line smuggling
+// cases httptest.NewRequest cannot represent, against a real net/http server
+// over raw TCP. Per RFC 9112 an absolute-form request-target overrides the
+// Host header (Go binds r.Host to the URI authority), so a loopback Host
+// header cannot be smuggled past the allowlist alongside an attacker
+// authority; duplicate Host headers are rejected by net/http with 400 before
+// the handler runs.
+func TestSupervisorHostAllowlistRawRequestLine(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	srv := httptest.NewServer(sm.Handler())
+	defer srv.Close()
+
+	cases := []struct {
+		name     string
+		request  string
+		wantCode string
+	}{
+		{
+			"absolute-uri attacker authority beats loopback host header",
+			"GET http://evil.example/v0/cities HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+			"421",
+		},
+		{
+			"absolute-uri loopback authority beats attacker host header",
+			"GET http://127.0.0.1/v0/cities HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+			"200",
+		},
+		{
+			"duplicate host headers loopback first",
+			"GET /v0/cities HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+			"400",
+		},
+		{
+			"duplicate host headers attacker first",
+			"GET /v0/cities HTTP/1.1\r\nHost: evil.example\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+			"400",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close() //nolint:errcheck // test cleanup
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatalf("set deadline: %v", err)
+			}
+			if _, err := conn.Write([]byte(tc.request)); err != nil {
+				t.Fatalf("write request: %v", err)
+			}
+			raw, err := io.ReadAll(conn)
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			statusLine, _, _ := strings.Cut(string(raw), "\r\n")
+			if !strings.Contains(statusLine, " "+tc.wantCode+" ") {
+				t.Fatalf("status line = %q, want code %s; full response:\n%s", statusLine, tc.wantCode, raw)
 			}
 		})
 	}
