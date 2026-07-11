@@ -11,7 +11,9 @@ and `test-double-migration-plan.md` (the categorization). Branch
 | `b0dac0708` | **Pilot** — `session_reconciler_drift_defer_test.go` | 15 → 0 |
 | `47a395447` | **Batch 1** — `session_reconciler_test.go` (24→0, incl. 3 struct-literal), `session_reconciler_drift_resume_test.go`+`session_reconciler_trace_integration_test.go` (7→0) | 31 → 0 |
 | `d5f76a6f1` | plan-doc SeedBead signature fix (red-team nit) | — |
-| `86bc8a587` | **Batch 2** — `session_lifecycle_parallel_test.go` (89→0: 53 SeedBead-on-local + 36 struct-literal), `session_reconcile_test.go` (48→0 via `seedSessionInfo`), `session_wake_test.go` (29→1: `wakeInfo` + 10 SeedBead; 1 adapter deferred) | 166 → 1 (red-team in flight) |
+| `86bc8a587` | **Batch 2** — `session_lifecycle_parallel_test.go` (89→0: 53 SeedBead-on-local + 36 struct-literal), `session_reconcile_test.go` (48→0 via `seedSessionInfo`), `session_wake_test.go` (29→1: `wakeInfo` + 10 SeedBead; 1 adapter deferred) | 166 → 1 |
+| `b3bc66e05` | Batch-2 red-team **APPROVE-with-nits (0 blockers)**; nit fixed (`wakeInfo`→`seedSessionInfo` delegate) | — |
+| in flight | **Batch 3** (base `b3bc66e05`) — build_desired_state (24), telemetry (17)+compute_awake_bridge (14), model_phase0_rare_state (14)+lifecycle_chaos (11) | ~80 sites |
 
 ## KEYSTONE FINDING (adjusts the plan's categorization)
 `MemStore.Create` unconditionally rewrites **ID→gc-N, Status→open, CreatedAt→now**
