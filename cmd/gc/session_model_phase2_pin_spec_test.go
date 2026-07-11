@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // Phase 2 spec coverage from engdocs/design/session-model-unification.md:
@@ -387,7 +388,7 @@ func TestPhase2ReconcileSessionBeads_PinWakesThroughSessionSleepSuppression(t *t
 		namedSessionModeMetadata:     "on_demand",
 		"pin_awake":                  "true",
 	})
-	policy := resolveSessionSleepPolicyInfo(session.InfoFromPersistedBead(sessionBead), env.cfg, env.sp)
+	policy := resolveSessionSleepPolicyInfo(sessiontest.SeedBead(t, sessionBead), env.cfg, env.sp)
 	if !policy.enabled() {
 		t.Fatalf("test policy should be enabled: %+v", policy)
 	}
@@ -433,7 +434,7 @@ func TestPhase2SessionListReason_ShowsWakeEligiblePin(t *testing.T) {
 		SessionName: "test-city--worker",
 	}
 
-	reason := sessionReason(info, map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)}, cfg, nil, nil, nil)
+	reason := sessionReason(info, map[string]session.Info{bead.ID: sessiontest.SeedBead(t, bead)}, cfg, nil, nil, nil)
 	if reason != string(WakePin) {
 		t.Fatalf("sessionReason = %q, want %q", reason, WakePin)
 	}
@@ -469,7 +470,7 @@ func TestPhase2SessionListReason_PinnedHoldStillShowsBlocker(t *testing.T) {
 		SessionName: "test-city--worker",
 	}
 
-	reason := sessionReason(info, map[string]session.Info{bead.ID: session.InfoFromPersistedBead(bead)}, cfg, nil, nil, nil)
+	reason := sessionReason(info, map[string]session.Info{bead.ID: sessiontest.SeedBead(t, bead)}, cfg, nil, nil, nil)
 	if reason != "user-hold" {
 		t.Fatalf("sessionReason = %q, want user-hold", reason)
 	}

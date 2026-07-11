@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // seedSessionBeads populates a Store with the given number of open and
@@ -379,7 +380,7 @@ func TestSessionBeadSnapshotFromReconcileRowsIndexPrecedence(t *testing.T) {
 // then-existing raw slice — every assertion below returned (Info{}, false), silently
 // stranding a Get-projection sweep built on this constructor.
 func TestSessionBeadSnapshotFromInfosTypedLookups(t *testing.T) {
-	seed := session.InfoFromPersistedBead(beads.Bead{
+	seed := sessiontest.SeedBead(t, beads.Bead{
 		ID:     "ga-named-reviewer",
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},

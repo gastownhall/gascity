@@ -9,7 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
@@ -179,7 +179,7 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp:   phase2TemplateParams(t, tc, "Base worker prompt"),
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
@@ -231,7 +231,7 @@ func preparePhase2ResumeRestartStart(t *testing.T, tc phase2ProviderCase, overri
 	tp := phase2TemplateParams(t, tc, "Base worker prompt")
 	tp.Hints.Nudge = ""
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp:   tp,
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {

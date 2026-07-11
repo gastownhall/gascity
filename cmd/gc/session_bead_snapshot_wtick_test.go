@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // wtickSnapshotBead builds an open session bead carrying a session_name and an
@@ -84,11 +85,11 @@ func TestApplyOpenInfoPatchFoldsMarker(t *testing.T) {
 func TestNewSessionBeadSnapshotFromReconcileRows(t *testing.T) {
 	rows := []sessionpkg.ReconcileSession{
 		{
-			Info:    sessionpkg.InfoFromPersistedBead(wtickSnapshotBead("s-1", "worker-1", "")),
+			Info:    sessiontest.SeedBead(t, wtickSnapshotBead("s-1", "worker-1", "")),
 			Circuit: sessionpkg.CircuitState{State: sessionpkg.SessionCircuitStateOpen, ResetGeneration: "4"},
 		},
 		{
-			Info:    sessionpkg.InfoFromPersistedBead(wtickSnapshotBead("s-2", "worker-2", "")),
+			Info:    sessiontest.SeedBead(t, wtickSnapshotBead("s-2", "worker-2", "")),
 			Circuit: sessionpkg.CircuitState{},
 		},
 	}
