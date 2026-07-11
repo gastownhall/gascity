@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
@@ -327,8 +326,12 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	cycle.configRevision = "rev-trace-2"
 	cycle.syncArms(armNow, cfg)
 
+	startInfo, err := sessionFrontDoor(store).Get(startBead.ID)
+	if err != nil {
+		t.Fatalf("load start session info: %v", err)
+	}
 	startCand := startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(startBead),
+		info: startInfo,
 		tp: TemplateParams{
 			TemplateName: "repo/worker",
 			SessionName:  "worker-1",
