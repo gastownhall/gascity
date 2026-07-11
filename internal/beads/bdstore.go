@@ -1100,6 +1100,16 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
+//
+// SEAM (bd conditional-release verb): today this rides raw `bd sql`, which
+// several backends reject — the sqlite backend refuses raw DB access, and
+// embedded dolt takes the releaseIfCurrentViaEmbeddedDoltSQL fallback, both
+// ultimately surfacing ErrConditionalReleaseUnsupported. When bd ships its
+// native issueops CAS release verb, consume it HERE as the first attempt:
+// probe by invoking the verb and fall back to this `bd sql` path when bd
+// reports the command unknown (older pinned bd). Callers already treat
+// ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
+// (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
