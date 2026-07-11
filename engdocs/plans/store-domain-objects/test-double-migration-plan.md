@@ -27,11 +27,12 @@ internal/api 1 · internal/worker 1 (**the sole cross-package caller that blocks
 internal/worker — NOT internal/session white-box, which keeps its existing `seedSessionStore`/
 `sessionBeadFixture` to avoid an import cycle):
 ```go
-func Store(t) (*session.Store, beads.Store)                       // memstore-backed front door + raw store
-func Info(t, s *session.Store, spec session.CreateSpec) session.Info  // create via front door → Info
+func Store(t, seed ...beads.Bead) (*session.Store, *beads.MemStore)   // memstore-backed front door + raw store; seed is VERBATIM
+func Info(t, s *session.Store, spec session.CreateSpec) session.Info  // create via front door → Info (store-assigned id)
 func InfoFromMeta(t, meta map[string]string) session.Info         // throwaway-store one-liner for standalone fixtures
-func SeedBead(t, s, mem, b beads.Bead) session.Info               // raw Create + front-door Get — for fixtures needing
-                                                                  // Status=closed / custom labels / pinned CreatedAt
+func SeedBead(t, b beads.Bead) session.Info                       // VERBATIM seed + front-door Get — for fixtures needing
+                                                                  // Status=closed / custom labels / pinned CreatedAt / specific id
+
 ```
 Plus cmd/gc `reconcilerTestEnv` methods (`sessionInfo(id)`, `createSessionInfo(name,template)`)
 — collapses ~40 store-read sites in the reconciler-env files.
