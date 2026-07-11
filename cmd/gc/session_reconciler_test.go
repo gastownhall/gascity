@@ -2217,20 +2217,22 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 // throttle markers stamped by the diagnostic are read back next tick.
 func newUnknownStateSession(t *testing.T, name, state string) (beads.Store, string) {
 	t.Helper()
-	store := beads.NewMemStore()
-	b, err := store.Create(beads.Bead{
+	// sessiontest-style store double: the bead is seeded VERBATIM (same shape a
+	// store.Create would have produced, with an explicit id), and the raw
+	// MemStore handle is returned for the durability oracles (SetMarker edge).
+	const id = "gc-unknown-1"
+	_, mem := sessiontest.Store(t, beads.Bead{
+		ID:     id,
 		Title:  name,
 		Type:   sessionBeadType,
+		Status: "open",
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": name,
 			"state":        state,
 		},
 	})
-	if err != nil {
-		t.Fatalf("creating session bead: %v", err)
-	}
-	return store, b.ID
+	return mem, id
 }
 
 // unknownStateInfo re-projects the session bead's typed Info through the front
