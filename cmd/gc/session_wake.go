@@ -629,20 +629,20 @@ func advanceSessionDrainsWithSessionsTraced(
 				ds.followUp = true
 			}
 			if trace != nil {
-				outcome := TraceOutcomeSuccess
+				outcome := "success"
 				fields := traceRecordPayload{
 					"reason":          ds.reason,
 					"deferred_signal": true,
 				}
 				if err != nil {
-					outcome = TraceOutcomeFailed
+					outcome = "failed"
 					fields["error"] = err.Error()
 				}
 				fields["template"] = normalizedSessionTemplateInfo(info, cfg)
 				fields["before"] = ""
 				fields["after"] = "1"
 				fields["field"] = "GC_DRAIN_ACK"
-				trace.RecordMutation(TraceSiteMutationRuntimeMeta, TraceReasonUnknown, outcome, "provider_meta", name, "GC_DRAIN_ACK", fields)
+				trace.RecordMutation(TraceSiteMutationRuntimeMeta, TraceReasonUnknown, TraceOutcomeCode(outcome), "provider_meta", name, "GC_DRAIN_ACK", fields)
 			}
 		}
 
