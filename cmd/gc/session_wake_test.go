@@ -809,20 +809,6 @@ func TestCancelSessionDrain_NonCancelableReason(t *testing.T) {
 	}
 }
 
-// infoLookupFromBeadLookup adapts a raw *beads.Bead lookup to the typed Info
-// lookup the drain scan consumes. The drain tests still carry raw beads; the
-// reconciler builds its Info lookup directly from the coherent infoByID
-// snapshot instead.
-func infoLookupFromBeadLookup(sessionLookup func(id string) *beads.Bead) func(id string) (sessionpkg.Info, bool) {
-	return func(id string) (sessionpkg.Info, bool) {
-		b := sessionLookup(id)
-		if b == nil {
-			return sessionpkg.Info{}, false
-		}
-		return sessionpkg.InfoFromPersistedBead(*b), true
-	}
-}
-
 func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -851,10 +837,10 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{}, cfg, clk, nil)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Drain should be cleaned up.
 	if dt.get(b.ID) != nil {
@@ -905,10 +891,10 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{}, cfg, clk, nil)
+	}, cfg, map[string]int{}, nil, nil, clk)
 
 	// Should have force-stopped.
 	if sp.IsRunning("test-session") {
@@ -952,12 +938,10 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	// A desired pool slot still has WakeConfig, which should cancel the drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{
-		b.ID: {Reasons: []WakeReason{WakeConfig}},
-	}, cfg, clk, nil)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Drain should be canceled — wake reasons reappeared.
 	if dt.get(b.ID) != nil {
@@ -1009,12 +993,10 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 
 	// Simulate next tick: wake reasons reappear (store recovered) → cancel drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{
-		b.ID: {Reasons: []WakeReason{WakeConfig}},
-	}, cfg, clk, nil)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Orphaned drains are non-cancelable because the session is leaving the
 	// desired set. The drain survives and receives its deferred signal.
@@ -1077,14 +1059,15 @@ func TestAdvanceSessionDrains_OrphanedDrainCanceledForAssignedWork(t *testing.T)
 		generation: 3,
 		ackSet:     true,
 	})
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessions(
 		dt,
 		sp,
 		store,
-		infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got
-		}),
+		},
+		[]beads.Bead{b},
 		map[string]wakeEvaluation{
 			b.ID: {
 				Reasons: []WakeReason{WakeWork},
@@ -1092,8 +1075,10 @@ func TestAdvanceSessionDrains_OrphanedDrainCanceledForAssignedWork(t *testing.T)
 			},
 		},
 		&config.City{Agents: []config.Agent{{Name: "worker"}}},
-		clk,
 		nil,
+		nil,
+		nil,
+		clk,
 	)
 
 	if ds := dt.get(b.ID); ds != nil {
@@ -1149,14 +1134,15 @@ func TestAdvanceSessionDrains_NoWakeDrainCanceledForAssignedWork(t *testing.T) {
 		generation: 3,
 		ackSet:     true,
 	})
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessions(
 		dt,
 		sp,
 		store,
-		infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got
-		}),
+		},
+		[]beads.Bead{b},
 		map[string]wakeEvaluation{
 			b.ID: {
 				Reasons: []WakeReason{WakeWork},
@@ -1164,8 +1150,10 @@ func TestAdvanceSessionDrains_NoWakeDrainCanceledForAssignedWork(t *testing.T) {
 			},
 		},
 		&config.City{Agents: []config.Agent{{Name: "worker"}}},
-		clk,
 		nil,
+		nil,
+		nil,
+		clk,
 	)
 
 	if ds := dt.get(b.ID); ds != nil {
@@ -1241,12 +1229,10 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 
 	// Simulate next tick: wake reasons reappear → cancel drain before interrupt.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{
-		b.ID: {Reasons: []WakeReason{WakeConfig}},
-	}, cfg, clk, nil)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Drain should be canceled — no-wake-reason is cancelable.
 	if dt.get(b.ID) != nil {
@@ -1338,10 +1324,10 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{}, cfg, clk, nil)
+	}, cfg, map[string]int{}, nil, nil, clk)
 
 	// Drain should be canceled (stale token), session still running.
 	if dt.get(b.ID) != nil {
@@ -1497,12 +1483,10 @@ func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 		generation: 3,
 	})
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{
-		b.ID: {Reasons: []WakeReason{WakeWait}},
-	}, &config.City{}, clk, nil)
+	}, &config.City{}, map[string]int{}, nil, map[string]bool{b.ID: true}, clk)
 
 	if dt.get(b.ID) != nil {
 		t.Fatal("drain should be canceled when a wait becomes ready mid-drain")
@@ -1541,10 +1525,10 @@ func TestAdvanceSessionDrains_ClearsIdleProbeOnCompletion(t *testing.T) {
 		t.Fatal("expected idle probe to start")
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
+	}, &config.City{}, map[string]int{}, nil, nil, clk)
 
 	if dt.get(b.ID) != nil {
 		t.Fatal("drain should be removed after completion")
