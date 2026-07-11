@@ -2,7 +2,7 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { reportClientError } from '../lib/clientErrorReporting';
-import { useGcEventRefresh } from './useGcEvents';
+import { useGcEventFeed, useGcEventRefresh } from './useGcEvents';
 
 const eventSources: FakeEventSource[] = [];
 const mockReportClientError = reportClientError as Mock;
@@ -308,6 +308,101 @@ describe('useGcEventRefresh', () => {
       });
       expect(onMatch).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+describe('useGcEventFeed', () => {
+  beforeEach(() => {
+    eventSources.length = 0;
+    vi.stubGlobal('EventSource', FakeEventSource);
+    mockReportClientError.mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('delivers the full parsed envelope for a matching event', () => {
+    const onEvent = vi.fn();
+    const { result } = renderHook(() => useGcEventFeed([GC_EVENT_PREFIX.bead], onEvent));
+
+    act(() => eventSources[0]?.open());
+    expect(result.current).toBe('open');
+
+    const envelope = {
+      type: 'bead.updated',
+      run_id: 'run-1',
+      run: { run_id: 'run-1' },
+      payload: { status: 'ready' },
+    };
+    act(() => eventSources[0]?.emitNamed('event', JSON.stringify(envelope)));
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledWith(envelope);
+  });
+
+  it('does not deliver events whose type falls outside the requested prefixes', () => {
+    const onEvent = vi.fn();
+    const { result } = renderHook(() => useGcEventFeed([GC_EVENT_PREFIX.bead], onEvent));
+
+    act(() => eventSources[0]?.open());
+    act(() => eventSources[0]?.emitNamed('event', JSON.stringify({ type: 'session.started' })));
+
+    expect(onEvent).not.toHaveBeenCalled();
+    // A parsed-but-unmatched event still proves the stream is live.
+    expect(result.current).toBe('open');
+  });
+
+  it('delivers every event in a rapid burst without coalescing', () => {
+    const onEvent = vi.fn();
+    renderHook(() => useGcEventFeed([GC_EVENT_PREFIX.bead], onEvent));
+    act(() => eventSources[0]?.open());
+
+    act(() => {
+      for (let i = 0; i < 5; i += 1) {
+        eventSources[0]?.emitNamed('event', JSON.stringify({ type: 'bead.updated', run_id: `r${i}` }));
+      }
+    });
+
+    expect(onEvent).toHaveBeenCalledTimes(5);
+    expect(onEvent).toHaveBeenNthCalledWith(1, { type: 'bead.updated', run_id: 'r0' });
+    expect(onEvent).toHaveBeenNthCalledWith(5, { type: 'bead.updated', run_id: 'r4' });
+  });
+
+  it('surfaces a malformed frame as degraded without crashing, delivering, or warning', () => {
+    const onEvent = vi.fn();
+    const { result } = renderHook(() => useGcEventFeed([GC_EVENT_PREFIX.bead], onEvent));
+
+    act(() => eventSources[0]?.open());
+    act(() => eventSources[0]?.emitNamed('event', 'not json'));
+
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(result.current).toBe('degraded');
+    expect(mockReportClientError).toHaveBeenCalledWith({
+      component: 'gc-events',
+      operation: 'parse event',
+      message: 'Malformed gc event payload: invalid JSON.',
+    });
+  });
+
+  it('does not reconnect the stream when only the onEvent callback identity changes', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender } = renderHook(({ cb }) => useGcEventFeed([GC_EVENT_PREFIX.bead], cb), {
+      initialProps: { cb: first },
+    });
+    act(() => eventSources[0]?.open());
+    expect(eventSources).toHaveLength(1);
+
+    rerender({ cb: second });
+    // Same single EventSource — no teardown/reconnect from the callback swap.
+    expect(eventSources).toHaveLength(1);
+
+    act(() => eventSources[0]?.emitNamed('event', JSON.stringify({ type: 'bead.updated' })));
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });
 

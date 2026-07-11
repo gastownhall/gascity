@@ -358,6 +358,8 @@ export function buildTestCitySupervisorData(nowMs: number = Date.now()): TestCit
       open: countByStatus(beads, 'open'),
       ready: countByStatus(beads, 'open'),
       in_progress: countByStatus(beads, 'in_progress'),
+      hooked: 0,
+      review: 0,
     },
   };
 

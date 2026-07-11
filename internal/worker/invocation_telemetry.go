@@ -95,7 +95,15 @@ func defaultPricingRegistry() *pricing.Registry {
 // scope (decided in ga-tkvb31, not a pending gap): runtime-only sessions
 // have no transcript adapter, no session bead for the cursor, and no agent
 // identity, and will not gain bead-backed identity just for telemetry.
-func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
+//
+// event, when non-nil, is the wrapping worker.operation event: the same
+// extracted invocation batch is aggregated onto its 1a token/model/cost fields
+// (via stampOperationEventUsage) before finish(), so the operation event and
+// the usage facts read from one extraction and agree. On any early return —
+// no session, unsupported family, no transcript, no new usage — the event is
+// left unstamped, and its 1a fields stay zero (omitted on the wire) per the
+// best-effort contract.
+func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context, event *operationEvent) {
 	// Record the transcript-session correlation sidecar on the same
 	// post-successful-turn beat as the usage telemetry below. Deferred at the top
 	// so it runs on every return path — this function has several early returns
@@ -159,6 +167,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	// per loop because the gate is per-handle.
 	emitFacts := h.usageFactRecordingEnabled()
 	now := time.Now().UTC()
+	var summary operationUsageSummary
 	for _, u := range pending {
 		labels := telemetry.InvocationLabels{
 			AgentName: agentName,
@@ -180,7 +189,26 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		if emitFacts {
 			h.recordModelUsageFact(modelUsageFact(u, b, id, info.SessionName, providerFamily, cost, priced, now))
 		}
+		// Aggregate the same batch onto the wrapping operation event. Tokens sum
+		// across the batch; the newest non-empty model wins; cost sums only priced
+		// invocations, and an unpriced token-bearing invocation flags the whole
+		// aggregate unauthoritative.
+		summary.promptTokens += u.InputTokens
+		summary.completionTokens += u.OutputTokens
+		summary.cacheReadTokens += u.CacheReadTokens
+		summary.cacheCreationTokens += u.CacheCreationTokens
+		if priced {
+			summary.costUSD += cost
+		} else {
+			summary.unpriced = true
+		}
+		if m := strings.TrimSpace(u.Model); m != "" {
+			summary.model = m
+		}
 	}
+	// pending is non-empty here (an earlier return covers the empty case), so at
+	// least one token-bearing invocation was observed: stamp the event.
+	stampOperationEventUsage(event, summary)
 	// Best-effort: a failed cursor write means the next prompt op may
 	// re-record these entries, which the residual-race note above covers.
 	// Debug-logged so a persistently failing store is diagnosable.

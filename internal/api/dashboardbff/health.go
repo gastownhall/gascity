@@ -30,8 +30,9 @@ type adminHealth struct {
 }
 
 // hostHealth is the machine-level state, matching the host block of
-// shared/src/dashboard-health.ts SystemHealth. Values are sourced from /proc;
-// any unreadable metric degrades to 0 rather than failing the request.
+// shared/src/dashboard-health.ts SystemHealth. Values come from the
+// platform-specific readPlatformMetrics seam (procfs on Linux, sysctl on
+// Darwin); any unreadable metric degrades to 0 rather than failing the request.
 type hostHealth struct {
 	LoadAvg1      float64 `json:"load_avg_1"`
 	LoadAvg5      float64 `json:"load_avg_5"`
@@ -92,122 +93,48 @@ func (p *Plane) registerHealth() {
 	})
 }
 
-// currentSystemHealth assembles the admin and host health blocks. Host metrics
-// come from /proc; an unreadable metric degrades to 0 so the endpoint never
-// errors on a platform without procfs.
+// platformMetrics holds the host- and process-level values that can only be
+// read through platform-specific system interfaces (procfs on Linux, sysctl and
+// getrusage on Darwin). readPlatformMetrics has one implementation per platform
+// (health_linux.go, health_darwin.go, health_other.go); each leaves a value at
+// its zero when the underlying source is unavailable, so the seam never fails.
+type platformMetrics struct {
+	LoadAvg1      float64
+	LoadAvg5      float64
+	LoadAvg15     float64
+	TotalMemBytes int64
+	FreeMemBytes  int64
+	UptimeSec     int64
+	RSSBytes      int64
+}
+
+// currentSystemHealth assembles the admin and host health blocks. The host and
+// process metrics come from the readPlatformMetrics seam; an unreadable metric
+// degrades to 0 so the endpoint never errors on a platform without a reader.
 func currentSystemHealth() systemHealth {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
-	l1, l5, l15 := readLoadAvg()
-	total, free := readMemInfo()
+	pm := readPlatformMetrics()
 
 	return systemHealth{
 		Admin: adminHealth{
 			Pid:           os.Getpid(),
 			UptimeSec:     int64(time.Since(processStart).Round(time.Second).Seconds()),
-			RssBytes:      readRSSBytes(),
+			RssBytes:      pm.RSSBytes,
 			HeapUsedBytes: int64(mem.HeapAlloc),
 			NodeVersion:   runtime.Version(),
 		},
 		Host: hostHealth{
-			LoadAvg1:      l1,
-			LoadAvg5:      l5,
-			LoadAvg15:     l15,
-			TotalMemBytes: total,
-			FreeMemBytes:  free,
+			LoadAvg1:      pm.LoadAvg1,
+			LoadAvg5:      pm.LoadAvg5,
+			LoadAvg15:     pm.LoadAvg15,
+			TotalMemBytes: pm.TotalMemBytes,
+			FreeMemBytes:  pm.FreeMemBytes,
 			CPUCount:      runtime.NumCPU(),
-			UptimeSec:     readHostUptime(),
+			UptimeSec:     pm.UptimeSec,
 		},
 	}
-}
-
-// readRSSBytes reads resident set size from /proc/self/statm (field 2, in
-// pages) and converts to bytes. Returns 0 when procfs is unavailable.
-func readRSSBytes() int64 {
-	data, err := os.ReadFile("/proc/self/statm")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 2 {
-		return 0
-	}
-	pages, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return pages * int64(os.Getpagesize())
-}
-
-// readLoadAvg reads the 1/5/15-minute load averages from /proc/loadavg.
-// Missing values degrade to 0.
-func readLoadAvg() (float64, float64, float64) {
-	data, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		return 0, 0, 0
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 3 {
-		return 0, 0, 0
-	}
-	return parseFloat(fields[0]), parseFloat(fields[1]), parseFloat(fields[2])
-}
-
-// readMemInfo reads MemTotal and MemAvailable from /proc/meminfo and converts
-// the kB values to bytes (×1024). MemAvailable maps to free_mem_bytes — it is
-// the kernel's best estimate of allocatable memory, the closest analog to
-// Node's os.freemem(). Missing values degrade to 0.
-func readMemInfo() (total int64, free int64) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, 0
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		switch {
-		case strings.HasPrefix(line, "MemTotal:"):
-			total = parseMemInfoKB(line) * 1024
-		case strings.HasPrefix(line, "MemAvailable:"):
-			free = parseMemInfoKB(line) * 1024
-		}
-	}
-	return total, free
-}
-
-// parseMemInfoKB extracts the kB value from a /proc/meminfo line like
-// "MemTotal:       16384000 kB". Returns 0 on any parse failure.
-func parseMemInfoKB(line string) int64 {
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return 0
-	}
-	v, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
-// readHostUptime reads system uptime (seconds, rounded) from /proc/uptime.
-// Returns 0 when procfs is unavailable.
-func readHostUptime() int64 {
-	data, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 1 {
-		return 0
-	}
-	return int64(parseFloat(fields[0]) + 0.5)
-}
-
-func parseFloat(s string) float64 {
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0
-	}
-	return v
 }
 
 // localToolsCache memoizes one Plane's LocalToolVersions snapshot behind a

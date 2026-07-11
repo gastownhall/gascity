@@ -89,6 +89,46 @@ func TestHandleStatusEnriched(t *testing.T) {
 	}
 }
 
+func TestHandleStatusCountsHookedAndReviewWork(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	for _, status := range []string{"open", "hooked", "hooked", "review"} {
+		created, err := store.Create(beads.Bead{Type: "task", Title: status + " work", Status: status})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", status, err)
+		}
+		if status != "open" {
+			// MemStore creates as open; move to the target status explicitly.
+			s := status
+			if err := store.Update(created.ID, beads.UpdateOpts{Status: &s}); err != nil {
+				t.Fatalf("Update(%s): %v", status, err)
+			}
+		}
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Work.Hooked != 2 {
+		t.Errorf("Work.Hooked = %d, want 2", resp.Work.Hooked)
+	}
+	if resp.Work.Review != 1 {
+		t.Errorf("Work.Review = %d, want 1", resp.Work.Review)
+	}
+	if resp.Work.Open != 1 {
+		t.Errorf("Work.Open = %d, want 1 (hooked/review not double-counted as open)", resp.Work.Open)
+	}
+}
+
 func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 	state := newFakeState(t)
 	store := beads.NewMemStore()

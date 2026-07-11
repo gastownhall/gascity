@@ -2,10 +2,42 @@ package dashboardbff
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestCurrentSystemHealthHostMetrics verifies the platform host/process metric
+// seam returns live values on the host it runs on, instead of the procfs-only
+// zeros the pre-split readers produced off Linux. It runs on Linux and Darwin,
+// the two platforms with a real readPlatformMetrics implementation; the
+// zero-fallback build (health_other.go) has no live source to assert against.
+func TestCurrentSystemHealthHostMetrics(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("no live host-metric reader on %s", runtime.GOOS)
+	}
+	h := currentSystemHealth()
+
+	if h.Host.TotalMemBytes <= 0 {
+		t.Errorf("Host.TotalMemBytes = %d, want > 0", h.Host.TotalMemBytes)
+	}
+	if h.Host.UptimeSec <= 0 {
+		t.Errorf("Host.UptimeSec = %d, want > 0", h.Host.UptimeSec)
+	}
+	if h.Host.LoadAvg1 < 0 {
+		t.Errorf("Host.LoadAvg1 = %v, want >= 0", h.Host.LoadAvg1)
+	}
+	if h.Host.FreeMemBytes < 0 {
+		t.Errorf("Host.FreeMemBytes = %d, want >= 0", h.Host.FreeMemBytes)
+	}
+	if h.Host.CPUCount <= 0 {
+		t.Errorf("Host.CPUCount = %d, want > 0", h.Host.CPUCount)
+	}
+	if h.Admin.RssBytes <= 0 {
+		t.Errorf("Admin.RssBytes = %d, want > 0", h.Admin.RssBytes)
+	}
+}
 
 // TestLocalToolVersionsMemoized verifies the MEDIUM finding fix: repeated calls
 // within the TTL reuse the cached snapshot instead of re-probing. The cache is

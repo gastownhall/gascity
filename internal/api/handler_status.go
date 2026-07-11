@@ -45,6 +45,32 @@ var statusResponseTTLFloor = 3 * time.Second
 // work, by the status endpoint's work-count buckets.
 var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
 
+// statusWorkBuckets is the single source of truth for which bead statuses
+// the status endpoint counts. Every count path — the Counter fast path, the
+// List-scan fallback, and the per-rig merge — iterates this list through
+// workBucketPtr, so adding a bucket is one entry here plus one case there;
+// TestStatusWorkBucketsCoverEveryCountField fails if a StatusWorkCounts
+// field is ever left unmapped.
+var statusWorkBuckets = []string{"open", "ready", "in_progress", "hooked", "review"}
+
+// workBucketPtr resolves a countable bead status to its StatusWorkCounts
+// field. Returns nil for statuses the endpoint does not bucket.
+func workBucketPtr(wc *workCounts, status string) *int {
+	switch status {
+	case "open":
+		return &wc.Open
+	case "ready":
+		return &wc.Ready
+	case "in_progress":
+		return &wc.InProgress
+	case "hooked":
+		return &wc.Hooked
+	case "review":
+		return &wc.Review
+	}
+	return nil
+}
+
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
@@ -563,9 +589,9 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 	var wc workCounts
 	var errs []string
 	for _, r := range results {
-		wc.Open += r.wc.Open
-		wc.Ready += r.wc.Ready
-		wc.InProgress += r.wc.InProgress
+		for _, status := range statusWorkBuckets {
+			*workBucketPtr(&wc, status) += *workBucketPtr(&r.wc, status)
+		}
 		errs = append(errs, r.errs...)
 	}
 	return wc, errs
@@ -598,13 +624,8 @@ func statusStoreWorkCounts(ctx context.Context, state State, rigName string, sto
 		if slices.Contains(statusWorkExcludedTypes, b.Type) {
 			continue
 		}
-		switch b.Status {
-		case "in_progress":
-			result.wc.InProgress++
-		case "ready":
-			result.wc.Ready++
-		case "open":
-			result.wc.Open++
+		if p := workBucketPtr(&result.wc, b.Status); p != nil {
+			*p++
 		}
 	}
 	return result
@@ -620,19 +641,12 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
 	var wc workCounts
-	for _, bucket := range []struct {
-		status string
-		dst    *int
-	}{
-		{"open", &wc.Open},
-		{"ready", &wc.Ready},
-		{"in_progress", &wc.InProgress},
-	} {
-		n, err := counter.Count(ctx, beads.ListQuery{Status: bucket.status, AllowScan: true}, statusWorkExcludedTypes...)
+	for _, status := range statusWorkBuckets {
+		n, err := counter.Count(ctx, beads.ListQuery{Status: status, AllowScan: true}, statusWorkExcludedTypes...)
 		if err != nil {
 			return workCounts{}, err
 		}
-		*bucket.dst = n
+		*workBucketPtr(&wc, status) = n
 	}
 	return wc, nil
 }

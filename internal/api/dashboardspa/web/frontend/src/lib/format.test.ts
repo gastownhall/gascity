@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatDate, formatDateTime, formatHumanSize } from './format';
+import { formatBytesSI, formatDate, formatDateTime, formatHumanSize } from './format';
 
 describe('formatDate', () => {
   it('formats local dates as YYYY-MM-DD', () => {
@@ -28,5 +28,24 @@ describe('formatHumanSize', () => {
   it('formats character counts with the same thresholds', () => {
     expect(formatHumanSize(32, 'chars')).toBe('32 chars');
     expect(formatHumanSize(1024, 'chars')).toBe('1.0 KB');
+  });
+});
+
+describe('formatBytesSI', () => {
+  it('formats bytes through GB with decimal (SI, 1000-based) thresholds', () => {
+    expect(formatBytesSI(512)).toBe('512 B');
+    expect(formatBytesSI(999)).toBe('999 B');
+    expect(formatBytesSI(1_000)).toBe('1 KB');
+    expect(formatBytesSI(1_500)).toBe('2 KB');
+    expect(formatBytesSI(1_000_000)).toBe('1 MB');
+    expect(formatBytesSI(48_000_000)).toBe('48 MB');
+    expect(formatBytesSI(1_000_000_000)).toBe('1.0 GB');
+    expect(formatBytesSI(2_200_000_000)).toBe('2.2 GB');
+  });
+
+  it('uses SI (1000) boundaries, distinct from formatHumanSize binary (1024)', () => {
+    // 1_048_576 is exactly 1 binary MiB but 1.05 SI MB.
+    expect(formatBytesSI(1_048_576)).toBe('1 MB');
+    expect(formatHumanSize(1_048_576)).toBe('1.0 MB');
   });
 });

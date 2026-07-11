@@ -29,19 +29,19 @@ import (
 // receiving populated fields without the corresponding announcement.
 func TestWorkerOperationPayload1aWiringStatusPin(t *testing.T) {
 	wiredAlready := map[string]string{
-		"agent_name": "session.Info.AgentName with Alias fallback via populateOperationEventIdentity (PR #1272)",
+		"agent_name":            "session.Info.AgentName with Alias fallback via populateOperationEventIdentity (PR #1272)",
+		"model":                 "worker.recordInvocationTelemetry aggregates sessionlog.ExtractTailUsage (via SessionLogAdapter.TailUsage) and stamps the newest model onto the event at Message/Nudge finish (stampOperationEventUsage)",
+		"prompt_tokens":         "worker sessionlog tail extraction (SessionLogAdapter.TailUsage → sessionlog.ExtractTailUsage) summed onto the event at operation finish; shares the batch with the model usage facts",
+		"completion_tokens":     "worker sessionlog tail extraction summed onto the event at operation finish (same batch as the usage facts)",
+		"cache_read_tokens":     "worker sessionlog tail extraction summed onto the event at operation finish (same batch as the usage facts)",
+		"cache_creation_tokens": "worker sessionlog tail extraction summed onto the event at operation finish (same batch as the usage facts)",
+		"cost_usd_estimate":     "pricing.Registry.Estimate over the extracted tokens at operation finish (#1255); mirrors the usage-fact cost semantics — unknown (family,model) leaves cost 0 and sets unpriced",
 	}
 	notWiredYet := map[string]string{
-		"model":                 "follow-up: tail sessionlog at finish() to extract msg.Model",
-		"prompt_version":        "follow-up #1256: propagate promptmeta.FrontMatter.Version through session metadata",
-		"prompt_sha":            "follow-up #1256: propagate promptmeta.SHA through session metadata",
-		"bead_id":               "follow-up: thread operation context through worker.beginOperationEvent",
-		"prompt_tokens":         "follow-up: wire sessionlog/tail.go extraction to operation finish",
-		"completion_tokens":     "follow-up: wire sessionlog/tail.go extraction to operation finish",
-		"cache_read_tokens":     "follow-up: wire sessionlog/tail.go extraction to operation finish",
-		"cache_creation_tokens": "follow-up: wire sessionlog/tail.go extraction to operation finish",
-		"latency_ms":            "follow-up: no LLM-invocation latency source exists yet",
-		"cost_usd_estimate":     "follow-up #1255: pricing.Registry consumer wiring at operation finish",
+		"prompt_version": "follow-up #1256: propagate promptmeta.FrontMatter.Version through session metadata",
+		"prompt_sha":     "follow-up #1256: propagate promptmeta.SHA through session metadata",
+		"bead_id":        "follow-up: thread operation context through worker.beginOperationEvent",
+		"latency_ms":     "follow-up: no LLM-invocation latency source exists yet",
 	}
 
 	// 1. Every wired field must show up populated when its source is
@@ -154,9 +154,14 @@ func nonZeroPayloadForField(field string) WorkerOperationEventPayload {
 // downstream consumer reads from /v0/events/stream.
 func captureWorkerOperationEventToday(t *testing.T) string {
 	t.Helper()
-	// Today's wiring populates AgentName, nothing else from 1a. Mirror
-	// that explicitly so we don't accidentally rely on the worker
-	// package.
+	// Model, the token counts, and cost_usd_estimate are now wired from the
+	// worker sessionlog-tail extraction at operation finish, but they are
+	// best-effort: an operation with no extractable transcript usage (as here)
+	// carries only AgentName from 1a. The remaining notWiredYet fields
+	// (prompt_version, prompt_sha, bead_id, latency_ms) have no producer at
+	// all. Mirror a no-usage event explicitly so we don't rely on the worker
+	// package; the token/model/cost absence here is the best-effort contract,
+	// not a wiring gap.
 	payload := WorkerOperationEventPayload{
 		OpID:        "test-op",
 		Operation:   "message",

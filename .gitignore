@@ -64,3 +64,6 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Node tooling artifacts (web workspaces manage their own installs)
+node_modules/

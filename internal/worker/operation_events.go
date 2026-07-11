@@ -128,7 +128,12 @@ func (h *SessionHandle) beginOperationEvent(ctx context.Context, op workerOperat
 	return newOperationEvent(ctx, h, op, h.providerLabel(), h.session.Transport, h.session.Template)
 }
 
-func (e *operationEvent) finish(err error) {
+// sealTiming freezes the operation's FinishedAt/DurationMs/Result the
+// moment the wrapped work completes. DurationMs times the operation only:
+// call sites that stamp best-effort telemetry after completion (Message,
+// Nudge) seal first, stamp, then emit, so telemetry I/O never inflates the
+// duration the dashboard renders.
+func (e *operationEvent) sealTiming(err error) {
 	if e == nil || e.target == nil || e.suppressed {
 		return
 	}
@@ -140,8 +145,22 @@ func (e *operationEvent) finish(err error) {
 	} else {
 		e.payload.Result = operationResultSucceeded
 	}
+}
+
+// emit records the sealed event.
+func (e *operationEvent) emit() {
+	if e == nil || e.target == nil || e.suppressed {
+		return
+	}
 	e.target.populateOperationEventIdentity(&e.payload)
 	e.target.recordWorkerOperationEvent(e.payload)
+}
+
+// finish seals and emits in one call — the contract for operations with no
+// post-completion stamping.
+func (e *operationEvent) finish(err error) {
+	e.sealTiming(err)
+	e.emit()
 }
 
 func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPayload) {
@@ -276,6 +295,43 @@ func (h *SessionHandle) operationEventFallbackSessionName() string {
 func boolPointer(v bool) *bool {
 	b := v
 	return &b
+}
+
+// operationUsageSummary aggregates the pending invocation batch that
+// recordInvocationTelemetry recorded, so the wrapping worker.operation event
+// carries the same tokens, model, and cost the usage facts do — the two
+// surfaces read from one extraction and must agree. Aggregation is additive
+// across the batch (a single prompt-op finish usually sees one invocation).
+// Model takes the newest non-empty model observed (the batch is in file
+// order). Cost sums only priced invocations; Unpriced is true when any
+// token-bearing invocation had no resolved price, so a partial-price total is
+// never read as authoritative.
+type operationUsageSummary struct {
+	model               string
+	promptTokens        int
+	completionTokens    int
+	cacheReadTokens     int
+	cacheCreationTokens int
+	costUSD             float64
+	unpriced            bool
+}
+
+// stampOperationEventUsage copies the extracted invocation usage onto the
+// operation event payload. It is a no-op for a nil or suppressed event (the
+// event won't emit), and it always sets Unpriced because it is only called
+// once at least one token-bearing invocation was observed — mirroring the 1a
+// contract that a set field means "measured", an absent field means "no data".
+func stampOperationEventUsage(event *operationEvent, s operationUsageSummary) {
+	if event == nil || event.suppressed || event.target == nil {
+		return
+	}
+	event.payload.Model = s.model
+	event.payload.PromptTokens = s.promptTokens
+	event.payload.CompletionTokens = s.completionTokens
+	event.payload.CacheReadTokens = s.cacheReadTokens
+	event.payload.CacheCreationTokens = s.cacheCreationTokens
+	event.payload.CostUSDEstimate = s.costUSD
+	event.payload.Unpriced = boolPointer(s.unpriced)
 }
 
 func recordOperationEvent(recorder events.Recorder, payload operationEventPayload) {

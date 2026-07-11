@@ -3429,6 +3429,10 @@ export type StatusStoreHealth = {
 
 export type StatusWorkCounts = {
     /**
+     * Number of work items hooked to an agent but not yet started.
+     */
+    hooked: number;
+    /**
      * Number of in-progress work items.
      */
     in_progress: number;
@@ -3440,6 +3444,10 @@ export type StatusWorkCounts = {
      * Number of ready work items.
      */
     ready: number;
+    /**
+     * Number of work items in review.
+     */
+    review: number;
 };
 
 export type StoreDiskCriticalPayload = {
@@ -6606,6 +6614,103 @@ export type UnboundEventPayload = {
     session_id: string;
 };
 
+export type UsageBody = {
+    /**
+     * Usage in the trailing recent window.
+     */
+    recent: UsageTotals;
+    /**
+     * Recent-window model usage per session, largest token volume first.
+     */
+    recent_by_session?: Array<UsageSessionRecent> | null;
+    /**
+     * Length of the recent window in seconds.
+     */
+    recent_window_secs: number;
+    /**
+     * Usage since local midnight on the supervisor host.
+     */
+    today: UsageTotals;
+    /**
+     * All recorded usage for this city.
+     */
+    totals: UsageTotals;
+    /**
+     * Malformed usage records skipped during the read.
+     */
+    warnings?: Array<string> | null;
+};
+
+export type UsageSessionRecent = {
+    /**
+     * Prompt-cache creation tokens in the window.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens in the window.
+     */
+    cache_read_tokens: number;
+    /**
+     * List-price estimate for the window; decision-support only.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens in the window.
+     */
+    input_tokens: number;
+    /**
+     * Completion tokens in the window.
+     */
+    output_tokens: number;
+    /**
+     * Session (worker) name the facts were attributed to.
+     */
+    session: string;
+    /**
+     * Session bead id, when attributed.
+     */
+    session_id?: string;
+};
+
+export type UsageTotals = {
+    /**
+     * Prompt-cache creation tokens.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens.
+     */
+    cache_read_tokens: number;
+    /**
+     * Compute (wall-clock) facts in the window.
+     */
+    compute_facts: number;
+    /**
+     * List-price estimate; decision-support only, never an authoritative charge.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens.
+     */
+    input_tokens: number;
+    /**
+     * Model facts (LLM invocations) in the window.
+     */
+    invocations: number;
+    /**
+     * Completion tokens.
+     */
+    output_tokens: number;
+    /**
+     * Facts with unknown pricing — cost not measured, not free.
+     */
+    unpriced: number;
+    /**
+     * Compute wall-clock seconds.
+     */
+    wall_seconds: number;
+};
+
 export type WebhookReceivedPayload = {
     /**
      * Raw request body size in bytes (never the body itself).
@@ -6702,19 +6807,19 @@ export type WorkerOperationEventPayload = {
      */
     bead_id?: string;
     /**
-     * Input tokens written into the prompt cache (best-effort, currently always absent).
+     * Input tokens written into the prompt cache (best-effort; treat absence as 'not measured').
      */
     cache_creation_tokens?: number;
     /**
-     * Cached input tokens read (best-effort, currently always absent).
+     * Cached input tokens read (best-effort; treat absence as 'not measured').
      */
     cache_read_tokens?: number;
     /**
-     * Output tokens (best-effort, currently always absent).
+     * Output tokens (best-effort; treat absence as 'not measured').
      */
     completion_tokens?: number;
     /**
-     * Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+     * Estimated invocation cost in USD (best-effort, decision-support only; zero with unpriced=true means pricing unknown, not free).
      */
     cost_usd_estimate?: number;
     delivered?: boolean;
@@ -6726,7 +6831,7 @@ export type WorkerOperationEventPayload = {
      */
     latency_ms?: number;
     /**
-     * LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+     * LLM model identifier (best-effort; absent when no transcript usage was extracted for the operation).
      */
     model?: string;
     op_id: string;
@@ -6736,7 +6841,7 @@ export type WorkerOperationEventPayload = {
      */
     prompt_sha?: string;
     /**
-     * Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+     * Non-cached input tokens (best-effort; treat absence as 'not measured', not 'free').
      */
     prompt_tokens?: number;
     /**
@@ -15374,6 +15479,44 @@ export type PostV0CityByCityNameUnregisterResponses = {
 };
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];
+
+export type GetV0CityByCityNameUsageData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/usage';
+};
+
+export type GetV0CityByCityNameUsageErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+};
+
+export type GetV0CityByCityNameUsageError = GetV0CityByCityNameUsageErrors[keyof GetV0CityByCityNameUsageErrors];
+
+export type GetV0CityByCityNameUsageResponses = {
+    /**
+     * OK
+     */
+    200: UsageBody;
+};
+
+export type GetV0CityByCityNameUsageResponse = GetV0CityByCityNameUsageResponses[keyof GetV0CityByCityNameUsageResponses];
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;

@@ -255,11 +255,14 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
+		// Seal the timing before telemetry: the tail extraction and
+		// usage-fact write must not inflate the operation's DurationMs.
+		event.sealTiming(err)
 		event.payload.Queued = boolPointer(result.Queued)
-		event.finish(err)
 		if err == nil {
-			h.recordInvocationTelemetry(ctx)
+			h.recordInvocationTelemetry(ctx, event)
 		}
+		event.emit()
 	}()
 
 	if strings.TrimSpace(req.Text) == "" {
@@ -299,11 +302,13 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
+		// Seal the timing before telemetry — same contract as Message.
+		event.sealTiming(err)
 		event.payload.Delivered = boolPointer(result.Delivered)
-		event.finish(err)
 		if err == nil {
-			h.recordInvocationTelemetry(ctx)
+			h.recordInvocationTelemetry(ctx, event)
 		}
+		event.emit()
 	}()
 
 	if strings.TrimSpace(req.Text) == "" {

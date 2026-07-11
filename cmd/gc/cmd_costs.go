@@ -53,36 +53,36 @@ type runCost struct {
 
 // aggregateRunCosts groups usage facts by run id. Exposed (unexported) for tests.
 func aggregateRunCosts(facts []usage.Fact) []runCost {
-	byRun := map[string]*runCost{}
+	// usage.Totals is the canonical fold shared with the supervisor's
+	// /usage endpoint; this function only groups it per run and projects
+	// it onto the runCost wire shape.
+	byRun := map[string]*usage.Totals{}
 	var order []string
 	for _, f := range facts {
-		rc := byRun[f.RunID]
-		if rc == nil {
-			rc = &runCost{RunID: f.RunID}
-			byRun[f.RunID] = rc
+		t := byRun[f.RunID]
+		if t == nil {
+			t = &usage.Totals{}
+			byRun[f.RunID] = t
 			order = append(order, f.RunID)
 		}
-		switch f.Kind {
-		case usage.KindModel:
-			rc.Invocations++
-			rc.InputTokens += f.InputTokens
-			rc.OutputTokens += f.OutputTokens
-			rc.CacheReadTokens += f.CacheReadTokens
-			rc.CacheCreationTokens += f.CacheCreationTokens
-			if f.Unpriced {
-				rc.Unpriced++
-			} else {
-				rc.CostUSDEstimate += f.CostUSDEstimate
-			}
-		case usage.KindCompute:
-			rc.ComputeFacts++
-			rc.WallSeconds += f.WallSeconds
-		}
+		t.Add(f)
 	}
 	sort.Strings(order)
 	rows := make([]runCost, 0, len(order))
 	for _, id := range order {
-		rows = append(rows, *byRun[id])
+		t := byRun[id]
+		rows = append(rows, runCost{
+			RunID:               id,
+			Invocations:         t.Invocations,
+			ComputeFacts:        t.ComputeFacts,
+			InputTokens:         t.InputTokens,
+			OutputTokens:        t.OutputTokens,
+			CacheReadTokens:     t.CacheReadTokens,
+			CacheCreationTokens: t.CacheCreationTokens,
+			WallSeconds:         t.WallSeconds,
+			CostUSDEstimate:     t.CostUSDEstimate,
+			Unpriced:            t.Unpriced,
+		})
 	}
 	return rows
 }

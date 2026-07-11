@@ -17,6 +17,7 @@ import {
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
   getV0CityByCityNameStatus,
+  getV0CityByCityNameUsage,
   getV0CityByCityNameWorkflowByWorkflowId,
   patchV0CityByCityNameBeadById,
   postV0CityByCityNameBeadByIdClose,
@@ -41,6 +42,7 @@ import type {
   GetV0CityByCityNameHealthResponse,
   GetV0CityByCityNameMailData,
   GetV0CityByCityNameStatusResponse,
+  GetV0CityByCityNameUsageResponse,
   GetV0CityByCityNameWorkflowByWorkflowIdData,
   ListBodyBead,
   ListBodyAgentResponse,
@@ -86,6 +88,7 @@ export interface SupervisorApi {
   health(): Promise<GetHealthResponse>;
   cityHealth(cityName: string): Promise<GetV0CityByCityNameHealthResponse>;
   cityStatus(cityName: string): Promise<GetV0CityByCityNameStatusResponse>;
+  cityUsage(cityName: string): Promise<GetV0CityByCityNameUsageResponse>;
   listCities(): Promise<SupervisorCitiesOutputBody>;
   listAgents(cityName: string): Promise<ListBodyAgentResponse>;
   listRigs(cityName: string): Promise<ListBodyRigResponse>;
@@ -210,6 +213,15 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           path: { cityName },
         }) as Promise<SupervisorResult<GetV0CityByCityNameStatusResponse>>,
         'gc supervisor status response was empty',
+      );
+    },
+    cityUsage(cityName) {
+      return unwrapSupervisorResult<GetV0CityByCityNameUsageResponse>(
+        getV0CityByCityNameUsage({
+          client,
+          path: { cityName },
+        }) as Promise<SupervisorResult<GetV0CityByCityNameUsageResponse>>,
+        'gc supervisor usage response was empty',
       );
     },
     listCities() {

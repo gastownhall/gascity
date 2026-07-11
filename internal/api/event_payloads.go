@@ -363,11 +363,15 @@ type WorkerOperationEventPayload struct {
 	// best-effort. See the consumer contract on the type doc above.
 
 	// Model is the LLM model identifier observed in this operation
-	// (e.g. "claude-opus-4-8"). Sourced from session metadata.
+	// (e.g. "claude-opus-4-8"). Sourced from the transcript tail.
 	//
-	// Wired: TODO — follow-up will tail sessionlog at finish() to
-	// extract msg.Model.
-	Model string `json:"model,omitempty" doc:"LLM model identifier (best-effort, may be absent until follow-up wiring lands)."`
+	// Wired: YES — worker.recordInvocationTelemetry aggregates the
+	// sessionlog tail extraction (SessionLogAdapter.TailUsage →
+	// sessionlog.ExtractTailUsage) and stamps the newest observed model
+	// onto the event at Message/Nudge finish (stampOperationEventUsage).
+	// Best-effort: still absent for operations with no extractable
+	// transcript usage.
+	Model string `json:"model,omitempty" doc:"LLM model identifier (best-effort; absent when no transcript usage was extracted for the operation)."`
 	// AgentName is the agent identity that ran this operation
 	// (e.g. "rig/polecat-1"). Distinct from SessionName which carries
 	// the canonical session identity.
@@ -398,26 +402,28 @@ type WorkerOperationEventPayload struct {
 	// PromptTokens is the count of regular (non-cached) input tokens.
 	// Treat absence as "not measured", not "zero".
 	//
-	// Wired: TODO — sessionlog/tail.go already extracts the value for
-	// Claude; finish-time wiring through to this field is pending.
-	PromptTokens int `json:"prompt_tokens,omitempty" doc:"Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free')."`
+	// Wired: YES — summed from the worker sessionlog tail extraction
+	// (SessionLogAdapter.TailUsage → sessionlog.ExtractTailUsage) onto the
+	// event at operation finish, from the same batch as the model usage
+	// facts. Best-effort: absent when no new transcript usage was extracted.
+	PromptTokens int `json:"prompt_tokens,omitempty" doc:"Non-cached input tokens (best-effort; treat absence as 'not measured', not 'free')."`
 	// CompletionTokens is the count of output tokens generated.
 	// Treat absence as "not measured".
 	//
-	// Wired: TODO — see PromptTokens.
-	CompletionTokens int `json:"completion_tokens,omitempty" doc:"Output tokens (best-effort, currently always absent)."`
+	// Wired: YES — see PromptTokens.
+	CompletionTokens int `json:"completion_tokens,omitempty" doc:"Output tokens (best-effort; treat absence as 'not measured')."`
 	// CacheReadTokens is the count of cached input tokens read.
 	// Distinct from PromptTokens because cache-read pricing is roughly
 	// 10× cheaper than prompt pricing on Claude. Treat absence as
 	// "not measured".
 	//
-	// Wired: TODO — see PromptTokens.
-	CacheReadTokens int `json:"cache_read_tokens,omitempty" doc:"Cached input tokens read (best-effort, currently always absent)."`
+	// Wired: YES — see PromptTokens.
+	CacheReadTokens int `json:"cache_read_tokens,omitempty" doc:"Cached input tokens read (best-effort; treat absence as 'not measured')."`
 	// CacheCreationTokens is the count of input tokens written into
 	// the prompt cache during this invocation.
 	//
-	// Wired: TODO — see PromptTokens.
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty" doc:"Input tokens written into the prompt cache (best-effort, currently always absent)."`
+	// Wired: YES — see PromptTokens.
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty" doc:"Input tokens written into the prompt cache (best-effort; treat absence as 'not measured')."`
 	// LatencyMs is the wall-clock latency of the LLM invocation
 	// itself, where measurable. Distinct from DurationMs which times
 	// the wrapping operation.
@@ -428,9 +434,11 @@ type WorkerOperationEventPayload struct {
 	// against the pricing seam (#1255, 1d). NOT invoice-grade. Treat
 	// absence as "not measured", not "free".
 	//
-	// Wired: TODO — pricing.Registry exists (PR #1272); finish-time
-	// wiring to compute cost from token counts is pending.
-	CostUSDEstimate float64 `json:"cost_usd_estimate,omitempty" doc:"Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam)."`
+	// Wired: YES — pricing.Registry.Estimate over the extracted token
+	// counts at operation finish, summed across the batch. Mirrors the
+	// usage-fact cost semantics: an unknown (family, model) leaves cost 0
+	// and sets Unpriced=true. Best-effort: absent when no usage extracted.
+	CostUSDEstimate float64 `json:"cost_usd_estimate,omitempty" doc:"Estimated invocation cost in USD (best-effort, decision-support only; zero with unpriced=true means pricing unknown, not free)."`
 	// RunID is the run-root identifier this operation belongs to, resolved
 	// per-operation from the work/session bead metadata chain (workflow_id ||
 	// molecule_id || gc.root_bead_id-or-self || bead id || session id for
@@ -438,8 +446,10 @@ type WorkerOperationEventPayload struct {
 	RunID string `json:"run_id,omitempty" doc:"Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort)."`
 	// Unpriced is a tri-state flag: absent = pricing not evaluated, true =
 	// tokens observed but no price resolved (CostUSDEstimate not authoritative),
-	// false = priced. Wired: TODO — set alongside CostUSDEstimate by the pricing
-	// tier; currently always absent.
+	// false = priced. Wired: YES — set alongside CostUSDEstimate at operation
+	// finish whenever tokens were extracted; true when any token-bearing
+	// invocation in the batch had no resolved price. Absent when no usage
+	// extracted (pricing not evaluated).
 	Unpriced *bool `json:"unpriced,omitempty" doc:"True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated)."`
 }
 

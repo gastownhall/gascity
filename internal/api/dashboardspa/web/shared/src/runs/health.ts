@@ -3,8 +3,9 @@ import type { RunLane } from '../snapshot/types.js';
 // The run-health derivation (deriveRunHealth / buildCensus / advanceProgressMarks)
 // moved to Go (internal/runproj); the dashboard reads health and census off the
 // server-computed RunSummary DTO. This pure accessor is the one piece that stays
-// client-side, because the attention layer (AmbientHome, StatusSentence) reads
-// it during a session-list outage when per-lane health degrades to unavailable.
+// client-side, because the attention layer (attention/registry.ts, surfaced in
+// the cockpit home's needs-you attention strip) reads it during a session-list
+// outage when per-lane health degrades to unavailable.
 
 /**
  * Structural needs-operator signal for a lane: true when the lane's phase is a

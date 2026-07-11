@@ -1129,6 +1129,7 @@ describe('supervisor client wrapper', () => {
       getBead: vi.fn(),
       cityHealth: vi.fn(),
       cityStatus: vi.fn(),
+      cityUsage: vi.fn(),
       health: vi.fn(),
       listAgents: vi.fn(),
       listRigs: vi.fn(),

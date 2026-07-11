@@ -207,6 +207,8 @@ type StatusWorkCounts struct {
 	InProgress int `json:"in_progress" doc:"Number of in-progress work items."`
 	Ready      int `json:"ready" doc:"Number of ready work items."`
 	Open       int `json:"open" doc:"Number of open work items."`
+	Hooked     int `json:"hooked" doc:"Number of work items hooked to an agent but not yet started."`
+	Review     int `json:"review" doc:"Number of work items in review."`
 }
 
 // StatusMailCounts holds mail counts for the status endpoint.

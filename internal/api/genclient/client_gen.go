@@ -3281,6 +3281,9 @@ type StatusStoreHealth struct {
 
 // StatusWorkCounts defines model for StatusWorkCounts.
 type StatusWorkCounts struct {
+	// Hooked Number of work items hooked to an agent but not yet started.
+	Hooked int64 `json:"hooked"`
+
 	// InProgress Number of in-progress work items.
 	InProgress int64 `json:"in_progress"`
 
@@ -3289,6 +3292,9 @@ type StatusWorkCounts struct {
 
 	// Ready Number of ready work items.
 	Ready int64 `json:"ready"`
+
+	// Review Number of work items in review.
+	Review int64 `json:"review"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
@@ -5832,6 +5838,76 @@ type UnboundEventPayload struct {
 	SessionId string `json:"session_id"`
 }
 
+// UsageBody defines model for UsageBody.
+type UsageBody struct {
+	Recent UsageTotals `json:"recent"`
+
+	// RecentBySession Recent-window model usage per session, largest token volume first.
+	RecentBySession *[]UsageSessionRecent `json:"recent_by_session,omitempty"`
+
+	// RecentWindowSecs Length of the recent window in seconds.
+	RecentWindowSecs int64       `json:"recent_window_secs"`
+	Today            UsageTotals `json:"today"`
+	Totals           UsageTotals `json:"totals"`
+
+	// Warnings Malformed usage records skipped during the read.
+	Warnings *[]string `json:"warnings,omitempty"`
+}
+
+// UsageSessionRecent defines model for UsageSessionRecent.
+type UsageSessionRecent struct {
+	// CacheCreationTokens Prompt-cache creation tokens in the window.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens in the window.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// CostUsdEstimate List-price estimate for the window; decision-support only.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens in the window.
+	InputTokens int64 `json:"input_tokens"`
+
+	// OutputTokens Completion tokens in the window.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Session Session (worker) name the facts were attributed to.
+	Session string `json:"session"`
+
+	// SessionId Session bead id, when attributed.
+	SessionId *string `json:"session_id,omitempty"`
+}
+
+// UsageTotals defines model for UsageTotals.
+type UsageTotals struct {
+	// CacheCreationTokens Prompt-cache creation tokens.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// ComputeFacts Compute (wall-clock) facts in the window.
+	ComputeFacts int64 `json:"compute_facts"`
+
+	// CostUsdEstimate List-price estimate; decision-support only, never an authoritative charge.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens.
+	InputTokens int64 `json:"input_tokens"`
+
+	// Invocations Model facts (LLM invocations) in the window.
+	Invocations int64 `json:"invocations"`
+
+	// OutputTokens Completion tokens.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Unpriced Facts with unknown pricing — cost not measured, not free.
+	Unpriced int64 `json:"unpriced"`
+
+	// WallSeconds Compute wall-clock seconds.
+	WallSeconds float64 `json:"wall_seconds"`
+}
+
 // WebhookReceivedPayload defines model for WebhookReceivedPayload.
 type WebhookReceivedPayload struct {
 	// BodySize Raw request body size in bytes (never the body itself).
@@ -5906,16 +5982,16 @@ type WorkerOperationEventPayload struct {
 	// BeadId Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
 	BeadId *string `json:"bead_id,omitempty"`
 
-	// CacheCreationTokens Input tokens written into the prompt cache (best-effort, currently always absent).
+	// CacheCreationTokens Input tokens written into the prompt cache (best-effort; treat absence as 'not measured').
 	CacheCreationTokens *int64 `json:"cache_creation_tokens,omitempty"`
 
-	// CacheReadTokens Cached input tokens read (best-effort, currently always absent).
+	// CacheReadTokens Cached input tokens read (best-effort; treat absence as 'not measured').
 	CacheReadTokens *int64 `json:"cache_read_tokens,omitempty"`
 
-	// CompletionTokens Output tokens (best-effort, currently always absent).
+	// CompletionTokens Output tokens (best-effort; treat absence as 'not measured').
 	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
 
-	// CostUsdEstimate Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+	// CostUsdEstimate Estimated invocation cost in USD (best-effort, decision-support only; zero with unpriced=true means pricing unknown, not free).
 	CostUsdEstimate *float64  `json:"cost_usd_estimate,omitempty"`
 	Delivered       *bool     `json:"delivered,omitempty"`
 	DurationMs      int64     `json:"duration_ms"`
@@ -5925,7 +6001,7 @@ type WorkerOperationEventPayload struct {
 	// LatencyMs LLM invocation wall-clock latency (best-effort, currently always absent — no source).
 	LatencyMs *int64 `json:"latency_ms,omitempty"`
 
-	// Model LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+	// Model LLM model identifier (best-effort; absent when no transcript usage was extracted for the operation).
 	Model     *string `json:"model,omitempty"`
 	OpId      string  `json:"op_id"`
 	Operation string  `json:"operation"`
@@ -5933,7 +6009,7 @@ type WorkerOperationEventPayload struct {
 	// PromptSha SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
 	PromptSha *string `json:"prompt_sha,omitempty"`
 
-	// PromptTokens Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+	// PromptTokens Non-cached input tokens (best-effort; treat absence as 'not measured', not 'free').
 	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
 
 	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
@@ -13533,6 +13609,9 @@ type ClientInterface interface {
 	// PostV0CityByCityNameUnregister request
 	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameUsage request
+	GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteV0CityByCityNameWorkflowByWorkflowId request
 	DeleteV0CityByCityNameWorkflowByWorkflowId(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15858,6 +15937,18 @@ func (c *Client) GetV0CityByCityNameStatus(ctx context.Context, cityName string,
 
 func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameUnregisterRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -25333,6 +25424,40 @@ func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, pa
 	return req, nil
 }
 
+// NewGetV0CityByCityNameUsageRequest generates requests for GetV0CityByCityNameUsage
+func NewGetV0CityByCityNameUsageRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/usage", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewDeleteV0CityByCityNameWorkflowByWorkflowIdRequest generates requests for DeleteV0CityByCityNameWorkflowByWorkflowId
 func NewDeleteV0CityByCityNameWorkflowByWorkflowIdRequest(server string, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams) (*http.Request, error) {
 	var err error
@@ -26389,6 +26514,9 @@ type ClientWithResponsesInterface interface {
 
 	// PostV0CityByCityNameUnregisterWithResponse request
 	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
+
+	// GetV0CityByCityNameUsageWithResponse request
+	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
 
 	// DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request
 	DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameWorkflowByWorkflowIdResponse, error)
@@ -30484,6 +30612,31 @@ func (r PostV0CityByCityNameUnregisterResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameUsageResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *UsageBody
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameUsageResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameUsageResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteV0CityByCityNameWorkflowByWorkflowIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -32321,6 +32474,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx con
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameUnregisterResponse(rsp)
+}
+
+// GetV0CityByCityNameUsageWithResponse request returning *GetV0CityByCityNameUsageResponse
+func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
+	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameUsageResponse(rsp)
 }
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request returning *DeleteV0CityByCityNameWorkflowByWorkflowIdResponse
@@ -41696,6 +41858,53 @@ func ParsePostV0CityByCityNameUnregisterResponse(rsp *http.Response) (*PostV0Cit
 			return nil, err
 		}
 		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameUsageResponse parses an HTTP response from a GetV0CityByCityNameUsageWithResponse call
+func ParseGetV0CityByCityNameUsageResponse(rsp *http.Response) (*GetV0CityByCityNameUsageResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameUsageResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UsageBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
 
 	}
 

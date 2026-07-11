@@ -563,7 +563,7 @@ function baseStatus(): StatusBody {
     work: {
       open: 5,
       ready: 3,
-      in_progress: 1,
+      in_progress: 1, hooked: 0, review: 0,
     },
   };
 }

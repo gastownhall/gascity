@@ -33,6 +33,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/status", (*Server).humaHandleStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/health", (*Server).humaHandleHealth, errorStatuses(http.StatusNotFound))
 
+	// Usage (token/cost telemetry from the city's usage.jsonl fact log).
+	cityGet(sm, "/usage", (*Server).humaHandleUsage, errorStatuses(http.StatusNotFound))
+
 	// City detail.
 	cityGet(sm, "", (*Server).humaHandleCityGet, errorStatuses(http.StatusNotFound))
 	cityPatch(sm, "", (*Server).humaHandleCityPatch, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))

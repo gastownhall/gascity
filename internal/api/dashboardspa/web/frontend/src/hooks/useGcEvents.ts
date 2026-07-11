@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { reportClientError } from '../lib/clientErrorReporting';
 import { getActiveCity } from '../api/cityBase';
 import { supervisorApi } from '../supervisor/client';
@@ -34,6 +34,16 @@ export interface GcEventRefreshOptions {
   coalesceMs?: number;
 }
 
+export interface GcEventFeedOptions {
+  /**
+   * Optional predicate applied to each prefix-matching envelope before it is
+   * delivered. Return false to drop the envelope. Mirrors
+   * {@link GcEventRefreshOptions.matches}; unlike the refresh hook there is no
+   * coalescing — every surviving envelope is delivered synchronously.
+   */
+  matches?: (event: GcEventEnvelope) => boolean;
+}
+
 const CONNECTING_GRACE_MS = 2_000;
 const DEFAULT_COALESCE_MS = 2_500;
 
@@ -47,14 +57,13 @@ export function useGcEventRefresh(
   onMatch: () => void,
   options: GcEventRefreshOptions = {},
 ): GcEventConnState {
-  const [state, setState] = useState<GcEventConnState>('connecting');
   const onMatchRef = useRef(onMatch);
   onMatchRef.current = onMatch;
   const matchesRef = useRef(options.matches);
   matchesRef.current = options.matches;
   const coalesceMsRef = useRef(options.coalesceMs);
   coalesceMsRef.current = options.coalesceMs;
-  // Stable hash of prefixes for the effect dep array.
+  // Stable hash of prefixes for the coalesce-cleanup effect dep array.
   const prefixKey = prefixes.join(',');
 
   // gascity-dashboard-0sh (ported from upstream cd-tle7m): coalesce
@@ -68,6 +77,94 @@ export function useGcEventRefresh(
   // expensive refresh widen the window via options.coalesceMs.
   const lastFireRef = useRef(0);
   const coalesceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cancel a pending trailing fire when the stream re-binds (prefix change) or
+  // the hook unmounts, mirroring the original single-effect cleanup.
+  useEffect(() => {
+    return () => {
+      if (coalesceTimerRef.current) {
+        clearTimeout(coalesceTimerRef.current);
+        coalesceTimerRef.current = null;
+      }
+    };
+  }, [prefixKey]);
+
+  const fireMatch = useCallback(() => {
+    lastFireRef.current = Date.now();
+    onMatchRef.current();
+  }, []);
+
+  // Leading + trailing throttle: fire immediately when outside the window,
+  // otherwise schedule a single trailing fire at the window edge. Coalesces a
+  // burst of matching events into <=1 onMatch per coalesce window.
+  const handleMatch = useCallback(
+    (event: GcEventEnvelope) => {
+      if (!(matchesRef.current?.(event) ?? true)) return;
+      const coalesceMs = coalesceMsRef.current ?? DEFAULT_COALESCE_MS;
+      const elapsed = Date.now() - lastFireRef.current;
+      if (elapsed >= coalesceMs) {
+        if (coalesceTimerRef.current) {
+          clearTimeout(coalesceTimerRef.current);
+          coalesceTimerRef.current = null;
+        }
+        fireMatch();
+      } else if (coalesceTimerRef.current === null) {
+        coalesceTimerRef.current = setTimeout(() => {
+          coalesceTimerRef.current = null;
+          fireMatch();
+        }, coalesceMs - elapsed);
+      }
+    },
+    [fireMatch],
+  );
+
+  return useGcEventStream(prefixes, handleMatch);
+}
+
+/**
+ * Subscribe to gc events and deliver each prefix-matching envelope to
+ * `onEvent` synchronously, one call per frame with no coalescing. Designed for
+ * consumers that maintain their own buffer/throttle (e.g. a cockpit activity
+ * feed) and need the raw envelopes, not just a refresh nudge. Shares the
+ * EventSource, parse, connection-state, and backoff machinery with
+ * {@link useGcEventRefresh}.
+ */
+export function useGcEventFeed(
+  prefixes: ReadonlyArray<string>,
+  onEvent: (event: GcEventEnvelope) => void,
+  options: GcEventFeedOptions = {},
+): GcEventConnState {
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
+  const matchesRef = useRef(options.matches);
+  matchesRef.current = options.matches;
+
+  const handleMatch = useCallback((event: GcEventEnvelope) => {
+    if (!(matchesRef.current?.(event) ?? true)) return;
+    onEventRef.current(event);
+  }, []);
+
+  return useGcEventStream(prefixes, handleMatch);
+}
+
+/**
+ * Shared core for the gc event hooks. Opens a single EventSource against the
+ * supervisor city event stream, tracks connection state, reconnects with
+ * exponential backoff, parses each frame, and invokes `onMatched` synchronously
+ * for every event whose type starts with one of `prefixes`. Callers layer their
+ * own delivery policy (coalescing, buffering) on top of `onMatched`. The
+ * callback is captured in a ref, so changing its identity does not reconnect the
+ * stream — only a change to the prefix set re-binds.
+ */
+function useGcEventStream(
+  prefixes: ReadonlyArray<string>,
+  onMatched: (event: GcEventEnvelope) => void,
+): GcEventConnState {
+  const [state, setState] = useState<GcEventConnState>('connecting');
+  const onMatchedRef = useRef(onMatched);
+  onMatchedRef.current = onMatched;
+  // Stable hash of prefixes for the effect dep array.
+  const prefixKey = prefixes.join(',');
 
   useEffect(() => {
     if (prefixes.length === 0) {
@@ -91,30 +188,6 @@ export function useGcEventRefresh(
       if (malformedEventReported) return;
       malformedEventReported = true;
       reportMalformedEvent(reason);
-    };
-    const fireMatch = () => {
-      lastFireRef.current = Date.now();
-      onMatchRef.current();
-    };
-    // Leading + trailing throttle: fire immediately when outside the
-    // window, otherwise schedule a single trailing fire at the window
-    // edge. Coalesces a burst of matching events into <=1 onMatch per
-    // coalesce window.
-    const scheduleMatch = () => {
-      const coalesceMs = coalesceMsRef.current ?? DEFAULT_COALESCE_MS;
-      const elapsed = Date.now() - lastFireRef.current;
-      if (elapsed >= coalesceMs) {
-        if (coalesceTimerRef.current) {
-          clearTimeout(coalesceTimerRef.current);
-          coalesceTimerRef.current = null;
-        }
-        fireMatch();
-      } else if (coalesceTimerRef.current === null) {
-        coalesceTimerRef.current = setTimeout(() => {
-          coalesceTimerRef.current = null;
-          if (!cancelled) fireMatch();
-        }, coalesceMs - elapsed);
-      }
     };
 
     const connect = () => {
@@ -173,8 +246,7 @@ export function useGcEventRefresh(
         setState('open');
         for (const prefix of prefixes) {
           if (t.startsWith(prefix)) {
-            const event = parsed as GcEventEnvelope;
-            if (matchesRef.current?.(event) ?? true) scheduleMatch();
+            onMatchedRef.current(parsed as GcEventEnvelope);
             break;
           }
         }
@@ -201,13 +273,9 @@ export function useGcEventRefresh(
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
       clearConnectGraceTimer();
-      if (coalesceTimerRef.current) {
-        clearTimeout(coalesceTimerRef.current);
-        coalesceTimerRef.current = null;
-      }
       es?.close();
     };
-    // We re-bind only when the prefix set changes — onMatch is captured in a ref.
+    // We re-bind only when the prefix set changes — onMatched is captured in a ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefixKey]);
 

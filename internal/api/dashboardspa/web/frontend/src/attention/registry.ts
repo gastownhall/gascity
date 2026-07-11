@@ -14,6 +14,7 @@ import { selectBeadsNeedingAttention, type BeadAttentionReason } from './beadsNe
 import { elapsedSince, formatElapsed } from './elapsed';
 import { runDetailHref } from '../supervisor/runHref';
 import { agentNeedsYouReasonLabel } from './agentNeedsYou';
+import { formatBytesSI } from '../lib/format';
 import type {
   AgentResponse,
   Bead,
@@ -740,7 +741,7 @@ function appendDashboardProcessAttention(items: AttentionItem[], health: SystemH
       healthAttention({
         id: 'health:dashboard-process-rss-high',
         title: 'Dashboard RSS high',
-        summary: formatBytes(admin.rss_bytes),
+        summary: formatBytesSI(admin.rss_bytes),
       }),
     );
   } else if (admin.rss_bytes >= DASHBOARD_PROCESS_RSS_ELEVATED_BYTES) {
@@ -748,7 +749,7 @@ function appendDashboardProcessAttention(items: AttentionItem[], health: SystemH
       healthWatch({
         id: 'health:dashboard-process-rss-elevated',
         title: 'Dashboard RSS elevated',
-        summary: formatBytes(admin.rss_bytes),
+        summary: formatBytesSI(admin.rss_bytes),
       }),
     );
   }
@@ -758,7 +759,7 @@ function appendDashboardProcessAttention(items: AttentionItem[], health: SystemH
       healthAttention({
         id: 'health:dashboard-process-heap-high',
         title: 'Dashboard heap high',
-        summary: formatBytes(admin.heap_used_bytes),
+        summary: formatBytesSI(admin.heap_used_bytes),
       }),
     );
   } else if (admin.heap_used_bytes >= DASHBOARD_PROCESS_HEAP_ELEVATED_BYTES) {
@@ -766,7 +767,7 @@ function appendDashboardProcessAttention(items: AttentionItem[], health: SystemH
       healthWatch({
         id: 'health:dashboard-process-heap-elevated',
         title: 'Dashboard heap elevated',
-        summary: formatBytes(admin.heap_used_bytes),
+        summary: formatBytesSI(admin.heap_used_bytes),
       }),
     );
   }
@@ -810,13 +811,6 @@ function appendHostAttention(items: AttentionItem[], health: SystemHealth): void
       }),
     );
   }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
-  if (bytes >= 1_000_000) return `${Math.round(bytes / 1_000_000)} MB`;
-  if (bytes >= 1_000) return `${Math.round(bytes / 1_000)} KB`;
-  return `${bytes} B`;
 }
 
 function safeRatio(numerator: number, denominator: number): number | null {
