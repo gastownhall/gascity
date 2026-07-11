@@ -1410,16 +1410,21 @@ func TestNativeDoltStoreUsesBoundedOperationContext(t *testing.T) {
 	}
 }
 
-func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
+func TestOpenNativeBeadsStoreAtUsesConfiguredBackendAndScopedEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	oldOpen := nativeDoltOpenBestAvailable
+	t.Setenv("BEADS_POSTGRES_URL", "postgres://ambient.example.com/beads")
+	t.Setenv("BEADS_BACKEND_PLUGIN_COMMAND", "/ambient/plugin")
+	oldOpen := nativeBeadsOpenConfigured
 	t.Cleanup(func() {
-		nativeDoltOpenBestAvailable = oldOpen
+		nativeBeadsOpenConfigured = oldOpen
 	})
-	nativeDoltOpenBestAvailable = func(ctx context.Context, beadsDir string) (beadslib.Storage, error) {
+	nativeBeadsOpenConfigured = func(ctx context.Context, beadsDir string, opts beadslib.OpenConfiguredOptions) (beadslib.Storage, beadslib.BackendInfo, error) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("native open context has no deadline")
+		}
+		if opts.ReadOnly {
+			t.Fatal("configured store unexpectedly opened read-only")
 		}
 		if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "scoped.example.com" {
 			t.Fatalf("BEADS_DOLT_SERVER_HOST during open = %q, want scoped.example.com", got)
@@ -1427,31 +1432,53 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 		if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "4407" {
 			t.Fatalf("BEADS_DOLT_SERVER_PORT during open = %q, want 4407", got)
 		}
+		if got := os.Getenv("BEADS_POSTGRES_URL"); got != "postgres://scoped.example.com/beads" {
+			t.Fatalf("BEADS_POSTGRES_URL during open = %q, want scoped URL", got)
+		}
+		if got := os.Getenv("BEADS_BACKEND_PLUGIN_COMMAND"); got != "/ambient/plugin" {
+			t.Fatalf("BEADS_BACKEND_PLUGIN_COMMAND during open = %q, want ambient local trust", got)
+		}
 		if !strings.HasSuffix(beadsDir, filepath.Join("scope", ".beads")) {
 			t.Fatalf("beadsDir = %q, want scope .beads path", beadsDir)
 		}
 		return &nativeDoltStorageSpy{
-			getConfig: func(context.Context, string) (string, error) {
-				return "gc", nil
-			},
-		}, nil
+				getConfig: func(context.Context, string) (string, error) {
+					return "gc", nil
+				},
+			}, beadslib.BackendInfo{
+				Name: "postgres",
+				Capabilities: beadslib.BackendCapabilities{
+					Transactions:      true,
+					ConcurrentWriters: true,
+				},
+			}, nil
 	}
 
-	store, err := OpenNativeDoltStoreAt(context.Background(), filepath.Join(t.TempDir(), "scope"), map[string]string{
+	store, err := OpenNativeBeadsStoreAt(context.Background(), filepath.Join(t.TempDir(), "scope"), map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 		"BEADS_DOLT_SERVER_PORT": "4407",
+		"BEADS_POSTGRES_URL":     "postgres://scoped.example.com/beads",
 	})
 	if err != nil {
-		t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+		t.Fatalf("OpenNativeBeadsStoreAt: %v", err)
 	}
 	if store.IDPrefix() != "gc" {
 		t.Fatalf("IDPrefix = %q, want gc", store.IDPrefix())
+	}
+	if info := store.BackendInfo(); info.Name != "postgres" || !info.Capabilities.Transactions {
+		t.Fatalf("BackendInfo = %+v, want transactional postgres", info)
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "ambient.example.com" {
 		t.Fatalf("BEADS_DOLT_SERVER_HOST after open = %q, want ambient restored", got)
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "9999" {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT after open = %q, want ambient restored", got)
+	}
+	if got := os.Getenv("BEADS_POSTGRES_URL"); got != "postgres://ambient.example.com/beads" {
+		t.Fatalf("BEADS_POSTGRES_URL after open = %q, want ambient restored", got)
+	}
+	if got := os.Getenv("BEADS_BACKEND_PLUGIN_COMMAND"); got != "/ambient/plugin" {
+		t.Fatalf("BEADS_BACKEND_PLUGIN_COMMAND after open = %q, want ambient preserved", got)
 	}
 }
 

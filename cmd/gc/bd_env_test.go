@@ -5204,7 +5204,7 @@ func projectedKeyStripped(key string) bool {
 	return true
 }
 
-func TestApplyCanonicalScopeBackendEnv_UnsupportedBackend(t *testing.T) {
+func TestApplyCanonicalScopeBackendEnv_DelegatesUnknownBackendToBeads(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -5222,15 +5222,33 @@ dolt.auto-start: false
 
 	env := map[string]string{}
 	used, err := applyCanonicalScopeBackendEnv(env, cityPath, cityPath)
-	if err == nil {
-		t.Fatal("applyCanonicalScopeBackendEnv = nil error, want unsupported-backend rejection")
+	if err != nil {
+		t.Fatalf("applyCanonicalScopeBackendEnv: %v", err)
 	}
 	if !used {
-		t.Errorf("used = false, want true (scope is authoritative; failure is semantic)")
+		t.Error("used = false, want true for authoritative scope")
 	}
-	var parseErr *contract.MetadataParseError
-	if !errors.As(err, &parseErr) {
-		t.Errorf("errors.As(*MetadataParseError) = false, want true; err=%v", err)
+}
+
+func TestBdRuntimeEnvWithErrorSkipsDoltProjectionForConfiguredSQLite(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"bd\"\nbackend = \"sqlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"sqlite"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-dolt.example.com")
+
+	env, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want cleared for sqlite", got)
 	}
 }
 

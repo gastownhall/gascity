@@ -97,17 +97,16 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// hardened post-idle paste+submit path; cfg.Nudge takes precedence so the
 	// working pool path is byte-for-byte unchanged. See startupDeliveryText.
 	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
-		// A freshly-spawned agent boots through a shell→TUI handoff before its
-		// input prompt is listening. The paste buffers and survives that window,
-		// but the submit CR does not: delivered too early it is swallowed, leaving
-		// the text typed-but-unsubmitted in the box — and the agent then idles
-		// forever instead of running its first turn. Wait for herdr to report the
-		// agent idle (its prompt rendered) before delivering, mirroring how tmux's
-		// doStartSession waits for readiness before its Step-6 startup nudge.
-		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
-		// worse than the prior unconditional send), and the reconciler tolerates a
-		// slow Start (pendingCreateNeverStartedTimeout = 10m).
-		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
+		// Herdr can report idle while the launch shell is still handing the pane to
+		// the agent TUI. Pasting in that window sends the startup text to the shell,
+		// before the agent owns its input. Require the configured process and prompt
+		// readiness hints before delivery; do not risk executing work text in the
+		// bootstrap shell when readiness cannot be established.
+		if err := p.waitForStartupReady(ctx, name, info.PaneID, cfg, startupNudgeIdleTimeout); err != nil {
+			_ = p.c.closePane(context.Background(), info.PaneID)
+			_ = p.clearMeta(name)
+			return fmt.Errorf("herdr: wait for %q startup readiness: %w", name, err)
+		}
 		if err := p.c.deliverNudge(ctx, info.PaneID, name, startupText); err != nil {
 			// Best-effort: the submit didn't confirm (TUI race under boot load).
 			// Surface it rather than silently leaving a stranded startup turn;
@@ -143,12 +142,140 @@ func startupDeliveryText(cfg runtime.Config) string {
 }
 
 // startupNudgeIdleTimeout bounds how long Start waits for a freshly-spawned
-// agent to reach its idle input prompt before delivering the startup nudge. The
-// wait returns as soon as the agent idles (typically a few seconds); the bound
-// only bites on a boot that never idles, after which the nudge is sent
-// best-effort. Sized generously to cover cold, concurrent boots during a
-// town-wide restart.
+// agent process and input prompt before delivering the startup nudge. A launch
+// that never becomes ready is cleaned up instead of receiving input in its
+// bootstrap shell. Sized generously for cold, concurrent town-wide restarts.
 const startupNudgeIdleTimeout = 60 * time.Second
+
+const startupReadyPollInterval = 200 * time.Millisecond
+
+// waitForStartupReady waits through the launch shell -> agent TUI handoff. A
+// native Herdr idle observation alone is insufficient during startup because a
+// newly-created pane is initially an idle shell. ProcessNames and
+// ReadyPromptPrefix are stronger launch/readiness signals and mirror the hints
+// used by the tmux provider.
+func (p *Provider) waitForStartupReady(
+	ctx context.Context,
+	name, paneID string,
+	cfg runtime.Config,
+	timeout time.Duration,
+) error {
+	return waitForStartupReady(ctx, cfg, timeout, startupReadinessProbes{
+		processes: func(ctx context.Context) ([]proc, error) {
+			_, processes, err := p.c.processInfo(ctx, paneID)
+			return processes, err
+		},
+		visible: func(ctx context.Context) (string, error) {
+			return p.c.read(ctx, name, "visible", 120)
+		},
+		waitIdle: func(ctx context.Context, timeout time.Duration) error {
+			return p.WaitForIdle(ctx, name, timeout)
+		},
+	})
+}
+
+type startupReadinessProbes struct {
+	processes func(context.Context) ([]proc, error)
+	visible   func(context.Context) (string, error)
+	waitIdle  func(context.Context, time.Duration) error
+}
+
+func waitForStartupReady(
+	ctx context.Context,
+	cfg runtime.Config,
+	timeout time.Duration,
+	probes startupReadinessProbes,
+) error {
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	if len(cfg.ProcessNames) > 0 {
+		if err := waitForStartupCondition(readyCtx, func() (bool, error) {
+			processes, err := probes.processes(readyCtx)
+			if err != nil {
+				return false, nil // process-info races pane initialization; retry
+			}
+			return hasExpectedProcess(processes, cfg.ProcessNames), nil
+		}); err != nil {
+			return fmt.Errorf("agent process %v: %w", cfg.ProcessNames, err)
+		}
+	}
+
+	if cfg.ReadyPromptPrefix != "" {
+		if err := waitForStartupCondition(readyCtx, func() (bool, error) {
+			visible, err := probes.visible(readyCtx)
+			if err != nil {
+				return false, nil // screen capture can race initial TUI rendering
+			}
+			return containsReadyPrompt(visible, cfg.ReadyPromptPrefix), nil
+		}); err != nil {
+			return fmt.Errorf("ready prompt %q: %w", cfg.ReadyPromptPrefix, err)
+		}
+		return nil
+	}
+
+	if cfg.ReadyDelayMs > 0 {
+		delay := time.Duration(cfg.ReadyDelayMs) * time.Millisecond
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-readyCtx.Done():
+			return readyCtx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+
+	return probes.waitIdle(readyCtx, timeout)
+}
+
+func waitForStartupCondition(ctx context.Context, ready func() (bool, error)) error {
+	for {
+		ok, err := ready()
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		timer := time.NewTimer(startupReadyPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func hasExpectedProcess(processes []proc, expected []string) bool {
+	for _, process := range processes {
+		for _, want := range expected {
+			if strings.EqualFold(strings.TrimSpace(process.Name), strings.TrimSpace(want)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsReadyPrompt(visible, prefix string) bool {
+	normalizedPrefix := strings.ReplaceAll(prefix, "\u00a0", " ")
+	trimmedPrefix := strings.TrimSpace(normalizedPrefix)
+	for _, line := range strings.Split(visible, "\n") {
+		candidate := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		if candidate == "" {
+			continue
+		}
+		if strings.HasPrefix(candidate, "│") || strings.HasPrefix(candidate, "┃") {
+			candidate = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(candidate, "│"), "┃"))
+		}
+		if strings.HasPrefix(candidate, normalizedPrefix) || (trimmedPrefix != "" && candidate == trimmedPrefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // Stop closes the agent's pane and clears its metadata sidecar. Idempotent.
 func (p *Provider) Stop(name string) error {

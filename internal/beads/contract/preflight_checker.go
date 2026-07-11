@@ -47,7 +47,7 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
 		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
 		c.checkIdentityMatch(scope, metadata),
-		c.checkVersionCompat(bdCtx, bdCtxErr),
+		c.checkVersionCompat(metadata, bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
 	verdict := preflightVerdictForChecks(checks)
@@ -119,19 +119,10 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 		PostgresDSNRedacted: metadata.PostgresDSN,
 		PostgresPassword:    metadata.PostgresPassword,
 	}
-	switch metadata.Backend {
-	case "dolt":
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is dolt", details)
-	case "postgres":
-		if hasDSN && !hasSplit {
-			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is postgres; native store supports dolt only", details)
-	case "":
+	if metadata.Backend == "" {
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is missing", details)
-	default:
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported", metadata.Backend), details)
 	}
+	return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata names the backend selected by Beads", details)
 }
 
 func (c PreflightChecker) readBDContext(scope string) (PreflightBDContext, error) {
@@ -148,6 +139,9 @@ func (c PreflightChecker) readBDContext(scope string) (PreflightBDContext, error
 func (c PreflightChecker) checkBDContextAgreement(metadata preflightMetadata, ctx PreflightBDContext, err error) PreflightCheckResult {
 	details := PreflightDetails{MetadataBackend: metadata.Backend}
 	details.BDContextBackend = ctx.Backend
+	if metadata.Backend != "dolt" {
+		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckPass, "Beads owns configured backend context for non-dolt backend", details)
+	}
 	if err != nil {
 		// Unreachable bd context (e.g. a non-git city root where `bd context`
 		// cannot run) is not evidence of backend DISAGREEMENT — only that we
@@ -170,13 +164,16 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 		BDContextBackend:  ctx.Backend,
 		BDContextDoltMode: ctx.DoltMode,
 	}
+	if metadata.Backend != "dolt" {
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "Dolt mode check is not required for non-dolt backend", details)
+	}
 	if err != nil {
 		// Unreachable bd context cannot confirm dolt server mode; degrade
 		// (opt-in) rather than hard-block. embedded mode is still rejected
 		// below once bd context is readable.
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckWarn, "bd context is unreachable; cannot confirm dolt server mode", details)
 	}
-	if metadata.Backend != "dolt" || ctx.Backend != "dolt" {
+	if ctx.Backend != "dolt" {
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "Dolt mode check is not required for non-dolt backend", details)
 	}
 	switch ctx.DoltMode {
@@ -191,6 +188,9 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 
 func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata) PreflightCheckResult {
 	details := PreflightDetails{MetadataProjectID: metadata.ProjectID}
+	if metadata.Backend != "dolt" {
+		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "Dolt project identity check is not required for non-dolt backend", details)
+	}
 	if metadata.ProjectID == "" {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "metadata project_id is missing", details)
 	}
@@ -208,7 +208,7 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 	return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "project_id matches", details)
 }
 
-func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) PreflightCheckResult {
+func (c PreflightChecker) checkVersionCompat(metadata preflightMetadata, ctx PreflightBDContext, err error) PreflightCheckResult {
 	libraryVersion := strings.TrimPrefix(strings.TrimSpace(c.BeadsLibraryVersion), "v")
 	if libraryVersion == "" {
 		libraryVersion = strings.TrimPrefix(beadsModuleVersion(), "v")
@@ -217,6 +217,9 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		BDVersion:           ctx.BDVersion,
 		BeadsLibraryVersion: libraryVersion,
 		SchemaVersion:       ctx.SchemaVersion,
+	}
+	if metadata.Backend != "dolt" {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "configured backend is opened by the linked Beads library", details)
 	}
 	if err != nil {
 		// Unreachable bd context cannot confirm bd/beads version parity; degrade
@@ -259,28 +262,10 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 		PostgresUser:        metadata.PostgresUser,
 		PostgresDatabase:    metadata.PostgresDatabase,
 	}
-	if hasDSN && hasSplit {
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn and split postgres fields are both present", details)
-	}
-	switch metadata.Backend {
-	case "dolt":
-		if hasDSN || hasSplit {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "dolt metadata contains postgres fields", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
-	case "postgres":
-		if hasDSN {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", details)
-		}
-		if metadata.hasCompletePostgresSplitFields() {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses split postgres shape", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres metadata split fields are incomplete", details)
-	case "":
+	if metadata.Backend == "" {
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "metadata backend is missing", details)
-	default:
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, fmt.Sprintf("metadata backend %q has unsupported contract shape", metadata.Backend), details)
 	}
+	return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Backend-specific metadata is validated by Beads", details)
 }
 
 func preflightFallbackReason(checks []PreflightCheckResult) string {

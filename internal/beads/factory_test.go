@@ -77,8 +77,8 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 	if result.Store != native {
 		t.Fatalf("Store = %T %#v, want injected native store", result.Store, result.Store)
 	}
-	if result.Diagnostic.Store != storeNameNativeDoltStore {
-		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameNativeDoltStore)
+	if result.Diagnostic.Store != storeNameNativeBeadsStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameNativeBeadsStore)
 	}
 	if !result.Diagnostic.NativeStoreEligible {
 		t.Fatal("diagnostic native_store_eligible = false, want true")

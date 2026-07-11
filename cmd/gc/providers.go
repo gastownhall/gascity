@@ -645,7 +645,7 @@ func cityUsesBdStoreContract(cityPath string) bool {
 }
 
 func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
-	return cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath)
+	return cityUsesBdStoreContract(cityPath) && beadsBackend(cityPath) == "dolt"
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {

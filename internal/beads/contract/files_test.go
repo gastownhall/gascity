@@ -1553,61 +1553,6 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			fixture:         "reject_invalid_json.json",
 			wantErrContains: "invalid metadata.json:",
 		},
-		{
-			name:            "E2 unknown backend",
-			fixture:         "reject_unknown_backend.json",
-			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, postgres)`,
-		},
-		{
-			name:            "E3 mixed backends fires before required-fields",
-			fixture:         "reject_mixed_backends.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_database is also set)",
-		},
-		{
-			name:            "E3 rejects explicit dolt with postgres fields",
-			fixture:         "reject_dolt_with_postgres_field.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_host is also set)",
-		},
-		{
-			name:            "E3 surfaces dolt field when backend=postgres",
-			fixture:         "reject_mixed_pg_backend_with_dolt.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
-		},
-		{
-			name:            "E3 rejects explicit postgres with dolt fields",
-			fixture:         "reject_postgres_with_dolt_field.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
-		},
-		{
-			name:            "E3 surfaces dolt field first when backend is empty",
-			fixture:         "reject_mixed_empty_backend.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend= but dolt_database is also set)",
-		},
-		{
-			name:            "E4 postgres missing host",
-			fixture:         "reject_pg_missing_host.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-		},
-		{
-			name:            "E4 postgres missing all fields",
-			fixture:         "reject_pg_missing_all.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-		},
-		{
-			name:            "E5 postgres_port non-numeric",
-			fixture:         "reject_pg_port_nonnumeric.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "abc"`,
-		},
-		{
-			name:            "E5 postgres_port zero",
-			fixture:         "reject_pg_port_zero.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "0"`,
-		},
-		{
-			name:            "E5 postgres_port too high",
-			fixture:         "reject_pg_port_too_high.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "99999"`,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1637,6 +1582,31 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			wantWrapped := "load metadata " + path + ": " + parseErr.Reason
 			if err.Error() != wantWrapped {
 				t.Fatalf("MetadataParseError.Error() = %q, want %q", err.Error(), wantWrapped)
+			}
+		})
+	}
+}
+
+func TestLoadMetadataStateDelegatesBackendShapeValidationToBeads(t *testing.T) {
+	fs := fsys.OSFS{}
+	fixtures := []string{
+		"reject_unknown_backend.json",
+		"reject_mixed_backends.json",
+		"reject_dolt_with_postgres_field.json",
+		"reject_mixed_pg_backend_with_dolt.json",
+		"reject_postgres_with_dolt_field.json",
+		"reject_mixed_empty_backend.json",
+		"reject_pg_missing_host.json",
+		"reject_pg_missing_all.json",
+		"reject_pg_port_nonnumeric.json",
+		"reject_pg_port_zero.json",
+		"reject_pg_port_too_high.json",
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture, func(t *testing.T) {
+			path, _ := copyMetadataFixture(t, fs, fixture)
+			if _, ok, err := LoadMetadataState(fs, path); err != nil || !ok {
+				t.Fatalf("LoadMetadataState(%s) = ok %v, err %v; backend shape belongs to Beads", fixture, ok, err)
 			}
 		})
 	}

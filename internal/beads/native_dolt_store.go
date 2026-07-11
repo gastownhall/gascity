@@ -71,8 +71,8 @@ var nativeDoltOpenReadyStatuses = []beadslib.Status{
 }
 
 var (
-	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
-	nativeDoltOpenEnvMu         sync.Mutex
+	nativeBeadsOpenConfigured = beadslib.OpenConfigured
+	nativeDoltOpenEnvMu       sync.Mutex
 )
 
 var nativeDoltOpenEnvKeys = []string{
@@ -89,6 +89,12 @@ var nativeDoltOpenEnvKeys = []string{
 	"BEADS_DOLT_SERVER_TLS",
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_DOLT_SHARED_SERVER",
+	"BEADS_POSTGRES_URL",
+	"BEADS_PG_PASSWORD",
+	"BEADS_PG_PASSWORD_COMMAND",
+	"BEADS_MYSQL_URL",
+	"BEADS_MYSQL_PASSWORD",
+	"BEADS_MYSQL_PASSWORD_COMMAND",
 }
 
 func nativeDoltOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -157,10 +163,11 @@ func restoreNativeDoltOpenEnv(previous map[string]*string) {
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
 type NativeDoltStore struct {
-	mu       sync.RWMutex
-	storage  beadslib.Storage
-	actor    string
-	idPrefix string
+	mu          sync.RWMutex
+	storage     beadslib.Storage
+	backendInfo beadslib.BackendInfo
+	actor       string
+	idPrefix    string
 }
 
 var (
@@ -176,7 +183,16 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor}
+	return &NativeDoltStore{
+		storage: storage,
+		backendInfo: beadslib.BackendInfo{
+			Name: "dolt",
+			Capabilities: beadslib.BackendCapabilities{
+				Transactions: true,
+			},
+		},
+		actor: actor,
+	}
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -185,13 +201,37 @@ func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idP
 	return store
 }
 
+func newNativeBeadsStoreWithStorageAndPrefix(storage beadslib.Storage, info beadslib.BackendInfo, actor, idPrefix string) *NativeDoltStore {
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, actor, idPrefix)
+	store.backendInfo = info
+	return store
+}
+
+// BackendInfo reports the backend selected and opened by Beads.
+func (s *NativeDoltStore) BackendInfo() beadslib.BackendInfo {
+	if s == nil {
+		return beadslib.BackendInfo{}
+	}
+	return s.backendInfo
+}
+
+// OpenNativeBeadsStoreAt opens the backend selected by Beads metadata while
+// projecting the supplied scope-local backend environment during open.
+func OpenNativeBeadsStoreAt(ctx context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
+	return newNativeBeadsStoreAt(ctx, scopeRoot, env)
+}
+
 // OpenNativeDoltStoreAt opens a native Dolt-backed beads store at scopeRoot
 // while projecting the supplied scoped Dolt environment for upstream beads.
 func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
-	return newNativeDoltStoreAt(ctx, scopeRoot, env)
+	return newNativeBeadsStoreAt(ctx, scopeRoot, env)
 }
 
 func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
+	return newNativeBeadsStoreAt(parent, scopeRoot, env)
+}
+
+func newNativeBeadsStoreAt(parent context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
 	restoreEnv, err := withNativeDoltOpenEnv(env)
@@ -199,7 +239,7 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, err
 	}
 	defer restoreEnv()
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, info, err := nativeBeadsOpenConfigured(ctx, filepath.Join(scopeRoot, ".beads"), beadslib.OpenConfiguredOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +248,7 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		_ = storage.Close()
 		return nil, fmt.Errorf("reading native issue prefix: %w", err)
 	}
-	if accessor, ok := storage.(rawDBGetter); ok {
+	if accessor, ok := storage.(rawDBGetter); info.Name == "dolt" && ok {
 		for _, table := range idDefaultRepairTables {
 			if repairErr := repairIDDefault(accessor.DB(), table); repairErr != nil {
 				// Log but don't fail: the error will surface on the first
@@ -217,7 +257,7 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 			}
 		}
 	}
-	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
+	return newNativeBeadsStoreWithStorageAndPrefix(storage, info, nativeDoltStoreActor, prefix), nil
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
@@ -950,10 +990,7 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
 
-// Tx executes fn inside a single native Dolt transaction so every write in the
-// callback shares one DOLT_COMMIT. This is the coalescing path that lets a
-// caller (e.g. an extmsg bind) issue several bead writes at the cost of one
-// commit instead of one per write.
+// Tx executes fn inside one transaction supplied by the configured backend.
 func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
@@ -973,9 +1010,8 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 	})
 }
 
-// AtomicTx reports that Tx is backed by a native Dolt transaction that rolls
-// back every write when the callback returns an error.
-func (s *NativeDoltStore) AtomicTx() bool { return true }
+// AtomicTx reports whether the configured backend advertises transactions.
+func (s *NativeDoltStore) AtomicTx() bool { return s != nil && s.backendInfo.Capabilities.Transactions }
 
 // nativeDoltTx adapts the Store.Tx write surface onto an open beadslib
 // transaction. Every method routes through the store's applyXInTx helpers so

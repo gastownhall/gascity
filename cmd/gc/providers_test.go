@@ -78,6 +78,30 @@ func TestRawBeadsProviderNormalizesManagedExecEnv(t *testing.T) {
 	}
 }
 
+func TestCityUsesManagedDoltBeadsLifecycleOnlyForDolt(t *testing.T) {
+	for _, tc := range []struct {
+		backend string
+		want    bool
+	}{
+		{backend: "dolt", want: true},
+		{backend: "postgres", want: false},
+		{backend: "sqlite", want: false},
+		{backend: "doltlite", want: false},
+		{backend: "custom-plugin", want: false},
+	} {
+		t.Run(tc.backend, func(t *testing.T) {
+			cityPath := t.TempDir()
+			content := "[beads]\nprovider = \"bd\"\nbackend = \"" + tc.backend + "\"\n"
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := cityUsesManagedDoltBeadsLifecycle(cityPath); got != tc.want {
+				t.Fatalf("cityUsesManagedDoltBeadsLifecycle() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 type apiMailCacheCountingStore struct {
 	*beads.MemStore
 	mu               sync.Mutex

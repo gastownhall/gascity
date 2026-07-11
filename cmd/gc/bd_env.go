@@ -403,7 +403,10 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		}
 		return true, nil
 	default:
-		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, scopeRoot)
+		// Backend-specific environment projection belongs to Beads and its
+		// backend pack. Gas City preserves the scoped environment for every
+		// other configured backend rather than maintaining an allowlist here.
+		return true, nil
 	}
 }
 
@@ -428,7 +431,7 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 	case "", "dolt", "doltlite":
 		return false, nil
 	default:
-		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, cityPath)
+		return false, nil
 	}
 }
 
@@ -1379,6 +1382,14 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 		mirrorBeadsDoltEnv(env)
 		return env, err
 	} else if usedPostgres {
+		return env, nil
+	}
+	if nonDolt, err := scopeUsesNonDoltBackendForInit(cityPath, cityPath); err != nil {
+		return env, err
+	} else if nonDolt {
+		clearProjectedDoltEnv(env)
+		clearProjectedPostgresEnv(env)
+		clearProjectedBeadsBackendEnv(env)
 		return env, nil
 	}
 	if err := applyResolvedCityDoltEnv(env, cityPath, allowRecovery); err != nil {

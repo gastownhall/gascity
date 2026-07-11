@@ -11,7 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestPreflightBlocksNativeOnMetadataPostgres(t *testing.T) {
+func TestPreflightAcceptsConfiguredPostgres(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
 		"backend": "postgres",
@@ -27,9 +27,9 @@ func TestPreflightBlocksNativeOnMetadataPostgres(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
 	assertCheckOrder(t, result)
-	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckPass)
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
 	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
 	assertPreflightReadOnly(t, checker.FS.(*fsys.Fake))
@@ -48,9 +48,9 @@ func TestPreflightRedactsPostgresDSN(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
-	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckWarn)
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckWarn)
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
 	check := findPreflightCheck(t, result, PreflightCheckMetadataBackend)
 	if check.Details.PostgresDSNRedacted != "postgres://[REDACTED]" {
 		t.Fatalf("PostgresDSNRedacted = %q, want redacted DSN", check.Details.PostgresDSNRedacted)
@@ -62,6 +62,32 @@ func TestPreflightRedactsPostgresDSN(t *testing.T) {
 	if strings.Contains(string(data), "swordfish") || strings.Contains(string(data), "operator:swordfish") {
 		t.Fatalf("serialized result leaked DSN secret: %s", data)
 	}
+}
+
+func TestPreflightAcceptsBackendOwnedSQLiteMetadata(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "sqlite",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "sqlite"}, "gc-local")
+	checker.BDContext = func(string) (PreflightBDContext, error) {
+		return PreflightBDContext{}, errors.New("bd context is unavailable")
+	}
+	checker.DatabaseProjectID = func(string) (string, bool, error) {
+		return "", false, errors.New("dolt project identity is unavailable")
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
 }
 
 func TestPreflightBlocksNativeOnContextDisagreement(t *testing.T) {
@@ -381,7 +407,7 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
-			got := c.checkVersionCompat(tt.ctx, nil)
+			got := c.checkVersionCompat(preflightMetadata{Backend: "dolt"}, tt.ctx, nil)
 			if got.ID != PreflightCheckVersionCompat {
 				t.Fatalf("ID = %q, want %q", got.ID, PreflightCheckVersionCompat)
 			}

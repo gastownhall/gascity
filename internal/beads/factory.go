@@ -19,17 +19,21 @@ const (
 	BeadsStoreNameFileStore = "FileStore"
 	// BeadsStoreNameExecStore is the diagnostic store name for exec-backed stores.
 	BeadsStoreNameExecStore = "ExecStore"
-	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
-	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+	// BeadsStoreNameNativeBeadsStore is the diagnostic store name for stores
+	// opened through Beads' configured backend API.
+	BeadsStoreNameNativeBeadsStore = "NativeBeadsStore"
+	// BeadsStoreNameNativeDoltStore is retained as a source-compatible alias.
+	BeadsStoreNameNativeDoltStore = BeadsStoreNameNativeBeadsStore
 
-	storeNameBdStore         = BeadsStoreNameBdStore
-	storeNameFileStore       = BeadsStoreNameFileStore
-	storeNameExecStore       = BeadsStoreNameExecStore
-	storeNameNativeDoltStore = BeadsStoreNameNativeDoltStore
-	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
-	nativeForceFallbackGate  = "force_fallback"
-	nativeHooksGate          = "bd_hooks"
-	nativeUnavailableMessage = "native_store_unavailable"
+	storeNameBdStore          = BeadsStoreNameBdStore
+	storeNameFileStore        = BeadsStoreNameFileStore
+	storeNameExecStore        = BeadsStoreNameExecStore
+	storeNameNativeBeadsStore = BeadsStoreNameNativeBeadsStore
+	storeNameNativeDoltStore  = storeNameNativeBeadsStore
+	nativeForceFallbackEnv    = "GC_BEADS_FORCE_FALLBACK"
+	nativeForceFallbackGate   = "force_fallback"
+	nativeHooksGate           = "bd_hooks"
+	nativeUnavailableMessage  = "native_store_unavailable"
 
 	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
 	// it installs. Hooks bearing this stamp are gc's own event-forwarding
@@ -149,7 +153,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	return StoreOpenResult{
 		Store: native,
 		Diagnostic: BeadsDiagnostic{
-			Store:               storeNameNativeDoltStore,
+			Store:               storeNameNativeBeadsStore,
 			NativeStoreEligible: true,
 		},
 	}, nil
@@ -170,7 +174,7 @@ func (opts StoreOpenOptions) openNativeStore(ctx context.Context) (Store, error)
 	if opts.OpenNativeStore != nil {
 		return opts.OpenNativeStore()
 	}
-	return newNativeDoltStoreAt(ctx, opts.ScopeRoot, nil)
+	return newNativeBeadsStoreAt(ctx, opts.ScopeRoot, nil)
 }
 
 func callStoreOpen(name string, open func() (Store, error)) (Store, error) {

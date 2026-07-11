@@ -334,20 +334,13 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 }
 
 // LoadMetadataState parses .beads/metadata.json at path and returns the
-// canonical MetadataState if the file exists and validates.
+// MetadataState projection if the file exists and contains valid JSON.
 //
 // Returns (zero, false, nil) when the file does not exist — callers decide
 // whether absence is an error in their context (mirrors ReadIssuePrefix and
 // ReadDoltDatabase). Returns a non-nil error for read failures other than
-// ENOENT and for any of the E1–E5 rejection cases. Validation failures are
-// wrapped in *MetadataParseError; callers may use errors.As to discriminate.
-//
-// Validation order is deterministic: the operator always sees the same
-// top-most message when several things are wrong. Order is JSON parse (E1) →
-// mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
-// postgres-port-format (E5). An empty Backend is permitted at the parse
-// layer; downstream consumers that need a backend must check
-// state.Backend != "" themselves.
+// ENOENT and for malformed JSON. Beads owns backend names and backend-specific
+// metadata validation; Gas City deliberately projects only fields it needs.
 func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -370,93 +363,7 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
-	if other, ok := mixedBackendField(state); ok {
-		return MetadataState{}, false, &MetadataParseError{
-			Path:   abs,
-			Reason: fmt.Sprintf("cannot mix dolt and postgres fields in a single scope (backend=%s but %s is also set)", state.Backend, other),
-		}
-	}
-
-	switch state.Backend {
-	case "", "dolt", "doltlite", "postgres":
-		// allowed
-	default:
-		return MetadataState{}, false, &MetadataParseError{
-			Path:   abs,
-			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres)", state.Backend),
-		}
-	}
-
-	if state.Backend == "postgres" {
-		if state.PostgresHost == "" || state.PostgresPort == "" || state.PostgresUser == "" || state.PostgresDatabase == "" {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-			}
-		}
-		port, err := strconv.Atoi(state.PostgresPort)
-		if err != nil || port < 1 || port > 65535 {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", state.PostgresPort),
-			}
-		}
-	}
-
 	return state, true, nil
-}
-
-// mixedBackendField reports the first populated "other-backend" field name
-// (relative to state.Backend). For explicit backends, any populated field from
-// the opposite backend is mixed. For empty or unknown backends, mixed still
-// means both Dolt-shaped and Postgres-shaped fields are populated.
-//
-// Field-iteration order is the JSON-key declaration order on MetadataState
-// (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database). When state.Backend is empty or unknown and both backend
-// families appear, the first populated field across both backends wins (with
-// Dolt fields preferred per declaration order).
-func mixedBackendField(state MetadataState) (string, bool) {
-	type entry struct {
-		name    string
-		value   string
-		backend string
-	}
-	fields := []entry{
-		{"dolt_mode", state.DoltMode, "dolt"},
-		{"dolt_database", state.DoltDatabase, "dolt"},
-		{"postgres_host", state.PostgresHost, "postgres"},
-		{"postgres_port", state.PostgresPort, "postgres"},
-		{"postgres_user", state.PostgresUser, "postgres"},
-		{"postgres_database", state.PostgresDatabase, "postgres"},
-	}
-	var firstDolt, firstPostgres string
-	for _, f := range fields {
-		if f.value == "" {
-			continue
-		}
-		if f.backend == "dolt" && firstDolt == "" {
-			firstDolt = f.name
-		}
-		if f.backend == "postgres" && firstPostgres == "" {
-			firstPostgres = f.name
-		}
-	}
-	switch state.Backend {
-	case "postgres":
-		if firstDolt != "" {
-			return firstDolt, true
-		}
-	case "dolt", "doltlite":
-		if firstPostgres != "" {
-			return firstPostgres, true
-		}
-	default:
-		if firstDolt != "" && firstPostgres != "" {
-			return firstDolt, true
-		}
-	}
-	return "", false
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
