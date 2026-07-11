@@ -430,3 +430,56 @@ func TestWatchBackfillBoundedBuffer(t *testing.T) {
 		drainWatcher(t, fw, 1)
 	}
 }
+
+// Promotion window: a rotating file listed at T0 but promoted (renamed to its
+// .gz, source removed) before the open must be read via its derived archive
+// path, not silently skipped — the .gz did not exist at list time.
+func TestBackfillRotatingPromotedBetweenListAndOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	recordN(rec, "p", 3)
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatal(err)
+	}
+	rec.WaitForRotations() // .gz now exists, rotating file removed
+
+	// Reconstruct the exact race state a watcher would see: a source list that
+	// names the (now vanished) rotating file with the archive as fallback.
+	archives, err := archiveFilesIn(dir)
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("archives = %v err = %v, want exactly 1", archives, err)
+	}
+	info := archives[0]
+	src := backfillSource{
+		path:         filepath.Join(dir, "events.jsonl.rotating-vanished"), // gone
+		fallbackPath: filepath.Join(dir, info.Basename),
+		kind:         sourceRotating,
+		firstSeq:     info.FirstSeq,
+		lastSeq:      info.LastSeq,
+	}
+	sr, err := openSegmentReader(src)
+	if err != nil {
+		t.Fatalf("openSegmentReader: %v", err)
+	}
+	if sr == nil {
+		t.Fatal("vanished rotating file with existing .gz was skipped — promotion window lost")
+	}
+	defer sr.close()
+
+	var maxSeq uint64
+	var out []Event
+	eof, err := sr.readInto(Filter{}, &maxSeq, &out, 100)
+	if err != nil || !eof {
+		t.Fatalf("readInto: eof=%v err=%v", eof, err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("fallback archive yielded %d events, want 3", len(out))
+	}
+}

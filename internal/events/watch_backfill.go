@@ -52,12 +52,18 @@ const (
 )
 
 // backfillSource is one on-disk segment contributing to a resume backfill,
-// ordered by its first sequence.
+// ordered by its first sequence. fallbackPath, set for rotating files, is the
+// canonical .gz archive the recorder promotes the file to: the promotion
+// (rename .gz into place, THEN remove the rotating source) can land between the
+// directory listing and the open, in which case the archive did not exist at
+// list time and the rotating file no longer does — reading the derived archive
+// path is the only way not to lose that window.
 type backfillSource struct {
-	path     string
-	kind     backfillSourceKind
-	firstSeq uint64
-	lastSeq  uint64
+	path         string
+	fallbackPath string
+	kind         backfillSourceKind
+	firstSeq     uint64
+	lastSeq      uint64
 }
 
 // listBackfillSources returns the .gz archives and in-flight rotating-* files in
@@ -93,7 +99,7 @@ func listBackfillSources(dir string, afterSeq uint64) ([]backfillSource, error) 
 				firstSeq: info.FirstSeq, lastSeq: info.LastSeq,
 			})
 		case hasRotatingPrefix(name):
-			_, first, last, ok := parseRotatingBasename(name)
+			ts, first, last, ok := parseRotatingBasename(name)
 			if !ok {
 				continue // legacy rotating file without a window; reaper promotes it
 			}
@@ -101,8 +107,10 @@ func listBackfillSources(dir string, afterSeq uint64) ([]backfillSource, error) 
 				continue
 			}
 			srcs = append(srcs, backfillSource{
-				path: filepath.Join(dir, name), kind: sourceRotating,
-				firstSeq: first, lastSeq: last,
+				path:         filepath.Join(dir, name),
+				fallbackPath: filepath.Join(dir, formatArchiveBasename(ts, first, last)),
+				kind:         sourceRotating,
+				firstSeq:     first, lastSeq: last,
 			})
 		}
 	}
@@ -130,12 +138,21 @@ type segmentReader struct {
 	br *bufio.Reader
 }
 
-// openSegmentReader opens src (a captured active fd, or an archive/rotating path)
-// bounded by limit bytes when limit >= 0 (the active leg). A missing file yields
-// (nil, nil): a rotating file may have been promoted to its .gz and removed
-// between listing and open; the .gz counterpart (also listed) covers the window.
+// openSegmentReader opens one backfill segment. A rotating file that vanished
+// between listing and open was promoted (the recorder renames the .gz into place
+// BEFORE removing the rotating source), so its derived archive path is read
+// instead — skipping would silently lose the window whenever the promotion lands
+// in that gap, because the .gz did not exist at list time. A missing archive
+// yields (nil, nil): archives are only removed by retention reaping, which never
+// touches windows a live backfill can still need (and the monotonic cursor makes
+// a re-listed duplicate harmless).
 func openSegmentReader(src backfillSource) (*segmentReader, error) {
 	f, err := os.Open(src.path)
+	kind := src.kind
+	if err != nil && os.IsNotExist(err) && src.fallbackPath != "" {
+		f, err = os.Open(src.fallbackPath)
+		kind = sourceArchive
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -144,7 +161,7 @@ func openSegmentReader(src backfillSource) (*segmentReader, error) {
 	}
 	sr := &segmentReader{f: f}
 	var r io.Reader = f
-	if src.kind == sourceArchive {
+	if kind == sourceArchive {
 		gz, gerr := gzip.NewReader(f)
 		if gerr != nil {
 			_ = f.Close()

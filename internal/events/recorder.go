@@ -685,6 +685,14 @@ func (w *fileWatcher) Next() (Event, error) {
 					w.offset = 0
 				} else {
 					w.inode = curr
+					// Same identity but a cursor beyond EOF is stale (e.g. an
+					// inode reused across a rotation the stat window missed, or
+					// a truncated file): ReadFrom would seek past EOF and skip
+					// everything below it forever. Rewind; the seq guard drops
+					// any overlap re-read.
+					if w.offset > info.Size() {
+						w.offset = 0
+					}
 				}
 			}
 		}
