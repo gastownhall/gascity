@@ -210,7 +210,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/convoys",
 		Summary:       "Create a convoy",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleConvoyCreate)
 	cityGet(sm, "/convoy/{id}", (*Server).humaHandleConvoyGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/convoy/{id}/add", (*Server).humaHandleConvoyAdd, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))

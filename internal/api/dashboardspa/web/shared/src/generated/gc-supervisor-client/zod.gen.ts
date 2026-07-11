@@ -5248,7 +5248,8 @@ export const zGetV0CityByCityNameAgentsResponse = zListBodyAgentResponse;
 export const zCreateAgentBody = zAgentCreateInputBody;
 
 export const zCreateAgentHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zCreateAgentPath = z.object({
@@ -5567,7 +5568,8 @@ export const zGetV0CityByCityNameConvoysResponse = zListBodyBead;
 export const zCreateConvoyBody = zConvoyCreateInputBody;
 
 export const zCreateConvoyHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zCreateConvoyPath = z.object({
@@ -6354,7 +6356,8 @@ export const zGetV0CityByCityNamePacksResponse = zPackListBody;
 export const zAddPackBody = zPackAddInputBody;
 
 export const zAddPackHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zAddPackPath = z.object({
@@ -6625,7 +6628,8 @@ export const zGetV0CityByCityNameProvidersResponse = zListBodyProviderResponse;
 export const zCreateProviderBody = zProviderCreateInputBody;
 
 export const zCreateProviderHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zCreateProviderPath = z.object({
@@ -6741,7 +6745,8 @@ export const zGetV0CityByCityNameRigsResponse = zListBodyRigResponse;
 export const zCreateRigBody = zRigCreateInputBody;
 
 export const zCreateRigHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zCreateRigPath = z.object({

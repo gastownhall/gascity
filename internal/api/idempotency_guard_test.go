@@ -14,8 +14,13 @@ import (
 // Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
 // lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
-	"create-bead": true,
-	"send-mail":   true,
+	"create-bead":     true,
+	"send-mail":       true,
+	"create-agent":    true,
+	"create-provider": true,
+	"create-rig":      true,
+	"create-convoy":   true,
+	"add-pack":        true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -23,16 +28,11 @@ var requireIdempotency = map[string]bool{
 // TODO list, not an exemption: when a slice wires one of these, MOVE it to
 // requireIdempotency — the test enforces the move so the lists stay honest.
 var pendingIdempotency = map[string]bool{
-	"create-agent":            true, // 201
-	"create-provider":         true, // 201
-	"create-rig":              true, // 201
-	"create-convoy":           true, // 201
-	"add-pack":                true, // 201; git fetch, retry-prone
-	"reply-mail":              true, // 201; mints a message
-	"register-extmsg-adapter": true, // 201
-	"emit-event":              true, // 201; append-only, retry double-emits
-	"ensure-extmsg-group":     true, // 201; identity-idempotent already
-	"post-v0-city":            true, // 202; supervisor city create
+	"reply-mail":              true, // 201; mints a message (S3)
+	"register-extmsg-adapter": true, // 201 (S3)
+	"emit-event":              true, // 201; append-only, retry double-emits (S3)
+	"ensure-extmsg-group":     true, // 201; identity-idempotent already — moves to exempt in S3
+	"post-v0-city":            true, // 202; supervisor city create (S3)
 	"create-session":          true, // 202; raw+Huma split, deferred (S4)
 	"send-session-message":    true, // 202; deferred (S4)
 	"respond-session":         true, // 202; deferred (S4)

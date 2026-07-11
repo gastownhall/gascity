@@ -7936,6 +7936,10 @@ export type CreateAgentData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -9257,6 +9261,10 @@ export type CreateConvoyData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -9285,6 +9293,10 @@ export type CreateConvoyErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -12264,6 +12276,10 @@ export type AddPackData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -13423,6 +13439,10 @@ export type CreateProviderData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -13870,6 +13890,10 @@ export type CreateRigData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**

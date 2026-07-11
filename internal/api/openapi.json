@@ -20207,6 +20207,15 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -23653,6 +23662,15 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -23750,6 +23768,21 @@
               }
             },
             "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -31259,6 +31292,15 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -34244,6 +34286,15 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -35379,6 +35430,15 @@
               "description": "City name.",
               "minLength": 1,
               "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
               "type": "string"
             }
           }

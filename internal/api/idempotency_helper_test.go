@@ -203,4 +203,15 @@ func TestWithIdempotency_DistinctKeysAndPathsIndependent(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("same key on a different path collided (calls=%d, want 1)", calls)
 	}
+	// Different keys, same path, same body → must not collide either. This
+	// pins that the KEY participates in the cache scope (dropping it from
+	// scopedKey would make key-2 replay key-1's response).
+	calls = 0
+	if _, err := withIdempotency(s, "/v0/things", "key-2", body,
+		func() (idemVal, error) { calls++; return idemVal{ID: "z"}, nil }); err != nil {
+		t.Fatalf("second key: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a different key on the same path replayed the first key's response (calls=%d, want 1)", calls)
+	}
 }

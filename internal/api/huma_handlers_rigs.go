@@ -66,24 +66,33 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 // humaHandleRigCreate is the Huma-typed handler for POST /v0/rigs.
 // Name and Path required via struct tags on RigCreateInput.
 func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (*RigCreatedOutput, error) {
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		return nil, errMutationsNotSupported
-	}
+	// Idempotency: create at most once per Idempotency-Key. The cached value is
+	// the rig name; the response body is rebuilt from it on replay.
+	name, err := withIdempotency(s, "/v0/rigs", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			sm, ok := s.state.(StateMutator)
+			if !ok {
+				return "", errMutationsNotSupported
+			}
 
-	rig := config.Rig{
-		Name:          input.Body.Name,
-		Path:          input.Body.Path,
-		Prefix:        input.Body.Prefix,
-		DefaultBranch: input.Body.DefaultBranch,
-	}
+			rig := config.Rig{
+				Name:          input.Body.Name,
+				Path:          input.Body.Path,
+				Prefix:        input.Body.Prefix,
+				DefaultBranch: input.Body.DefaultBranch,
+			}
 
-	if err := sm.CreateRig(rig); err != nil {
-		return nil, mutationError(err)
+			if err := sm.CreateRig(rig); err != nil {
+				return "", mutationError(err)
+			}
+			return input.Body.Name, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	resp := &RigCreatedOutput{}
 	resp.Body.Status = "created"
-	resp.Body.Rig = input.Body.Name
+	resp.Body.Rig = name
 	return resp, nil
 }
 
