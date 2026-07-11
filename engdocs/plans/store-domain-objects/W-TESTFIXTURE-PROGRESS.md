@@ -13,7 +13,8 @@ and `test-double-migration-plan.md` (the categorization). Branch
 | `d5f76a6f1` | plan-doc SeedBead signature fix (red-team nit) | — |
 | `86bc8a587` | **Batch 2** — `session_lifecycle_parallel_test.go` (89→0: 53 SeedBead-on-local + 36 struct-literal), `session_reconcile_test.go` (48→0 via `seedSessionInfo`), `session_wake_test.go` (29→1: `wakeInfo` + 10 SeedBead; 1 adapter deferred) | 166 → 1 |
 | `b3bc66e05` | Batch-2 red-team **APPROVE-with-nits (0 blockers)**; nit fixed (`wakeInfo`→`seedSessionInfo` delegate) | — |
-| in flight | **Batch 3** (base `b3bc66e05`) — build_desired_state (24), telemetry (17)+compute_awake_bridge (14), model_phase0_rare_state (14)+lifecycle_chaos (11) | ~80 sites |
+| `716ef1826` | **Batch 3** — build_desired_state (24→0), telemetry (17→0)+compute_awake_bridge (14→0), model_phase0_rare_state (14→0)+lifecycle_chaos (11→0). Red-team **APPROVE-with-nits (0 blockers)**; nit fixed (divergence comment). | 80 → 0 |
+| in flight | **Batch 4** (base `939c9affe`) — cmd_session(11)+assigned_work(8)+fork_launch(5)+pool_replacement(2) [w4-cmd DONE `ccca708fa`, 25/26, 1 deferred `sessionInfosFromBeads`]; tail cluster of 8 small files (20) [w4-tail running] | ~46 sites |
 
 ## KEYSTONE FINDING (adjusts the plan's categorization)
 `MemStore.Create` unconditionally rewrites **ID→gc-N, Status→open, CreatedAt→now**
@@ -71,6 +72,13 @@ per-shape), THEN they stop blocking the unexport:
   still carry raw beads."
 - `wakeReasonsForBead` / `healStateInfo` bridge helpers — called from `session_reconcile_test.go`
   (converted) + `session_sleep_test.go` + `session_reconcile_ratelimit_test.go` (NOT yet converted).
+- `sessionInfosFromBeads(bs []beads.Bead) []session.Info` (`assigned_work_scope_test.go:23`, `t`-less)
+  — the batch codec, called from **8+ files** (`pool_desired_state_test.go`, `build_desired_state_test.go`,
+  `session_reconciler_test.go`, `cmd_sling_test.go`, `session_circuit_breaker_test.go`,
+  `pool_desired_state_wake_test.go`, `session_model_phase0_demand_spec_test.go`, `assigned_work_scope_test.go`).
+  Projects any bead shape incl. deliberately-narrowed task beads → a Type-stamp would defeat other
+  callers' narrowing tests. Coordinated pass must own all callers (e.g. thread a projector or convert
+  callers to pass Infos). ← this is the LAST InfoFromPersistedBead site in several of those files.
 
 ## In flight — Batch 2 (3 solo Opus agents, base d5f76a6f1, worktrees /data/projects/gascity-sdo-w2-*)
 - `session_lifecycle_parallel_test.go` (89) — bare-memstore + standalone
