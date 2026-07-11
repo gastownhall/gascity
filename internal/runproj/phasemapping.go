@@ -590,6 +590,21 @@ func stripAttemptSuffix(id string) string {
 	return stripped
 }
 
+// iterationSegmentRE matches the .iteration.N path segments loop
+// materialization inserts into a step ref (scope.iteration.2.step).
+var iterationSegmentRE = regexp.MustCompile(`\.iteration\.\d+`)
+
+// stripIterationSegments removes every .iteration.N segment from a step ref,
+// yielding the iteration-agnostic authored form. A value that is nothing but
+// segments is returned unchanged rather than stripped to the empty string.
+func stripIterationSegments(id string) string {
+	stripped := iterationSegmentRE.ReplaceAllString(id, "")
+	if stripped == "" {
+		return id
+	}
+	return stripped
+}
+
 // formulaStageStatus resolves one stage's status relative to the active and
 // furthest-closed stage indices. Port of the TS status switch.
 func formulaStageStatus(idx, activeIndex, furthestClosedIndex int, stage formulaStage, primary []runIssue) string {
