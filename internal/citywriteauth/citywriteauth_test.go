@@ -539,6 +539,143 @@ func TestVerify_EmptyClaimsAndZeroExpectRejected(t *testing.T) {
 	}
 }
 
+// cidFixture returns a verifier configured with the given cid/legacy-aud plus a
+// matching valid grant, mirroring the hosted (tenancy-scoped) writeauth wiring.
+func cidFixture(t *testing.T, now time.Time, cid, legacyAud string) (*Verifier, ed25519.PrivateKey, Grant, Expect) {
+	t.Helper()
+	pub, priv := newTestKeypair(t)
+	v, err := New(Options{
+		Aud:        "gc-city-write.v2",
+		LegacyAud:  legacyAud,
+		CID:        cid,
+		Keys:       map[string]ed25519.PublicKey{"k1": pub},
+		EpochFloor: 1,
+		MaxTTL:     60 * time.Second,
+		Skew:       5 * time.Second,
+		Now:        func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	body := []byte(`{"name":"worker"}`)
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", body)
+	g := Grant{
+		Kid:   "k1",
+		Aud:   "gc-city-write.v2",
+		City:  "acme",
+		CID:   cid,
+		Epoch: 7,
+		IAT:   now.Unix(),
+		Exp:   now.Add(30 * time.Second).Unix(),
+		JTI:   "jti-1",
+		Req:   digest,
+	}
+	return v, priv, g, Expect{City: "acme", ReqDigest: digest}
+}
+
+// The cid claim is the tenancy binding: when the verifier is configured with a
+// cid, every grant must carry that exact value — a mismatching or missing cid
+// fails closed. When no cid is configured the claim is not checked.
+func TestVerify_CIDEnforcement(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("matching cid passes", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		got, err := v.Verify(mintFor(t, priv, g), expect)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		if got.CID != "city_acme" {
+			t.Fatalf("grant cid = %q, want city_acme", got.CID)
+		}
+	})
+	t.Run("mismatching cid rejected", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		g.CID = "city_evil"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrCIDMismatch) {
+			t.Fatalf("got %v, want ErrCIDMismatch", err)
+		}
+	})
+	t.Run("missing cid rejected when configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		g.CID = ""
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrCIDMismatch) {
+			t.Fatalf("got %v, want ErrCIDMismatch", err)
+		}
+	})
+	t.Run("cid ignored when not configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "")
+		g.CID = "city_whatever" // signed, but the verifier has no cid to bind
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+	})
+}
+
+// A failed cid check must NOT burn the jti, like every other rejection: an
+// attacker replaying a captured grant against the wrong tenant must not be able
+// to invalidate it for the legitimate controller. (The two verifiers here model
+// two controllers with independent replay guards; the property under test is
+// that the mismatch rejection happens before jti consumption.)
+func TestVerify_FailedCIDCheckDoesNotConsumeJTI(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+	g.CID = "city_other"
+	token := mintFor(t, priv, g)
+	if _, err := v.Verify(token, expect); !errors.Is(err, ErrCIDMismatch) {
+		t.Fatalf("expected ErrCIDMismatch, got %v", err)
+	}
+	// The same verifier must still accept a matching grant with the same jti:
+	// the failed attempt did not consume it.
+	g.CID = "city_acme"
+	if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+		t.Fatalf("legit Verify after failed cid attempt: %v", err)
+	}
+}
+
+// LegacyAud is an optional second accepted audience so pre-cid ("gc-city-write")
+// grants keep verifying through the v2 cutover on deployments that are not
+// tenancy-scoped. Anything other than the two configured audiences stays
+// rejected, and without LegacyAud the verifier is strictly single-audience.
+func TestVerify_LegacyAudience(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("legacy aud accepted when configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "gc-city-write")
+		g.Aud = "gc-city-write"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("Verify legacy aud: %v", err)
+		}
+	})
+	t.Run("primary aud accepted alongside legacy", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "gc-city-write")
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("Verify primary aud: %v", err)
+		}
+	})
+	t.Run("unknown aud rejected despite legacy", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "gc-city-write")
+		g.Aud = "gc-city-write.v3"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("legacy aud rejected when not configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "")
+		g.Aud = "gc-city-write"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("empty grant aud never matches an unset legacy aud", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "")
+		g.Aud = ""
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+}
+
 func flipLastByte(tok string) string {
 	parts := strings.SplitN(tok, ".", 2)
 	sig, err := base64.RawURLEncoding.DecodeString(parts[1])

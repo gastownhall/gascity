@@ -17,9 +17,14 @@ import (
 // request-bound authorization for exactly one city mutation, minted by a
 // configured trusted authority and verified here.
 type Grant struct {
-	Kid   string `json:"kid"`
-	Aud   string `json:"aud"`
-	City  string `json:"city"`
+	Kid  string `json:"kid"`
+	Aud  string `json:"aud"`
+	City string `json:"city"`
+	// CID is the tenancy binding: the org-unique city id the grant was minted
+	// for (distinct from City, the per-org city name that feeds the request
+	// path). Legacy (pre-cid) grants omit it. When the verifier is configured
+	// with a CID, every grant must carry that exact value — see Options.CID.
+	CID   string `json:"cid"`
 	Epoch int64  `json:"epoch"`
 	IAT   int64  `json:"iat"`
 	Exp   int64  `json:"exp"`
@@ -42,6 +47,7 @@ var (
 	ErrMissingClaim       = errors.New("citywriteauth: grant missing required claim")
 	ErrMissingExpectation = errors.New("citywriteauth: request expectation incomplete")
 	ErrCityMismatch       = errors.New("citywriteauth: city mismatch")
+	ErrCIDMismatch        = errors.New("citywriteauth: cid mismatch")
 	ErrReqMismatch        = errors.New("citywriteauth: request binding mismatch")
 	ErrReplay             = errors.New("citywriteauth: replay detected")
 	ErrReplayUnavailable  = errors.New("citywriteauth: replay guard unavailable")
@@ -62,8 +68,19 @@ type ReplayGuard interface {
 // New so a misconfiguration fails loudly at construction rather than silently
 // admitting writes.
 type Options struct {
-	// Aud is the exact expected audience (e.g. "gc-city-write"). Required.
+	// Aud is the exact expected audience (e.g. "gc-city-write.v2"). Required.
 	Aud string
+	// LegacyAud, when non-empty, is a second accepted audience so grants from
+	// a previous audience generation (e.g. "gc-city-write") keep verifying
+	// through a cutover. All other checks — including CID when configured —
+	// apply to legacy grants unchanged.
+	LegacyAud string
+	// CID, when non-empty, requires every grant to carry this exact cid claim
+	// (the verifier's own tenancy identity). A grant with a mismatching or
+	// missing cid is rejected, so a grant minted for one tenant's city can
+	// never be replayed against another tenant's verifier even when the city
+	// names collide. Empty disables the check (untenanted deployments).
+	CID string
 	// Keys maps a key id (kid) to its ed25519 public key. At least one required.
 	Keys map[string]ed25519.PublicKey
 	// EpochFloor rejects grants minted before a rotation/teardown boundary.
@@ -81,6 +98,8 @@ type Options struct {
 // Verifier checks X-GC-City-Write tokens. It is verify-only: it never mints.
 type Verifier struct {
 	aud        string
+	legacyAud  string
+	cid        string
 	keys       map[string]ed25519.PublicKey
 	epochFloor int64
 	maxTTL     time.Duration
@@ -130,6 +149,8 @@ func New(opts Options) (*Verifier, error) {
 	}
 	return &Verifier{
 		aud:        opts.Aud,
+		legacyAud:  opts.LegacyAud,
+		cid:        opts.CID,
 		keys:       keys,
 		epochFloor: opts.EpochFloor,
 		maxTTL:     opts.MaxTTL,
@@ -172,7 +193,10 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 		return nil, err
 	}
 
-	if g.Aud != v.aud {
+	// The primary audience or, when configured, the legacy one. The guard on a
+	// non-empty legacyAud matters: an unset LegacyAud must never match a grant
+	// with an empty aud claim.
+	if g.Aud != v.aud && (v.legacyAud == "" || g.Aud != v.legacyAud) {
 		return nil, ErrAudience
 	}
 
@@ -196,6 +220,11 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 	}
 	if g.City != expect.City {
 		return nil, ErrCityMismatch
+	}
+	// Tenancy binding: a configured cid must match exactly, so a grant with a
+	// missing cid (every legacy grant) or another tenant's cid fails closed.
+	if v.cid != "" && g.CID != v.cid {
+		return nil, ErrCIDMismatch
 	}
 	if g.Req != expect.ReqDigest {
 		return nil, ErrReqMismatch
