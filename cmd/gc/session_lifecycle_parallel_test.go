@@ -17,13 +17,13 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -87,15 +87,10 @@ func (s *panicMetadataBatchStore) SetMetadataBatch(string, map[string]string) er
 }
 
 func TestSessionTriggerBeadEnv(t *testing.T) {
-	session := &beads.Bead{
-		ID: "sess-1",
-		Metadata: map[string]string{
-			beadmeta.TriggerBeadIDMetadataKey:       "gp-59q",
-			beadmeta.TriggerBeadStoreRefMetadataKey: "rig:gascity-packs",
-		},
-	}
-
-	env := sessionTriggerBeadEnv(sessionpkg.InfoFromPersistedBead(*session))
+	env := sessionTriggerBeadEnv(sessionpkg.Info{
+		TriggerBeadID:       "gp-59q",
+		TriggerBeadStoreRef: "rig:gascity-packs",
+	})
 	if got := env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
 		t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
 	}
@@ -724,7 +719,7 @@ func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "frontend/worker",
 			SessionName:  "custom-worker-1",
@@ -780,7 +775,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 	}
 
 	prepared, err := prepareStartCandidateForCity(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "frontend/worker",
 			SessionName:  "custom-worker-1",
@@ -824,7 +819,7 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "worker",
 			SessionName:  "worker",
@@ -911,7 +906,7 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 
 	woken := executePlannedStarts(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp, order: 0}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp, order: 0}},
 		cfg,
 		map[string]TemplateParams{"mayor": tp},
 		sp,
@@ -990,7 +985,7 @@ func TestPrepareStartCandidate_GeneratesMissingSessionKeyBeforeWake(t *testing.T
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "wendy",
 			SessionName:  "wendy",
@@ -1042,7 +1037,7 @@ func TestPrepareStartCandidate_ResumeCapableWithoutSessionKeyKeepsStartupPrompt(
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "codex-worker",
 			SessionName:  "codex-worker",
@@ -1095,7 +1090,7 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "mayor",
 			SessionName:  "mayor",
@@ -1290,7 +1285,7 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		sCopy := sess
 		tp := mkTP(s.name)
 		desired[s.name] = tp
-		candidates = append(candidates, startCandidate{info: sessionpkg.InfoFromPersistedBead(sCopy), tp: tp, order: i})
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sCopy), tp: tp, order: i})
 	}
 
 	woken := executePlannedStarts(
@@ -1336,7 +1331,7 @@ func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) 
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(bead),
+		info: sessiontest.SeedBead(t, bead),
 		tp: TemplateParams{
 			TemplateName: "mayor",
 			SessionName:  "mayor",
@@ -1536,7 +1531,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 			t.Fatal(err)
 		}
 		candidate := created
-		candidates = append(candidates, startCandidate{info: sessionpkg.InfoFromPersistedBead(candidate), tp: tp})
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, candidate), tp: tp})
 	}
 
 	woken := executePlannedStartsTraced(
@@ -1639,7 +1634,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 	go func() {
 		done <- executePlannedStartsTraced(
 			context.Background(),
-			[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+			[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 			cfg,
 			desired,
 			sp,
@@ -1725,7 +1720,7 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		cfg.Agents = append(cfg.Agents, config.Agent{Name: name})
 		tp := TemplateParams{Command: name, SessionName: name, TemplateName: name}
 		desired[name] = tp
-		candidates = append(candidates, startCandidate{info: sessionpkg.InfoFromPersistedBead(session), tp: tp})
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, session), tp: tp})
 	}
 
 	woken := executePlannedStartsTraced(
@@ -1785,7 +1780,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		t.Cleanup(func() { sp.release(name) })
 		tp := TemplateParams{Command: name, SessionName: name, TemplateName: name}
 		desired[name] = tp
-		return startCandidate{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}
+		return startCandidate{info: sessiontest.SeedBead(t, session), tp: tp}
 	}
 	limiter := newAsyncStartLimiter(1)
 	first := makeCandidate("worker-1")
@@ -1915,7 +1910,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 
 	if got := executePlannedStartsTraced(
 		ctx,
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -1988,7 +1983,7 @@ func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
 
 	woken := executePlannedStartsTraced(
 		ctx,
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -2113,7 +2108,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -2204,7 +2199,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -2266,7 +2261,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 	}
 	if got := executePlannedStartsTraced(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -2347,7 +2342,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 
 	if got := executePlannedStartsTraced(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -2434,7 +2429,7 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 
 	woken := executePlannedStartsTraced(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(session), tp: tp}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
 		sp,
@@ -2561,22 +2556,18 @@ func TestDependencySessionStartInFlightFailsClosedOnSessionListError(t *testing.
 
 func TestPendingCreateStartInFlight_ZeroStartupTimeoutUsesRecoveryLease(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 1, 40, 0, time.UTC)
-	recent := beads.Bead{
-		Metadata: map[string]string{
-			"pending_create_claim": "true",
-			"last_woke_at":         now.Add(-10 * time.Second).Format(time.RFC3339),
-		},
+	recent := sessionpkg.Info{
+		PendingCreateClaim: true,
+		LastWokeAt:         now.Add(-10 * time.Second).Format(time.RFC3339),
 	}
-	if !pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(recent), &clock.Fake{Time: now}, 0) {
+	if !pendingCreateStartInFlightInfo(recent, &clock.Fake{Time: now}, 0) {
 		t.Fatal("explicit zero startup timeout should still use a finite recovery lease while recent")
 	}
-	stale := beads.Bead{
-		Metadata: map[string]string{
-			"pending_create_claim": "true",
-			"last_woke_at":         now.Add(-24 * time.Hour).Format(time.RFC3339),
-		},
+	stale := sessionpkg.Info{
+		PendingCreateClaim: true,
+		LastWokeAt:         now.Add(-24 * time.Hour).Format(time.RFC3339),
 	}
-	if pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(stale), &clock.Fake{Time: now}, 0) {
+	if pendingCreateStartInFlightInfo(stale, &clock.Fake{Time: now}, 0) {
 		t.Fatal("explicit zero startup timeout should not suppress recovery forever")
 	}
 }
@@ -2670,13 +2661,12 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(
 }
 
 func TestRunningSessionMatchesPendingCreateAcceptsTokenOnlyRuntime(t *testing.T) {
-	session := &beads.Bead{
-		ID: "gc-worker",
-		Metadata: map[string]string{
-			"session_name":   "worker",
-			"generation":     "2",
-			"instance_token": "tok-worker",
-		},
+	session := sessionpkg.Info{
+		ID:                  "gc-worker",
+		SessionName:         "worker",
+		SessionNameMetadata: "worker",
+		Generation:          "2",
+		InstanceToken:       "tok-worker",
 	}
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
@@ -2686,18 +2676,17 @@ func TestRunningSessionMatchesPendingCreateAcceptsTokenOnlyRuntime(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if !runningSessionMatchesPendingCreateInfo(sessionpkg.InfoFromPersistedBead(*session), "worker", sp) {
+	if !runningSessionMatchesPendingCreateInfo(session, "worker", sp) {
 		t.Fatal("runtime with matching token and no session id should match pending create")
 	}
 }
 
 func TestRunningSessionMatchesPendingCreateAcceptsIDOnlyRuntime(t *testing.T) {
-	session := &beads.Bead{
-		ID: "gc-worker",
-		Metadata: map[string]string{
-			"session_name": "worker",
-			"generation":   "2",
-		},
+	session := sessionpkg.Info{
+		ID:                  "gc-worker",
+		SessionName:         "worker",
+		SessionNameMetadata: "worker",
+		Generation:          "2",
 	}
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
@@ -2707,7 +2696,7 @@ func TestRunningSessionMatchesPendingCreateAcceptsIDOnlyRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !runningSessionMatchesPendingCreateInfo(sessionpkg.InfoFromPersistedBead(*session), "worker", sp) {
+	if !runningSessionMatchesPendingCreateInfo(session, "worker", sp) {
 		t.Fatal("runtime with matching session id and no token should match pending create")
 	}
 }
@@ -2801,7 +2790,7 @@ func TestCommitAsyncStartResult_IgnoresStaleSessionSnapshot(t *testing.T) {
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -2859,7 +2848,7 @@ func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -2932,7 +2921,7 @@ func TestCommitAsyncStartResult_StopsMatchingRuntimeForStaleSnapshot(t *testing.
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3005,9 +2994,9 @@ func TestAsyncStartIdentityMatches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			prepared := beads.Bead{Metadata: tc.prepared}
-			current := beads.Bead{Metadata: tc.current}
-			if got := asyncStartIdentityMatchesInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)); got != tc.want {
+			prepared := sessionpkg.Info{Generation: tc.prepared["generation"], InstanceToken: tc.prepared["instance_token"]}
+			current := sessionpkg.Info{Generation: tc.current["generation"], InstanceToken: tc.current["instance_token"]}
+			if got := asyncStartIdentityMatchesInfo(prepared, current); got != tc.want {
 				t.Fatalf("asyncStartIdentityMatches = %v, want %v", got, tc.want)
 			}
 		})
@@ -3021,39 +3010,39 @@ func TestAsyncStartSessionStillCurrent_GenerationDriftWithMatchingToken(t *testi
 	// invalidate the result — the instance_token is the authoritative
 	// session identity. Without this guarantee, pool sessions stay stuck
 	// in state=creating with pending_create_claim=true forever.
-	prepared := beads.Bead{Metadata: map[string]string{
-		"generation":     "2",
-		"instance_token": "tok-X",
-		"state":          "creating",
-	}}
-	current := beads.Bead{Metadata: map[string]string{
-		"generation":     "7",
-		"instance_token": "tok-X",
-		"state":          "creating",
-	}}
-	if !asyncStartSessionStillCurrentInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	prepared := sessionpkg.Info{
+		Generation:    "2",
+		InstanceToken: "tok-X",
+		MetadataState: "creating",
+	}
+	current := sessionpkg.Info{
+		Generation:    "7",
+		InstanceToken: "tok-X",
+		MetadataState: "creating",
+	}
+	if !asyncStartSessionStillCurrentInfo(prepared, current) {
 		t.Fatal("generation drift with matching instance_token must not be considered stale")
 	}
-	if asyncStartStaleRuntimeCleanupAllowedInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	if asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current) {
 		t.Fatal("matching instance_token must protect the runtime from cleanup despite generation drift")
 	}
 }
 
 func TestAsyncStartSessionStillCurrent_TokenMismatchIsStale(t *testing.T) {
-	prepared := beads.Bead{Metadata: map[string]string{
-		"generation":     "2",
-		"instance_token": "tok-old",
-		"state":          "creating",
-	}}
-	current := beads.Bead{Metadata: map[string]string{
-		"generation":     "3",
-		"instance_token": "tok-new",
-		"state":          "creating",
-	}}
-	if asyncStartSessionStillCurrentInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	prepared := sessionpkg.Info{
+		Generation:    "2",
+		InstanceToken: "tok-old",
+		MetadataState: "creating",
+	}
+	current := sessionpkg.Info{
+		Generation:    "3",
+		InstanceToken: "tok-new",
+		MetadataState: "creating",
+	}
+	if asyncStartSessionStillCurrentInfo(prepared, current) {
 		t.Fatal("instance_token mismatch must be detected as stale")
 	}
-	if !asyncStartStaleRuntimeCleanupAllowedInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	if !asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current) {
 		t.Fatal("instance_token mismatch must allow runtime cleanup")
 	}
 }
@@ -3070,44 +3059,42 @@ func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAttachIsNotStale
 	//
 	// Fix: when current state has advanced to active or awake, the spawn
 	// already succeeded; commit the start result regardless of pcc drift.
-	prepared := beads.Bead{Metadata: map[string]string{
-		"instance_token":       "tok-Z",
-		"generation":           "2",
-		"state":                "creating",
-		"pending_create_claim": "true",
-	}}
-	current := beads.Bead{Metadata: map[string]string{
-		"instance_token": "tok-Z",
-		"generation":     "3",
-		"state":          "active",
-		// pending_create_claim cleared by confirmLiveSessionState
-		"pending_create_claim": "",
-	}}
-	if !asyncStartSessionStillCurrentInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	prepared := sessionpkg.Info{
+		InstanceToken:      "tok-Z",
+		Generation:         "2",
+		MetadataState:      "creating",
+		PendingCreateClaim: true,
+	}
+	// pending_create_claim cleared by confirmLiveSessionState
+	current := sessionpkg.Info{
+		InstanceToken: "tok-Z",
+		Generation:    "3",
+		MetadataState: "active",
+	}
+	if !asyncStartSessionStillCurrentInfo(prepared, current) {
 		t.Fatal("session that advanced to active mid-flight must not be considered stale even when pcc was cleared")
 	}
-	if asyncStartStaleRuntimeCleanupAllowedInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	if asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current) {
 		t.Fatal("session that advanced to active must not allow runtime cleanup")
 	}
 }
 
 func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAwakeIsNotStale(t *testing.T) {
-	prepared := beads.Bead{Metadata: map[string]string{
-		"instance_token":       "tok-awake",
-		"generation":           "2",
-		"state":                "creating",
-		"pending_create_claim": "true",
-	}}
-	current := beads.Bead{Metadata: map[string]string{
-		"instance_token":       "tok-awake",
-		"generation":           "8",
-		"state":                "awake",
-		"pending_create_claim": "",
-	}}
-	if !asyncStartSessionStillCurrentInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	prepared := sessionpkg.Info{
+		InstanceToken:      "tok-awake",
+		Generation:         "2",
+		MetadataState:      "creating",
+		PendingCreateClaim: true,
+	}
+	current := sessionpkg.Info{
+		InstanceToken: "tok-awake",
+		Generation:    "8",
+		MetadataState: "awake",
+	}
+	if !asyncStartSessionStillCurrentInfo(prepared, current) {
 		t.Fatal("session that advanced to awake mid-flight must not be considered stale even when pcc was cleared")
 	}
-	if asyncStartStaleRuntimeCleanupAllowedInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	if asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current) {
 		t.Fatal("session that advanced to awake must not allow runtime cleanup")
 	}
 }
@@ -3117,19 +3104,18 @@ func TestAsyncStartSessionStillCurrent_RollbackPendingCreateStillWorksWhenNotAct
 	// (still creating/asleep), the original rollback drift check still fires.
 	// This protects the prior intent: another phase decided to roll back the
 	// spawn, our result must not stomp on that decision.
-	prepared := beads.Bead{Metadata: map[string]string{
-		"instance_token":       "tok-Y",
-		"generation":           "2",
-		"state":                "creating",
-		"pending_create_claim": "true",
-	}}
-	current := beads.Bead{Metadata: map[string]string{
-		"instance_token":       "tok-Y",
-		"generation":           "3",
-		"state":                "creating",
-		"pending_create_claim": "",
-	}}
-	if asyncStartSessionStillCurrentInfo(sessionpkg.InfoFromPersistedBead(prepared), sessionpkg.InfoFromPersistedBead(current)) {
+	prepared := sessionpkg.Info{
+		InstanceToken:      "tok-Y",
+		Generation:         "2",
+		MetadataState:      "creating",
+		PendingCreateClaim: true,
+	}
+	current := sessionpkg.Info{
+		InstanceToken: "tok-Y",
+		Generation:    "3",
+		MetadataState: "creating",
+	}
+	if asyncStartSessionStillCurrentInfo(prepared, current) {
 		t.Fatal("pcc cleared while state still creating must be treated as rollback (stale)")
 	}
 }
@@ -3163,7 +3149,7 @@ func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testi
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3237,7 +3223,7 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "CUSTOM_VERSION=v1 report",
 					SessionName:  "drifter",
@@ -3310,7 +3296,7 @@ func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3361,7 +3347,7 @@ func TestCommitAsyncStartResult_RecoversCommitPanic(t *testing.T) {
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3409,7 +3395,7 @@ func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3473,7 +3459,7 @@ func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateR
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3532,7 +3518,7 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3585,7 +3571,7 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "control",
 					SessionName:  "control",
@@ -3614,7 +3600,7 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess
 	if got := updated.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared on closed failed-create bead", got)
 	}
-	if pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(updated), clk, 0) {
+	if pendingCreateStartInFlightInfo(sessiontest.SeedBead(t, updated), clk, 0) {
 		t.Fatal("canceled async success left the pending-create bead leased")
 	}
 }
@@ -3643,7 +3629,7 @@ func TestCommitStartResult_SessionInitializingClearsInFlightLease(t *testing.T) 
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "worker",
 					SessionName:  "worker",
@@ -3698,7 +3684,7 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(session),
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					Command:      "exit 0",
 					SessionName:  "shortlived",
@@ -3729,7 +3715,7 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 	if got := updated.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared after failed-create metadata lands", got)
 	}
-	if pendingCreateStartInFlightInfo(sessionpkg.InfoFromPersistedBead(updated), clk, 0) {
+	if pendingCreateStartInFlightInfo(sessiontest.SeedBead(t, updated), clk, 0) {
 		t.Fatal("rollback-pending error left the pending-create bead leased")
 	}
 }
@@ -3761,7 +3747,7 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(bead),
+				info: sessiontest.SeedBead(t, bead),
 				tp: TemplateParams{
 					SessionName:  "sky",
 					TemplateName: "helper",
@@ -3808,7 +3794,7 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 		return startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					info: sessionpkg.InfoFromPersistedBead(*session),
+					info: sessiontest.SeedBead(t, *session),
 					tp: TemplateParams{
 						SessionName:  "sky",
 						TemplateName: "helper",
@@ -3944,7 +3930,7 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 		Command:      "true",
 		WorkDir:      cityPath,
 	}
-	candidate := startCandidate{info: sessionpkg.InfoFromPersistedBead(bead), tp: stale}
+	candidate := startCandidate{info: sessiontest.SeedBead(t, bead), tp: stale}
 	refreshed := refreshConfiguredNamedStartCandidate(
 		candidate,
 		cityPath,
@@ -4004,7 +3990,7 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 
 	woken := executePlannedStarts(
 		context.Background(),
-		[]startCandidate{{info: sessionpkg.InfoFromPersistedBead(bead), tp: tp, order: 0}},
+		[]startCandidate{{info: sessiontest.SeedBead(t, bead), tp: tp, order: 0}},
 		&config.City{Agents: []config.Agent{{Name: "helper"}}},
 		map[string]TemplateParams{"sky": tp},
 		sp,
@@ -4059,7 +4045,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	if ok, _ := recoverRunningPendingCreate(sessionpkg.InfoFromPersistedBead(bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+	if ok, _ := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
 
@@ -4104,7 +4090,7 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	ok, batch := recoverRunningPendingCreate(sessionpkg.InfoFromPersistedBead(bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
+	ok, batch := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
 	if !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
@@ -4130,12 +4116,12 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 // forward-pass config-drift gate (which now reads Info.StartedConfigHash) would see a
 // stale non-empty hash and wrongly enter the drift block (#127 startup-window skip).
 func TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear(t *testing.T) {
-	// A bead whose started_config_hash was just cleared by the stale-resume guard.
-	session := &beads.Bead{ID: "s", Metadata: map[string]string{
-		"instance_token":      "tok",
-		"started_config_hash": "", // cleared
-	}}
-	fold := pendingCreateResidueFold(sessionpkg.InfoFromPersistedBead(*session))
+	// A session whose started_config_hash was just cleared by the stale-resume guard.
+	session := sessionpkg.Info{
+		InstanceToken:     "tok",
+		StartedConfigHash: "", // cleared
+	}
+	fold := pendingCreateResidueFold(session)
 	if v, ok := fold["started_config_hash"]; !ok || v != "" {
 		t.Fatalf("fold[started_config_hash] = %q, present=%v; want present and empty (carry the clear)", v, ok)
 	}
@@ -4143,10 +4129,10 @@ func TestPendingCreateResidueFold_CarriesStaleResumeStartedConfigHashClear(t *te
 		t.Fatalf("fold[instance_token] = %q, want tok", fold["instance_token"])
 	}
 
-	// A bead the guard did NOT clear: the fold carries the current hash verbatim (a
+	// A session the guard did NOT clear: the fold carries the current hash verbatim (a
 	// no-op fold against a coherent snapshot).
-	kept := &beads.Bead{ID: "s", Metadata: map[string]string{"started_config_hash": "H"}}
-	if v := pendingCreateResidueFold(sessionpkg.InfoFromPersistedBead(*kept))["started_config_hash"]; v != "H" {
+	kept := sessionpkg.Info{StartedConfigHash: "H"}
+	if v := pendingCreateResidueFold(kept)["started_config_hash"]; v != "H" {
 		t.Fatalf("fold[started_config_hash] = %q, want H (current value carried verbatim)", v)
 	}
 }
@@ -4174,7 +4160,7 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
-				info: sessionpkg.InfoFromPersistedBead(bead),
+				info: sessiontest.SeedBead(t, bead),
 				tp: TemplateParams{
 					SessionName:  "sky",
 					TemplateName: "helper",
@@ -4259,7 +4245,7 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 		}
 		candidate := created
 		candidates = append(candidates, startCandidate{
-			info:  sessionpkg.InfoFromPersistedBead(candidate),
+			info:  sessiontest.SeedBead(t, candidate),
 			tp:    tp,
 			order: idx,
 		})
@@ -4886,13 +4872,14 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 
 func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
 	store := newTestStore()
-	session := makeBead("b1", map[string]string{
-		"template":     "worker",
-		"session_name": "worker",
-	})
 	candidate := startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
-		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker"},
+		info: sessionpkg.Info{
+			ID:                  "b1",
+			Template:            "worker",
+			SessionName:         "worker",
+			SessionNameMetadata: "worker",
+		},
+		tp: TemplateParams{TemplateName: "worker", InstanceName: "worker"},
 	}
 	result := startResult{
 		prepared: preparedStart{
@@ -4917,13 +4904,14 @@ func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
 
 func TestCommitStartResult_SanitizesMultilineError(t *testing.T) {
 	store := newTestStore()
-	session := makeBead("b1", map[string]string{
-		"template":     "worker",
-		"session_name": "worker",
-	})
 	candidate := startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
-		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker"},
+		info: sessionpkg.Info{
+			ID:                  "b1",
+			Template:            "worker",
+			SessionName:         "worker",
+			SessionNameMetadata: "worker",
+		},
+		tp: TemplateParams{TemplateName: "worker", InstanceName: "worker"},
 	}
 	result := startResult{
 		prepared: preparedStart{candidate: candidate},
@@ -4956,7 +4944,7 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	session.Labels = []string{sessionBeadLabel}
 	session.Title = "worker"
 	candidate := startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker"},
 	}
 	result := startResult{
@@ -5101,11 +5089,10 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
-	panicBead := beads.Bead{Metadata: map[string]string{"session_name": "worker"}}
 	results := executePreparedStartWave(
 		context.Background(),
 		[]preparedStart{{
-			candidate: startCandidate{info: sessionpkg.InfoFromPersistedBead(panicBead)},
+			candidate: startCandidate{info: sessionpkg.Info{SessionName: "worker", SessionNameMetadata: "worker"}},
 			cfg:       runtime.Config{Command: "panic-provider"},
 		}},
 		&panicStartProvider{Fake: runtime.NewFake()},
@@ -5225,12 +5212,12 @@ func TestCandidateWaveOrder_FallsBackToSerialOnCycle(t *testing.T) {
 	}
 	candidates := []startCandidate{
 		{
-			info:  sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{"session_name": "api", "template": "api"}}),
+			info:  sessionpkg.Info{SessionName: "api", SessionNameMetadata: "api", Template: "api"},
 			tp:    TemplateParams{TemplateName: "api"},
 			order: 0,
 		},
 		{
-			info:  sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{"session_name": "db", "template": "db"}}),
+			info:  sessionpkg.Info{SessionName: "db", SessionNameMetadata: "db", Template: "db"},
 			tp:    TemplateParams{TemplateName: "db"},
 			order: 1,
 		},
@@ -5281,22 +5268,22 @@ func TestCandidateWaveOrder_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	}
 	candidates := []startCandidate{
 		{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
-				Metadata: map[string]string{
-					"template":     "worker",
-					"session_name": "custom-worker-1",
-					"pool_slot":    "1",
-				},
-			}),
+			info: sessionpkg.Info{
+				Labels:              []string{sessionBeadLabel, "agent:frontend/worker-1"},
+				Template:            "worker",
+				SessionName:         "custom-worker-1",
+				SessionNameMetadata: "custom-worker-1",
+				PoolSlot:            "1",
+			},
 			tp:    TemplateParams{TemplateName: "frontend/worker"},
 			order: 0,
 		},
 		{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{
-				"template":     "frontend/db",
-				"session_name": "custom-db",
-			}}),
+			info: sessionpkg.Info{
+				Template:            "frontend/db",
+				SessionName:         "custom-db",
+				SessionNameMetadata: "custom-db",
+			},
 			tp:    TemplateParams{TemplateName: "frontend/db"},
 			order: 1,
 		},
@@ -5433,14 +5420,13 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-99",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"session_key":  "stale-key-abc",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-99",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "stale-key-abc",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude --resume stale-key-abc",
 				SessionName:  "test-agent",
@@ -5474,14 +5460,13 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-99",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"session_key":  "stale-key-abc",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-99",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "stale-key-abc",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude --resume stale-key-abc",
 				SessionName:  "test-agent",
@@ -5518,13 +5503,12 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-99",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-99",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "test-agent",
@@ -5560,14 +5544,13 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-100",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"session_key":  "still-valid-key",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-100",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "still-valid-key",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude --resume still-valid-key",
 				SessionName:  "test-agent",
@@ -5608,14 +5591,13 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-101",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"session_key":  "still-valid-key",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-101",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "still-valid-key",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude --resume still-valid-key",
 				SessionName:  "test-agent",
@@ -5669,13 +5651,12 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 	sp.Zombies["test-agent"] = true
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-102",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-102",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "test-agent",
@@ -5729,15 +5710,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMisma
 	sp.Zombies["test-agent"] = true
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-103",
-				Metadata: map[string]string{
-					"session_name":         "test-agent",
-					"template":             "worker",
-					"pending_create_claim": "true",
-					"instance_token":       "tok-current",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                         "gc-103",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				InstanceToken:              "tok-current",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "test-agent",
@@ -5783,14 +5764,13 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-102",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"session_key":  "still-valid-key",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-102",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "still-valid-key",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude --resume still-valid-key",
 				SessionName:  "test-agent",
@@ -5835,13 +5815,12 @@ func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallba
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-103",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                  "gc-103",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "test-agent",
@@ -5887,15 +5866,15 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateIdentityMism
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-creating",
-				Metadata: map[string]string{
-					"session_name":         "test-agent",
-					"template":             "worker",
-					"instance_token":       "tok-new",
-					"pending_create_claim": "true",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                         "gc-creating",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				InstanceToken:              "tok-new",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "test-agent",
@@ -5938,15 +5917,15 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "gc-creating",
-				Metadata: map[string]string{
-					"session_name":         "test-agent",
-					"template":             "worker",
-					"instance_token":       "tok-new",
-					"pending_create_claim": "true",
-				},
-			}),
+			info: sessionpkg.Info{
+				ID:                         "gc-creating",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				InstanceToken:              "tok-new",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
 			tp: TemplateParams{
 				Command:      "claude",
 				SessionName:  "test-agent",
@@ -5986,14 +5965,12 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(beads.Bead{
-				ID: "",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"session_key":  "still-valid-key",
-					"template":     "worker",
-				},
-			}),
+			info: sessionpkg.Info{
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				SessionKey:          "still-valid-key",
+				Template:            "worker",
+			},
 			tp: TemplateParams{
 				Command:      "claude --resume still-valid-key",
 				SessionName:  "test-agent",
@@ -6049,7 +6026,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 	sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(session),
+			info: sessiontest.SeedBead(t, session),
 			tp: TemplateParams{
 				Command:      "claude --resume stale-key-abc",
 				SessionName:  "test-agent",
@@ -6141,7 +6118,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 	sp.SetPeekOutput("creating-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
 	item := preparedStart{
 		candidate: startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(session),
+			info: sessiontest.SeedBead(t, session),
 			tp: TemplateParams{
 				Command:      "claude --resume resume-key",
 				SessionName:  "creating-agent",
@@ -6262,7 +6239,7 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 
 	prepared, err := prepareStartCandidate(
 		startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(bead),
+			info: sessiontest.SeedBead(t, bead),
 			tp:   tp,
 		},
 		&config.City{},
@@ -6344,7 +6321,7 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 
 	prepared, err := prepareStartCandidate(
 		startCandidate{
-			info: sessionpkg.InfoFromPersistedBead(bead),
+			info: sessiontest.SeedBead(t, bead),
 			tp:   tp,
 		},
 		&config.City{},
@@ -6395,7 +6372,7 @@ func TestPrepareStartCandidate_EmptyPoolBeadAliasScrubsStampedTemplateIdentity(t
 	}
 
 	prepared, err := prepareStartCandidate(
-		startCandidate{info: sessionpkg.InfoFromPersistedBead(bead), tp: tp},
+		startCandidate{info: sessiontest.SeedBead(t, bead), tp: tp},
 		&config.City{},
 		store,
 		clock.Real{},
@@ -6449,7 +6426,7 @@ func TestPrepareStartCandidate_EmptyAliasEverywhereKeepsEmptyForTmuxScrub(t *tes
 	}
 
 	prepared, err := prepareStartCandidate(
-		startCandidate{info: sessionpkg.InfoFromPersistedBead(bead), tp: tp},
+		startCandidate{info: sessiontest.SeedBead(t, bead), tp: tp},
 		&config.City{},
 		store,
 		clock.Real{},
@@ -6494,7 +6471,7 @@ func TestPrepareStartCandidate_NonEmptyBeadAliasOverridesTemplate(t *testing.T) 
 	}
 
 	prepared, err := prepareStartCandidate(
-		startCandidate{info: sessionpkg.InfoFromPersistedBead(bead), tp: tp},
+		startCandidate{info: sessiontest.SeedBead(t, bead), tp: tp},
 		&config.City{},
 		store,
 		clock.Real{},
@@ -6565,7 +6542,7 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidate := startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
 	}
 	result := startResult{
@@ -6628,7 +6605,7 @@ func TestCommitStartResult_PersistsMCPIdentityForACPStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidate := startCandidate{
-		info: sessionpkg.InfoFromPersistedBead(session),
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "worker",
 			InstanceName: "worker-1",
