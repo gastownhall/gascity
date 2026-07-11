@@ -202,16 +202,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 	}
 	cfg.Command = freshCmd
-	// Refuse the fresh start if a prior escaped process for this session could
-	// not be confirmed dead: a survivor would race this replacement for the
-	// same work bead. This path reuses the existing bead ID, so there is no
-	// fresh-create to roll back — unroute and propagate the error before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
-	}
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
 			unroute()
@@ -380,17 +371,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// Refuse to resume if a prior escaped process for this session could not be
-	// confirmed dead: a survivor would race this replacement for the same work
-	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
-	// exact "old process survives alongside its replacement" scenario. No
-	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
-	}
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
@@ -501,16 +482,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// Refuse to respawn if a prior escaped process for this session could not
-	// be confirmed dead: a survivor would race this replacement for the same
-	// work bead. This is the reconciler respawn bridge on a stable/reused bead
-	// ID. No fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
-	}
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
