@@ -948,7 +948,7 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if _, err := session.ListSessionWaits(store, sessionID); beads.IsLookupLimitError(err) {
+	if _, err := session.ListSessionWaitBeads(store, sessionID); beads.IsLookupLimitError(err) {
 		stampWaitLookupCapDiagnostic(sessionFrontDoor(store), sessionID, err, now, "retired-session-cleanup")
 	}
 	if err := session.CancelWaits(store, sessionID, now); err != nil {

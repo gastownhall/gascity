@@ -569,26 +569,22 @@ func TestPolicyReadPathsIncludeHistoryAndNoHistoryRows(t *testing.T) {
 		t.Fatalf("new session row = %+v, want no_history parsed", sessions[1])
 	}
 
-	// loadWaits returns session.WaitInfo, which deliberately omits the NoHistory
-	// storage detail (mirroring session.Info). The no-history row still flows
-	// through the retyped policy read path, so assert both wait IDs are present;
-	// the no_history parse assertion remains covered by the loadSessionBeads half
-	// above and by the bdstore tests.
-	waits, err := loadWaits(store)
+	waits, err := loadWaitBeads(store)
 	if err != nil {
-		t.Fatalf("loadWaits: %v", err)
+		t.Fatalf("loadWaitBeads: %v", err)
 	}
 	if len(waits) != 2 {
 		t.Fatalf("waits = %+v, want history and no-history rows", waits)
 	}
-	waitIDs := map[string]bool{}
+	foundNoHistoryWait := false
 	for _, wait := range waits {
-		waitIDs[wait.ID] = true
-	}
-	for _, id := range []string{"bd-old-wait", "bd-new-wait"} {
-		if !waitIDs[id] {
-			t.Fatalf("waits = %+v, want both history and no-history rows (missing %s)", waits, id)
+		if wait.ID == "bd-new-wait" {
+			foundNoHistoryWait = wait.NoHistory
+			break
 		}
+	}
+	if !foundNoHistoryWait {
+		t.Fatalf("waits = %+v, want bd-new-wait with no_history parsed", waits)
 	}
 }
 
