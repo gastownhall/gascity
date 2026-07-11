@@ -1472,16 +1472,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Skip beads with unrecognized states. This enables forward-compatible
 		// rollback: if a newer version writes "draining" or "archived", the
-		// older reconciler ignores those beads rather than crashing.
+		// older reconciler ignores those beads rather than crashing. The skip is
+		// preserved; the previously per-tick stderr line is now a throttled,
+		// durable session.unknown_state signal (folded onto the tick snapshot).
 		if !isKnownStateInfo(info) {
-			fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", //nolint:errcheck // best-effort stderr
-				info.SessionNameMetadata, info.MetadataState)
+			if fold := emitSessionUnknownStateDiagnostic(store, info, snapshot, rec, clk, stderr); fold != nil {
+				tick.apply(id, fold)
+			}
 			if trace != nil {
 				trace.RecordDecision(TraceSiteReconcilerUnknownState, TraceReasonUnknownStateSkipped, TraceOutcomeSkipped, info.Template, info.SessionNameMetadata, traceRecordPayload{
 					"state": info.MetadataState,
 				})
 			}
 			continue
+		}
+		// Back in a known state: drop any stale unknown-state throttle markers so a
+		// later recurrence of the same unrecognized value is signaled afresh rather
+		// than suppressed as "same state as last tick" (no-op when unmarked).
+		if fold := clearSessionUnknownStateMarkers(store, info, snapshot, stderr); fold != nil {
+			tick.apply(id, fold)
 		}
 
 		// Orphan/suspended: bead exists but not in desired state.
@@ -3750,6 +3759,170 @@ func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifier
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+// Unknown-state throttle markers. unknownStateFirstSeenKey records when the
+// reconciler first observed the current unrecognized state and
+// unknownStateValueKey records the raw value it was seen with; together they
+// gate the diagnostic to first sight and state transitions (not every tick,
+// #2389) and survive reconciler restarts (#2085) so the first-seen clock and
+// its escalation are queryable off the bead (#1497). unknownStateEscalatedKey
+// guards the single past-threshold escalation emit.
+const (
+	unknownStateFirstSeenKey = "unknown_state_first_seen"
+	unknownStateValueKey     = "unknown_state_value"
+	unknownStateEscalatedKey = "unknown_state_escalated_at"
+)
+
+// unknownStateEscalationAge is how long a session bead may sit in an
+// unrecognized state before the reconciler re-emits session.unknown_state with
+// escalated=true. The forward-compat skip still defers all action; escalation
+// is a signal for operators and pack-level subscribers, never an auto-mutation.
+const unknownStateEscalationAge = 30 * time.Minute
+
+// emitSessionUnknownStateDiagnostic surfaces a session bead whose metadata
+// state the reconciler does not recognize. The caller preserves the
+// forward-compatible skip (an older reconciler ignores a newer writer's state
+// rather than crashing); this turns the previously per-tick stderr line into a
+// throttled signal. It logs and records events.SessionUnknownState only on
+// first sight or when the raw state changes to a different unrecognized value,
+// then re-records once with escalated=true after the bead has sat unrecognized
+// past unknownStateEscalationAge. Throttle state is read off the projected typed
+// Info mirrors (info.UnknownStateFirstSeen / _Value / _EscalatedAt) and stamped
+// durably via the session front door so the throttle and the escalation clock
+// survive reconciler restarts. It never mutates session state — escalation is a
+// notification, not a recovery action (keep judgment out of Go).
+//
+// It returns the metadata patch it stamped so the caller folds it onto the tick
+// snapshot (write-returns-Info; the stranded-diagnostic sibling shape), or nil
+// when it neither transitioned nor escalated this tick. Like
+// emitSessionStrandedDiagnostic it folds the same patch onto the (possibly
+// reused) OpenForReconcile snapshot row before returning, so a reused snapshot
+// carries the marker even when the durable write fails.
+func emitSessionUnknownStateDiagnostic(
+	store beads.Store,
+	info sessionpkg.Info,
+	snapshot *sessionBeadSnapshot,
+	rec events.Recorder,
+	clk clock.Clock,
+	stderr io.Writer,
+) sessionpkg.MetadataPatch {
+	// Report the raw, untrimmed state: classification (isKnownStateInfo) keys off
+	// the raw value, so a known value wrapped in whitespace like " active " is
+	// skipped as unrecognized and must surface verbatim, not trimmed to "active".
+	// This matches SessionUnknownStatePayload.State's documented "raw ... value"
+	// contract and the raw comparison the transition/value markers below use.
+	state := info.MetadataState
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	now := clk.Now().UTC()
+
+	fold := sessionpkg.MetadataPatch{}
+	setMarker := func(key, value string) {
+		fold[key] = value
+		if err := sessionFrontDoor(store).SetMarker(info.ID, key, value); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: stamping unknown-state marker %s on %s: %v\n", key, info.ID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	emit := func(escalated bool, firstSeen time.Time) {
+		if rec == nil {
+			return
+		}
+		age := now.Sub(firstSeen).Round(time.Second)
+		msg := fmt.Sprintf("session %q has unrecognized state %q; reconciler is skipping it (forward-compatible rollback)", name, state)
+		if escalated {
+			msg = fmt.Sprintf("session %q still has unrecognized state %q after %s; reconciler continues to skip it — operator or pack recovery required", name, state, age)
+		}
+		rec.Record(events.Event{
+			Type:      events.SessionUnknownState,
+			Ts:        now,
+			Actor:     "gc",
+			Subject:   info.ID,
+			Message:   msg,
+			SessionID: info.ID,
+			Payload:   api.SessionUnknownStatePayloadJSON(info.ID, name, state, firstSeen, escalated),
+		})
+	}
+
+	firstSeenRaw := strings.TrimSpace(info.UnknownStateFirstSeen)
+	transition := firstSeenRaw == "" || info.UnknownStateValue != info.MetadataState
+	if transition {
+		// First sight, or the unrecognized state changed to a different value:
+		// (re)stamp the first-seen clock, log once, emit, and clear any prior
+		// escalation guard so the new state gets its own escalation window.
+		fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", name, state) //nolint:errcheck // best-effort stderr
+		emit(false, now)
+		setMarker(unknownStateFirstSeenKey, now.Format(time.RFC3339))
+		setMarker(unknownStateValueKey, info.MetadataState)
+		if strings.TrimSpace(info.UnknownStateEscalatedAt) != "" {
+			setMarker(unknownStateEscalatedKey, "")
+		}
+		snapshot.ApplyOpenInfoPatch(info.ID, fold)
+		return fold
+	}
+
+	// Same unrecognized state as a previous tick: stay silent unless it has now
+	// aged past the escalation threshold and has not escalated yet.
+	if strings.TrimSpace(info.UnknownStateEscalatedAt) != "" {
+		return nil
+	}
+	firstSeen, err := time.Parse(time.RFC3339, firstSeenRaw)
+	if err != nil || now.Sub(firstSeen) < unknownStateEscalationAge {
+		return nil
+	}
+	emit(true, firstSeen)
+	setMarker(unknownStateEscalatedKey, now.Format(time.RFC3339))
+	snapshot.ApplyOpenInfoPatch(info.ID, fold)
+	return fold
+}
+
+// clearSessionUnknownStateMarkers removes the unknown-state throttle markers
+// once a session is observed back in a known state. The markers are durable
+// (they survive reconciler restarts by design), so without clearing them on
+// recovery a later recurrence of the *same* unrecognized value would look like
+// "same state as the last tick" to emitSessionUnknownStateDiagnostic and be
+// silently suppressed — the recurrence would never re-signal. Clearing on the
+// known-state path means a recurrence is treated as a fresh first-sight. It is
+// a no-op (no store write, nil fold) when the session carries no unknown-state
+// markers, so the common known-state tick pays nothing.
+//
+// It mirrors clearStrandedEventMarker's typed shape: the durable SetMarker
+// clears the persisted row, snapshot.ApplyOpenInfoPatch folds the empty-value
+// patch onto a reused snapshot's OpenForReconcile row, and the returned fold
+// advances the reconciler's infoByID snapshot (write-returns-Info) — the raw
+// bead pointer is gone, so the typed Info + snapshot carrier replaces the old
+// in-memory session.Metadata delete.
+func clearSessionUnknownStateMarkers(store beads.Store, info sessionpkg.Info, snapshot *sessionBeadSnapshot, stderr io.Writer) sessionpkg.MetadataPatch {
+	if store == nil {
+		return nil
+	}
+	markers := [...]struct{ key, value string }{
+		{unknownStateFirstSeenKey, info.UnknownStateFirstSeen},
+		{unknownStateValueKey, info.UnknownStateValue},
+		{unknownStateEscalatedKey, info.UnknownStateEscalatedAt},
+	}
+	hasMarker := false
+	for _, m := range markers {
+		if strings.TrimSpace(m.value) != "" {
+			hasMarker = true
+			break
+		}
+	}
+	if !hasMarker {
+		return nil
+	}
+	front := sessionFrontDoor(store)
+	fold := sessionpkg.MetadataPatch{}
+	for _, m := range markers {
+		if strings.TrimSpace(m.value) == "" {
+			continue
+		}
+		fold[m.key] = ""
+		if err := front.SetMarker(info.ID, m.key, ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing unknown-state marker %s on %s: %v\n", m.key, info.ID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	snapshot.ApplyOpenInfoPatch(info.ID, fold)
+	return fold
 }
 
 // strandedEventEmittedKey is the per-session-bead throttle marker for

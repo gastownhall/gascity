@@ -75,6 +75,15 @@ const (
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionUnknownState fires when the reconciler observes a session bead
+	// whose metadata state it does not recognize. The reconciler skips such
+	// beads (forward-compatible rollback: an older reconciler ignores a newer
+	// writer's state rather than crashing), so this is the only durable signal
+	// that a bead is stuck outside the state machine. Emitted on first sight
+	// (and again with escalated=true once the bead has sat unrecognized past a
+	// threshold), never as a recovery action — pack-level subscribers or
+	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
+	SessionUnknownState = "session.unknown_state"
 	// SessionResetStalled fires when a session reset was committed but
 	// the follow-up wake remains pending past the configured startup
 	// timeout. Operators use the typed payload to correlate the stuck
@@ -224,6 +233,7 @@ var KnownEventTypes = []string{
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
+	SessionUnknownState,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,

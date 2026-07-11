@@ -44,6 +44,7 @@ var allProjectedMetadataKeys = []string{
 	"config_drift_deferred_at",
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
+	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
 	"session_name_explicit", "wake_request", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
 	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",

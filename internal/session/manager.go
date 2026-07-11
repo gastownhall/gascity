@@ -380,6 +380,17 @@ type Info struct {
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
 	StrandedEventEmittedAt string // stranded_event_emitted_at (raw)
+	// UnknownStateFirstSeen / UnknownStateValue / UnknownStateEscalatedAt are the
+	// RAW unknown_state_first_seen / _value / _escalated_at metadata, the durable
+	// throttle markers the unknown-state diagnostic emitter reads to gate emission
+	// to first sight and value transitions (UnknownStateValue is compared verbatim
+	// against MetadataState), survive reconciler restarts (UnknownStateFirstSeen is
+	// the escalation clock, parsed RFC3339), and guard the single past-threshold
+	// escalation (UnknownStateEscalatedAt, trimmed != ""). Mirrors keep the raw
+	// values so the emitter reads them off Info instead of the raw bead.
+	UnknownStateFirstSeen   string // unknown_state_first_seen (raw)
+	UnknownStateValue       string // unknown_state_value (raw)
+	UnknownStateEscalatedAt string // unknown_state_escalated_at (raw)
 	// SessionNameExplicit is the RAW session_name_explicit metadata. The lifecycle
 	// projection's LifecycleIdentifiersReleased predicate reads it (trimmed == "")
 	// alongside alias / session_name, and build_desired_state / the parallel
