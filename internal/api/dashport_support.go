@@ -85,8 +85,11 @@ type SeededCityDeps struct {
 // on one listener, so a harness (and the Playwright fake supervisor) can load
 // "/" and let its relative fetches resolve to the same origin.
 //
-// The plane's per-city run tailers and status samplers are started against ctx;
-// cancel ctx (e.g. via the harness's test context) to drain them. baseURL is the
+// The plane's per-city run tailers and status samplers are started against ctx.
+// The returned stop function invokes the plane's Stop, which cancels those
+// goroutines and synchronously waits for them to drain; cancelling ctx alone
+// stops them but does not wait, so call stop (e.g. via the harness's t.Cleanup,
+// after the server is closed) for a deterministic teardown. baseURL is the
 // loopback origin the host-side status samplers dial to read this stack's own
 // /v0 status; pass the httptest.Server URL once known, or "" to leave the
 // status samplers dark (the run tailers, which read the event log off disk, do
@@ -94,7 +97,7 @@ type SeededCityDeps struct {
 //
 // For integration and e2e harnesses only. It performs no access control beyond
 // the production middleware and must not be exposed on an untrusted listener.
-func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (http.Handler, error) {
+func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (http.Handler, func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -110,7 +113,7 @@ func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (
 
 	spa, err := dashboardspa.NewStaticHandler()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	plane := dashboardbff.New(dashboardbff.Deps{
@@ -120,7 +123,7 @@ func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (
 	plane.Start(ctx)
 	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
 
-	return mux.Handler(), nil
+	return mux.Handler(), plane.Stop, nil
 }
 
 // singleCityPathResolver resolves exactly one city name to its seeded root path

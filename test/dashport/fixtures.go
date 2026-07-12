@@ -165,7 +165,8 @@ func corpusConfig() *config.City {
 }
 
 // serveSeededCity wires the loaded corpus into the exported production seam.
-func serveSeededCity(ctx context.Context, fx *fixtures) (http.Handler, error) {
+// The returned stop function drains the plane's run tailers and status samplers.
+func serveSeededCity(ctx context.Context, fx *fixtures) (http.Handler, func(), error) {
 	return api.ServeSeededCity(ctx, api.SeededCityDeps{
 		CityName:      fx.CityName,
 		CityPath:      fx.CityPath,

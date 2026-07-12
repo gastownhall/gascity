@@ -23,8 +23,8 @@ import (
 )
 
 // harness is a running seeded-city server plus the collaborators a test asserts
-// against. It owns the httptest.Server lifecycle; call Close (via t.Cleanup) to
-// drain the plane's run tailers and shut the listener.
+// against. It owns the httptest.Server lifecycle; the t.Cleanup hooks registered
+// in newHarness shut the listener and then drain the plane's run tailers.
 type harness struct {
 	t        *testing.T
 	server   *httptest.Server
@@ -35,7 +35,8 @@ type harness struct {
 
 // newHarness seeds a city from testdata/dashport and serves the full supervisor
 // stack over an httptest.Server. The plane's per-city run tailers are started
-// against the test context, so they drain when the test ends.
+// against the test context and drained deterministically by a t.Cleanup hook
+// that calls the seam's stop function after the server is closed.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 
@@ -49,10 +50,14 @@ func newHarness(t *testing.T) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	handler, err := serveSeededCity(ctx, fx)
+	handler, stop, err := serveSeededCity(ctx, fx)
 	if err != nil {
 		t.Fatalf("ServeSeededCity: %v", err)
 	}
+	// Registered before srv.Close so cleanup runs LIFO: close the server first
+	// (no in-flight requests), then drain the plane's goroutines via stop, then
+	// cancel the parent ctx.
+	t.Cleanup(stop)
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
