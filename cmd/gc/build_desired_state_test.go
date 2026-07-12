@@ -7926,8 +7926,17 @@ func TestBuildDesiredState_NamedBackedPoolPartialRetainsGenericPoolSession(t *te
 		&stderr,
 	)
 
-	if result.StoreQueryPartial {
-		t.Fatalf("StoreQueryPartial = true, want false for scoped named scale_check failure; stderr=%s", stderr.String())
+	// The demand phase now shares one full ready read per store across the
+	// assigned-work, scale-check, and named-session probes (readyDemandCache),
+	// so a partial ready read is reported uniformly: the assigned-work
+	// collection is marked partial too, suppressing drains conservatively
+	// (over-retention, never a demand under-count). Before the shared snapshot
+	// the assigned-work pass issued its own *limited* ready read, which this
+	// synthetic store — which returns partial only for unlimited reads — treated
+	// as clean. The scoped template partials below still fire, so the
+	// generic-pool session is retained either way.
+	if !result.StoreQueryPartial {
+		t.Fatalf("StoreQueryPartial = false, want true once the shared ready snapshot is partial; stderr=%s", stderr.String())
 	}
 	if !result.ScaleCheckPartialTemplates["worker"] {
 		t.Fatalf("ScaleCheckPartialTemplates[worker] = false, want named-session partial recorded; templates=%v stderr=%s", result.ScaleCheckPartialTemplates, stderr.String())

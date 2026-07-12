@@ -724,9 +724,14 @@ func buildDesiredStateWithSessionBeads(
 	var namedScaleCheckPartialTemplates map[string]bool
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
+	// One shared ready snapshot per store for the whole demand phase: the
+	// assigned-work pass, the default scale-check probe, and the named-session
+	// probe all filter the same in-memory read instead of each issuing its own
+	// /beads/ready fetch per store per assignee. See readyDemandCache.
+	readyCache := newReadyDemandCache()
 	if store != nil {
 		subPhaseStart = time.Now()
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads, readyCache)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_assigned_work", subPhaseStart, map[string]any{
 			"beads":   len(assignedWorkBeads),
 			"partial": storePartial,
@@ -776,7 +781,7 @@ func buildDesiredStateWithSessionBeads(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets, readyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -827,7 +832,7 @@ func buildDesiredStateWithSessionBeads(
 			var namedErrs []error
 			var partialTemplates map[string]bool
 			subPhaseStart = time.Now()
-			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName)
+			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName, readyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.named_session_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultNamedScaleTargets),
 			})
@@ -1194,7 +1199,9 @@ func collectAssignedWorkBeadsWithStores(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
+	caches ...*readyDemandCache,
 ) ([]beads.Bead, []beads.Store, []string, map[storeScopedBeadKey]bool, bool) {
+	cache := optionalReadyDemandCache(caches)
 	// Work arm of the reconciler frame: iterate the work-class candidate fan-out
 	// (city + non-suspended rigs). The city store carries the empty store-ref so
 	// the index-aligned workBeads/workStores slices stay per-bead aligned for the
@@ -1308,13 +1315,13 @@ func collectAssignedWorkBeadsWithStores(
 			var err error
 			var errs []error
 			if len(assignees) == 0 {
-				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+				ready, err = cache.liveReady(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
 			} else {
 				for _, assignee := range assignees {
-					part, partErr := liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+					part, partErr := cache.liveReady(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
 					if partErr != nil {
 						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
 					}
@@ -1485,7 +1492,8 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
 	if len(targets) == 0 {
@@ -1535,7 +1543,7 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget) (map[st
 		// should wake pools must create an actionable root, such as a
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
-		ready, readyErr := readyForControllerDemand(group.store)
+		ready, readyErr := cache.controllerDemandReady(group.store)
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -1640,7 +1648,8 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	return existing
 }
 
-func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City, _ string) (map[string]bool, map[string]bool, []error) {
+func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City, _ string, caches ...*readyDemandCache) (map[string]bool, map[string]bool, []error) {
+	cache := optionalReadyDemandCache(caches)
 	demand := make(map[string]bool)
 	if len(targets) == 0 {
 		return demand, nil, nil
@@ -1687,7 +1696,7 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 	// when a default demand query is inconclusive, so existing named-session
 	// beads are retained instead of swept on a store/query failure.
 	for key, group := range groups {
-		_, err := readyForControllerDemand(group.store)
+		_, err := cache.controllerDemandReady(group.store)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -1919,6 +1928,171 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 	query.TierMode = beads.TierBoth
 	handles := beads.HandlesFor(store)
 	return handles.Live.Ready(query)
+}
+
+// readyDemandCache memoizes the unfiltered ready reads for a single reconcile
+// pass so every pool and demand probe filters one shared in-memory snapshot
+// instead of issuing its own /beads/ready fetch. Each backing store is read at
+// most once on the live tier and at most once on the cached tier; consumers
+// then apply their Assignee/Limit selectors in memory. This is safe because the
+// store backends apply those selectors client-side over a stable, filter-
+// independent result order (see MemStore.Ready, BdStore.Ready,
+// NativeDoltStore.Ready): the assignee-matching prefix of the unfiltered set is
+// exactly the assignee-filtered set, and taking the first Limit of it matches a
+// per-assignee fetch.
+//
+// Before this cache a single demand phase fanned out ~60 sequential Ready reads
+// on a live city — the assigned-work pass alone issued one live read per store
+// per live-session assignee (build_desired_state.go collectAssignedWorkBeads*),
+// and the scale-check and named-session probes each re-read the full ready set
+// per store group. On the live maintainer-city those reads measured 3.6s avg /
+// 7.4s max, so one pass took ~3.5 min against a configured 15s patrol interval.
+//
+// Keyed by store identity so two templates backed by the same store share one
+// fetch. A nil *readyDemandCache falls back to the direct free functions, so
+// tests and non-tick callers keep the pre-cache behavior unchanged.
+//
+// This collapses the read *count* (the dominant cost). The per-read cost is a
+// separate defect: the sqlite/embedded infra store's ready-projection cache is
+// broken (bd sql unsupported), so HandlesFor(store).Cached.Ready fails with
+// ErrCacheUnavailable and the live full hydration serves every read (~2.5s of
+// API-route + hydration overhead vs ~0.97s bd-native). Repairing that projection
+// is a beads-library change (internal/beads) and is deliberately out of scope
+// here. NB: the store_health.go timeout+cache pattern must NOT be copied onto
+// these reads — an empty/partial result on timeout would under-count demand and
+// starve spawns; correctness outranks latency on the demand path, so the fix is
+// fewer full reads, never a bounded-but-lossy read.
+type readyDemandCache struct {
+	mu     sync.Mutex
+	live   map[beads.Store]*readyDemandEntry
+	cached map[beads.Store]*readyDemandEntry
+}
+
+type readyDemandEntry struct {
+	once sync.Once
+	rows []beads.Bead
+	err  error
+}
+
+func newReadyDemandCache() *readyDemandCache {
+	return &readyDemandCache{
+		live:   make(map[beads.Store]*readyDemandEntry),
+		cached: make(map[beads.Store]*readyDemandEntry),
+	}
+}
+
+// entry returns the per-store memo slot for m, creating it under the cache lock.
+// The lock is held only long enough to get-or-create the slot, so reads for
+// different stores still fetch concurrently (the assigned-work pass fans out one
+// goroutine per store); the slot's sync.Once serializes only same-store readers.
+func (c *readyDemandCache) entry(m map[beads.Store]*readyDemandEntry, store beads.Store) *readyDemandEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := m[store]
+	if e == nil {
+		e = &readyDemandEntry{}
+		m[store] = e
+	}
+	return e
+}
+
+// liveSnapshot returns the memoized full live ready set (TierBoth, unfiltered)
+// for store, fetching it once. Mirrors the read liveReadyForControllerDemandQuery
+// performs before its own assignee/limit filtering.
+func (c *readyDemandCache) liveSnapshot(store beads.Store) ([]beads.Bead, error) {
+	e := c.entry(c.live, store)
+	e.once.Do(func() {
+		e.rows, e.err = beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	})
+	return e.rows, e.err
+}
+
+// cachedSnapshot returns the memoized full cached ready set (TierBoth,
+// unfiltered) for store, fetching it once. Mirrors the read
+// readyForControllerDemandQuery performs against the cached tier.
+func (c *readyDemandCache) cachedSnapshot(store beads.Store) ([]beads.Bead, error) {
+	e := c.entry(c.cached, store)
+	e.once.Do(func() {
+		e.rows, e.err = beads.HandlesFor(store).Cached.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	})
+	return e.rows, e.err
+}
+
+// liveReady reproduces liveReadyForControllerDemandQuery from the shared live
+// snapshot. A nil cache reads directly (pre-cache behavior).
+func (c *readyDemandCache) liveReady(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+	if c == nil {
+		return liveReadyForControllerDemandQuery(store, query)
+	}
+	rows, err := c.liveSnapshot(store)
+	return filterReadySnapshot(rows, query), err
+}
+
+// controllerDemandReady reproduces readyForControllerDemand (the full ready set
+// with no assignee/limit selector) from the shared cached and live snapshots,
+// preserving its tier-merge precedence exactly (a complete live read is
+// authoritative; cached rows only backfill a failed or partial live read). A nil
+// cache reads directly (pre-cache behavior).
+func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bead, error) {
+	if c == nil {
+		return readyForControllerDemand(store)
+	}
+	rows, err := c.cachedSnapshot(store)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return c.liveSnapshot(store)
+	}
+	if _, hasExplicitHandles := store.(interface {
+		Handles() beads.StoreHandles
+	}); !hasExplicitHandles {
+		return rows, err
+	}
+	if err != nil && !beads.IsPartialResult(err) {
+		rows = nil
+	}
+	liveRows, liveErr := c.liveSnapshot(store)
+	if liveErr == nil {
+		return liveRows, nil
+	}
+	if liveErr != nil && !beads.IsPartialResult(liveErr) {
+		liveRows = nil
+	}
+	rows = mergeReadyRowsByID(rows, liveRows)
+	if joined := errors.Join(err, liveErr); joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
+		return rows, &beads.PartialResultError{Op: "controller ready demand", Err: joined}
+	} else if joined != nil {
+		return rows, joined
+	}
+	return rows, nil
+}
+
+// filterReadySnapshot applies a ReadyQuery's Assignee and Limit selectors to an
+// unfiltered snapshot in memory, matching the client-side filtering the store
+// backends apply for the same selectors (order-preserving, limit truncates).
+func filterReadySnapshot(rows []beads.Bead, query beads.ReadyQuery) []beads.Bead {
+	if query.Assignee == "" && query.Limit <= 0 {
+		return rows
+	}
+	out := make([]beads.Bead, 0, len(rows))
+	for _, b := range rows {
+		if query.Assignee != "" && b.Assignee != query.Assignee {
+			continue
+		}
+		out = append(out, b)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out
+}
+
+// optionalReadyDemandCache extracts the optional per-pass ready cache threaded
+// through the demand probes. Absent (test/non-tick callers) yields nil, whose
+// cache methods read directly and preserve pre-cache behavior.
+func optionalReadyDemandCache(caches []*readyDemandCache) *readyDemandCache {
+	if len(caches) > 0 {
+		return caches[0]
+	}
+	return nil
 }
 
 func mergeReadyRowsByID(primary, secondary []beads.Bead) []beads.Bead {
