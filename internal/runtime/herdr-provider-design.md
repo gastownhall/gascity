@@ -132,8 +132,11 @@ herdr just becomes another selectable runtime name.
    runtime dir). Low risk, fully owned by the provider.
 2. **`IsAttached`** — no dedicated query. **Bridge:** parse `herdr status` / infer from
    `pane.get`; or return false (the contract permits "attach detection unsupported").
-3. **`GetLastActivity`** — no timestamp. **Bridge:** subscribe to `output` events and stamp,
-   or diff `pane.read`. Best-effort per the contract.
+3. **`GetLastActivity`** — no timestamp. **Bridge:** stamp from pushed events — but note
+   0.7.3 offers **no** output-changed subscription (`events.subscribe` rejects it; only the
+   broadcast pane lifecycle kinds plus per-pane `pane.agent_status_changed` /
+   `pane.output_matched` / `pane.scroll_changed` are subscribable), so activity stamping
+   rides agent-status transitions — or diff `pane.read`. Best-effort per the contract.
 4. **`ClearScrollback`** — not in the API. **Bridge:** best-effort no-op (contract allows), or
    close+respawn the pane on restart.
 5. **Signals** — only keystroke `ctrl+c` (no signal API). **Bridge:** soft `Interrupt` =
@@ -147,6 +150,10 @@ herdr just becomes another selectable runtime name.
 2. **Native push events** (`events.subscribe`) — gascity **polls** today for liveness/wedge
    detection. `pane.exited` → instant dead-agent detection; `agent_status_changed` →
    real-time. **Directly relevant to this town's repeated wedged-agent incidents.**
+   *Implemented:* `events.go` exposes this as `runtime.SessionEventProvider` (self-healing
+   subscribe loop, resync-on-reconnect, level-triggered contract — the server replays a
+   recent-event backlog to every new subscription, so events are hints to re-poll, never
+   authoritative transitions).
 3. **Native agent-state** (`agent_status` working/idle/done/blocked, `--source detection`,
    `wait agent-status`/`wait output`) maps *directly* onto `IdleWaitProvider` /
    `InterruptBoundaryWaitProvider` (tmux implements these by polling/scraping). The

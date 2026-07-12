@@ -33,6 +33,7 @@ type client struct {
 	session  string // herdr named session (shared per city)
 	bin      string // herdr binary (default "herdr")
 	cityRoot string // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
+	sockPath string // test override for socketPath (unit tests point it at a fake server)
 }
 
 func newClient(session, cityRoot string) *client {
@@ -491,6 +492,9 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel string) 
 
 // socketPath is the unix socket for this client's herdr session.
 func (c *client) socketPath() string {
+	if c.sockPath != "" {
+		return c.sockPath
+	}
 	home, _ := os.UserHomeDir()
 	if c.session == "" || c.session == "default" {
 		return filepath.Join(home, ".config", "herdr", "herdr.sock")

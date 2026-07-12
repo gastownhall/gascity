@@ -382,7 +382,7 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: false, // no clean IsAttached query
 		CanReportActivity:   false, // no GetLastActivity
-		CanStream:           false, // socket-event streaming is a later optimization
+		CanStream:           true,  // push session-event stream via SubscribeSessionEvents (events.subscribe socket API)
 		CanAttachTTY:        true,  // agent attach
 	}
 }
