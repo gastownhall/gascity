@@ -481,6 +481,10 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 	for i := range input.beads {
 		issues = append(issues, fromRunSnapshotBead(input.beads[i]))
 	}
+	// The run id feeds mapRunPhase's terminal-fail lookup, but the detail view
+	// carries run failure through node statuses in the DAG rather than a
+	// run-header label: only phase.phase is projected below, so the honest
+	// "failed" label stays a summary/lane-level signal (RunLane.PhaseLabel).
 	phase := mapRunPhase(input.runID, issues)
 	formulaName, hasFormulaName := "", false
 	if formula.Kind == "known" {

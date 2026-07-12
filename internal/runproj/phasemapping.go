@@ -147,6 +147,19 @@ var (
 	intakeStageTokens         = map[string]bool{"intake": true, "bootstrap": true, "context": true, "router": true, "request": true, "preflight": true, "setup": true, "rebase": true}
 )
 
+// reviewPrepImplementationSteps names review-preparation steps that are
+// themselves implementation work rather than the review gate or intake. Such a
+// step carries a review lead-up qualifier (so the review classifier rejects it)
+// plus a generic intake token, so neither the review nor the implementation
+// token set resolves it; it must be pinned explicitly. Keys are authored base
+// step ids (attempt suffix stripped). prepare-review-context builds the review
+// context a later code review consumes and belongs to the bug-implementation
+// formula's "implement" stage, yet its only non-rejected token is the intake
+// token "context"; without this it falls through to intake.
+var reviewPrepImplementationSteps = map[string]bool{
+	"prepare-review-context": true,
+}
+
 // stepIDPhase classifies a single gc.step_id into a generic RunPhase.
 // Port of TS stepIdPhase.
 func stepIDPhase(stepID string) string {
@@ -162,6 +175,15 @@ func stepIDPhase(stepID string) string {
 	// review, it is not the review.
 	if hasStageToken(tokens, reviewStageTokens, true) {
 		return "review"
+	}
+	// A named review-preparation step that is implementation work (e.g.
+	// prepare-review-context) is rejected as review above and would otherwise be
+	// misread as intake by its "context" token; pin it to implementation before
+	// the token fallthrough. pre-review-ci / repair-pre-review-ci-failures are
+	// deliberately absent: the CI gate leads up to review without being
+	// implementation, and its repair step already resolves via the "repair" token.
+	if reviewPrepImplementationSteps[stripAttemptSuffix(strings.ToLower(strings.TrimSpace(stepID)))] {
+		return "implementation"
 	}
 	if hasStageToken(tokens, implementationStageTokens, false) {
 		return "implementation"
@@ -751,12 +773,16 @@ func byMostRecentThenStage(a, b runIssue) int {
 }
 
 // stepIssues returns the issues whose gc.step_id equals step, treating an
-// attempt-suffixed id (step.attempt.N) as its authored base id. Port of TS
-// stepIssues.
+// attempt-suffixed id (step.attempt.N) as its authored base id on BOTH sides.
+// The authored stage tables query with base ids, but a live retry's active step
+// id (runStepAttempt) still carries the suffix; stripping the query too keeps
+// the match symmetric so attempt lookup resolves for in-flight retries. Port of
+// TS stepIssues, extended to normalize the query side.
 func stepIssues(issues []runIssue, step string) []runIssue {
+	base := stripAttemptSuffix(step)
 	var out []runIssue
 	for _, i := range issues {
-		if stripAttemptSuffix(stringValue(i.metadata[beadmeta.StepIDMetadataKey])) == step {
+		if stripAttemptSuffix(stringValue(i.metadata[beadmeta.StepIDMetadataKey])) == base {
 			out = append(out, i)
 		}
 	}
