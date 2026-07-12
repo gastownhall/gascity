@@ -182,7 +182,13 @@ SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
 sanitize_output() {
-    printf '%s' "$1" | tr '\n' ' ' | cut -c1-4000
+    local flattened
+    flattened=$(printf '%s' "$1" | tr '\n' ' ')
+    if [ "${#flattened}" -le 4000 ]; then
+        printf '%s' "$flattened"
+    else
+        printf '%s...[truncated]...%s' "${flattened:0:2000}" "${flattened: -1900}"
+    fi
 }
 
 record_anomaly() {
