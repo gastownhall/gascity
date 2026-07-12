@@ -703,17 +703,65 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
 		return true
 	}
-	if !skipLabels && !slices.Equal(old.Labels, fresh.Labels) {
+	// Labels, needs, and dependencies are SETS: their order carries no meaning.
+	// Compare them order-insensitively. A backing store that returns these in a
+	// different order than the cache holds (the Dolt gcg rig store does not
+	// guarantee a stable order across scans) would otherwise register as a
+	// change on every reconcile pass — the cache-reconcile re-absorb flood that
+	// re-touched every live molecule wisp ~every 80s and starved review
+	// molecules from advancing (ga-ocypq2).
+	if !skipLabels && !stringSetEqual(old.Labels, fresh.Labels) {
 		return true
 	}
-	if !slices.Equal(old.Needs, fresh.Needs) {
+	if !stringSetEqual(old.Needs, fresh.Needs) {
 		return true
 	}
-	return !slices.Equal(old.Dependencies, fresh.Dependencies)
+	return !depSetEqual(old.Dependencies, fresh.Dependencies)
 }
 
 func depsChanged(old, fresh []Dep) bool {
-	return !slices.Equal(old, fresh)
+	return !depSetEqual(old, fresh)
+}
+
+// stringSetEqual reports whether two string slices hold the same multiset of
+// values regardless of order. Used for order-insensitive label/needs change
+// detection so a store returning a set in a different order than the cache is
+// not mistaken for a change (ga-ocypq2).
+func stringSetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, s := range a {
+		counts[s]++
+	}
+	for _, s := range b {
+		counts[s]--
+		if counts[s] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// depSetEqual reports whether two dependency slices hold the same multiset of
+// dependencies regardless of order. Dep is a comparable struct, so it is a
+// valid map key for the multiset count.
+func depSetEqual(a, b []Dep) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[Dep]int, len(a))
+	for _, d := range a {
+		counts[d]++
+	}
+	for _, d := range b {
+		counts[d]--
+		if counts[d] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func intPtrEqual(left, right *int) bool {
