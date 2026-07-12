@@ -1817,6 +1817,24 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		target = agentPane
 	}
 
+	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
+	// only once delivery is actually confirmed (see delivered below). This
+	// mirrors recordPoke/GetSessionActivity (see discountPokeActivity) so gc's
+	// own nudge keystrokes don't inflate last_active, but captures prior up
+	// front and stamps `at` after the LAST keystroke: submitEnterAndConfirm's
+	// polling can burn several seconds — longer than pokeEcho — so stamping at
+	// entry would let the final Enter's echo land outside the discount window.
+	prior, err := t.GetSessionActivity(session)
+	if err != nil {
+		prior = time.Time{}
+	}
+	delivered := false
+	defer func() {
+		if delivered {
+			t.recordPokeAt(session, prior, time.Now())
+		}
+	}()
+
 	// Wake a detached pane BEFORE the first send. A fully-detached pool TUI
 	// (e.g. grok, never observed by a client) may not be servicing its event
 	// loop, so the initial paste is silently dropped at the application layer
@@ -1860,6 +1878,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
 			return fmt.Errorf("failed to send Enter: %w", err)
 		}
+		delivered = true
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
@@ -1874,6 +1893,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
 		wake()
+		delivered = true
 		return nil
 	}
 	return fmt.Errorf("failed to send Enter after %d attempts: %w", submitEnterMaxSends, lastErr)
@@ -1890,6 +1910,19 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		return fmt.Errorf("nudge lock timeout for pane %q: previous nudge may be hung", pane)
 	}
 	defer releaseNudgeLock(pane)
+
+	// See NudgeSession for why prior is captured before the first keystroke
+	// and the poke stamped only on confirmed delivery.
+	prior, err := t.GetSessionActivity(pane)
+	if err != nil {
+		prior = time.Time{}
+	}
+	delivered := false
+	defer func() {
+		if delivered {
+			t.recordPokeAt(pane, prior, time.Now())
+		}
+	}()
 
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(pane, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -1921,6 +1954,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
 		t.WakePaneIfDetached(pane)
+		delivered = true
 		return nil
 	}
 	return fmt.Errorf("failed to send Enter after 3 attempts: %w", lastErr)
@@ -2323,11 +2357,19 @@ func (t *Tmux) recordPoke(session string) {
 	if err != nil {
 		prior = time.Time{}
 	}
+	t.recordPokeAt(session, prior, time.Now())
+}
+
+// recordPokeAt stamps a poke with an explicit prior activity and timestamp,
+// for callers (NudgeSession/NudgePane) whose send spans longer than pokeEcho:
+// they capture prior BEFORE the first keystroke and stamp `at` AFTER the last,
+// so the echo window brackets the final keystroke regardless of delivery load.
+func (t *Tmux) recordPokeAt(session string, prior, at time.Time) {
 	t.pokeMu.Lock()
 	if t.pokes == nil {
 		t.pokes = make(map[string]pokeInfo)
 	}
-	t.pokes[session] = pokeInfo{at: time.Now(), prior: prior}
+	t.pokes[session] = pokeInfo{at: at, prior: prior}
 	t.pokeMu.Unlock()
 }
 
