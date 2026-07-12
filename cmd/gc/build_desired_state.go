@@ -724,14 +724,17 @@ func buildDesiredStateWithSessionBeads(
 	var namedScaleCheckPartialTemplates map[string]bool
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
-	// One shared ready snapshot per store for the whole demand phase: the
-	// assigned-work pass, the default scale-check probe, and the named-session
-	// probe all filter the same in-memory read instead of each issuing its own
-	// /beads/ready fetch per store per assignee. See readyDemandCache.
-	readyCache := newReadyDemandCache()
+	// Per-store ready snapshots for the demand phase: each probe filters one
+	// shared in-memory read per store instead of issuing its own /beads/ready
+	// fetch per store per assignee. A snapshot must not span a demand-phase
+	// write. The assigned-work pass reads before canonicalizeLegacyBound*
+	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
+	// scale-check and named-session probes read after those writes and share a
+	// second cache created below. See readyDemandCache.
+	assignedReadyCache := newReadyDemandCache()
 	if store != nil {
 		subPhaseStart = time.Now()
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads, readyCache)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_assigned_work", subPhaseStart, map[string]any{
 			"beads":   len(assignedWorkBeads),
 			"partial": storePartial,
@@ -770,6 +773,14 @@ func buildDesiredStateWithSessionBeads(
 		subPhaseStart = time.Now()
 		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
+		// work, so the assigned-work snapshot is now stale for demand
+		// bucketing. Read the post-rewrite state from a fresh per-store
+		// snapshot: reusing assignedReadyCache would bucket demand from the
+		// pre-rewrite legacy routes and miss the canonical cold pool, because
+		// an explicit-handle CachingStore returns its memoized pre-write live
+		// snapshot as the authoritative demand read.
+		demandReadyCache := newReadyDemandCache()
 		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
@@ -781,7 +792,7 @@ func buildDesiredStateWithSessionBeads(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets, readyCache)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -832,7 +843,7 @@ func buildDesiredStateWithSessionBeads(
 			var namedErrs []error
 			var partialTemplates map[string]bool
 			subPhaseStart = time.Now()
-			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName, readyCache)
+			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.named_session_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultNamedScaleTargets),
 			})
@@ -1938,16 +1949,16 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 // stores that filter client-side over a stable, filter-independent result order
 // (MemStore.Ready, BdStore.Ready): the assignee-matching prefix of the
 // unfiltered set is exactly the assignee-filtered set, and taking the first
-// Limit of it matches a per-assignee fetch. NativeDoltStore.Ready instead
-// filters the assignee server-side, and — unlike its issue rows, whose ORDER BY
-// is a total order independent of the predicate with Limit applied client-side
-// — its wisp sub-query is assignee-blind, so a per-assignee liveReady over the
-// snapshot can drop wisps a direct Ready(Assignee=X) would have returned. That
-// divergence never under-counts spawn demand: the pool-spawn path
-// (controllerDemandReady) is assignee-free and reads the full set, and the
-// dropped wisps are only those NOT owned by the probed live session, so they
-// cannot wake it. The transformation is therefore demand-safe even where it is
-// not byte-identical for wisps.
+// Limit of it matches a per-assignee fetch. NativeDoltStore.Ready filters the
+// assignee server-side, and its wisp sub-query is assignee-aware too: the
+// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// wisp filter (internal/storage/issueops/ready_work.go), which emits
+// `assignee = ?` for the wisp table (internal/storage/sqlbuild/filter.go),
+// exactly as the issues leg does. Both legs order by a total order independent
+// of the assignee predicate with Limit applied client-side, so filtering the
+// unfiltered snapshot by assignee returns exactly the assignee-scoped Ready
+// set. The transformation is therefore exact for all three production stores,
+// not merely demand-safe.
 //
 // Before this cache a single demand phase fanned out ~60 sequential Ready reads
 // on a live city — the assigned-work pass alone issued one live read per store
@@ -1959,6 +1970,11 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 // Keyed by store identity so two templates backed by the same store share one
 // fetch. A nil *readyDemandCache falls back to the direct free functions, so
 // tests and non-tick callers keep the pre-cache behavior unchanged.
+//
+// Read-only contract: every read here (liveReady, controllerDemandReady,
+// filterReadySnapshot) may return a slice that aliases the shared per-pass
+// memo, so consumers must treat results as read-only and never mutate or
+// append to them. The current demand consumers only read.
 //
 // This collapses the read *count* (the dominant cost). The per-read cost is a
 // separate defect: the sqlite/embedded infra store's ready-projection cache is
@@ -2040,7 +2056,9 @@ func (c *readyDemandCache) liveReady(store beads.Store, query beads.ReadyQuery) 
 // with no assignee/limit selector) from the shared cached and live snapshots,
 // preserving its tier-merge precedence exactly (a complete live read is
 // authoritative; cached rows only backfill a failed or partial live read). A nil
-// cache reads directly (pre-cache behavior).
+// cache reads directly (pre-cache behavior). The returned slice may alias the
+// shared per-pass snapshot (the live path returns the memo directly), so callers
+// must treat it as read-only.
 func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bead, error) {
 	if c == nil {
 		return readyForControllerDemand(store)
@@ -2076,14 +2094,17 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bea
 // filterReadySnapshot applies a ReadyQuery's Assignee and Limit selectors to an
 // unfiltered snapshot in memory, matching the client-side filtering the store
 // backends apply for the same selectors (order-preserving, limit truncates).
+// The filtered result is a fresh slice; an empty selector returns the shared
+// snapshot by reference. Either way the result is a read-only view that callers
+// must not mutate or append to (see readyDemandCache).
 func filterReadySnapshot(rows []beads.Bead, query beads.ReadyQuery) []beads.Bead {
 	if query.Assignee == "" && query.Limit <= 0 {
-		// rows is the shared per-pass memo slice. Return a copy so a consumer
-		// that mutates its result cannot corrupt the snapshot every other probe
-		// reads. No caller does this today (all pass an Assignee or a Limit, so
-		// the allocating branch below runs), but the copy makes the read-only
-		// contract on the shared snapshot unconditional.
-		return append([]beads.Bead(nil), rows...)
+		// No selector: the whole snapshot is the result. Return the shared
+		// per-pass memo by reference, matching controllerDemandReady's live path,
+		// so demand reads stay allocation-free. The result is read-only per the
+		// readyDemandCache contract; no production caller passes an empty query
+		// (every liveReady call carries an Assignee or a Limit).
+		return rows
 	}
 	out := make([]beads.Bead, 0, len(rows))
 	for _, b := range rows {

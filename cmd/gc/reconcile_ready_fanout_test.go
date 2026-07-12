@@ -83,6 +83,18 @@ func TestReadyDemandCacheCollapsesReadyFanout(t *testing.T) {
 	}
 }
 
+// Coverage boundary for the snapshot-equivalence tests below: they exercise
+// MemStore and CachingStore-over-MemStore, which filter the assignee entirely
+// client-side. The wisp-bearing production stores (NativeDoltStore, BdStore)
+// apply the assignee predicate server-side on BOTH the issue and wisp legs — the
+// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// wisp filter, emitting `assignee = ?` for the wisp table — so filtering an
+// unfiltered snapshot by assignee is exact for them too (see the readyDemandCache
+// doc in build_desired_state.go). That server-side path is not exercised here
+// because beads.NewNativeDoltStoreForConformance is an internal test-only export
+// of internal/beads and is not importable from cmd/gc; a full NativeDoltStore is
+// likewise too heavy for this package's unit tests.
+
 // TestReadyDemandCacheLiveReadyEquivalentToDirect proves the snapshot-filtered
 // live read returns exactly what a direct assignee/limit-scoped Ready would, so
 // the demand probes see the same beads they see today.
