@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2204,6 +2205,9 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 func TestOrderRunGraphWorkflowDecoratesStepRouting(t *testing.T) {
 	cityDir := t.TempDir()
 	formulaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	cityToml := `[workspace]
 name = "test-city"
@@ -2211,8 +2215,23 @@ name = "test-city"
 [daemon]
 formula_v2 = true
 
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
 [[agent]]
 name = "quinn"
+dir = "fixture"
+min_active_sessions = 0
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fixture"
 max_active_sessions = 1
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -2233,7 +2252,7 @@ title = "Do work"
 	}
 
 	aa := []orders.Order{
-		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
+		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "fixture/quinn", FormulaLayer: formulaDir},
 	}
 	store := beads.NewMemStore()
 
@@ -2249,7 +2268,24 @@ title = "Do work"
 
 	foundRoot := false
 	foundWorker := false
+	foundControl := false
 	for _, bead := range all {
+		if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "city:test-city" {
+			t.Fatalf("%s gc.root_store_ref = %q, want city:test-city", bead.Title, got)
+		}
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != config.ControlDispatcherAgentName {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want owning city dispatcher", got)
+			}
+			if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "city:test-city" {
+				t.Fatalf("workflow-finalize gc.root_store_ref = %q, want city:test-city", got)
+			}
+			if got := bead.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "fixture/quinn" {
+				t.Fatalf("workflow-finalize execution route = %q, want fixture/quinn", got)
+			}
+			foundControl = true
+			continue
+		}
 		switch bead.Title {
 		case "graph-work":
 			if bead.Assignee != "" {
@@ -2258,13 +2294,22 @@ title = "Do work"
 			if bead.Metadata["gc.kind"] != "workflow" {
 				t.Fatalf("workflow root gc.kind = %q, want workflow", bead.Metadata["gc.kind"])
 			}
-			if bead.Metadata["gc.routed_to"] != "quinn" {
-				t.Fatalf("workflow root gc.routed_to = %q, want quinn", bead.Metadata["gc.routed_to"])
+			if bead.Metadata["gc.routed_to"] != "fixture/quinn" {
+				t.Fatalf("workflow root gc.routed_to = %q, want fixture/quinn", bead.Metadata["gc.routed_to"])
+			}
+			if got := bead.Metadata[beadmeta.ScopeKindMetadataKey]; got != "city" {
+				t.Fatalf("workflow root gc.scope_kind = %q, want city", got)
+			}
+			if got := bead.Metadata[beadmeta.ScopeRefMetadataKey]; got != "test-city" {
+				t.Fatalf("workflow root gc.scope_ref = %q, want test-city", got)
 			}
 			foundRoot = true
 		case "Do work":
 			if bead.Assignee != "" {
 				t.Fatalf("worker assignee = %q, want empty child under routed workflow root", bead.Assignee)
+			}
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/quinn" {
+				t.Fatalf("worker gc.routed_to = %q, want fixture/quinn", got)
 			}
 			foundWorker = true
 		}
@@ -2275,6 +2320,160 @@ title = "Do work"
 	}
 	if !foundWorker {
 		t.Fatal("missing workflow child step")
+	}
+	if !foundControl {
+		t.Fatal("missing workflow-finalize control step")
+	}
+}
+
+func TestOrderRunGraphWorkflowWithoutPoolUsesPerStepTargetAndRigStore(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "fixture")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
+[[agent]]
+name = "worker"
+dir = "fixture"
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fixture"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphFormula := `
+formula = "rig-order-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Rig work"
+metadata = { "gc.run_target" = "worker" }
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "rig-order-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "rig-patrol", Rig: "fixture", Formula: "rig-order-work", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir}
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	if code := doOrderRun([]orders.Order{a}, a.Name, a.Rig, cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundWork, foundControl bool
+	for _, bead := range all {
+		if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "rig:fixture" {
+			t.Fatalf("%s gc.root_store_ref = %q, want rig:fixture", bead.Title, got)
+		}
+		switch bead.Metadata[beadmeta.KindMetadataKey] {
+		case beadmeta.KindWorkflowFinalize:
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/control-dispatcher" {
+				t.Fatalf("finalize gc.routed_to = %q, want fixture/control-dispatcher", got)
+			}
+			foundControl = true
+		default:
+			if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+				if got := bead.Metadata[beadmeta.ScopeKindMetadataKey]; got != "rig" {
+					t.Fatalf("workflow root gc.scope_kind = %q, want rig", got)
+				}
+				if got := bead.Metadata[beadmeta.ScopeRefMetadataKey]; got != "fixture" {
+					t.Fatalf("workflow root gc.scope_ref = %q, want fixture", got)
+				}
+			}
+			if bead.Title == "Rig work" {
+				if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/worker" {
+					t.Fatalf("work gc.routed_to = %q, want fixture/worker", got)
+				}
+				foundWork = true
+			}
+		}
+	}
+	if !foundWork || !foundControl {
+		t.Fatalf("found work=%v control=%v; beads=%+v", foundWork, foundControl, all)
+	}
+}
+
+func TestOrderRunGraphWorkflowMissingRigDispatcherFailsBeforeInstantiate(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
+[[agent]]
+name = "worker"
+dir = "fixture"
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "missing-dispatcher.toml"), []byte(`
+formula = "missing-dispatcher"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Rig work"
+metadata = { "gc.run_target" = "worker" }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "rig-patrol", Rig: "fixture", Formula: "missing-dispatcher", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir}
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	if code := doOrderRun([]orders.Order{a}, a.Name, a.Rig, cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1", code)
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("open beads = %+v, want no graph materialized", all)
+	}
+	if !strings.Contains(stderr.String(), `control-dispatcher agent for rig "fixture" not found`) {
+		t.Fatalf("stderr = %q, want missing rig dispatcher", stderr.String())
 	}
 }
 

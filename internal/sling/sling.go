@@ -140,14 +140,6 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
-	// ControlDispatcherRuntimeMissing reports whether the named control-
-	// dispatcher agent's session is asleep with reason runtime-missing. It
-	// gates the rig→city control-dispatcher fallback on the sling graph-
-	// routing path (#3454); nil disables the fallback. Forwarded verbatim
-	// into graphroute.Deps so a freshly slung graph.v2 molecule binds its
-	// auto-injected workflow-finalize sink to the city dispatcher when the
-	// rig-local one has decayed, instead of a dead session.
-	ControlDispatcherRuntimeMissing func(qualifiedName string) bool
 }
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
@@ -171,10 +163,9 @@ func (deps SlingDeps) graphStore() beads.Store {
 // the boundary.
 func (deps SlingDeps) graphrouteDeps() graphroute.Deps {
 	return graphroute.Deps{
-		CityPath:                        deps.CityPath,
-		Resolver:                        deps.Resolver,
-		DirectSessionResolver:           deps.DirectSessionResolver,
-		ControlDispatcherRuntimeMissing: deps.ControlDispatcherRuntimeMissing,
+		CityPath:              deps.CityPath,
+		Resolver:              deps.Resolver,
+		DirectSessionResolver: deps.DirectSessionResolver,
 	}
 }
 

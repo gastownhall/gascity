@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -564,6 +565,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	if routingRigContext == "" {
 		routingRigContext = graphroute.GraphRouteRigContext(defaultRoute.QualifiedName)
 	}
+	storeRigContext, storeScoped := storeref.ScopeRigContext(source.Metadata[beadmeta.RootStoreRefMetadataKey])
 	controlRoutes := map[string]graphRouteBinding{}
 	controlRouteFor := func(rigContext string) (graphRouteBinding, error) {
 		rigContext = strings.TrimSpace(rigContext)
@@ -619,7 +621,9 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		}
 		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			controlRigContext := graphRouteBindingRigContext(binding)
-			if controlRigContext == "" {
+			if storeScoped {
+				controlRigContext = storeRigContext
+			} else if controlRigContext == "" {
 				controlRigContext = routingRigContext
 			}
 			controlRoute, err := controlRouteFor(controlRigContext)
@@ -756,6 +760,12 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 	}
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
+	}
+	if rootStoreRef := strings.TrimSpace(source.Metadata[beadmeta.RootStoreRefMetadataKey]); rootStoreRef != "" {
+		// Dynamically attached steps live in the source graph store. Overwrite a
+		// stale template value before routing so gc.routed_to and the store ref
+		// molecule.Attach persists cannot disagree.
+		step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 	}
 	if scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey]); scopeRef != "" && step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		step.Metadata[beadmeta.ScopeRefMetadataKey] = scopeRef

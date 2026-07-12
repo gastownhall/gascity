@@ -5736,6 +5736,10 @@ path = "/tmp/gascity"
 [[agent]]
 name = "reviewer"
 dir = "gascity"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "gascity"
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -5877,13 +5881,14 @@ on_exhausted = "hard_fail"
 		Title: "Expand fanout for survey",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.kind":         "fanout",
-			"gc.root_bead_id": workflow.ID,
-			"gc.control_for":  "demo.survey",
-			"gc.routed_to":    "gascity/control-dispatcher",
-			"gc.for_each":     "output.items",
-			"gc.bond":         "expansion-review",
-			"gc.fanout_mode":  "parallel",
+			"gc.kind":           "fanout",
+			"gc.root_bead_id":   workflow.ID,
+			"gc.root_store_ref": "rig:gascity",
+			"gc.control_for":    "demo.survey",
+			"gc.routed_to":      "gascity/control-dispatcher",
+			"gc.for_each":       "output.items",
+			"gc.bond":           "expansion-review",
+			"gc.fanout_mode":    "parallel",
 		},
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
@@ -6130,7 +6135,9 @@ metadata = { "gc.scope_ref" = "{scope_ref}" }
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	opts := testProcessOptionsWithControlDispatcher("")
+	opts.FormulaSearchPaths = []string{dir}
+	result, err := ProcessControl(store, fanout, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -6212,7 +6219,9 @@ metadata = { "gc.scope_ref" = "{scope_ref}" }
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	opts := testProcessOptionsWithControlDispatcher("")
+	opts.FormulaSearchPaths = []string{dir}
+	result, err := ProcessControl(store, fanout, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -6461,7 +6470,9 @@ on_exhausted = "hard_fail"
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment: %v", err)
 	}
-	routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store)
+	if err := routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store); err != nil {
+		t.Fatalf("routeFanoutFragmentSteps: %v", err)
+	}
 	if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}

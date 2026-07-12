@@ -15,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -956,7 +958,7 @@ func TestOrderDispatchEventWispLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
 
-	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID, nil)
+	mad.dispatchWisp(context.Background(), store, execStoreTarget{}, mad.aa[0], t.TempDir(), tracking.ID, nil)
 
 	all := trackingBeads(t, store, "order-run:release-watch")
 	if len(all) != 1 {
@@ -1011,7 +1013,7 @@ description = "Inspect convoy {{convoy_id}}"
 	}
 	mad := ad.(*memoryOrderDispatcher)
 
-	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID, nil)
+	mad.dispatchWisp(context.Background(), store, execStoreTarget{}, mad.aa[0], t.TempDir(), tracking.ID, nil)
 
 	all := trackingBeads(t, store, "order-run:convoy-patrol")
 	if len(all) != 1 {
@@ -1022,6 +1024,328 @@ description = "Inspect convoy {{convoy_id}}"
 	}
 	if !rec.hasType(events.OrderFailed) {
 		t.Fatal("missing order.failed event")
+	}
+}
+
+func TestOrderDispatchGraphWorkflowWithoutPoolUsesRigStoreScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "rig-order.toml"), []byte(`
+formula = "rig-order"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Rig work"
+metadata = { "gc.run_target" = "worker" }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	maxOne, maxTwo := 1, 2
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: rigPath}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "fixture", MaxActiveSessions: &maxTwo},
+			{Name: config.ControlDispatcherAgentName, MaxActiveSessions: &maxOne},
+			{Name: config.ControlDispatcherAgentName, Dir: "fixture", MaxActiveSessions: &maxOne},
+		},
+	}
+	a := orders.Order{Name: "rig-patrol", Rig: "fixture", Formula: "rig-order", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir}
+	store := beads.NewMemStore()
+	var rec memRecorder
+	dispatchCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var gotTargets []execStoreTarget
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{a},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			gotTargets = append(gotTargets, target)
+			return store, nil
+		},
+		cfg:                  cfg,
+		cityName:             "test-city",
+		cityPath:             cityPath,
+		rec:                  &rec,
+		stderr:               io.Discard,
+		maxDispatchesPerTick: 1,
+		dispatchCtx:          dispatchCtx,
+		dispatchCancel:       cancel,
+	}
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer drainCancel()
+	if !m.drain(drainCtx) {
+		t.Fatal("order dispatch did not drain")
+	}
+	foundRigTarget := false
+	for _, gotTarget := range gotTargets {
+		if gotTarget.ScopeKind == "rig" && gotTarget.RigName == "fixture" && samePath(gotTarget.ScopeRoot, rigPath) {
+			foundRigTarget = true
+		}
+	}
+	if !foundRigTarget {
+		t.Fatalf("resolved targets = %+v, want fixture rig store", gotTargets)
+	}
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundWork, foundControl bool
+	for _, bead := range all {
+		if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "rig:fixture" {
+			t.Fatalf("%s gc.root_store_ref = %q, want rig:fixture", bead.Title, got)
+		}
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+			if got := bead.Metadata[beadmeta.ScopeKindMetadataKey]; got != "rig" {
+				t.Fatalf("workflow root gc.scope_kind = %q, want rig", got)
+			}
+			if got := bead.Metadata[beadmeta.ScopeRefMetadataKey]; got != "fixture" {
+				t.Fatalf("workflow root gc.scope_ref = %q, want fixture", got)
+			}
+		}
+		if bead.Title == "Rig work" {
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/worker" {
+				t.Fatalf("work gc.routed_to = %q, want fixture/worker", got)
+			}
+			foundWork = true
+		}
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/control-dispatcher" {
+				t.Fatalf("finalize gc.routed_to = %q, want fixture/control-dispatcher", got)
+			}
+			foundControl = true
+		}
+	}
+	if !foundWork || !foundControl {
+		t.Fatalf("found work=%v control=%v; beads=%+v", foundWork, foundControl, all)
+	}
+	if !rec.hasType(events.OrderCompleted) || rec.hasType(events.OrderFailed) {
+		t.Fatalf("events = %+v, want completed without failure", rec.events)
+	}
+}
+
+func TestOrderDispatchRigOwnedGraphKeepsOwnerStoreWhenPoolRunsOnAnotherRig(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	cityPath := t.TempDir()
+	ownerPath := filepath.Join(cityPath, "owner")
+	executorPath := filepath.Join(cityPath, "executor")
+	for _, path := range []string{ownerPath, executorPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "cross-rig-order.toml"), []byte(`
+formula = "cross-rig-order"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Cross-rig work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	maxOne, maxTwo := 1, 2
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "owner", Path: ownerPath},
+			{Name: "executor", Path: executorPath},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "executor", MaxActiveSessions: &maxTwo},
+			{Name: config.ControlDispatcherAgentName, MaxActiveSessions: &maxOne},
+			{Name: config.ControlDispatcherAgentName, Dir: "owner", MaxActiveSessions: &maxOne},
+		},
+	}
+	a := orders.Order{
+		Name:         "cross-rig-patrol",
+		Rig:          "owner",
+		Formula:      "cross-rig-order",
+		Pool:         "executor/worker",
+		Trigger:      "cooldown",
+		Interval:     "15m",
+		FormulaLayer: formulaDir,
+	}
+	cityStore := beads.NewMemStore()
+	ownerStore := beads.NewMemStore()
+	executorStore := beads.NewMemStore()
+	var rec memRecorder
+	dispatchCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{a},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			switch {
+			case target.ScopeKind == "city":
+				return cityStore, nil
+			case target.RigName == "owner":
+				return ownerStore, nil
+			case target.RigName == "executor":
+				return executorStore, nil
+			default:
+				return nil, fmt.Errorf("unexpected order store target: %+v", target)
+			}
+		},
+		cfg:                  cfg,
+		cityName:             "test-city",
+		cityPath:             cityPath,
+		rec:                  &rec,
+		stderr:               io.Discard,
+		maxDispatchesPerTick: 1,
+		dispatchCtx:          dispatchCtx,
+		dispatchCancel:       cancel,
+	}
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer drainCancel()
+	if !m.drain(drainCtx) {
+		t.Fatal("order dispatch did not drain")
+	}
+
+	executorBeads, err := executorStore.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(executorBeads) != 0 {
+		t.Fatalf("executor store beads = %+v, want graph to remain in owner store", executorBeads)
+	}
+	all, err := ownerStore.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundWork, foundControl bool
+	for _, bead := range all {
+		if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "rig:owner" {
+			t.Fatalf("%s gc.root_store_ref = %q, want rig:owner", bead.Title, got)
+		}
+		if bead.Title == "Cross-rig work" {
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "executor/worker" {
+				t.Fatalf("worker gc.routed_to = %q, want executor/worker", got)
+			}
+			foundWork = true
+		}
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "owner/control-dispatcher" {
+				t.Fatalf("finalize gc.routed_to = %q, want owner/control-dispatcher", got)
+			}
+			if got := bead.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "executor/worker" {
+				t.Fatalf("finalize execution route = %q, want executor/worker", got)
+			}
+			foundControl = true
+		}
+	}
+	if !foundWork || !foundControl {
+		t.Fatalf("found work=%v control=%v; owner beads=%+v", foundWork, foundControl, all)
+	}
+	if !rec.hasType(events.OrderCompleted) || rec.hasType(events.OrderFailed) {
+		t.Fatalf("events = %+v, want completed without failure", rec.events)
+	}
+}
+
+func TestOrderDispatchMissingRigDispatcherFailsBeforeInstantiate(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "rig-order.toml"), []byte(`
+formula = "rig-order"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Rig work"
+metadata = { "gc.run_target" = "worker" }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	maxOne, maxTwo := 1, 2
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: rigPath}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "fixture", MaxActiveSessions: &maxTwo},
+			{Name: config.ControlDispatcherAgentName, MaxActiveSessions: &maxOne},
+		},
+	}
+	a := orders.Order{Name: "rig-patrol", Rig: "fixture", Formula: "rig-order", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir}
+	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{Title: "order:rig-patrol", Labels: []string{"order-run:rig-patrol", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec memRecorder
+	m := &memoryOrderDispatcher{cfg: cfg, cityName: "test-city", rec: &rec, stderr: io.Discard}
+	m.dispatchWisp(context.Background(), store, target, a, cityPath, tracking.ID, nil)
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ID != tracking.ID {
+		t.Fatalf("open beads = %+v, want only tracking bead", all)
+	}
+	if !rec.hasType(events.OrderFailed) || rec.hasType(events.OrderCompleted) {
+		t.Fatalf("events = %+v, want failed without completed", rec.events)
+	}
+	if !slicesContain(all[0].Labels, "wisp-failed") {
+		t.Fatalf("tracking labels = %v, want wisp-failed", all[0].Labels)
+	}
+}
+
+func TestApplyOrderRecipeRoutingNoPoolRejectsMissingAndUnknownStepTargets(t *testing.T) {
+	cityPath := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityPath, ScopeKind: "city"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: config.ControlDispatcherAgentName}},
+	}
+	for _, tt := range []struct {
+		name       string
+		runTarget  string
+		wantErrSub string
+	}{
+		{name: "missing", wantErrSub: `has no routing target`},
+		{name: "unknown", runTarget: "unknown-worker", wantErrSub: `unknown formulas v2 target "unknown-worker"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := map[string]string{}
+			if tt.runTarget != "" {
+				metadata[beadmeta.RunTargetMetadataKey] = tt.runTarget
+			}
+			recipe := &formula.Recipe{
+				Name: "order-graph",
+				Steps: []formula.RecipeStep{
+					{ID: "order-graph", IsRoot: true, Metadata: map[string]string{
+						beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+						beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+					}},
+					{ID: "order-graph.work", Title: "Work", Metadata: metadata},
+				},
+			}
+			err := applyOrderRecipeRouting(recipe, "", nil, target, beads.NewMemStore(), "test-city", cityPath, cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("applyOrderRecipeRouting error = %v, want %q", err, tt.wantErrSub)
+			}
+		})
 	}
 }
 

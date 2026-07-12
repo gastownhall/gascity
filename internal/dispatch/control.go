@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // attemptDisposition is the normalized outcome of a closed attempt/iteration,
@@ -419,6 +420,12 @@ func IsTransientControllerError(err error) bool {
 		"database is locked",
 		"database table is locked",
 		"sqlite_busy",
+		// bd's client-side Dolt breaker fails fast while the server is down.
+		// These errors are recoverable, so a long-running control dispatcher
+		// must keep sweeping rather than exit permanently during the outage.
+		"dolt circuit breaker is open",
+		"server appears down, failing fast",
+		"dolt server unreachable",
 	}
 	for _, needle := range transientNeedles {
 		if strings.Contains(msg, needle) {
@@ -504,7 +511,11 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	// available, and only inherit the parent execution lane as a fallback.
 	executionRoute := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
-	routeCfg, _ := opts.routeConfig()
+	routeCfg, err := opts.routeConfig()
+	if err != nil {
+		return fmt.Errorf("loading attempt route config: %w", err)
+	}
+	rootStoreRef := strings.TrimSpace(control.Metadata[beadmeta.RootStoreRefMetadataKey])
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
 			continue
@@ -514,6 +525,14 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 				recipe.Steps[i].Metadata = make(map[string]string)
 			}
 			recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey] = executionRigContext
+		}
+		if rootStoreRef != "" {
+			if recipe.Steps[i].Metadata == nil {
+				recipe.Steps[i].Metadata = make(map[string]string)
+			}
+			// The parent graph owns attached attempts. Ignore stale fragment
+			// metadata so routing and molecule.Attach's persisted store ref agree.
+			recipe.Steps[i].Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 		}
 		target := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.RunTargetMetadataKey])
 		if target == "" {
@@ -528,7 +547,9 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata[beadmeta.KindMetadataKey]) {
-			applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store)
+			if err := applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store); err != nil {
+				return fmt.Errorf("routing attempt control step %s: %w", recipe.Steps[i].ID, err)
+			}
 			continue
 		}
 		if target == "" {
@@ -1049,12 +1070,17 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 	step.Assignee = ""
 }
 
-func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City, store beads.Store) {
+func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City, store beads.Store) error {
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
 	resolvedExecutionTarget := strings.TrimSpace(executionTarget)
 	rigContext := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey])
+	scopeKnown := rigContext != ""
+	if storeRigContext, scoped := storeref.ScopeRigContext(step.Metadata[beadmeta.RootStoreRefMetadataKey]); scoped {
+		rigContext = storeRigContext
+		scopeKnown = true
+	}
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		switch {
 		case binding.qualifiedName != "":
@@ -1074,37 +1100,35 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget, rigContext, cfg)
-	if controlTarget != "" {
-		step.Metadata[beadmeta.RoutedToMetadataKey] = controlTarget
-	} else {
+	controlTarget, err := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget, rigContext, scopeKnown, cfg)
+	if err != nil {
 		delete(step.Metadata, beadmeta.RoutedToMetadataKey)
+		step.Assignee = ""
+		return err
 	}
+	step.Metadata[beadmeta.RoutedToMetadataKey] = controlTarget
 	step.Assignee = ""
+	return nil
 }
 
-func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext string, cfg *config.City) string {
+func controlDispatcherTargetForExecutionTarget(executionTarget, rigContext string, scopeKnown bool, cfg *config.City) (string, error) {
 	executionTarget = strings.TrimSpace(executionTarget)
 	rigContext = strings.TrimSpace(rigContext)
-	if rigContext == "" {
+	if !scopeKnown {
 		if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
 			rigContext = executionTarget[:slash]
 		}
 	}
-	// Prefer the city-level singleton deterministic dispatcher for every scope
-	// (the one whose session actually runs given max_active_sessions=1), falling
-	// back to a rig-scoped instance only when no city-level dispatcher exists.
-	// This keeps attempt-time control re-routing in lockstep with the graph.v2
-	// decoration path; without it an attempt-kind control bead would re-stamp a
-	// <rig>/control-dispatcher route the lone singleton session never claims.
-	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
-		return agentCfg.QualifiedName()
+	// Select the deterministic dispatcher in the same scope as the graph store.
+	// This keeps attempt-time control re-routing in lockstep with graph.v2
+	// decoration and with the dispatcher's store-scoped claim loop.
+	if agentCfg, ok := config.ControlDispatcherForScope(cfg, rigContext); ok {
+		return agentCfg.QualifiedName(), nil
 	}
-	// String fallbacks for configs with no deterministic dispatcher at all.
 	if rigContext != "" {
-		return rigContext + "/" + config.ControlDispatcherAgentName
+		return "", fmt.Errorf("control-dispatcher agent for rig %q not found", rigContext)
 	}
-	return config.ControlDispatcherAgentName
+	return "", fmt.Errorf("city control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 }
 
 // isAttemptControlKind reports whether an Attach-path recipe step should be
