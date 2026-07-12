@@ -260,19 +260,30 @@ func deriveRunStepStatus(b beads.Bead) RunStepStatus {
 }
 
 // runLastError returns the structured failure reason for a terminal, non-success
-// run, or nil otherwise. The code comes from the run root's outcome metadata; the
-// message from a close-reason marker when present.
+// run, or nil otherwise. The code prefers the actionable graph failure reason
+// (gc.failure_reason, e.g. "rate_limited") that control/drain stamp on a failed
+// root, so clients get the stable code they can branch on rather than the coarse
+// gc.outcome; it falls back to that outcome and finally the status. The message
+// carries the controller's human-readable error (gc.controller_error) when
+// present, else a close-reason marker.
 func runLastError(status RunStatus, root beads.Bead) *RunLastError {
 	if status != RunStatusFailed && status != RunStatusCanceled {
 		return nil
 	}
-	code := strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey])
+	code := strings.TrimSpace(root.Metadata[beadmeta.FailureReasonMetadataKey])
+	if code == "" {
+		code = strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey])
+	}
 	if code == "" {
 		code = string(status)
 	}
+	message := strings.TrimSpace(root.Metadata[beadmeta.ControllerErrorMetadataKey])
+	if message == "" {
+		message = strings.TrimSpace(root.Metadata["close_reason"])
+	}
 	return &RunLastError{
 		Code:    code,
-		Message: strings.TrimSpace(root.Metadata["close_reason"]),
+		Message: message,
 	}
 }
 

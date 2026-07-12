@@ -340,6 +340,39 @@ func TestRunGetFailedWithOpenSource(t *testing.T) {
 	}
 }
 
+// TestRunGetFailedExposesFailureReason guards the last_error contract: a failed
+// run root stamps the actionable machine reason in gc.failure_reason (as
+// dispatch control/drain do on a hard fail), so last_error.code must surface that
+// reason — not the coarse gc.outcome=fail — and last_error.message must carry the
+// controller's human-readable error rather than the never-written close_reason.
+func TestRunGetFailedExposesFailureReason(t *testing.T) {
+	root := runRootBead("runfr", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "fail"
+	root.Metadata["gc.failure_reason"] = "rate_limited"
+	root.Metadata["gc.controller_error"] = "provider returned 429: slow down"
+	s := newRunServer(t, beadCreatedEvent(1, root))
+
+	out, err := s.humaHandleRunGet(context.Background(), &RunGetInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runfr",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunGet(runfr) error: %v", err)
+	}
+	if out.Body.Status != RunStatusFailed {
+		t.Fatalf("status = %q, want failed", out.Body.Status)
+	}
+	if out.Body.LastError == nil {
+		t.Fatal("last_error = nil, want the graph failure reason exposed on the wire")
+	}
+	if out.Body.LastError.Code != "rate_limited" {
+		t.Errorf("last_error.code = %q, want rate_limited (the actionable gc.failure_reason, not the coarse outcome)", out.Body.LastError.Code)
+	}
+	if out.Body.LastError.Message != "provider returned 429: slow down" {
+		t.Errorf("last_error.message = %q, want the controller error text", out.Body.LastError.Message)
+	}
+}
+
 // TestRunsWireRoute drives the endpoints through the real SupervisorMux HTTP
 // router — verifying route registration, {cityName} binding, JSON serialization,
 // the closed status enum on the wire, and that a missing run maps to a 404.
