@@ -1004,7 +1004,13 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
-	out, err := s.runner(s.dir, "bd", "show", "--json", id)
+	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
+	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
+	// "invalid connection"/"i/o timeout" transport error. The runner performs a
+	// single recover-and-retry per call; the wrapper's outer attempts give the
+	// rebind enough total time to complete under CI load, matching every other
+	// BdStore read/write path (ga-gellq1).
+	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -2545,7 +2551,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -2587,7 +2593,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil
