@@ -4351,96 +4351,159 @@ func repairControlDispatcherRoutesForStoreScope(
 		suppressControlDispatcherRoutes(workBeads)
 		return
 	}
-	type routeLookup struct {
-		route string
-		ok    bool
-	}
-	routeByScope := make(map[string]routeLookup)
-	reportedMissingScope := make(map[string]bool)
-	repairAttempts := 0
+	repair := newControlDispatcherRouteRepair(cfg, stderr)
 	cursor := controlDispatcherRouteRepairCursorForDomain(repairDomain)
 	start := int((cursor.Add(controlDispatcherRouteRepairLimitPerTick) - controlDispatcherRouteRepairLimitPerTick) % uint64(len(workBeads)))
 	for offset := range workBeads {
 		i := (start + offset) % len(workBeads)
-		bead := &workBeads[i]
-		if !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
-			continue
+		repair.repairBead(&workBeads[i], workStores[i], workStoreRefs[i])
+	}
+}
+
+// controlDispatcherRouteLookup memoizes whether a store scope has a configured
+// control-dispatcher and, if so, its qualified route.
+type controlDispatcherRouteLookup struct {
+	route string
+	ok    bool
+}
+
+// controlDispatcherRouteRepair carries the per-pass state for a bounded
+// cross-scope control-route repair sweep: per-scope route lookups are cached, a
+// store scope with no configured dispatcher is reported once, and the remaining
+// durable-write budget is tracked so a large upgrade backlog cannot monopolize a
+// reconciler tick.
+type controlDispatcherRouteRepair struct {
+	cfg                  *config.City
+	routeByScope         map[string]controlDispatcherRouteLookup
+	reportedMissingScope map[string]bool
+	writesRemaining      int
+	stderr               io.Writer
+}
+
+func newControlDispatcherRouteRepair(cfg *config.City, stderr io.Writer) *controlDispatcherRouteRepair {
+	return &controlDispatcherRouteRepair{
+		cfg:                  cfg,
+		routeByScope:         make(map[string]controlDispatcherRouteLookup),
+		reportedMissingScope: make(map[string]bool),
+		writesRemaining:      controlDispatcherRouteRepairLimitPerTick,
+		stderr:               stderr,
+	}
+}
+
+// repairBead realigns one control bead's persisted route with the dispatcher
+// that owns its store scope, clearing any stale fallback marker in the same
+// bounded write. Non-control, unscoped, and already-canonical beads are left
+// untouched. Store ownership, not the current route, selects the dispatcher: an
+// unscoped row cannot be repaired safely because #3765 itself stamped a valid
+// city route onto rig-owned controls, so gc.routed_to is not ownership evidence.
+// Graph v2 stamped gc.root_store_ref before that regression, so malformed/older
+// rows are left untouched instead of guessing a store.
+func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.Store, storeRef string) {
+	if !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
+		return
+	}
+	if _, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey]); !scoped {
+		return
+	}
+	route, ok := r.desiredRoute(bead, storeRef)
+	if !ok {
+		return
+	}
+	current := strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey])
+	needsRouteRepair := current != route
+	clearFallback := strings.TrimSpace(bead.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]) != ""
+	if !needsRouteRepair && !clearFallback {
+		return
+	}
+	r.persist(bead, store, current, route, needsRouteRepair, clearFallback)
+}
+
+// desiredRoute returns the configured control-dispatcher route for the bead's
+// store scope, caching lookups per rig context. When no dispatcher is
+// configured it reports the gap once per scope and suppresses the bead's
+// cross-scope route from this tick's demand snapshot so it cannot create phantom
+// demand for a dispatcher that cannot read the store; the durable route is left
+// in place for operator diagnosis and a later config repair.
+func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef string) (string, bool) {
+	rigContext := controlDispatcherRigContextForStoreRef(storeRef)
+	lookup, cached := r.routeByScope[rigContext]
+	if !cached {
+		lookup.route, lookup.ok = configuredControlDispatcherRouteForScope(r.cfg, rigContext)
+		r.routeByScope[rigContext] = lookup
+	}
+	if lookup.ok {
+		return lookup.route, true
+	}
+	if !r.reportedMissingScope[rigContext] {
+		if r.stderr != nil {
+			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its store scope\n", bead.ID, controlDispatcherStoreRefLabel(storeRef)) //nolint:errcheck
 		}
-		// Store ownership, not the current route, selects the dispatcher. An
-		// unscoped row cannot be repaired safely: #3765 itself stamped a valid
-		// city route onto rig-owned controls, so gc.routed_to is not ownership
-		// evidence. Graph v2 stamped gc.root_store_ref before that regression;
-		// leave malformed/older rows untouched instead of guessing a store.
-		if _, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey]); !scoped {
-			continue
+		r.reportedMissingScope[rigContext] = true
+	}
+	delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
+	return "", false
+}
+
+// persist durably rewrites one control bead's route and/or clears its fallback
+// marker within the per-pass write budget. The budget is consumed the moment a
+// repair is attempted, so a missing store or a failed write still spends a slot
+// and the rotating cursor gives later beads a turn on the next tick. When the
+// repair cannot be persisted this tick the pending route change is suppressed
+// from the demand snapshot and retried later while the durable route is
+// preserved.
+func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
+	if r.writesRemaining <= 0 {
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	r.writesRemaining--
+	if store == nil {
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	metadata := make(map[string]string, 2)
+	if needsRouteRepair {
+		metadata[beadmeta.RoutedToMetadataKey] = route
+	}
+	if clearFallback {
+		// #3463 stamped this marker together with the cross-store fallback. Clear
+		// its semantic value in the same bounded migration write, even when
+		// another recovery path already repaired the route itself.
+		metadata[beadmeta.ControlDispatcherFallbackMetadataKey] = ""
+	}
+	if err := store.Update(bead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+		if r.stderr != nil {
+			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s route %q -> %q: %v\n", bead.ID, current, route, err) //nolint:errcheck
 		}
-		rigContext := controlDispatcherRigContextForStoreRef(workStoreRefs[i])
-		lookup, cached := routeByScope[rigContext]
-		if !cached {
-			lookup.route, lookup.ok = configuredControlDispatcherRouteForScope(cfg, rigContext)
-			routeByScope[rigContext] = lookup
-		}
-		if !lookup.ok {
-			if !reportedMissingScope[rigContext] {
-				if stderr != nil {
-					fmt.Fprintf(stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its store scope\n", bead.ID, controlDispatcherStoreRefLabel(workStoreRefs[i])) //nolint:errcheck
-				}
-				reportedMissingScope[rigContext] = true
-			}
-			// Do not let a cross-scope persisted route create phantom demand for a
-			// dispatcher that cannot read this store. The durable route is left in
-			// place for operator diagnosis and a later config repair.
-			delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
-			continue
-		}
-		current := strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey])
-		needsRouteRepair := current != lookup.route
-		clearFallback := strings.TrimSpace(bead.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]) != ""
-		if !needsRouteRepair && !clearFallback {
-			continue
-		}
-		if repairAttempts >= controlDispatcherRouteRepairLimitPerTick {
-			if needsRouteRepair {
-				delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
-			}
-			continue
-		}
-		repairAttempts++
-		store := workStores[i]
-		if store == nil {
-			if needsRouteRepair {
-				delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
-			}
-			continue
-		}
-		metadata := make(map[string]string, 2)
-		if needsRouteRepair {
-			metadata[beadmeta.RoutedToMetadataKey] = lookup.route
-		}
-		if clearFallback {
-			// #3463 stamped this marker together with the cross-store fallback.
-			// Clear its semantic value in the same bounded migration write, even
-			// when another recovery path already repaired the route itself.
-			metadata[beadmeta.ControlDispatcherFallbackMetadataKey] = ""
-		}
-		if err := store.Update(bead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
-			if stderr != nil {
-				fmt.Fprintf(stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s route %q -> %q: %v\n", bead.ID, current, lookup.route, err) //nolint:errcheck
-			}
-			if needsRouteRepair {
-				delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
-			}
-			continue
-		}
-		if bead.Metadata == nil {
-			bead.Metadata = make(map[string]string)
-		}
-		if needsRouteRepair {
-			bead.Metadata[beadmeta.RoutedToMetadataKey] = lookup.route
-		}
-		if clearFallback {
-			delete(bead.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
-		}
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	applyRouteRepairInMemory(bead, route, needsRouteRepair, clearFallback)
+}
+
+// applyRouteRepairInMemory mirrors a persisted route repair onto the in-memory
+// bead snapshot so this tick's demand calculation sees the canonical route. The
+// fallback marker is deleted from the snapshot rather than blanked, matching the
+// durable write's cleared value.
+func applyRouteRepairInMemory(bead *beads.Bead, route string, needsRouteRepair, clearFallback bool) {
+	if bead.Metadata == nil {
+		bead.Metadata = make(map[string]string)
+	}
+	if needsRouteRepair {
+		bead.Metadata[beadmeta.RoutedToMetadataKey] = route
+	}
+	if clearFallback {
+		delete(bead.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
+	}
+}
+
+// deferRouteRepair suppresses an un-persisted route change from this tick's
+// demand snapshot, leaving the durable route untouched for a later retry. A
+// fallback-only cleanup carries no pending route change and stays eligible for
+// demand.
+func deferRouteRepair(bead *beads.Bead, needsRouteRepair bool) {
+	if needsRouteRepair {
+		delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
 	}
 }
 

@@ -163,6 +163,11 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		return ControlResult{}, fmt.Errorf("%s: unsupported gc.retry_state %q", bead.ID, bead.Metadata[beadmeta.RetryStateMetadataKey])
 	}
 
+	// A routeConfig error is intentionally tolerated here: retry preserves the
+	// prior attempt's already-stamped routes rather than scope-routing, so a nil
+	// cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
+	// (control.go, fanout.go) fail closed on this error because they scope-route
+	// through applyAttemptControlStepRoute.
 	routeCfg, _ := opts.routeConfig()
 	if beadUsesMetadataPoolRouteWithConfig(subject, routeCfg) {
 		if opts.RecycleSession == nil {
