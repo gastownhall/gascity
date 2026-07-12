@@ -8827,6 +8827,42 @@ func TestOrderExecEnvProjectsGitHubToken(t *testing.T) {
 			t.Errorf("orderExecEnv missing %q; every `gh` call in the order would fail auth. env=%v", want, envSlice)
 		}
 	}
+
+	// Prove the projection survives the final mergeOrderExecEnv boundary, where
+	// FilterInherited strips inherited sensitive keys before overrides are
+	// appended. That boundary is where the bug lived: an ambient token inherited
+	// from the parent env is dropped, so only the projected override keeps the
+	// child's `gh` calls authenticated. Mirrors the Dolt-scrub merge-boundary
+	// assertion in TestOrderExecEnvScrubsAmbientDoltEnvForCityWithoutDoltTarget.
+	merged := mergeOrderExecEnv([]string{
+		"GH_TOKEN=ambient_inherited",
+		"GITHUB_TOKEN=ambient_inherited",
+	}, envSlice)
+	for _, want := range []string{
+		"GH_TOKEN=ghs_controller_token",
+		"GITHUB_TOKEN=github_pat_controller",
+	} {
+		found := false
+		for _, entry := range merged {
+			if entry == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("projected %q did not survive mergeOrderExecEnv; the sensitive-key filter would silently re-break the order's `gh` auth. merged=%v", want, merged)
+		}
+	}
+	for _, unwanted := range []string{
+		"GH_TOKEN=ambient_inherited",
+		"GITHUB_TOKEN=ambient_inherited",
+	} {
+		for _, entry := range merged {
+			if entry == unwanted {
+				t.Errorf("ambient inherited token survived mergeOrderExecEnv: %q in %v", unwanted, merged)
+			}
+		}
+	}
 }
 
 // TestOrderExecEnvGitHubTokenOrderEnvOverrideWins verifies an explicit

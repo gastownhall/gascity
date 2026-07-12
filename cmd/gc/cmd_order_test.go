@@ -2825,6 +2825,54 @@ dolt.auto-start: false
 	}
 }
 
+// TestOrderRunExecFailureRedactsProjectedGitHubToken proves that when a manual
+// `gc order run` exec order fails after echoing the controller's projected
+// GitHub token, the token is redacted from the error and combined output
+// printed to stderr. The exec env now projects GH_TOKEN/GITHUB_TOKEN into the
+// child (see projectGitHubTokenExecEnv), so the manual failure path must scrub
+// them just like the controller dispatch path does.
+func TestOrderRunExecFailureRedactsProjectedGitHubToken(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	// Echo the projected token to the child's combined output, then fail so the
+	// error+output branch runs.
+	a := orders.Order{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN"; exit 1`,
+	}
+
+	var stdout, stderr bytes.Buffer
+	result := doOrderRunExecResult(a, cityDir, cfg, nil, &stdout, &stderr)
+	if result.code == 0 {
+		t.Fatalf("doOrderRunExecResult = 0, want exec failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if result.failureLabel != "exec-failed" {
+		t.Fatalf("failureLabel = %q, want exec-failed", result.failureLabel)
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("stderr leaked projected GitHub token: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[redacted]") {
+		t.Fatalf("stderr = %q, want redaction marker for the echoed token", stderr.String())
+	}
+}
+
 // --- gc order history ---
 
 func TestOrderHistory(t *testing.T) {

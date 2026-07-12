@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -898,9 +899,14 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: exec failed: %v\n", err) //nolint:errcheck
+		// The exec env now projects the controller's GH_TOKEN/GITHUB_TOKEN into
+		// the child, so a failing order that echoes one would leak it to stderr.
+		// Redact the exec error and combined output against the projected env,
+		// matching the controller dispatch path (order_dispatch.go).
+		redactionEnv := append(os.Environ(), env...)
+		fmt.Fprintf(stderr, "gc order run: exec failed: %s\n", execenv.RedactText(err.Error(), redactionEnv)) //nolint:errcheck
 		if len(output) > 0 {
-			fmt.Fprintf(stderr, "%s", output) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
 		}
 		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
 	}
