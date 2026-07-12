@@ -138,6 +138,13 @@ func (r singleCityPathResolver) CityPath(name string) (string, bool) {
 	return "", false
 }
 
+func (r singleCityPathResolver) Cities() []dashboardbff.CityRef {
+	if r.name == "" || r.path == "" {
+		return nil
+	}
+	return []dashboardbff.CityRef{{Name: r.name, Path: r.path}}
+}
+
 // seededState is a minimal, read-only State implementation built from injected
 // stores and providers. It is the production analog of the _test.go-only
 // fakeState: an immutable snapshot with no controller loop, no hot-reload lock,
