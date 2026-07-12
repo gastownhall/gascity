@@ -223,3 +223,31 @@ func TestNormalizeServiceBaseURL(t *testing.T) {
 		t.Fatalf("normalize should reject non-loopback http")
 	}
 }
+
+// TestLoginLabelFlagDefaultIsHostIndependent pins the regression where
+// --label's Cobra default was computed at command-construction time
+// (defaultTokenLabel(), i.e. this builder's USER@hostname) and leaked into the
+// generated CLI reference docs, drifting on every machine.
+func TestLoginLabelFlagDefaultIsHostIndependent(t *testing.T) {
+	cmd := newLoginCmd(io.Discard, io.Discard)
+	f := cmd.Flags().Lookup("label")
+	if f == nil {
+		t.Fatal("login command is missing the --label flag")
+	}
+	if f.DefValue != "" {
+		t.Fatalf("--label default = %q; want empty so generated CLI docs stay host-independent", f.DefValue)
+	}
+}
+
+func TestLoginLabelOrDefault(t *testing.T) {
+	if got := loginLabelOrDefault("custom-label"); got != "custom-label" {
+		t.Fatalf("explicit label = %q; want custom-label", got)
+	}
+	fallback := defaultTokenLabel()
+	if got := loginLabelOrDefault("   "); got != fallback {
+		t.Fatalf("blank label = %q; want defaultTokenLabel() fallback %q", got, fallback)
+	}
+	if got := loginLabelOrDefault(""); got != fallback || got == "" {
+		t.Fatalf("empty label = %q; want non-empty defaultTokenLabel() fallback %q", got, fallback)
+	}
+}

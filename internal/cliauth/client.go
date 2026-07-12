@@ -181,11 +181,15 @@ func (c *Client) Whoami(ctx context.Context, token string) (User, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var payload meResponse
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A non-2xx means the token is not valid (spec §3.3). Classify by status
+		// first so a bodyless or non-JSON error (a bare gateway/proxy/WAF 401 or
+		// 5xx) still returns an *AuthError; decode the body only to enrich it.
+		_ = decodeJSONResponse(resp, &payload)
+		return User{}, newAuthError("checking login", resp.StatusCode, payload.Error.Code, payload.Error.Message)
+	}
 	if err := decodeJSONResponse(resp, &payload); err != nil {
 		return User{}, fmt.Errorf("checking login: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return User{}, newAuthError("checking login", resp.StatusCode, payload.Error.Code, payload.Error.Message)
 	}
 	if strings.TrimSpace(payload.User.ID) == "" {
 		return User{}, errors.New("service token did not authenticate a user")
@@ -377,14 +381,17 @@ func (c *Client) deviceLogin(ctx context.Context, label string) (string, error) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var code deviceCodeResponse
-	if err := decodeJSONResponse(resp, &code); err != nil {
-		return "", fmt.Errorf("requesting device login: %w", err)
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Classify by status first; a bodyless or non-JSON non-2xx must still
+		// report the rejection instead of surfacing a decode error.
+		_ = decodeJSONResponse(resp, &code)
 		if code.Error.Message != "" {
 			return "", fmt.Errorf("service rejected device login (%s): %s", code.Error.Code, code.Error.Message)
 		}
 		return "", fmt.Errorf("service rejected device login: HTTP %d", resp.StatusCode)
+	}
+	if err := decodeJSONResponse(resp, &code); err != nil {
+		return "", fmt.Errorf("requesting device login: %w", err)
 	}
 	if code.DeviceCode == "" || code.UserCode == "" {
 		return "", errors.New("service did not return a device code")
@@ -407,61 +414,84 @@ func (c *Client) deviceLogin(ctx context.Context, label string) (string, error) 
 		case <-ctx.Done():
 			return "", errors.New("timed out waiting for device login")
 		}
-		token, pollInterval, pending, err := c.pollDeviceToken(ctx, code.DeviceCode)
+		token, pollInterval, slowDown, pending, err := c.pollDeviceToken(ctx, code.DeviceCode)
 		if err != nil {
 			return "", err
 		}
 		if token != "" {
 			return token, nil
 		}
-		if pollInterval > 0 {
-			code.Interval = pollInterval
-		}
+		code.Interval = nextPollInterval(code.Interval, pollInterval, slowDown)
 		if !pending {
 			return "", errors.New("device login failed")
 		}
 	}
 }
 
-func (c *Client) pollDeviceToken(ctx context.Context, deviceCode string) (token string, interval int, pending bool, err error) {
+func (c *Client) pollDeviceToken(ctx context.Context, deviceCode string) (token string, interval int, slowDown, pending bool, err error) {
 	body, err := json.Marshal(map[string]string{"device_code": deviceCode})
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+c.Endpoints.DeviceToken, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(VersionHeader, Version)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return "", 0, false, fmt.Errorf("polling device login: %w", err)
+		return "", 0, false, false, fmt.Errorf("polling device login: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var payload deviceTokenResponse
-	if err := decodeJSONResponse(resp, &payload); err != nil {
-		return "", 0, false, fmt.Errorf("polling device login: %w", err)
-	}
+	// Best-effort decode: the device-token endpoint carries its RFC-8628 error
+	// code (authorization_pending, slow_down, …) in the JSON body even on non-2xx,
+	// but a bodyless or non-JSON response must still fall through to the
+	// status-derived failure below instead of surfacing a decode error.
+	_ = decodeJSONResponse(resp, &payload)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 && payload.AccessToken != "" {
-		return payload.AccessToken, 0, false, nil
+		return payload.AccessToken, 0, false, false, nil
 	}
 	switch payload.Error {
 	case "authorization_pending":
-		return "", payload.Interval, true, nil
+		// Report the server's suggested interval, if any; the caller keeps the
+		// current interval and never shortens it (nextPollInterval).
+		return "", payload.Interval, false, true, nil
 	case "slow_down":
-		if payload.Interval <= 0 {
-			payload.Interval = 10
-		}
-		return "", payload.Interval, true, nil
+		// Surface any explicit interval verbatim and flag slow_down; the caller
+		// increases the current interval rather than replacing it with a smaller
+		// absolute value (Service Protocol v0 §3.2 requires slowing down).
+		return "", payload.Interval, true, true, nil
 	case "access_denied":
-		return "", 0, false, errors.New("device login denied")
+		return "", 0, false, false, errors.New("device login denied")
 	case "expired_token":
-		return "", 0, false, errors.New("device login expired")
+		return "", 0, false, false, errors.New("device login expired")
 	default:
-		return "", 0, false, fmt.Errorf("device login failed: HTTP %d", resp.StatusCode)
+		return "", 0, false, false, fmt.Errorf("device login failed: HTTP %d", resp.StatusCode)
 	}
+}
+
+// slowDownStep is the fixed number of seconds added to the device-code poll
+// interval on a slow_down that carries no explicit interval, per Service
+// Protocol v0 §3.2 ("increase the interval … else by a fixed step") and
+// RFC 8628 §3.5.
+const slowDownStep = 5
+
+// nextPollInterval computes the next device-code poll interval in seconds.
+// It honors a larger server-provided interval in every pending state, but never
+// shortens polling: a slow_down that does not increase the interval falls back
+// to current + slowDownStep, and authorization_pending keeps the current
+// interval (Service Protocol v0 §3.2).
+func nextPollInterval(current, server int, slowDown bool) int {
+	if server > current {
+		return server
+	}
+	if slowDown {
+		return current + slowDownStep
+	}
+	return current
 }
 
 func decodeJSONResponse(resp *http.Response, v any) error {

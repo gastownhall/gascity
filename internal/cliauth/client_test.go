@@ -174,6 +174,11 @@ func TestWhoamiClassifiesStatuses(t *testing.T) {
 		{http.StatusUnauthorized, `{"error":{"code":"invalid_token","message":"expired"}}`, true},
 		{http.StatusForbidden, `{"error":{"code":"forbidden","message":"no scope"}}`, false},
 		{http.StatusInternalServerError, `{"error":{"message":"boom"}}`, false},
+		// Bodyless and non-JSON non-2xx (a bare gateway/proxy/WAF 401 or 5xx) must
+		// still classify by status instead of surfacing a decode EOF/parse error.
+		{http.StatusUnauthorized, ``, true},
+		{http.StatusUnauthorized, `<html><body>401 Unauthorized</body></html>`, true},
+		{http.StatusBadGateway, `502 Bad Gateway`, false},
 	}
 	for _, tc := range cases {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -289,5 +294,131 @@ func TestDeviceLoginSurfacesDenied(t *testing.T) {
 	c.after = immediateAfter
 	if _, err := c.Login(context.Background(), LoginOptions{Device: true}); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("err = %v; want a denial", err)
+	}
+}
+
+// TestDeviceLoginBodylessError verifies a bodyless non-2xx from the device-code
+// endpoint (a bare gateway/proxy 5xx) reports the rejection by status instead of
+// leaking a decode EOF.
+func TestDeviceLoginBodylessError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/gc/v0/auth/device/code" {
+			w.WriteHeader(http.StatusServiceUnavailable) // bodyless 5xx
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL, io.Discard)
+	c.after = immediateAfter
+	_, err := c.Login(context.Background(), LoginOptions{Device: true})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("err = %v; want a status-derived device rejection", err)
+	}
+	if strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("err = %v; bodyless non-2xx leaked a decode EOF", err)
+	}
+}
+
+// TestDeviceLoginPollBodylessError verifies a bodyless non-2xx while polling the
+// device-token endpoint reports the failure by status instead of leaking a
+// decode EOF.
+func TestDeviceLoginPollBodylessError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gc/v0/auth/device/code":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"device_code":"dev-1","user_code":"AAAA-BBBB","verification_uri":"https://x/device","expires_in":900,"interval":1}`)
+		default:
+			w.WriteHeader(http.StatusBadGateway) // bodyless non-2xx while polling
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL, io.Discard)
+	c.after = immediateAfter
+	_, err := c.Login(context.Background(), LoginOptions{Device: true})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Fatalf("err = %v; want a status-derived poll failure", err)
+	}
+	if strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("err = %v; bodyless poll response leaked a decode EOF", err)
+	}
+}
+
+func TestNextPollInterval(t *testing.T) {
+	tests := []struct {
+		name            string
+		current, server int
+		slowDown        bool
+		want            int
+	}{
+		{"pending keeps the current interval when the server suggests none", 15, 0, false, 15},
+		{"pending never shortens on a smaller server interval", 15, 3, false, 15},
+		{"pending honors a larger server interval", 5, 10, false, 10},
+		{"slow_down without an interval adds the fixed step", 15, 0, true, 15 + slowDownStep},
+		{"slow_down never shortens below the current interval", 15, 12, true, 15 + slowDownStep},
+		{"slow_down honors a larger server interval", 15, 30, true, 30},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nextPollInterval(tt.current, tt.server, tt.slowDown); got != tt.want {
+				t.Fatalf("nextPollInterval(%d, %d, %v) = %d; want %d", tt.current, tt.server, tt.slowDown, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeviceLoginSlowDownNeverShortensInterval pins the bug where a slow_down
+// response with no explicit interval replaced an initial interval above 10s
+// with the absolute value 10, making the client poll faster instead of slower
+// (Service Protocol v0 §3.2).
+func TestDeviceLoginSlowDownNeverShortensInterval(t *testing.T) {
+	var polls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/gc/v0/auth/device/code":
+			// Initial interval deliberately above the old absolute 10s clamp.
+			_, _ = io.WriteString(w, `{"device_code":"dev-1","user_code":"BDWK-JQPX","verification_uri":"https://x/device","expires_in":900,"interval":15}`)
+		case "/gc/v0/auth/device/token":
+			polls++
+			if polls == 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"slow_down"}`) // no interval field
+				return
+			}
+			_, _ = io.WriteString(w, `{"access_token":"tok-device","token_type":"bearer"}`)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL, io.Discard)
+	var waits []time.Duration
+	c.after = func(d time.Duration) <-chan time.Time {
+		waits = append(waits, d)
+		return immediateAfter(d)
+	}
+	token, err := c.Login(context.Background(), LoginOptions{Device: true, Label: "test@host"})
+	if err != nil {
+		t.Fatalf("device login: %v", err)
+	}
+	if token != "tok-device" {
+		t.Fatalf("token = %q; want tok-device", token)
+	}
+	if len(waits) < 2 {
+		t.Fatalf("waits = %v; want at least the initial sleep and the post-slow_down sleep", waits)
+	}
+	if waits[0] != 15*time.Second {
+		t.Fatalf("first wait = %v; want the initial 15s interval", waits[0])
+	}
+	if waits[1] <= waits[0] {
+		t.Fatalf("second wait = %v; slow_down must not shorten the %v interval", waits[1], waits[0])
+	}
+	if waits[1] != (15+slowDownStep)*time.Second {
+		t.Fatalf("second wait = %v; want the 15s interval increased by the fixed slow-down step", waits[1])
 	}
 }

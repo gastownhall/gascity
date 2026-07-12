@@ -2044,7 +2044,7 @@ gc login [flags]
 |------|------|---------|-------------|
 | `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 | `--device` | bool |  | use device-code login instead of browser callback login |
-| `--label` | string | `ubuntu@cherry` | label for the minted token |
+| `--label` | string |  | label for the minted token; defaults to &lt;user&gt;@&lt;host&gt; |
 | `--no-browser` | bool |  | print the browser login URL instead of opening it |
 | `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
 | `--token` | string |  | existing API token to store; defaults to GC_SERVICE_TOKEN |

@@ -37,7 +37,6 @@ type loginOptions struct {
 
 func newLoginCmd(stdout, stderr io.Writer) *cobra.Command {
 	opts := loginOptions{
-		Label:   defaultTokenLabel(),
 		Timeout: 15 * time.Minute,
 	}
 	cmd := &cobra.Command{
@@ -59,7 +58,7 @@ token. The token is stored per service under ~/.gc/credentials.json.`,
 	}
 	cmd.Flags().StringVar(&opts.ServiceURL, "at", "", "service base URL; defaults to "+serviceURLEnv+", the stored default, then "+defaultServiceURL)
 	cmd.Flags().StringVar(&opts.Token, "token", "", "existing API token to store; defaults to "+serviceTokenEnv)
-	cmd.Flags().StringVar(&opts.Label, "label", opts.Label, "label for the minted token")
+	cmd.Flags().StringVar(&opts.Label, "label", "", "label for the minted token; defaults to <user>@<host>")
 	cmd.Flags().BoolVar(&opts.Device, "device", false, "use device-code login instead of browser callback login")
 	cmd.Flags().BoolVar(&opts.NoBrowser, "no-browser", false, "print the browser login URL instead of opening it")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "maximum time to wait for interactive login")
@@ -186,7 +185,10 @@ func doLogin(ctx context.Context, opts loginOptions, stdout, stderr io.Writer) i
 			fmt.Fprintln(stderr, "gc login: this looks like CI — a human session is not a CI credential; use a machine principal for automation") //nolint:errcheck
 		}
 		token, err = client.Login(ctx, cliauth.LoginOptions{
-			Label:     opts.Label,
+			// Resolve the label at execution time so the --label flag default
+			// stays empty and generated CLI docs never bake in this builder's
+			// user/host (mirrors the token resolution above).
+			Label:     loginLabelOrDefault(opts.Label),
 			Device:    opts.Device,
 			NoBrowser: opts.NoBrowser,
 		})
@@ -335,6 +337,17 @@ func isLoopbackHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// loginLabelOrDefault resolves the token label at execution time. The --label
+// flag defaults to empty so generated CLI docs stay host-independent; when the
+// user supplies no label we fall back to the builder-independent
+// defaultTokenLabel().
+func loginLabelOrDefault(label string) string {
+	if strings.TrimSpace(label) == "" {
+		return defaultTokenLabel()
+	}
+	return label
 }
 
 func defaultTokenLabel() string {
