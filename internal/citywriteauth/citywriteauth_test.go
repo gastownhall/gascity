@@ -614,9 +614,10 @@ func TestVerify_CIDEnforcement(t *testing.T) {
 
 // A failed cid check must NOT burn the jti, like every other rejection: an
 // attacker replaying a captured grant against the wrong tenant must not be able
-// to invalidate it for the legitimate controller. (The two verifiers here model
-// two controllers with independent replay guards; the property under test is
-// that the mismatch rejection happens before jti consumption.)
+// to invalidate it for the legitimate controller. The property under test is
+// that the mismatch rejection happens before jti consumption: the same verifier
+// still accepts a later matching grant carrying that same jti, proving the
+// failed attempt did not consume it.
 func TestVerify_FailedCIDCheckDoesNotConsumeJTI(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	v, priv, g, expect := cidFixture(t, now, "city_acme", "")
@@ -672,6 +673,26 @@ func TestVerify_LegacyAudience(t *testing.T) {
 		g.Aud = ""
 		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
 			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("legacy aud rejected on a tenancy-scoped verifier even with a matching cid", func(t *testing.T) {
+		// The v2 cutover regression: on a cid-scoped verifier the legacy
+		// audience is not honored even when configured, so a grant carrying the
+		// legacy audience AND a matching cid — a mis-minted or rollout-era
+		// artifact — is still rejected on the audience gate. The cid match must
+		// not carry it past the cutover.
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "gc-city-write")
+		g.Aud = "gc-city-write" // legacy audience; g.CID already matches the verifier
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("primary aud still accepted on a tenancy-scoped verifier with legacy configured", func(t *testing.T) {
+		// Suppressing the legacy audience under cid must not touch the primary
+		// (v2) path: a v2-audience grant with a matching cid still verifies.
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "gc-city-write")
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("primary aud on tenancy-scoped verifier: %v", err)
 		}
 	})
 }

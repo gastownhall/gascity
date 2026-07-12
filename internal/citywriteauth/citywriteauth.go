@@ -72,8 +72,10 @@ type Options struct {
 	Aud string
 	// LegacyAud, when non-empty, is a second accepted audience so grants from
 	// a previous audience generation (e.g. "gc-city-write") keep verifying
-	// through a cutover. All other checks — including CID when configured —
-	// apply to legacy grants unchanged.
+	// through a cutover. It is honored ONLY on an untenanted verifier: when
+	// CID is set (tenancy-scoped) the legacy audience is not accepted at all,
+	// because the v2 audience is minted in lockstep with the cid claim, so a
+	// cid-aware verifier must accept only the primary (v2) Aud — see audienceOK.
 	LegacyAud string
 	// CID, when non-empty, requires every grant to carry this exact cid claim
 	// (the verifier's own tenancy identity). A grant with a mismatching or
@@ -193,30 +195,19 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 		return nil, err
 	}
 
-	// The primary audience or, when configured, the legacy one. The guard on a
-	// non-empty legacyAud matters: an unset LegacyAud must never match a grant
-	// with an empty aud claim.
-	if g.Aud != v.aud && (v.legacyAud == "" || g.Aud != v.legacyAud) {
+	// Audience gate: the primary (v2) audience always, plus — only on an
+	// untenanted verifier — the legacy one. Rejecting here, ahead of the cid
+	// gate below, is what keeps a matching cid from carrying a legacy-audience
+	// grant past the v2 cutover; audienceOK documents the full reasoning.
+	if !v.audienceOK(g.Aud) {
 		return nil, ErrAudience
 	}
 
-	iat := time.Unix(g.IAT, 0)
-	exp := time.Unix(g.Exp, 0)
-	if !exp.After(iat) {
-		return nil, ErrBadWindow
-	}
-	if exp.Sub(iat) > v.maxTTL {
-		return nil, ErrTTLTooLong
-	}
-	now := v.now()
-	if now.After(exp.Add(v.skew)) {
-		return nil, ErrExpired
-	}
-	if now.Before(iat.Add(-v.skew)) {
-		return nil, ErrNotYetValid
-	}
-	if g.Epoch < v.epochFloor {
-		return nil, ErrEpoch
+	// Temporal contract: a well-formed, unexpired, in-window grant minted at or
+	// above the epoch floor. exp is reused below to bound replay retention.
+	exp, err := v.checkFreshness(g)
+	if err != nil {
+		return nil, err
 	}
 	if g.City != expect.City {
 		return nil, ErrCityMismatch
@@ -246,6 +237,53 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 		return nil, fmt.Errorf("%w: %w", ErrReplayUnavailable, err)
 	}
 	return &g, nil
+}
+
+// audienceOK reports whether aud is an audience this verifier accepts: the
+// primary (v2) audience always, plus the legacy audience ONLY on an untenanted
+// (cid-less) verifier. When a cid is configured the legacy audience is refused
+// outright — the v2 audience is minted in lockstep with the cid claim, so a
+// cid-aware verifier must accept only the primary audience. Honoring the legacy
+// audience under a configured cid would let a mis-minted or rollout-era grant
+// carrying the legacy audience *and* a matching cid ride past the v2 cutover's
+// deploy-ordering guarantee on the strength of the matching cid alone. The
+// non-empty legacyAud guard also keeps an unset (or cid-suppressed) legacy
+// audience from ever matching a grant with an empty aud claim.
+func (v *Verifier) audienceOK(aud string) bool {
+	if aud == v.aud {
+		return true
+	}
+	if v.cid != "" || v.legacyAud == "" {
+		return false
+	}
+	return aud == v.legacyAud
+}
+
+// checkFreshness validates the grant's temporal contract: a well-formed
+// iat/exp window, a ttl within MaxTTL, and the current time inside the
+// skew-tolerant window, plus the epoch floor. It returns the parsed exp so the
+// caller can bound replay retention to the same acceptance deadline (exp+skew)
+// instead of recomputing it. Every failure is a fail-closed sentinel.
+func (v *Verifier) checkFreshness(g Grant) (time.Time, error) {
+	iat := time.Unix(g.IAT, 0)
+	exp := time.Unix(g.Exp, 0)
+	if !exp.After(iat) {
+		return exp, ErrBadWindow
+	}
+	if exp.Sub(iat) > v.maxTTL {
+		return exp, ErrTTLTooLong
+	}
+	now := v.now()
+	if now.After(exp.Add(v.skew)) {
+		return exp, ErrExpired
+	}
+	if now.Before(iat.Add(-v.skew)) {
+		return exp, ErrNotYetValid
+	}
+	if g.Epoch < v.epochFloor {
+		return exp, ErrEpoch
+	}
+	return exp, nil
 }
 
 // requireBound rejects a grant whose required single-use and request-binding

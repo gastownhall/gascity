@@ -84,13 +84,17 @@ func TestVerify_CrucibleGoldenVectorV1_LegacyAccepted(t *testing.T) {
 	}
 }
 
-// On a tenancy-scoped verifier (cid configured) a legacy grant carries no cid
-// and MUST be rejected: dual-accept never reopens the tenancy window the v2
-// audience cutover closed.
+// On a tenancy-scoped verifier (cid configured) the legacy audience is not
+// honored at all, so a legacy v1 grant is rejected outright on the audience
+// gate — the v2 cutover forcing function itself, ahead of the cid gate. This is
+// what closes the mis-minted "legacy audience + matching cid" hole: because the
+// legacy audience is refused under cid, dual-accept can never reopen the tenancy
+// window the v2 audience cutover closed, even for a grant that carries a
+// matching cid.
 func TestVerify_CrucibleGoldenVectorV1_RejectedWhenCIDConfigured(t *testing.T) {
 	v := goldenVerifier(t, goldenCID, "gc-city-write")
-	if _, err := v.Verify(goldenTokenV1, Expect{City: "acme", ReqDigest: goldenDigest}); !errors.Is(err, ErrCIDMismatch) {
-		t.Fatalf("v1 golden token vs cid-configured verifier: got %v, want ErrCIDMismatch", err)
+	if _, err := v.Verify(goldenTokenV1, Expect{City: "acme", ReqDigest: goldenDigest}); !errors.Is(err, ErrAudience) {
+		t.Fatalf("v1 golden token vs cid-configured verifier: got %v, want ErrAudience", err)
 	}
 }
 

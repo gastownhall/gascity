@@ -747,9 +747,10 @@ func grantForCID(now time.Time, city, cid, method, path string, body []byte, jti
 
 // GC_CITY_WRITE_CID turns on the tenancy binding for the env-resolved verifier:
 // grants must carry that exact cid, mismatching/missing cids fail closed, and a
-// legacy-audience grant (which cannot carry a cid) is rejected. Exercised
-// through ResolveWriteAuthVerifier + the middleware so the env plumbing itself
-// is under test.
+// legacy-audience grant is rejected on the audience gate even when it carries a
+// matching cid — a tenancy-scoped verifier accepts only the v2 audience.
+// Exercised through ResolveWriteAuthVerifier + the middleware so the env
+// plumbing itself is under test.
 func TestResolveWriteAuthVerifier_CIDEnforcedEndToEnd(t *testing.T) {
 	pub, priv := mustKeypair(t)
 	t.Setenv("GC_CITY_WRITE_PUBKEY", "k1:"+base64.StdEncoding.EncodeToString(pub))
@@ -800,6 +801,18 @@ func TestResolveWriteAuthVerifier_CIDEnforcedEndToEnd(t *testing.T) {
 		g.Aud = writeAuthLegacyAudience
 		if seen, code := do(t, g); seen || code != http.StatusForbidden {
 			t.Fatalf("legacy aud with cid configured: seen=%v code=%d want 403", seen, code)
+		}
+	})
+	t.Run("legacy-audience grant with a matching cid rejected on tenancy-scoped verifier", func(t *testing.T) {
+		// The v2 cutover regression: a mis-minted or rollout-era grant that
+		// carries BOTH the legacy audience and a matching cid must still be
+		// rejected. The missing-cid case above is caught by the cid gate; this
+		// one proves the audience gate turns it away even when the cid matches,
+		// so a legacy grant cannot ride its matching cid past the cutover.
+		g := grantForCID(now, "acme", "city_acme", "POST", path, body, "jc5")
+		g.Aud = writeAuthLegacyAudience
+		if seen, code := do(t, g); seen || code != http.StatusForbidden {
+			t.Fatalf("legacy aud + matching cid: seen=%v code=%d want 403", seen, code)
 		}
 	})
 }

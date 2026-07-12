@@ -43,11 +43,13 @@ const (
 	// IS the forcing function.
 	writeAuthAudience = "gc-city-write.v2"
 	// writeAuthLegacyAudience is the pre-cid audience, still accepted so
-	// grants minted by an operator's own v1 authority keep verifying. This
-	// cannot reopen the tenancy window the v2 cutover closed: on a
-	// tenancy-scoped deployment (GC_CITY_WRITE_CID set) every grant must
-	// carry the matching cid, which no legacy grant can, so legacy grants are
-	// rejected exactly where tenancy matters.
+	// grants minted by an operator's own v1 authority keep verifying — but
+	// ONLY on an untenanted deployment. On a tenancy-scoped deployment
+	// (GC_CITY_WRITE_CID set) the verifier accepts only the v2 audience and
+	// rejects the legacy audience outright, so even a mis-minted or
+	// rollout-era grant carrying the legacy audience *and* a matching cid
+	// cannot ride past the v2 cutover. Legacy acceptance therefore never
+	// reopens the tenancy window the v2 cutover closed.
 	writeAuthLegacyAudience = "gc-city-write"
 
 	// maxWriteBodyBytes caps the request body the middleware buffers to compute
