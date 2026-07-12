@@ -349,12 +349,15 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 
 // Capabilities returns the intersection of both backends' capabilities.
 // A capability is reported only if both default and ACP support it.
+// NeedsClaimBackstop is a need, not an ability, so it unions instead: if
+// either backend requires the stalled-claim backstop, the composite does too.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	dc := p.defaultSP.Capabilities()
 	ac := p.acpSP.Capabilities()
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: dc.CanReportAttachment && ac.CanReportAttachment,
 		CanReportActivity:   dc.CanReportActivity && ac.CanReportActivity,
+		NeedsClaimBackstop:  dc.NeedsClaimBackstop || ac.NeedsClaimBackstop,
 	}
 }
 

@@ -2339,6 +2339,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// now event-based, delivered from startPreparedStartCandidate's warm-reuse
 	// branch (withWarmClaimProbe above) instead of a separate reconcile-tick poll —
 	// symmetric with cold Start, keyed on a persisted once-per-binding marker.
+	// The activity-reporting change kept a claimBackstopEnabled gate for the old
+	// nudgeStalledPoolClaims poller; with the poller replaced by the warm-bind
+	// edge nudge, only the NeedsClaimBackstop capability declaration survives
+	// (it documents that herdr's startup paste has no relaunch redelivery path).
 }
 
 // recordReconcileTraceInputs records the per-template baseline, the cycle input

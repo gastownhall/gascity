@@ -103,7 +103,7 @@ herdr just becomes another selectable runtime name.
 | `SetMeta`/`GetMeta`/`RemoveMeta` | — | ⚠ no general KV (Gaps) |
 | `Peek(name, lines)` | `pane.read --source recent-unwrapped --lines N` | ✅ (also `--source detection`) |
 | `ListRunning(prefix)` | `workspace.list` + label/name-prefix filter | ✅ orphan detection |
-| `GetLastActivity` | — | ⚠ no timestamp (Gaps) |
+| `GetLastActivity` | tracker-maintained (activity.go): polls `agent.list`, stamps observed changes | ✅ implemented (see Gaps 3 for the rules) |
 | `ClearScrollback` | — | ⚠ not in docs; best-effort (Gaps) |
 | `CopyTo` | host-side fs copy into pane `foreground_cwd` | ✅ provider-agnostic |
 | `SendKeys` | `pane.send_keys` | ✅ exact match (`enter`/`esc`/`ctrl+h`/…) |
@@ -132,11 +132,23 @@ herdr just becomes another selectable runtime name.
    runtime dir). Low risk, fully owned by the provider.
 2. **`IsAttached`** — no dedicated query. **Bridge:** parse `herdr status` / infer from
    `pane.get`; or return false (the contract permits "attach detection unsupported").
-3. **`GetLastActivity`** — no timestamp. **Bridge:** stamp from pushed events — but note
-   0.7.3 offers **no** output-changed subscription (`events.subscribe` rejects it; only the
-   broadcast pane lifecycle kinds plus per-pane `pane.agent_status_changed` /
-   `pane.output_matched` / `pane.scroll_changed` are subscribable), so activity stamping
-   rides agent-status transitions — or diff `pane.read`. Best-effort per the contract.
+3. **`GetLastActivity`** — no timestamp anywhere in the API. **Bridged (implemented,
+   activity.go):** a lazily started tracker polls `agent.list` and stamps per-session
+   activity from what polls OBSERVE — first observation, any agent-status change, and
+   (only for status `unknown`, where herdr cannot classify the pane) a moved output
+   `revision` counter. `working` reads as continuously active — a status that sits at
+   working emits no transitions, and stamping only transitions would hand the
+   progress-stall/idle nets a live agent to kill. Events are never a stamp source
+   (herdr replays a backlog to every new subscription; 0.7.3 also offers **no**
+   output-changed subscription — `events.subscribe` rejects it) — the session-event
+   stream only accelerates the next poll. Detected-idle revision ticks (TUI redraws) do
+   not stamp, so idle detection cannot be poisoned. Live caveat: 0.7.3 moves the
+   revision only while a client renders the pane — a headless server (gc's normal
+   mode) holds it at 0, so the unknown-status leg contributes exactly when someone is
+   attached, and detected agents carry the tracker everywhere else.
+   `CanReportActivity=true`; `NeedsClaimBackstop=true` keeps the reconciler's
+   stalled-claim nudge backstop active (activity restores idle visibility, not
+   startup-paste redelivery).
 4. **`ClearScrollback`** — not in the API. **Bridge:** best-effort no-op (contract allows), or
    close+respawn the pane on restart.
 5. **Signals** — only keystroke `ctrl+c` (no signal API). **Bridge:** soft `Interrupt` =

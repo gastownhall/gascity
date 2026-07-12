@@ -134,7 +134,7 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 // eventTestProvider wires a Provider at the fake server's socket.
 func eventTestProvider(t *testing.T, sock string) *Provider {
 	t.Helper()
-	p := New("gctest-events", t.TempDir(), "")
+	p := New("gctest-events", t.TempDir(), "", 0)
 	p.c.sockPath = sock
 	return p
 }

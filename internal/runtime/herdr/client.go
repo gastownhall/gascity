@@ -84,6 +84,11 @@ type agentInfo struct {
 	TerminalID  string `json:"terminal_id"`
 	AgentStatus string `json:"agent_status"`
 	Cwd         string `json:"cwd"`
+	// Revision is the pane's output revision counter. The activity tracker
+	// diffs it for sessions herdr cannot classify (agent_status "unknown").
+	// Verified live on 0.7.3: it moves only while a client renders the pane;
+	// a headless server holds it at 0.
+	Revision uint64 `json:"revision"`
 }
 
 // startAgent → `herdr agent start <name> --no-focus [--tab <tabID>] [--cwd <cwd>]
