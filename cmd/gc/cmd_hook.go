@@ -115,12 +115,23 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
-	// Forward the provider hook stdin so wrapped commands like
-	// `nudge drain --inject` still receive the UserPromptSubmit JSON
-	// (carrying transcript_path) they need for context-pressure injection.
-	// readHookStdin already bounds the read with an io.LimitReader and the
-	// hard timeout below bounds any block, so forwarding is safe.
-	cmd.Stdin = stdin
+	// Read the provider's hook stdin FULLY into a buffer before running the
+	// wrapped command, then hand it that buffer. Forwarding the live stdin
+	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
+	// the timeout — before consuming the payload, so gc hook run returned and
+	// closed the pipe under the provider's in-flight write. Codex surfaced that
+	// fleet-wide as "UserPromptSubmit hook (failed): failed to write hook stdin:
+	// Broken pipe (os error 32)", silently killing nudge-drain and mail-check
+	// injection on every prompt submit. Buffering up front guarantees the
+	// provider's write always completes regardless of the wrapped command. The
+	// 1<<20 bound matches readHookStdin, so `nudge drain --inject` still sees the
+	// same UserPromptSubmit JSON (carrying transcript_path) for context
+	// injection.
+	var hookStdin []byte
+	if stdin != nil {
+		hookStdin, _ = io.ReadAll(io.LimitReader(stdin, 1<<20)) //nolint:errcheck // best-effort; a partial read still lets the wrapped command run
+	}
+	cmd.Stdin = bytes.NewReader(hookStdin)
 	// Buffer child stdout instead of streaming it straight to the provider so
 	// a wedged command cannot leak partial injectable output before the
 	// fail-open timeout path runs. The buffer is flushed only on a clean or
