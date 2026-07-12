@@ -294,14 +294,17 @@ func standaloneBdEnv(t *testing.T, dir string) []string {
 		"GC_DOLT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
+		"GC_DOLT_DATABASE",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_PASSWORD",
+		"DOLT_DATABASE",
 	)
 	if gcHome := parseEnvList(env)["GC_HOME"]; gcHome != "" {
 		env = replaceEnv(env, "HOME", gcHome)

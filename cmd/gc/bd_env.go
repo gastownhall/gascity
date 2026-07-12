@@ -317,6 +317,11 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	} else {
 		delete(env, "GC_DOLT_PORT")
 	}
+	if database := strings.TrimSpace(target.Database); database != "" {
+		env["GC_DOLT_DATABASE"] = database
+	} else {
+		delete(env, "GC_DOLT_DATABASE")
+	}
 }
 
 func shouldProjectResolvedDoltHost(target contract.DoltConnectionTarget) bool {
@@ -689,11 +694,14 @@ func applyCanonicalScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot s
 }
 
 var projectedDoltEnvKeys = []string{
+	"DOLT_DATABASE",
 	"GC_DOLT_HOST",
 	"GC_DOLT_PORT",
+	"GC_DOLT_DATABASE",
 	"GC_DOLT_USER",
 	"GC_DOLT_PASSWORD",
 	"BEADS_CREDENTIALS_FILE",
+	"BEADS_DOLT_SERVER_DATABASE",
 	"BEADS_DOLT_SERVER_HOST",
 	"BEADS_DOLT_SERVER_PORT",
 	"BEADS_DOLT_SERVER_USER",
@@ -1482,6 +1490,14 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	if env == nil {
 		return
 	}
+	if database := strings.TrimSpace(env["GC_DOLT_DATABASE"]); database != "" {
+		env["BEADS_DOLT_SERVER_DATABASE"] = database
+	} else {
+		// Keep this explicit so stale ambient database selectors cannot send a
+		// city-scoped bd command to a rig database, or the reverse.
+		env["BEADS_DOLT_SERVER_DATABASE"] = ""
+	}
+	env["DOLT_DATABASE"] = ""
 	if host := strings.TrimSpace(env["GC_DOLT_HOST"]); host != "" {
 		env["BEADS_DOLT_SERVER_HOST"] = host
 	} else {
@@ -1583,6 +1599,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
@@ -1599,6 +1616,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_DOLT",
 		"GC_DOLT_CONFIG_FILE",
 		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_DATABASE",
 		"GC_DOLT_HOST",
 		"GC_DOLT_LOCK_FILE",
 		"GC_DOLT_LOG_FILE",
@@ -1608,6 +1626,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_DOLT_PORT",
 		"GC_DOLT_STATE_FILE",
 		"GC_DOLT_USER",
+		"DOLT_DATABASE",
 		"GC_PACK_STATE_DIR",
 		"GC_POSTGRES_PASSWORD",
 		"GC_RIG",

@@ -56,6 +56,55 @@ Two TOML fields, one per scope, describe endpoint ownership:
 - **`explicit`** — The rig pins its own external endpoint. Use for
   cross-city rigs or rigs pointing at a shared Dolt cluster.
 
+## External endpoint auth
+
+`city_canonical` and `explicit` endpoint config records non-secret
+topology only: host, port, user, endpoint origin/status, and the
+pinned logical database in `.beads/metadata.json`. Passwords are not
+stored in `.beads/config.yaml` or `city.toml`.
+
+Every `gc` surface resolves the same secret sources, in order:
+
+1. `GC_DOLT_PASSWORD` or `BEADS_DOLT_PASSWORD` in the current process
+2. `.beads/.env` in the endpoint authority scope
+3. the Beads credentials file selected by `BEADS_CREDENTIALS_FILE`,
+   or the default `~/.config/beads/credentials`
+4. empty password
+
+For a city-level external endpoint, the endpoint authority scope is
+the city directory. For an `inherited_city` rig, auth still resolves
+from the city scope. For an `explicit` rig, auth resolves from that
+rig's own scope.
+
+Dashboard and supervisor processes do not source interactive shell
+helpers after startup. If a helper exports credentials only for an
+interactive `gc` invocation, raw `gc`, `gc supervisor run`, the
+dashboard-backed status path, and spawned sessions can disagree. Put
+the shared password in a first-class secret source instead, or launch
+the supervisor/dashboard under an environment that contains the same
+`GC_DOLT_PASSWORD`/`BEADS_DOLT_PASSWORD`.
+
+For the credentials-file path, write one section per reachable
+host:port:
+
+```ini
+[127.0.0.1:3307]
+password=...
+```
+
+Then protect it:
+
+```bash
+chmod 600 ~/.config/beads/credentials
+```
+
+Keep database identity out of the shell environment unless you are
+testing a raw `bd` command directly. GC projects the correct database
+per scope (`hq` for city/HQ, each rig's pinned `dolt_database` for
+rig stores) and clears stale `DOLT_DATABASE`,
+`GC_DOLT_DATABASE`, and `BEADS_DOLT_SERVER_DATABASE` values when it
+constructs child environments.
+
 ## What NOT to do
 
 These are the edits mayors try first, all of which self-revert at
