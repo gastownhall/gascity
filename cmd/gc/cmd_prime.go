@@ -12,11 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -546,15 +544,16 @@ func startupPromptDeliveredMarkerStale(cityPath string) bool {
 	if err != nil {
 		return false
 	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		return false
 	}
-	markers, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).PersistedMarkers(sessionID)
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	info, err := sessionFrontDoor(cliSessionStore(store, cfg, cityPath)).Get(sessionID)
 	if err != nil {
 		return false
 	}
-	beadEpoch, err := strconv.Atoi(strings.TrimSpace(markers.ContinuationEpoch))
+	beadEpoch, err := strconv.Atoi(strings.TrimSpace(info.ContinuationEpoch))
 	if err != nil {
 		return false
 	}
