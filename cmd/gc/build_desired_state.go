@@ -1934,12 +1934,20 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 // pass so every pool and demand probe filters one shared in-memory snapshot
 // instead of issuing its own /beads/ready fetch. Each backing store is read at
 // most once on the live tier and at most once on the cached tier; consumers
-// then apply their Assignee/Limit selectors in memory. This is safe because the
-// store backends apply those selectors client-side over a stable, filter-
-// independent result order (see MemStore.Ready, BdStore.Ready,
-// NativeDoltStore.Ready): the assignee-matching prefix of the unfiltered set is
-// exactly the assignee-filtered set, and taking the first Limit of it matches a
-// per-assignee fetch.
+// then apply their Assignee/Limit selectors in memory. This is exact for the
+// stores that filter client-side over a stable, filter-independent result order
+// (MemStore.Ready, BdStore.Ready): the assignee-matching prefix of the
+// unfiltered set is exactly the assignee-filtered set, and taking the first
+// Limit of it matches a per-assignee fetch. NativeDoltStore.Ready instead
+// filters the assignee server-side, and — unlike its issue rows, whose ORDER BY
+// is a total order independent of the predicate with Limit applied client-side
+// — its wisp sub-query is assignee-blind, so a per-assignee liveReady over the
+// snapshot can drop wisps a direct Ready(Assignee=X) would have returned. That
+// divergence never under-counts spawn demand: the pool-spawn path
+// (controllerDemandReady) is assignee-free and reads the full set, and the
+// dropped wisps are only those NOT owned by the probed live session, so they
+// cannot wake it. The transformation is therefore demand-safe even where it is
+// not byte-identical for wisps.
 //
 // Before this cache a single demand phase fanned out ~60 sequential Ready reads
 // on a live city — the assigned-work pass alone issued one live read per store
@@ -2070,7 +2078,12 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bea
 // backends apply for the same selectors (order-preserving, limit truncates).
 func filterReadySnapshot(rows []beads.Bead, query beads.ReadyQuery) []beads.Bead {
 	if query.Assignee == "" && query.Limit <= 0 {
-		return rows
+		// rows is the shared per-pass memo slice. Return a copy so a consumer
+		// that mutates its result cannot corrupt the snapshot every other probe
+		// reads. No caller does this today (all pass an Assignee or a Limit, so
+		// the allocating branch below runs), but the copy makes the read-only
+		// contract on the shared snapshot unconditional.
+		return append([]beads.Bead(nil), rows...)
 	}
 	out := make([]beads.Bead, 0, len(rows))
 	for _, b := range rows {
