@@ -101,10 +101,13 @@ type ListQuery struct {
 	// SeekAfter is an exclusive keyset boundary for cursor pagination: only
 	// rows STRICTLY AFTER the boundary in the query's sort order match. It
 	// requires an explicit Sort (Validate enforces this) because a seek
-	// without a total order is meaningless. Backends whose native query layer
-	// cannot express the compound (created_at, id) predicate must fall back
-	// to exact Go-side filtering via Matches BEFORE applying any row limit —
-	// applying a limit first silently drops rows from the page.
+	// without a total order is meaningless. Every backend resolves the compound
+	// (created_at, id) boundary Go-side via Matches to keep the tie-break
+	// byte-identical to the in-memory sort — a SQL/CLI seek predicate is
+	// expressible but risks collation/precision divergence. Because the filter
+	// is Go-side, it must run BEFORE any native row limit — a limit applied
+	// first silently drops page rows — so seeked reads fetch a superset and cut
+	// the page in Go.
 	SeekAfter *SeekBoundary
 }
 
@@ -166,19 +169,24 @@ func (q ListQuery) IncludesClosed() bool {
 	return q.IncludeClosed || q.Status == "closed"
 }
 
-// Matches reports whether the bead satisfies the query.
-func (q ListQuery) Matches(b Bead) bool {
+// matchesTier reports whether the bead is in the storage tier(s) the query
+// selects. TierIssues (the zero value) excludes ephemeral wisps; TierWisps
+// keeps only ephemeral or no-history rows; TierBoth applies no tier filter.
+func (q ListQuery) matchesTier(b Bead) bool {
 	switch q.TierMode {
 	case TierWisps:
-		if !b.Ephemeral && !b.NoHistory {
-			return false
-		}
+		return b.Ephemeral || b.NoHistory
 	case TierBoth:
-		// no tier filter
+		return true
 	default: // TierIssues
-		if b.Ephemeral {
-			return false
-		}
+		return !b.Ephemeral
+	}
+}
+
+// Matches reports whether the bead satisfies the query.
+func (q ListQuery) Matches(b Bead) bool {
+	if !q.matchesTier(b) {
+		return false
 	}
 	if q.Status != "" {
 		if b.Status != q.Status {

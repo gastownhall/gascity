@@ -1356,9 +1356,10 @@ func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
 		if !query.UpdatedBefore.IsZero() && !beadUpdatedReferenceTime(row).Before(query.UpdatedBefore) {
 			continue
 		}
-		// Exact Go-side seek: SQL cannot express the compound
-		// (created_at, id) boundary, so the fetch above is a superset and
-		// this is where the page boundary is enforced (before the Go limit).
+		// Exact Go-side seek: the compound (created_at, id) boundary is
+		// resolved here rather than in SQL so the tie-break stays identical to
+		// the in-memory sort, so the fetch above is a superset and this is
+		// where the page boundary is enforced (before the Go limit).
 		if query.SeekAfter != nil && !query.SeekAfter.After(row, query.Sort) {
 			continue
 		}
