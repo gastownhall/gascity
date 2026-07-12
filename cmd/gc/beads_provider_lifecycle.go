@@ -1979,10 +1979,10 @@ func applyLegacyRigScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot s
 		return
 	}
 	clearProjectedPostgresEnv(env)
-	applyLegacyRigExternalTarget(env, *explicitRig)
+	target := applyLegacyRigExternalTarget(env, *explicitRig)
 	clearProjectedDoltPasswordEnv(env)
 	applyResolvedDoltAuthEnv(env, scopeRoot, "")
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 }
 
 func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string) []string {
