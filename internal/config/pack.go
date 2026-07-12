@@ -47,19 +47,20 @@ type PackConfig struct {
 	// Agents holds legacy inline agent templates accepted by the current
 	// loader. New packs should define agents under
 	// agents/<name>/agent.toml instead.
-	Agents        []Agent                     `toml:"agent,omitempty"`
-	NamedSessions []NamedSession              `toml:"named_session,omitempty"`
-	Services      []Service                   `toml:"service,omitempty"`
-	Webhooks      []Webhook                   `toml:"webhook,omitempty"`
-	Providers     map[string]ProviderSpec     `toml:"providers,omitempty"`
-	Upstreams     map[string]UpstreamSpec     `toml:"upstreams,omitempty"`
-	Runtimes      map[string]PackRuntimeEntry `toml:"runtimes,omitempty"`
-	Formulas      FormulasConfig              `toml:"formulas,omitempty" jsonschema:"-"`
-	Patches       PackPatches                 `toml:"patches,omitempty"`
-	Doctor        []PackDoctorEntry           `toml:"doctor,omitempty"`
-	Commands      []PackCommandEntry          `toml:"commands,omitempty"`
-	Global        PackGlobal                  `toml:"global,omitempty"`
-	Pricing       []pricing.ModelPricing      `toml:"pricing,omitempty"`
+	Agents         []Agent                     `toml:"agent,omitempty"`
+	NamedSessions  []NamedSession              `toml:"named_session,omitempty"`
+	Services       []Service                   `toml:"service,omitempty"`
+	Webhooks       []Webhook                   `toml:"webhook,omitempty"`
+	Providers      map[string]ProviderSpec     `toml:"providers,omitempty"`
+	Upstreams      map[string]UpstreamSpec     `toml:"upstreams,omitempty"`
+	Runtimes       map[string]PackRuntimeEntry `toml:"runtimes,omitempty"`
+	BackendPlugins []PackBackendPluginEntry    `toml:"backend_plugins,omitempty"`
+	Formulas       FormulasConfig              `toml:"formulas,omitempty" jsonschema:"-"`
+	Patches        PackPatches                 `toml:"patches,omitempty"`
+	Doctor         []PackDoctorEntry           `toml:"doctor,omitempty"`
+	Commands       []PackCommandEntry          `toml:"commands,omitempty"`
+	Global         PackGlobal                  `toml:"global,omitempty"`
+	Pricing        []pricing.ModelPricing      `toml:"pricing,omitempty"`
 }
 
 // PackPatches holds the patch operations valid in pack.toml. City
@@ -179,6 +180,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			if err := mergeCityRuntimes(cfg, cachedPackRuntimes(cache, topoDir)); err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
+			if err := mergeCityBackendPlugins(cfg, cachedPackBackendPlugins(cache, topoDir)); err != nil {
+				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
+			}
 			skills := cachedPackSkills(cache, topoDir)
 			if packName == "" && len(skills) > 0 {
 				return fmt.Errorf("rig %q pack %q: discovered skills require [pack].name for binding", rig.Name, ref)
@@ -286,6 +290,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				commands := cachedPackCommands(cache, impDir)
 				doctors := cachedPackDoctors(cache, impDir)
 				runtimes := cachedPackRuntimes(cache, impDir)
+				backendPlugins := cachedPackBackendPlugins(cache, impDir)
 				skills := cachedPackSkills(cache, impDir)
 				if !imp.ImportIsTransitive() {
 					warnings = cachedPackLocalWarnings(cache, impDir)
@@ -303,6 +308,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					commands = filterCommandsByPackDir(commands, impDir)
 					doctors = filterDoctorsByPackDir(doctors, impDir)
 					runtimes = filterRuntimesByPackDir(runtimes, impDir)
+					backendPlugins = filterBackendPluginsByPackDir(backendPlugins, impDir)
 					providers = cachedPackLocalProviders(cache, impDir)
 					upstreams = cachedPackLocalUpstreams(cache, impDir)
 					topoDirs = cachedPackLocalTopoDirs(cache, impDir)
@@ -439,6 +445,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				// Runtime selection is city-wide, so rig-imported
 				// runtime packs register into the same namespace.
 				if err := mergeCityRuntimes(cfg, runtimes); err != nil {
+					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
+				}
+				if err := mergeCityBackendPlugins(cfg, backendPlugins); err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
 
@@ -665,6 +674,9 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		if err := mergeCityRuntimes(cfg, cachedPackRuntimes(cache, topoDir)); err != nil {
 			return nil, nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
+		if err := mergeCityBackendPlugins(cfg, cachedPackBackendPlugins(cache, topoDir)); err != nil {
+			return nil, nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
+		}
 
 		// Merge pack providers (additive, first wins).
 		if len(providers) > 0 {
@@ -735,6 +747,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			commands := cachedPackCommands(cache, impDir)
 			doctors := cachedPackDoctors(cache, impDir)
 			runtimes := cachedPackRuntimes(cache, impDir)
+			backendPlugins := cachedPackBackendPlugins(cache, impDir)
 			skills := cachedPackSkills(cache, impDir)
 			webhooks := cachedPackWebhooks(cache, impDir)
 			mcpTopoDirs := topoDirs
@@ -757,6 +770,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				commands = filterCommandsByPackDir(commands, impDir)
 				doctors = filterDoctorsByPackDir(doctors, impDir)
 				runtimes = filterRuntimesByPackDir(runtimes, impDir)
+				backendPlugins = filterBackendPluginsByPackDir(backendPlugins, impDir)
 				providers = cachedPackLocalProviders(cache, impDir)
 				upstreams = cachedPackLocalUpstreams(cache, impDir)
 				topoDirs = cachedPackLocalTopoDirs(cache, impDir)
@@ -848,6 +862,9 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 			// Register pack-declared runtimes city-wide (collisions error).
 			if err := mergeCityRuntimes(cfg, runtimes); err != nil {
+				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
+			}
+			if err := mergeCityBackendPlugins(cfg, backendPlugins); err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
 			// Bootstrap-managed implicit imports own their skill
@@ -1115,6 +1132,7 @@ type packLoadResult struct {
 	commands       []DiscoveredCommand
 	doctors        []DiscoveredDoctor
 	runtimes       []DiscoveredRuntime
+	backendPlugins []DiscoveredBackendPlugin
 	skills         []DiscoveredSkillCatalog
 	localWarnings  []string
 	warnings       []string
@@ -1285,6 +1303,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var includedCommands []DiscoveredCommand
 	var includedDoctors []DiscoveredDoctor
 	var includedRuntimes []DiscoveredRuntime
+	var includedBackendPlugins []DiscoveredBackendPlugin
 	var includedSkills []DiscoveredSkillCatalog
 	var inheritedWarnings []string
 	includedProviders := make(map[string]ProviderSpec)
@@ -1314,6 +1333,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedCommands = append(includedCommands, cachedPackCommands(cache, incTopoDir)...)
 		includedDoctors = append(includedDoctors, cachedPackDoctors(cache, incTopoDir)...)
 		includedRuntimes = append(includedRuntimes, cachedPackRuntimes(cache, incTopoDir)...)
+		includedBackendPlugins = append(includedBackendPlugins, cachedPackBackendPlugins(cache, incTopoDir)...)
 		includedSkills = append(includedSkills, cachedPackSkills(cache, incTopoDir)...)
 
 		// Merge providers: included first, no overwrite.
@@ -1368,6 +1388,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		impCommands := cachedPackCommands(cache, impDir)
 		impDoctors := cachedPackDoctors(cache, impDir)
 		impRuntimes := cachedPackRuntimes(cache, impDir)
+		impBackendPlugins := cachedPackBackendPlugins(cache, impDir)
 		impSkills := cachedPackSkills(cache, impDir)
 		impWebhooks := cachedPackWebhooks(cache, impDir)
 
@@ -1390,6 +1411,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			impCommands = filterCommandsByPackDir(impCommands, impDir)
 			impDoctors = filterDoctorsByPackDir(impDoctors, impDir)
 			impRuntimes = filterRuntimesByPackDir(impRuntimes, impDir)
+			impBackendPlugins = filterBackendPluginsByPackDir(impBackendPlugins, impDir)
 			impProviders = cachedPackLocalProviders(cache, impDir)
 			impUpstreams = cachedPackLocalUpstreams(cache, impDir)
 			impTopoDirs = cachedPackLocalTopoDirs(cache, impDir)
@@ -1470,6 +1492,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedCommands = append(includedCommands, impCommands...)
 		includedDoctors = append(includedDoctors, impDoctors...)
 		includedRuntimes = append(includedRuntimes, impRuntimes...)
+		includedBackendPlugins = append(includedBackendPlugins, impBackendPlugins...)
 		includedSkills = append(includedSkills, impSkills...)
 
 		for name, spec := range impProviders {
@@ -1519,6 +1542,10 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	}
 	doctors = append(doctors, legacyDoctors...)
 	localRuntimes, err := packLocalRuntimes(&tc, topoDir)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
+	}
+	localBackendPlugins, err := packLocalBackendPlugins(&tc, topoDir, cityRoot)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
@@ -1598,6 +1625,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedRuntimes = append(includedRuntimes, localRuntimes...)
+	includedBackendPlugins = append(includedBackendPlugins, localBackendPlugins...)
 	includedSkills = append(includedSkills, skills...)
 
 	// Apply pack-level patches to the merged agent list.
@@ -1688,6 +1716,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		commands:       includedCommands,
 		doctors:        includedDoctors,
 		runtimes:       includedRuntimes,
+		backendPlugins: includedBackendPlugins,
 		skills:         includedSkills,
 		localWarnings:  append([]string(nil), packWarnings...),
 		warnings:       appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
@@ -1718,6 +1747,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		commands:       deepCopyCommands(in.commands),
 		doctors:        deepCopyDoctors(in.doctors),
 		runtimes:       append([]DiscoveredRuntime(nil), in.runtimes...),
+		backendPlugins: deepCopyBackendPlugins(in.backendPlugins),
 		skills:         deepCopySkills(in.skills),
 		localWarnings:  append([]string(nil), in.localWarnings...),
 		warnings:       append([]string(nil), in.warnings...),

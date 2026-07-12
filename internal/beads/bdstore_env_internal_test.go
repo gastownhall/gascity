@@ -66,6 +66,35 @@ func TestExecEnvForBd_MergesOtherOverrides(t *testing.T) {
 	}
 }
 
+func TestBdArgsWithDBOverrideUsesBeadsDir(t *testing.T) {
+	got := bdArgsWithDBOverride([]string{"list", "--json"}, "/city/.beads")
+	want := []string{"--db", "/city/.beads", "list", "--json"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("bdArgsWithDBOverride() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBdArgsWithDBOverridePreservesExplicitDB(t *testing.T) {
+	got := bdArgsWithDBOverride([]string{"--db", "/explicit/.beads", "list"}, "/city/.beads")
+	want := []string{"--db", "/explicit/.beads", "list"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("bdArgsWithDBOverride() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBackendRequiresDBOverrideOnlyForPluginBackends(t *testing.T) {
+	for _, backend := range []string{"", "dolt", "postgres", " DOLT "} {
+		if backendRequiresDBOverride(backend) {
+			t.Fatalf("backendRequiresDBOverride(%q) = true, want false for built-in backend", backend)
+		}
+	}
+	for _, backend := range []string{"doltlite", "custom-plugin"} {
+		if !backendRequiresDBOverride(backend) {
+			t.Fatalf("backendRequiresDBOverride(%q) = false, want true for plugin backend", backend)
+		}
+	}
+}
+
 func TestExecEnvForNonBd_LeavesEnvAlone(t *testing.T) {
 	// The runner also execs dolt directly; non-bd commands keep the
 	// caller-visible environment untouched.

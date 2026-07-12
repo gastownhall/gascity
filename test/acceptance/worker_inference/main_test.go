@@ -83,8 +83,7 @@ func TestMain(m *testing.M) {
 
 	liveEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
 		Without("GC_SESSION").
-		Without("GC_BEADS").
-		Without("GC_DOLT").
+		WithConfiguredBeadsBackend().
 		With("DOLT_ROOT_PATH", gcHome)
 	liveSetup = prepareProviderSetup(gcHome, liveEnv)
 

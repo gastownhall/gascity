@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -38,6 +39,38 @@ import (
 type CachedRead[T any] struct {
 	Body       T
 	AgeSeconds float64
+}
+
+// ReadyBeads is the CLI-facing result of the federated GET
+// /v0/city/{cityName}/beads/ready read. Unlike the generic CachedRead wrapper it
+// preserves the partial-aggregation contract (Partial / PartialErrors) so
+// controller-side consumers can tell an authoritative ready set apart from one
+// where a backing store — for example the city store that holds graph control
+// beads — failed and was silently omitted. A zero AgeSeconds means the server
+// surfaced no cache age.
+type ReadyBeads struct {
+	Body          []beads.Bead
+	AgeSeconds    float64
+	Partial       bool
+	PartialErrors []string
+}
+
+// CityReadAuthoritative reports whether the ready read can be trusted to contain
+// every city-store bead. It is false only when a partial federated read recorded
+// a city-store failure; an unrelated rig-store failure still leaves the city
+// store (where graph control beads live) authoritative. The city store is
+// federated under CityReadyPartialLabel and partialAggregator records failures
+// as "<label>: <error>", so a city-store omission is detectable by prefix.
+func (r ReadyBeads) CityReadAuthoritative() bool {
+	if !r.Partial {
+		return true
+	}
+	for _, msg := range r.PartialErrors {
+		if strings.HasPrefix(msg, CityReadyPartialLabel+": ") {
+			return false
+		}
+	}
+	return true
 }
 
 // cacheAgeHeader is the wire name of the X-GC-Cache-Age-S response header,

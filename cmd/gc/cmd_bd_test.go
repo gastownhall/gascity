@@ -2114,6 +2114,65 @@ exit 0
 	}
 }
 
+func TestGcBdPluginProviderForcesDBPath(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "postgres"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{
+  "database": "demo",
+  "backend": "postgres",
+  "postgres_host": "127.0.0.1",
+  "postgres_port": "5432",
+  "postgres_user": "bd",
+  "postgres_database": "beads"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	capture := filepath.Join(t.TempDir(), "bd-args.txt")
+	binDir := t.TempDir()
+	fakeBD := "#!/bin/sh\nprintf '%s' \"$*\" > " + strconv.Quote(capture) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "plugin")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"list", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(list) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--db " + filepath.Join(cityDir, ".beads") + " list --json"
+	if string(data) != want {
+		t.Fatalf("forwarded args = %q, want %q", string(data), want)
+	}
+}
+
 // TestGcBdProcessExitCodeMatchesSilentFallbackContract pins the process-
 // level exit code contract that the bdSilentFallbackExitCode = 4 doc
 // comment promises operators and CI. PR #2327 review found the previous

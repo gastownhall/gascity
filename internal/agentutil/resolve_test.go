@@ -176,6 +176,7 @@ func TestResolveAgentQualifiedGenericRigScopedTemplate(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "reviewer", Scope: "rig"},
+			{Name: "run-operator", BindingName: "gc", Scope: "rig"},
 		},
 		Rigs: []config.Rig{
 			{Name: "alpha"},
@@ -197,6 +198,14 @@ func TestResolveAgentQualifiedGenericRigScopedTemplate(t *testing.T) {
 	}
 	if got := template.QualifiedName(); got != "beta/reviewer" {
 		t.Fatalf("TemplateOnly QualifiedName() = %q, want %q", got, "beta/reviewer")
+	}
+
+	bound, ok := ResolveAgent(cfg, "alpha/gc.run-operator", ResolveOpts{AllowPoolMembers: true})
+	if !ok {
+		t.Fatal("expected to resolve alpha/gc.run-operator")
+	}
+	if got := bound.QualifiedName(); got != "alpha/gc.run-operator" {
+		t.Fatalf("binding-qualified generic rig template QualifiedName() = %q, want %q", got, "alpha/gc.run-operator")
 	}
 }
 

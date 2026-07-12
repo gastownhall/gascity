@@ -764,6 +764,144 @@
       ],
       "description": "OptionChoice is one allowed value for a \"select\" option."
     },
+    "PackBackendPluginEndpoint": {
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protocol": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackBackendPluginEndpoint declares one process in a backend plugin bundle."
+    },
+    "PackBackendPluginEntry": {
+      "properties": {
+        "backend": {
+          "type": "string",
+          "description": "Backend is the logical [beads].backend value this bundle implements."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "plugin",
+            "native"
+          ],
+          "description": "Kind selects how bd reaches the backend. \"plugin\" (the default) uses\nthe external endpoint contract introduced by the backend-plugin stack;\n\"native\" selects a storage driver compiled into stock upstream bd."
+        },
+        "driver": {
+          "type": "string",
+          "enum": [
+            "postgres",
+            "sqlite"
+          ],
+          "description": "Driver is the upstream bd --backend value for a native bundle. Gas City\ncurrently supports the upstream postgres and sqlite drivers."
+        },
+        "sqlite_path": {
+          "type": "string",
+          "description": "SQLitePath is the default database path passed to bd init for a native\nSQLite bundle. Relative paths are resolved by bd beneath .beads/."
+        },
+        "setup_hook": {
+          "type": "string",
+          "description": "SetupHook is the pack-relative exec provider script GC calls for\nbackend initialization, metadata creation, and readiness repair."
+        },
+        "provider_command": {
+          "type": "string",
+          "description": "ProviderCommand is the bd-compatible provider command for normal\nlifecycle/data operations. It defaults to SetupHook when omitted."
+        },
+        "prepare_command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PrepareCommand is an optional pack command to run before setup, for\nexample to install endpoint binaries into the pack runtime directory."
+        },
+        "store_path": {
+          "type": "string",
+          "description": "StorePath is the backend-owned store path relative to the scope root."
+        },
+        "scope": {
+          "$ref": "#/$defs/PackBackendPluginScopePolicy",
+          "description": "Scope declares how this backend maps GC city/rig scopes to backend\nresources. GC owns rig topology; the plugin owns realizing each scope."
+        },
+        "bd_compatibility": {
+          "type": "string",
+          "description": "BDCompatibility is the bd metadata/CLI contract this bundle expects."
+        },
+        "beads_endpoint": {
+          "$ref": "#/$defs/PackBackendPluginEndpoint",
+          "description": "BeadsEndpoint is the bd backend plugin endpoint."
+        },
+        "gascity_endpoint": {
+          "$ref": "#/$defs/PackBackendPluginEndpoint",
+          "description": "GascityEndpoint is the Gas City fastpath/backend endpoint."
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Capabilities names backend surfaces this bundle supports, such as\n\"setup\", \"provider\", \"metadata\", \"fastpath\", \"store-health\", and\n\"jsonl-export\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "backend"
+      ],
+      "description": "PackBackendPluginEntry declares a pack-provided backend plugin bundle."
+    },
+    "PackBackendPluginScopePolicy": {
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model names the scope topology. \"per_scope\" means every city/rig scope has\nits own backend namespace; \"shared\" means scopes share a backend resource."
+        },
+        "resource": {
+          "type": "string",
+          "description": "Resource names the backend resource type, for example \"database\", \"schema\",\n\"directory\", or \"external\"."
+        },
+        "namespace_from": {
+          "type": "string",
+          "description": "NamespaceFrom tells GC how to derive the resource namespace when the plugin\nsetup hook is called. Supported values today: \"prefix\", \"scope_name\",\n\"city_or_prefix\", and \"none\"."
+        },
+        "inherits_city_connection": {
+          "type": "boolean",
+          "description": "InheritsCityConnection means rig scopes reuse city-level connection\ncoordinates while selecting their own namespace."
+        },
+        "metadata_owner": {
+          "type": "string",
+          "description": "MetadataOwner declares who writes backend metadata. \"plugin\" means GC must\nnot canonicalize backend-specific metadata for this backend."
+        },
+        "routes": {
+          "type": "string",
+          "description": "Routes declares the routing contract. The default is \"gc-prefix-routes\",\nwhere GC owns prefix routing and writes routes.jsonl."
+        },
+        "adopt": {
+          "type": "string",
+          "description": "Adopt declares what plugin setup should do with an existing .beads scope:\n\"validate_or_repair\", \"reject\", or \"skip\"."
+        },
+        "remove": {
+          "type": "string",
+          "description": "Remove declares whether rig removal should preserve or drop backend data."
+        },
+        "requires_git": {
+          "type": "boolean",
+          "description": "RequiresGit lets a backend pack require rig paths to be git repos."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackBackendPluginScopePolicy describes the backend resource model a plugin wants GC to use for each city/rig bead scope."
+    },
     "PackCommandEntry": {
       "properties": {
         "name": {
@@ -849,6 +987,12 @@
             "$ref": "#/$defs/PackRuntimeEntry"
           },
           "type": "object"
+        },
+        "backend_plugins": {
+          "items": {
+            "$ref": "#/$defs/PackBackendPluginEntry"
+          },
+          "type": "array"
         },
         "patches": {
           "$ref": "#/$defs/PackPatches"

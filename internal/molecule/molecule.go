@@ -660,6 +660,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			return nil, err
 		}
 
+		graphApplyTracef("sequential create step=%s ref=%s type=%s needs=%d needs_list=%s parent=%s", step.ID, b.Ref, b.Type, len(b.Needs), strings.Join(b.Needs, ","), b.ParentID)
 		created, err := store.Create(b)
 		if err != nil {
 			// Best-effort cleanup: mark already-created beads as failed.

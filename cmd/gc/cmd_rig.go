@@ -200,7 +200,7 @@ func resolveRigAddPath(cityPath, rigArg string) (string, error) {
 		}
 		return filepath.Clean(filepath.Join(wd, rigArg)), nil
 	}
-	return filepath.Clean(filepath.Join(cityPath, rigArg)), nil
+	return filepath.Clean(filepath.Join(cityPath, "rigs", rigArg)), nil
 }
 
 // doRigAdd is the pure logic for "gc rig add". Operations are ordered so that

@@ -1704,6 +1704,59 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 	}
 }
 
+func TestSyncConfiguredDoltPortFilesRemovesPortFilesForDoltliteCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "doltlite-rig")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		dir      string
+		database string
+	}{
+		{dir: cityDir, database: "hq"},
+		{dir: rigDir, database: "dl"},
+	} {
+		if err := os.MkdirAll(filepath.Join(tc.dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tc.dir, ".beads", "config.yaml"), []byte("dolt.auto-start: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tc.dir, ".beads", "dolt-server.port"), []byte("33123\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(tc.dir, ".beads", "metadata.json"), contract.MetadataState{
+			Database:     "doltlite",
+			Backend:      "doltlite",
+			DoltDatabase: tc.database,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "plugin", config.DoltConfig{}, "gc", []config.Rig{{Name: "doltlite-rig", Path: rigDir, Prefix: "dl"}})
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if _, err := os.Stat(filepath.Join(dir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+			t.Fatalf("%s dolt-server.port should be removed for doltlite city, stat err = %v", dir, err)
+		}
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		if !strings.Contains(string(cfgData), "dolt.auto-start: false") {
+			t.Fatalf("%s config missing dolt.auto-start normalization:\n%s", dir, cfgData)
+		}
+	}
+}
+
 func TestSyncConfiguredDoltPortFilesWarnsOnRigPortFileRewrite(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "drifty")
@@ -5537,6 +5590,304 @@ func TestSeedDeferredManagedBeadsSkipsDoltMetadataForInheritedCityPostgresRigWit
 	}
 	if got, want := string(data), `{"database":"beads"}`; got != want {
 		t.Fatalf("metadata = %s, want preserved %s", got, want)
+	}
+}
+
+func TestSeedDeferredManagedBeadsUsesPluginSetupHookForPluginBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"doltlite","backend":"doltlite","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsPath := filepath.Join(t.TempDir(), "setup-hook-calls")
+	script := filepath.Join(cityPath, ".gc", "scripts", "gc-beads-doltlite-bd.sh")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" > %q
+cat > "$2/.beads/metadata.json" <<JSON
+{"database":"plugin-owned","backend":"plugin-owned","dolt_database":"$4","backend_plugin_command":"/plugin/bd","gascity_backend_command":"/plugin/gc"}
+JSON
+`, callsPath)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := seedDeferredManagedBeadsErr(cityPath, cityPath, "gc", ""); err != nil {
+		t.Fatalf("seedDeferredManagedBeadsErr: %v", err)
+	}
+
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read setup hook calls: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(calls)), "init "+cityPath+" gc hq"; got != want {
+		t.Fatalf("setup hook call = %q, want %q", got, want)
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	metaText := string(data)
+	for _, want := range []string{`"database":"plugin-owned"`, `"backend_plugin_command":"/plugin/bd"`, `"gascity_backend_command":"/plugin/gc"`} {
+		if !strings.Contains(metaText, want) {
+			t.Fatalf("metadata missing %q:\n%s", want, metaText)
+		}
+	}
+}
+
+func TestInitDirIfReadyPassesRigScopeDatabaseToPluginSetupHook(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "pg")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsPath := filepath.Join(t.TempDir(), "setup-hook-calls")
+	script := filepath.Join(cityPath, ".gc", "scripts", "gc-beads-doltlite-bd.sh")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" > %q
+mkdir -p "$2/.beads"
+cat > "$2/.beads/metadata.json" <<JSON
+{"database":"plugin-owned","backend":"plugin-owned","dolt_database":"$4"}
+JSON
+`, callsPath)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	deferred, err := initDirIfReady(cityPath, rigPath, "pg")
+	if err != nil {
+		t.Fatalf("initDirIfReady: %v", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady deferred plugin setup, want immediate setup")
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read setup hook calls: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(calls)), "init "+rigPath+" pg pg"; got != want {
+		t.Fatalf("setup hook call = %q, want %q", got, want)
+	}
+}
+
+func TestInitDirIfReadyUsesPackPluginRigScopePolicy(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_BACKEND", "")
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "repo")
+	if err := os.MkdirAll(filepath.Join(cityPath, "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "postgres"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsPath := filepath.Join(t.TempDir(), "setup-hook-calls")
+	script := filepath.Join(cityPath, "assets", "scripts", "setup-postgres.sh")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+{
+  printf 'args=%%s\n' "$*"
+  printf 'scope_kind=%%s\n' "${GC_BEADS_SETUP_SCOPE_KIND:-}"
+  printf 'scope_name=%%s\n' "${GC_BEADS_SETUP_SCOPE_NAME:-}"
+  printf 'prefix=%%s\n' "${GC_BEADS_SETUP_PREFIX:-}"
+  printf 'namespace=%%s\n' "${GC_BEADS_SETUP_NAMESPACE:-}"
+  printf 'resource=%%s\n' "${GC_BEADS_SCOPE_RESOURCE:-}"
+} > %q
+mkdir -p "$2/.beads"
+cat > "$2/.beads/metadata.json" <<JSON
+{"database":"$4","backend":"postgres","backend_plugin_command":"/plugin/bd","gascity_backend_command":"/plugin/gc"}
+JSON
+`, callsPath)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(`
+[pack]
+name = "city"
+schema = 2
+
+[[backend_plugins]]
+backend = "postgres"
+setup_hook = "assets/scripts/setup-postgres.sh"
+capabilities = ["setup", "provider", "metadata", "fastpath"]
+
+[backend_plugins.scope]
+model = "per_scope"
+resource = "schema"
+namespace_from = "scope_name"
+inherits_city_connection = true
+metadata_owner = "plugin"
+routes = "gc-prefix-routes"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !cityUsesPluginBeadsBackendSetup(cityPath) {
+		caps, capsOK := beadsBackendPluginCapabilitiesForCity(cityPath)
+		t.Fatalf("cityUsesPluginBeadsBackendSetup = false; raw_provider=%q backend=%q caps_ok=%v caps=%+v", rawBeadsProvider(cityPath), beadsBackend(cityPath), capsOK, caps)
+	}
+
+	deferred, err := initDirIfReady(cityPath, rigPath, "bbp")
+	if err != nil {
+		t.Fatalf("initDirIfReady: %v", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady deferred plugin setup, want immediate setup")
+	}
+	data, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read setup hook calls: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"args=init " + rigPath + " bbp repo",
+		"scope_kind=rig",
+		"scope_name=repo",
+		"prefix=bbp",
+		"namespace=repo",
+		"resource=schema",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("setup hook output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsPassesPackPluginEndpointsToSetupHook(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_BACKEND", "")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsPath := filepath.Join(t.TempDir(), "setup-hook-env")
+	script := filepath.Join(cityPath, "assets", "scripts", "setup-doltlite.sh")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+{
+  printf 'generic_bd=%%s\n' "${GC_BEADS_BACKEND_PLUGIN_COMMAND:-}"
+  printf 'generic_bd_args=%%s\n' "${GC_BEADS_BACKEND_PLUGIN_ARGS:-}"
+  printf 'generic_bd_protocol=%%s\n' "${GC_BEADS_BACKEND_PLUGIN_PROTOCOL:-}"
+  printf 'generic_gc=%%s\n' "${GC_GASCITY_BACKEND_PLUGIN_COMMAND:-}"
+  printf 'generic_gc_args=%%s\n' "${GC_GASCITY_BACKEND_PLUGIN_ARGS:-}"
+  printf 'generic_gc_protocol=%%s\n' "${GC_GASCITY_BACKEND_PLUGIN_PROTOCOL:-}"
+  printf 'bd=%%s\n' "${GC_DOLTLITE_BACKEND_PLUGIN_COMMAND:-}"
+  printf 'bd_args=%%s\n' "${GC_DOLTLITE_BACKEND_PLUGIN_ARGS:-}"
+  printf 'bd_protocol=%%s\n' "${GC_DOLTLITE_BACKEND_PLUGIN_PROTOCOL:-}"
+  printf 'gc=%%s\n' "${GC_DOLTLITE_GASCITY_BACKEND_PLUGIN_COMMAND:-}"
+  printf 'gc_args=%%s\n' "${GC_DOLTLITE_GASCITY_BACKEND_PLUGIN_ARGS:-}"
+  printf 'gc_protocol=%%s\n' "${GC_DOLTLITE_GASCITY_BACKEND_PLUGIN_PROTOCOL:-}"
+} > %q
+cat > "$2/.beads/metadata.json" <<JSON
+{"database":"doltlite","backend":"doltlite","dolt_database":"$4"}
+JSON
+`, callsPath)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(`
+[pack]
+name = "city"
+schema = 2
+
+[[backend_plugins]]
+backend = "doltlite"
+setup_hook = "assets/scripts/setup-doltlite.sh"
+store_path = ".beads/doltlite"
+
+[backend_plugins.beads_endpoint]
+command = ".gc/runtime/packs/bd-gc-dl/bin/bd-backend-doltlite"
+args = ["--trace", ".gc/backend-plugin-trace.jsonl", "serve"]
+protocol = "beads.backend.v1alpha1"
+
+[backend_plugins.gascity_endpoint]
+command = ".gc/runtime/packs/bd-gc-dl/bin/gc-doltlite-fastpath"
+args = ["serve"]
+protocol = "gascity.backend.v1alpha1"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := seedDeferredManagedBeadsErr(cityPath, cityPath, "gc", "hq"); err != nil {
+		t.Fatalf("seedDeferredManagedBeadsErr: %v", err)
+	}
+
+	data, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read setup hook env: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"generic_bd=" + filepath.Join(cityPath, ".gc/runtime/packs/bd-gc-dl/bin/bd-backend-doltlite"),
+		"generic_bd_args=--trace .gc/backend-plugin-trace.jsonl serve",
+		"generic_bd_protocol=beads.backend.v1alpha1",
+		"generic_gc=" + filepath.Join(cityPath, ".gc/runtime/packs/bd-gc-dl/bin/gc-doltlite-fastpath"),
+		"generic_gc_args=serve",
+		"generic_gc_protocol=gascity.backend.v1alpha1",
+		"bd=" + filepath.Join(cityPath, ".gc/runtime/packs/bd-gc-dl/bin/bd-backend-doltlite"),
+		"bd_args=--trace .gc/backend-plugin-trace.jsonl serve",
+		"bd_protocol=beads.backend.v1alpha1",
+		"gc=" + filepath.Join(cityPath, ".gc/runtime/packs/bd-gc-dl/bin/gc-doltlite-fastpath"),
+		"gc_args=serve",
+		"gc_protocol=gascity.backend.v1alpha1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("setup hook env missing %q:\n%s", want, text)
+		}
 	}
 }
 

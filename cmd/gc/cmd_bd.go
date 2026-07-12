@@ -230,7 +230,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
-	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
+	provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath)
+	if !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
 			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr
@@ -289,6 +290,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
 	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
 		return 1
+	}
+	if provider == "plugin" && !bdArgsHasDBOverride(bdArgs) {
+		bdArgs = append([]string{"--db", filepath.Join(target.ScopeRoot, ".beads")}, bdArgs...)
 	}
 
 	reapStaleBdExportJSONL(target.ScopeRoot)
@@ -357,6 +361,15 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+func bdArgsHasDBOverride(args []string) bool {
+	for _, arg := range args {
+		if arg == "--db" || strings.HasPrefix(arg, "--db=") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseBdReleaseIfCurrentArgs(args []string) (id, expectedAssignee string, ok bool, err error) {

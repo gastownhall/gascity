@@ -49,3 +49,33 @@ func TestNewEnvUsesAcceptanceBeadsProviderOverride(t *testing.T) {
 		t.Fatalf("NewEnv() GC_BEADS = %q, want %q", got, "sqlite")
 	}
 }
+
+func TestEnvBeadsBackendProfiles(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithConfiguredBeadsBackend()
+	if got := env.Get("GC_BEADS"); got != "" {
+		t.Fatalf("WithConfiguredBeadsBackend() GC_BEADS = %q, want empty", got)
+	}
+	if got := env.Get("GC_DOLT"); got != "" {
+		t.Fatalf("WithConfiguredBeadsBackend() GC_DOLT = %q, want empty", got)
+	}
+
+	env.WithFastFileBeads()
+	if got := env.Get("GC_BEADS"); got != "file" {
+		t.Fatalf("WithFastFileBeads() GC_BEADS = %q, want file", got)
+	}
+	if got := env.Get("GC_DOLT"); got != "skip" {
+		t.Fatalf("WithFastFileBeads() GC_DOLT = %q, want skip", got)
+	}
+}
+
+func TestEnvCloneIsIndependent(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	clone := env.Clone().WithConfiguredBeadsBackend()
+
+	if got := env.Get("GC_BEADS"); got != "file" {
+		t.Fatalf("original env GC_BEADS = %q, want file", got)
+	}
+	if got := clone.Get("GC_BEADS"); got != "" {
+		t.Fatalf("clone GC_BEADS = %q, want empty", got)
+	}
+}

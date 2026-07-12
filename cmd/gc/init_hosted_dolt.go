@@ -185,10 +185,10 @@ func cityExternalDoltEndpointUnverified(cityPath string) bool {
 // agrees with how the city will actually resolve its ledger:
 //
 //   - a non-bd (file) store cannot carry the bd Dolt-server contract; and
-//   - the doltlite backend is a local embedded store, not an external server,
-//     so pinning --dolt-host would write backend=dolt server metadata that
-//     permanently disagrees with the configured doltlite backend (split-brain)
-//     and skip the external-endpoint init defer.
+//   - non-Dolt backends are owned by their backend/plugin setup path, so
+//     pinning --dolt-host would write backend=dolt server metadata that
+//     permanently disagrees with the configured backend (split-brain) and skip
+//     the external-endpoint init defer.
 //
 // Both incompatibilities must be rejected before any canonical hosted-Dolt
 // files are written so a rejected init leaves no mixed ledger state behind.
@@ -196,8 +196,8 @@ func hostedDoltBackendError(cityPath string) error {
 	if !cityUsesBdStoreContract(cityPath) {
 		return fmt.Errorf("--dolt-host requires a bd-backed beads provider (use the gascity or gastown template)")
 	}
-	if cityUsesDoltliteBeadsBackend(cityPath) {
-		return fmt.Errorf("--dolt-host configures an external Dolt server and is incompatible with the doltlite beads backend; unset the doltlite backend (GC_BEADS_BACKEND or [beads] backend) to use the dolt (server) backend")
+	if backend := beadsBackend(cityPath); backend != "" && backend != "dolt" {
+		return fmt.Errorf("--dolt-host configures an external Dolt server and is incompatible with the %s beads backend; unset the non-Dolt backend (GC_BEADS_BACKEND or [beads] backend) to use the dolt (server) backend", backend)
 	}
 	return nil
 }

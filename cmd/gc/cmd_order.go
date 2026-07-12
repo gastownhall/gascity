@@ -296,7 +296,7 @@ func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	return allAA, 0
+	return filterOrdersForBackend(cityPath, cfg, allAA), 0
 }
 
 func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
@@ -310,7 +310,11 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 // scanAllOrders returns the shared post-override discovery view used by command
 // tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+	if err != nil {
+		return nil, err
+	}
+	return filterOrdersForBackend(cityPath, cfg, allAA), nil
 }
 
 func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {

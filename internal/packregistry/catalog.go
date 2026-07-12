@@ -52,7 +52,17 @@ type CatalogPack struct {
 	Description string           `toml:"description"`
 	Source      string           `toml:"source"`
 	SourceKind  string           `toml:"source_kind"`
+	Plugins     []CatalogPlugin  `toml:"plugin,omitempty"`
 	Releases    []CatalogRelease `toml:"release,omitempty"`
+}
+
+// CatalogPlugin advertises plugin capabilities a pack can provide before the
+// pack is installed into a city.
+type CatalogPlugin struct {
+	Kind         string   `toml:"kind"`
+	Backend      string   `toml:"backend,omitempty"`
+	DisplayName  string   `toml:"display_name,omitempty"`
+	Capabilities []string `toml:"capabilities,omitempty"`
 }
 
 // CatalogRelease describes an immutable published version of a catalog pack.
@@ -170,6 +180,19 @@ func ValidateCatalog(catalog Catalog, remote bool) error {
 		}
 		if err := validatePackSource(pack.Source, remote); err != nil {
 			return fmt.Errorf("pack %q source: %w", pack.Name, err)
+		}
+		for _, plugin := range pack.Plugins {
+			if strings.TrimSpace(plugin.Kind) == "" {
+				return fmt.Errorf("pack %q plugin kind is required", pack.Name)
+			}
+			switch plugin.Kind {
+			case "beads-backend":
+				if strings.TrimSpace(plugin.Backend) == "" {
+					return fmt.Errorf("pack %q beads-backend plugin backend is required", pack.Name)
+				}
+			default:
+				return fmt.Errorf("pack %q has unsupported plugin kind %q", pack.Name, plugin.Kind)
+			}
 		}
 		seenReleases := map[string]bool{}
 		for _, release := range pack.Releases {

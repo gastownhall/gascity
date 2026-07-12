@@ -22371,6 +22371,48 @@
               "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
               "type": "string"
             }
+          },
+          {
+            "description": "Serve ready work from the supervisor cache projection (eventually consistent) instead of the authoritative live backing store. Defaults to false (live).",
+            "explode": false,
+            "in": "query",
+            "name": "cached",
+            "schema": {
+              "description": "Serve ready work from the supervisor cache projection (eventually consistent) instead of the authoritative live backing store. Defaults to false (live).",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Comma-separated assignees: keep only ready beads assigned to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side.",
+            "explode": false,
+            "in": "query",
+            "name": "control_assignees",
+            "schema": {
+              "description": "Comma-separated assignees: keep only ready beads assigned to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated routes: keep unassigned ready beads routed (run-target/routed-to/execution-routed-to) to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side.",
+            "explode": false,
+            "in": "query",
+            "name": "control_routes",
+            "schema": {
+              "description": "Comma-separated routes: keep unassigned ready beads routed (run-target/routed-to/execution-routed-to) to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Per-group cap on ready beads contributed by each control assignee and route. 0 = unbounded. Ignored unless control_assignees or control_routes is set.",
+            "explode": false,
+            "in": "query",
+            "name": "control_limit",
+            "schema": {
+              "description": "Per-group cap on ready beads contributed by each control assignee and route. 0 = unbounded. Ignored unless control_assignees or control_routes is set.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {

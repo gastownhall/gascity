@@ -4,3 +4,15 @@
 # assets, and collapse it in review UIs. Drift is still caught by the content-based
 # `git diff --quiet -- internal/api/dashboardspa/dist` gate in the Makefile.
 internal/api/dashboardspa/dist/** -diff linguist-generated
+
+# internal/api/genclient/client_gen.go is emitted by oapi-codegen from
+# internal/api/openapi.json (it carries the `DO NOT EDIT` generated marker).
+# Its branch structure is a mechanical projection of the spec, not hand-written
+# logic, so treat it as generated output: skip textual diffing and the
+# whitespace lint (`git diff --check`), and collapse it in review UIs. This also
+# keeps the per-changed-function complexity gate (scripts/complexity_report.py,
+# which reads `git diff -U0` hunks) from scoring generated request builders as
+# manually maintainable branch logic. Drift is still caught by the content-based
+# `git diff --quiet -- internal/api/genclient/client_gen.go` gate in the Makefile
+# (`make spec-ci`) and by TestGeneratedClientInSync.
+internal/api/genclient/client_gen.go -diff linguist-generated

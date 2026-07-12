@@ -133,6 +133,30 @@ func TestRawBeadsProviderNormalizesLegacyManagedExecEnv(t *testing.T) {
 	}
 }
 
+func TestRawBeadsProviderNormalizesManagedExecEnvForPluginBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"plugin\"\nbackend = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
+
+	if got := rawBeadsProvider(cityPath); got != "plugin" {
+		t.Fatalf("rawBeadsProvider() = %q, want plugin", got)
+	}
+}
+
+func TestBeadsProviderRoutesPluginProviderToManagedShim(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"plugin\"\nbackend = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "exec:" + gcBeadsBdScriptPath(cityPath)
+	if got := beadsProvider(cityPath); got != want {
+		t.Fatalf("beadsProvider() = %q, want %q", got, want)
+	}
+}
+
 func TestRawBeadsProviderPreservesCustomExecOverride(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:/tmp/custom-beads")
 
@@ -185,6 +209,56 @@ provider = "exec:/tmp/custom-beads"
 
 	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "exec:/tmp/custom-beads" {
 		t.Fatalf("rawBeadsProviderForScope() = %q, want custom exec provider", got)
+	}
+}
+
+func TestRawBeadsProviderForScopePreservesPluginAtCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"doltlite","backend":"doltlite","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "plugin" {
+		t.Fatalf("rawBeadsProviderForScope(city) = %q, want plugin", got)
+	}
+	if !cityUsesBdStoreContract(cityDir) {
+		t.Fatal("plugin provider must use the bd store contract")
+	}
+}
+
+func TestRawBeadsProviderForScopePreservesPluginForBdMarkedRig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"doltlite","backend":"doltlite","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "plugin" {
+		t.Fatalf("rawBeadsProviderForScope(rig) = %q, want plugin", got)
 	}
 }
 

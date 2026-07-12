@@ -164,6 +164,60 @@ func TestEnsureDefaultRegistryConfigPreservesExistingEmptyConfig(t *testing.T) {
 	}
 }
 
+func TestEnsureInitRegistryConfigAddsForkAndUpstream(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveConfig(home, Config{Registries: []Registry{
+		{Name: "custom", Source: "https://example.com/custom/registry.toml"},
+	}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := EnsureInitRegistryConfig(home); err != nil {
+		t.Fatalf("EnsureInitRegistryConfig: %v", err)
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := map[string]string{}
+	for _, reg := range cfg.Registries {
+		got[reg.Name] = reg.Source
+	}
+	if got["custom"] != "https://example.com/custom/registry.toml" {
+		t.Fatalf("custom registry not preserved: %+v", cfg.Registries)
+	}
+	if got[DefaultRegistryName] != DefaultRegistrySource {
+		t.Fatalf("upstream registry source = %q, want %q", got[DefaultRegistryName], DefaultRegistrySource)
+	}
+	if got[ForkRegistryName] != ForkRegistrySource {
+		t.Fatalf("fork registry source = %q, want %q", got[ForkRegistryName], ForkRegistrySource)
+	}
+}
+
+func TestEnsureInitRegistryConfigDoesNotDuplicateExistingSource(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveConfig(home, Config{Registries: []Registry{
+		{Name: "main", Source: DefaultRegistrySource},
+	}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := EnsureInitRegistryConfig(home); err != nil {
+		t.Fatalf("EnsureInitRegistryConfig: %v", err)
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	upstreamCount := 0
+	for _, reg := range cfg.Registries {
+		if reg.Source == DefaultRegistrySource {
+			upstreamCount++
+		}
+	}
+	if upstreamCount != 1 {
+		t.Fatalf("upstream registry count = %d in %+v, want 1", upstreamCount, cfg.Registries)
+	}
+}
+
 func TestLoadConfigPreservesExistingFile(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {

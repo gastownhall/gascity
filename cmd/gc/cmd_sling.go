@@ -307,7 +307,8 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// rig-scoped implicit agents (e.g., "hello-world/claude").
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	a, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
+	rigContext := currentRigContext(cfg)
+	a, ok := resolveAgentIdentity(cfg, target, rigContext)
 	if !ok {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "target_resolve_failed", agentNotFoundMsg("gc sling", target, cfg), 1)
@@ -327,7 +328,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 			return fail("store_open_failed", fmt.Sprintf("gc sling: opening store %s: %v", storeDir, err))
 		}
 	} else {
-		storeDir, store, err = openSlingStoreForSource(cfg, cityPath, beadOrFormula, a)
+		storeDir, store, err = openSlingStoreForSource(cfg, cityPath, beadOrFormula, a, target, rigContext)
 		if err != nil {
 			return fail("store_open_failed", fmt.Sprintf("gc sling: %v", err))
 		}
@@ -488,7 +489,7 @@ func slingDirForBead(cfg *config.City, cityPath, beadID string) string {
 	return resolveStoreScopeRoot(cityPath, cityPath)
 }
 
-func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a config.Agent) string {
+func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a config.Agent, targetIdentity, currentRigDir string) string {
 	storeDir := resolveStoreScopeRoot(cityPath, cityPath)
 	if cfg == nil {
 		return storeDir
@@ -509,11 +510,27 @@ func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a c
 	if rd := rigDirForAgent(cfg, a); rd != "" {
 		return resolveStoreScopeRoot(cityPath, rd)
 	}
+	if a.Scope == "rig" {
+		if targetRig, _ := config.ParseQualifiedName(targetIdentity); targetRig != "" {
+			for _, rig := range cfg.Rigs {
+				if rig.Name == targetRig && strings.TrimSpace(rig.Path) != "" {
+					return resolveStoreScopeRoot(cityPath, rig.Path)
+				}
+			}
+		}
+		if currentRigDir != "" {
+			for _, rig := range cfg.Rigs {
+				if rig.Name == currentRigDir && strings.TrimSpace(rig.Path) != "" {
+					return resolveStoreScopeRoot(cityPath, rig.Path)
+				}
+			}
+		}
+	}
 	return storeDir
 }
 
-func openSlingStoreForSource(cfg *config.City, cityPath, beadOrFormula string, a config.Agent) (string, beads.Store, error) {
-	storeDir := resolveSlingStoreRoot(cfg, cityPath, beadOrFormula, a)
+func openSlingStoreForSource(cfg *config.City, cityPath, beadOrFormula string, a config.Agent, targetIdentity, currentRigDir string) (string, beads.Store, error) {
+	storeDir := resolveSlingStoreRoot(cfg, cityPath, beadOrFormula, a, targetIdentity, currentRigDir)
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("opening store %s: %w", storeDir, err)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -19,8 +20,10 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
 )
@@ -75,6 +78,24 @@ var initConventionDirs = cityinit.InitConventionDirs()
 
 const defaultInitTemplate = "gascity"
 
+const (
+	initTmuxKeybindingsScriptRel = "assets/scripts/tmux-keybindings.sh"
+	initTmuxKeybindingsLiveCmd   = "{{.ConfigDir}}/" + initTmuxKeybindingsScriptRel + " {{.ConfigDir}}"
+	initTmuxKeybindingsScript    = `#!/bin/sh
+# tmux-keybindings.sh - Gas City tmux scrollback bindings.
+# Usage: tmux-keybindings.sh <config-dir>
+
+# Socket-aware tmux command (uses GC_TMUX_SOCKET when set).
+gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
+
+# Make the wheel drive tmux copy-mode scrollback instead of leaking to the
+# focused app. Without this, mouse-reporting TUIs can consume wheel events and
+# leave tmux scrollback unreachable from the mayor session.
+gcmux bind-key -T root WheelUpPane   if-shell -F -t= "#{pane_in_mode}" "send-keys -M" "copy-mode -e"
+gcmux bind-key -T root WheelDownPane send-keys -M
+`
+)
+
 // wizardConfig carries the results of the interactive init wizard (or defaults
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
@@ -83,6 +104,7 @@ type wizardConfig struct {
 	defaultProvider  string // selected default provider key
 	providers        []string
 	provider         string                // compatibility mirror for older internal callers
+	beadsBackend     string                // selected registry-backed beads backend, e.g. "doltlite" or "sqlite"
 	startCommand     string                // custom start command (workspace-level)
 	bootstrapProfile string                // hosted bootstrap profile, or "" for local defaults
 	hostedDolt       hostedDoltInitOptions // external/hosted Dolt ledger endpoint (disabled when zero)
@@ -209,12 +231,50 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		}
 	}
 
+	backendChoices, err := configuredWizardBeadsBackendChoices(context.Background())
+	if err != nil {
+		return wizardConfig{
+			interactive:     true,
+			configName:      configName,
+			defaultProvider: defaultProvider,
+			providers:       providers,
+			provider:        defaultProvider,
+			err:             err,
+		}
+	}
+	if len(backendChoices) == 0 {
+		backendChoices = []wizardBeadsBackendChoice{defaultWizardBeadsBackendChoice()}
+	}
+
+	fmt.Fprintln(stdout, "")                           //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "Choose your beads backend:") //nolint:errcheck // best-effort stdout
+	for i, choice := range backendChoices {
+		suffix := ""
+		if i == 0 {
+			suffix = " (default)"
+		}
+		fmt.Fprintf(stdout, "  %d. %-9s — %s%s\n", i+1, choice.DisplayName, choice.Description, suffix) //nolint:errcheck // best-effort stdout
+	}
+	fmt.Fprintf(stdout, "Backend [1]: ") //nolint:errcheck // best-effort stdout
+	beadsBackend, err := resolveWizardBeadsBackendChoice(readLine(br), backendChoices)
+	if err != nil {
+		return wizardConfig{
+			interactive:     true,
+			configName:      configName,
+			defaultProvider: defaultProvider,
+			providers:       providers,
+			provider:        defaultProvider,
+			err:             err,
+		}
+	}
+
 	return wizardConfig{
 		interactive:     true,
 		configName:      configName,
 		defaultProvider: defaultProvider,
 		providers:       providers,
 		provider:        defaultProvider,
+		beadsBackend:    beadsBackend,
 	}
 }
 
@@ -222,6 +282,14 @@ type wizardProviderChoice struct {
 	Name        string
 	DisplayName string
 }
+
+type wizardBeadsBackendChoice struct {
+	Backend     string
+	DisplayName string
+	Description string
+}
+
+var configuredWizardBeadsBackendChoices = discoverWizardBeadsBackendChoices
 
 func configuredWizardProviderChoices(ctx context.Context) ([]wizardProviderChoice, error) {
 	names := api.ProviderReadinessNames()
@@ -272,6 +340,132 @@ func resolveDefaultProviderChoice(input string, choices []wizardProviderChoice) 
 	return ""
 }
 
+func defaultWizardBeadsBackendChoice() wizardBeadsBackendChoice {
+	return wizardBeadsBackendChoice{
+		Backend:     "",
+		DisplayName: "dolt",
+		Description: "managed Dolt SQL server",
+	}
+}
+
+func discoverWizardBeadsBackendChoices(ctx context.Context) ([]wizardBeadsBackendChoice, error) {
+	choices := []wizardBeadsBackendChoice{defaultWizardBeadsBackendChoice()}
+	home := gchome.Default()
+	if err := packregistry.EnsureInitRegistryConfig(home); err != nil {
+		return choices, err
+	}
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		return choices, err
+	}
+
+	byBackend := map[string]wizardBeadsBackendChoice{}
+	for _, reg := range initBackendDiscoveryRegistries(cfg.Registries) {
+		catalog, err := packregistry.RefreshRegistry(ctx, home, reg, packregistry.FetchOptions{})
+		if err != nil {
+			cached, _, cacheErr := packregistry.ReadCachedRegistryCatalog(home, reg)
+			if cacheErr != nil {
+				continue
+			}
+			catalog = cached
+		}
+		for _, pack := range catalog.Packs {
+			for _, plugin := range pack.Plugins {
+				if strings.TrimSpace(plugin.Kind) != "beads-backend" {
+					continue
+				}
+				backend := strings.ToLower(strings.TrimSpace(plugin.Backend))
+				if backend == "" || backend == "dolt" {
+					continue
+				}
+				if _, exists := byBackend[backend]; exists {
+					continue
+				}
+				byBackend[backend] = wizardBeadsBackendChoice{
+					Backend:     backend,
+					DisplayName: wizardBackendDisplayName(plugin, backend),
+					Description: wizardBackendDescription(pack, plugin),
+				}
+			}
+		}
+	}
+
+	discoveredChoices := make([]wizardBeadsBackendChoice, 0, len(byBackend))
+	for _, choice := range byBackend {
+		discoveredChoices = append(discoveredChoices, choice)
+	}
+	sort.Slice(discoveredChoices, func(i, j int) bool {
+		return discoveredChoices[i].DisplayName < discoveredChoices[j].DisplayName
+	})
+	return append(choices, discoveredChoices...), nil
+}
+
+func initBackendDiscoveryRegistries(registries []packregistry.Registry) []packregistry.Registry {
+	out := make([]packregistry.Registry, 0, len(registries))
+	addMatches := func(match func(packregistry.Registry) bool) {
+		for _, reg := range registries {
+			if match(reg) {
+				out = append(out, reg)
+			}
+		}
+	}
+	addMatches(func(reg packregistry.Registry) bool {
+		return reg.Name == packregistry.ForkRegistryName || reg.Source == packregistry.ForkRegistrySource
+	})
+	addMatches(func(reg packregistry.Registry) bool {
+		return reg.Name == packregistry.DefaultRegistryName || reg.Source == packregistry.DefaultRegistrySource
+	})
+	for _, reg := range registries {
+		if reg.Name == packregistry.ForkRegistryName || reg.Name == packregistry.DefaultRegistryName ||
+			reg.Source == packregistry.ForkRegistrySource || reg.Source == packregistry.DefaultRegistrySource {
+			continue
+		}
+		out = append(out, reg)
+	}
+	return out
+}
+
+func wizardBackendDisplayName(plugin packregistry.CatalogPlugin, backend string) string {
+	display := strings.TrimSpace(plugin.DisplayName)
+	if display != "" {
+		return display
+	}
+	return backend
+}
+
+func wizardBackendDescription(pack packregistry.CatalogPack, plugin packregistry.CatalogPlugin) string {
+	capabilities := make([]string, 0, len(plugin.Capabilities))
+	for _, capability := range plugin.Capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability != "" {
+			capabilities = append(capabilities, capability)
+		}
+	}
+	if len(capabilities) > 0 {
+		return strings.Join(capabilities, ", ")
+	}
+	if description := strings.TrimSpace(pack.Description); description != "" {
+		return description
+	}
+	return "registry plugin"
+}
+
+func resolveWizardBeadsBackendChoice(input string, choices []wizardBeadsBackendChoice) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return choices[0].Backend, nil
+	}
+	if n, err := strconv.Atoi(input); err == nil && n >= 1 && n <= len(choices) {
+		return choices[n-1].Backend, nil
+	}
+	for _, choice := range choices {
+		if strings.EqualFold(input, choice.Backend) || strings.EqualFold(input, choice.DisplayName) {
+			return choice.Backend, nil
+		}
+	}
+	return "", fmt.Errorf("beads backend selection is required; enter a number or exact backend key")
+}
+
 // resolveAgentChoice maps user input to a provider name. Input can be a
 // number (1-based), a display name, or a provider key. Returns "" if the
 // input doesn't match any built-in provider.
@@ -320,6 +514,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var providerFlag string
 	var providersFlag []string
 	var defaultProviderFlag string
+	var beadsBackendFlag string
 	var bootstrapProfileFlag string
 	var doltHostFlag string
 	var doltPortFlag string
@@ -382,7 +577,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				Database:  doltDatabaseFlag,
 				ProjectID: doltProjectIDFlag,
 			}, os.Getenv)
-			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hosted)
+			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, beadsBackendFlag, hosted)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
@@ -400,6 +595,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
+	cmd.Flags().StringVar(&beadsBackendFlag, "beads-backend", "", "beads backend to discover and initialize from the pack registry")
 	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, or custom")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt")
@@ -419,6 +615,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.MarkFlagsMutuallyExclusive("default-provider", "from")
 	cmd.MarkFlagsMutuallyExclusive("providers", "file")
 	cmd.MarkFlagsMutuallyExclusive("providers", "from")
+	cmd.MarkFlagsMutuallyExclusive("beads-backend", "file")
+	cmd.MarkFlagsMutuallyExclusive("beads-backend", "from")
 	cmd.MarkFlagsMutuallyExclusive("template", "file")
 	cmd.MarkFlagsMutuallyExclusive("template", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
@@ -441,6 +639,7 @@ type initJSONResult struct {
 	Provider         string   `json:"provider,omitempty"`
 	DefaultProvider  string   `json:"default_provider,omitempty"`
 	Providers        []string `json:"providers,omitempty"`
+	BeadsBackend     string   `json:"beads_backend,omitempty"`
 	BootstrapProfile string   `json:"bootstrap_profile,omitempty"`
 }
 
@@ -465,6 +664,7 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, te
 		Provider:         strings.TrimSpace(defaultProvider),
 		DefaultProvider:  strings.TrimSpace(defaultProvider),
 		Providers:        append([]string(nil), providers...),
+		BeadsBackend:     "",
 		BootstrapProfile: strings.TrimSpace(bootstrapProfile),
 	})
 }
@@ -595,14 +795,15 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 	}, nil
 }
 
-func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string, hosted hostedDoltInitOptions) (wizardConfig, string, error) {
+func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag, beadsBackendFlag string, hosted hostedDoltInitOptions) (wizardConfig, string, error) {
 	legacyChanged := cmd.Flags().Changed("provider")
 	defaultChanged := cmd.Flags().Changed("default-provider")
 	providersChanged := cmd.Flags().Changed("providers")
 	templateChanged := cmd.Flags().Changed("template")
 	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
+	beadsBackendChanged := cmd.Flags().Changed("beads-backend")
 
-	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() {
+	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !beadsBackendChanged && !hosted.enabled() {
 		return wizardConfig{}, "", nil
 	}
 	if err := hosted.validate(); err != nil {
@@ -631,6 +832,13 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	if err != nil {
 		return wizardConfig{}, "", err
 	}
+	beadsBackend, err := normalizeInitBeadsBackend(beadsBackendFlag)
+	if err != nil {
+		return wizardConfig{}, "", err
+	}
+	if hosted.enabled() && beadsBackend != "" {
+		return wizardConfig{}, "", fmt.Errorf("--beads-backend cannot be combined with hosted Dolt flags")
+	}
 	if defaultProvider != "" && len(providers) == 0 {
 		providers = []string{defaultProvider}
 	}
@@ -643,7 +851,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	if template == "custom" && (legacyChanged || defaultChanged || providersChanged) {
 		return wizardConfig{}, "", fmt.Errorf("--template custom cannot be combined with provider flags")
 	}
-	if (template == "minimal" || template == "gastown" || template == "gascity") && defaultProvider == "" {
+	if (template == "minimal" || template == "gastown" || template == "gascity") && defaultProvider == "" && beadsBackend == "" {
 		return wizardConfig{}, "", fmt.Errorf("--template %s requires --default-provider", template)
 	}
 
@@ -654,15 +862,29 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	mode := "provider"
 	if templateChanged {
 		mode = "template"
+	} else if beadsBackendChanged {
+		mode = "beads-backend"
 	}
 	return wizardConfig{
 		configName:       template,
 		defaultProvider:  defaultProvider,
 		providers:        providers,
 		provider:         defaultProvider,
+		beadsBackend:     beadsBackend,
 		bootstrapProfile: bootstrapProfile,
 		hostedDolt:       hosted,
 	}, mode, nil
+}
+
+func normalizeInitBeadsBackend(backend string) (string, error) {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(backend, ", \t\n/\\") {
+		return "", fmt.Errorf("invalid beads backend %q", backend)
+	}
+	return backend, nil
 }
 
 func normalizeInitProvider(provider string) (string, error) {
@@ -811,6 +1033,38 @@ func writeInitFile(fs fsys.FS, path string, data []byte, preserve bool) (wrote b
 		}
 	}
 	return true, fs.WriteFile(path, data, 0o644)
+}
+
+func writeInitExecutableFile(fs fsys.FS, path string, data []byte, preserve bool) (wrote bool, err error) {
+	if preserve {
+		if _, err := fs.Stat(path); err == nil {
+			return false, nil
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return true, fs.WriteFile(path, data, 0o755)
+}
+
+func ensureInitTmuxKeybindings(fs fsys.FS, cityPath string, preserve bool) error {
+	path := filepath.Join(cityPath, initTmuxKeybindingsScriptRel)
+	if err := fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	_, err := writeInitExecutableFile(fs, path, []byte(initTmuxKeybindingsScript), preserve)
+	return err
+}
+
+func ensureInitTmuxKeybindingsGlobal(packCfg *initPackConfig) {
+	if packCfg == nil {
+		return
+	}
+	for _, cmd := range packCfg.Global.SessionLive {
+		if cmd == initTmuxKeybindingsLiveCmd {
+			return
+		}
+	}
+	packCfg.Global.SessionLive = append(packCfg.Global.SessionLive, initTmuxKeybindingsLiveCmd)
 }
 
 // writeInitPackTomlOpts marshals and writes pack.toml, honoring the
@@ -1041,8 +1295,8 @@ func applyInitPackTemplateExtras(dst *initPackConfig, src initPackConfig) {
 // addBuiltinImportsToInitPack merges the required bundled-pack imports
 // into the init pack manifest, preserving any imports the template (or a
 // preserved pack.toml) already declares.
-func addBuiltinImportsToInitPack(packCfg *initPackConfig, cityProvider string) {
-	imports, names := builtinImportsForInit(cityProvider)
+func addBuiltinImportsToInitPack(packCfg *initPackConfig, cityProvider, cityBackend string) {
+	imports, names := builtinImportsForInit(cityProvider, cityBackend)
 	if len(names) == 0 {
 		return
 	}
@@ -1055,6 +1309,89 @@ func addBuiltinImportsToInitPack(packCfg *initPackConfig, cityProvider string) {
 		}
 		packCfg.Imports[name] = imports[name]
 	}
+}
+
+func addBeadsBackendPluginImportToInitPack(packCfg *initPackConfig, backend string) error {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend == "" {
+		return nil
+	}
+	if backend == "dolt" {
+		return nil
+	}
+	name, imp, err := resolveBeadsBackendPluginImportFromRegistries(backend)
+	if err != nil {
+		return err
+	}
+	if packCfg.Imports == nil {
+		packCfg.Imports = make(map[string]config.Import, 1)
+	}
+	if existing, ok := packCfg.Imports[name]; ok {
+		if strings.TrimSpace(existing.Source) == "" {
+			packCfg.Imports[name] = imp
+		}
+		return nil
+	}
+	packCfg.Imports[name] = imp
+	return nil
+}
+
+func resolveBeadsBackendPluginImportFromRegistries(backend string) (string, config.Import, error) {
+	home := gchome.Default()
+	if err := packregistry.EnsureInitRegistryConfig(home); err != nil {
+		return "", config.Import{}, err
+	}
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		return "", config.Import{}, err
+	}
+	type match struct {
+		registry string
+		pack     packregistry.CatalogPack
+	}
+	var matches []match
+	var failures []string
+	for _, reg := range initBackendDiscoveryRegistries(cfg.Registries) {
+		catalog, err := packregistry.RefreshRegistry(context.Background(), home, reg, packregistry.FetchOptions{})
+		if err != nil {
+			cached, _, cacheErr := packregistry.ReadCachedRegistryCatalog(home, reg)
+			if cacheErr != nil {
+				failures = append(failures, reg.Name+": "+err.Error())
+				continue
+			}
+			catalog = cached
+		}
+		for _, pack := range catalog.Packs {
+			for _, plugin := range pack.Plugins {
+				if plugin.Kind == "beads-backend" && strings.EqualFold(strings.TrimSpace(plugin.Backend), backend) {
+					matches = append(matches, match{registry: reg.Name, pack: pack})
+					break
+				}
+			}
+		}
+	}
+	if len(matches) == 0 {
+		msg := fmt.Sprintf("no pack registry plugin found for beads backend %q", backend)
+		if len(failures) > 0 {
+			msg += "; registry errors: " + strings.Join(failures, "; ")
+		}
+		return "", config.Import{}, errors.New(msg)
+	}
+	pack := matches[0].pack
+	imp := config.Import{Source: pack.Source}
+	if release, ok := latestCatalogRelease(pack); ok {
+		imp.Version = "sha:" + release.Commit
+	}
+	return pack.Name, imp, nil
+}
+
+func latestCatalogRelease(pack packregistry.CatalogPack) (packregistry.CatalogRelease, bool) {
+	for i := len(pack.Releases) - 1; i >= 0; i-- {
+		if !pack.Releases[i].Withdrawn {
+			return pack.Releases[i], true
+		}
+	}
+	return packregistry.CatalogRelease{}, false
 }
 
 func appendUniqueStrings(dst []string, items ...string) []string {
@@ -1153,6 +1490,10 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := ensureInitTmuxKeybindings(fs, cityPath, preserveExisting); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Install Claude Code hooks (settings.json).
 	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
 		return code
@@ -1170,11 +1511,12 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
+	ensureInitTmuxKeybindingsGlobal(&packCfg)
 	// Builtin packs compose only through explicit imports: write the
 	// canonical bundled-source entries for this city's providers into
 	// pack.toml (mirrors doInit; the builtin-pack-imports doctor check
 	// repairs them later).
-	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider)
+	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider, cityCfg.Beads.Backend)
 	var rigSiteBindings []config.Rig
 	if hasInitRigSiteBindings(cityCfg.Rigs) {
 		rigSiteBindings = append([]config.Rig(nil), cityCfg.Rigs...)
@@ -1314,8 +1656,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Install Claude Code hooks (settings.json).
-	logInitProgress(stdout, 2, "Installing hooks (Claude Code)")
+	if err := ensureInitTmuxKeybindings(fs, cityPath, preserveExisting); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Install workspace hooks.
+	logInitProgress(stdout, 2, "Installing workspace hooks")
 	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
 		return code
 	}
@@ -1348,6 +1694,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			return 1
 		}
 	}
+	if wiz.beadsBackend != "" {
+		cfg.Beads.Provider = "plugin"
+		cfg.Beads.Backend = wiz.beadsBackend
+	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 
 	// Write prompt files only for the agents declared by the init template.
@@ -1369,6 +1719,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// prompt.template.md paths we actually scaffold.
 	rewriteInitPromptTemplates(&cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, &cfg)
+	ensureInitTmuxKeybindingsGlobal(&packCfg)
 	// Fresh built-in init scaffolds its default agents by convention under
 	// agents/<name>/ instead of re-emitting inline [[agent]] entries into
 	// pack.toml. The built-in templates currently only need the prompt
@@ -1378,7 +1729,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// canonical bundled-source entries for this city's providers into
 	// pack.toml. The builtin-pack-imports doctor check repairs them if
 	// they go missing.
-	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider)
+	addBuiltinImportsToInitPack(&packCfg, cityCfg.Beads.Provider, cityCfg.Beads.Backend)
+	if err := addBeadsBackendPluginImportToInitPack(&packCfg, wiz.beadsBackend); err != nil {
+		fmt.Fprintf(stderr, "gc init: resolving beads backend plugin: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

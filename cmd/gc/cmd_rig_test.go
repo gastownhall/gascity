@@ -399,9 +399,9 @@ func TestResolveRigAddPath(t *testing.T) {
 		want string
 	}{
 		{
-			name: "bare relative resolves against city",
+			name: "bare relative resolves under city rigs",
 			arg:  "frontend",
-			want: filepath.Join(cityPath, "frontend"),
+			want: filepath.Join(cityPath, "rigs", "frontend"),
 		},
 		{
 			name: "dot-prefixed resolves against cwd",

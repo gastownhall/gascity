@@ -436,6 +436,10 @@ func (s staleCachedWispStore) Get(_ string) (beads.Bead, error) {
 	return beads.Bead{}, beads.ErrCacheUnavailable
 }
 
+func (s staleCachedWispStore) ReadyCacheOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return s.Ready(query...)
+}
+
 func (s staleCachedWispStore) Handles() beads.StoreHandles {
 	return beads.StoreHandles{
 		Cached: s,
@@ -476,6 +480,10 @@ type tierNarrowListWispStore struct {
 
 func (s tierNarrowListWispStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, nil
+}
+
+func (s tierNarrowListWispStore) ReadyCacheOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return s.Ready(query...)
 }
 
 func (s tierNarrowListWispStore) Handles() beads.StoreHandles {

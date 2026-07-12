@@ -6493,6 +6493,18 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+
+	// Cached Serve ready work from the supervisor cache projection (eventually consistent) instead of the authoritative live backing store. Defaults to false (live).
+	Cached *bool `form:"cached,omitempty" json:"cached,omitempty"`
+
+	// ControlAssignees Comma-separated assignees: keep only ready beads assigned to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side.
+	ControlAssignees *string `form:"control_assignees,omitempty" json:"control_assignees,omitempty"`
+
+	// ControlRoutes Comma-separated routes: keep unassigned ready beads routed (run-target/routed-to/execution-routed-to) to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side.
+	ControlRoutes *string `form:"control_routes,omitempty" json:"control_routes,omitempty"`
+
+	// ControlLimit Per-group cap on ready beads contributed by each control assignee and route. 0 = unbounded. Ignored unless control_assignees or control_routes is set.
+	ControlLimit *int64 `form:"control_limit,omitempty" json:"control_limit,omitempty"`
 }
 
 // DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
@@ -18238,6 +18250,70 @@ func NewGetV0CityByCityNameBeadsReadyRequest(server string, cityName string, par
 		if params.Wait != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cached != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cached", *params.Cached, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ControlAssignees != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "control_assignees", *params.ControlAssignees, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ControlRoutes != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "control_routes", *params.ControlRoutes, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ControlLimit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "control_limit", *params.ControlLimit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

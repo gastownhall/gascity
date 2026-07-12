@@ -21,6 +21,21 @@ func beadsFromGenList(body *genclient.ListBodyBead) []beads.Bead {
 	return out
 }
 
+// readyPartialFromGen extracts the partial-aggregation signal from a federated
+// ready-list response body. Returns (false, nil) when the body or its partial
+// fields are absent, so a complete read is reported as authoritative.
+func readyPartialFromGen(body *genclient.ListBodyBead) (bool, []string) {
+	if body == nil {
+		return false, nil
+	}
+	partial := body.Partial != nil && *body.Partial
+	var errs []string
+	if body.PartialErrors != nil && len(*body.PartialErrors) > 0 {
+		errs = append(errs, *body.PartialErrors...)
+	}
+	return partial, errs
+}
+
 // beadFromGenPtr translates a non-nil *genclient.Bead into a beads.Bead.
 // Returns the zero beads.Bead when given a nil pointer; callers should check
 // for an empty ID to detect the missing-body case.

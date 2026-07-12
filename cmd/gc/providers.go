@@ -589,7 +589,7 @@ func scopedBeadsProviderOverride(cityPath, scopeRoot string) (string, bool) {
 }
 
 // normalizeRawBeadsProvider maps the city-managed gc-beads-bd wrapper back to
-// the logical "bd" provider for command-time store selection. Managed sessions
+// the logical bd-compatible provider for command-time store selection. Managed sessions
 // set GC_BEADS=exec:<cityPath>/.gc/scripts/gc-beads-bd.sh (the stable shim)
 // so lifecycle operations stay pinned to the city's Dolt server, but general
 // gc commands still need a CRUD-capable store.
@@ -600,6 +600,9 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
 	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacySystemPacksGcBeadsBdScriptPath(cityPath)) {
+		if strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml"))) == "plugin" {
+			return "plugin"
+		}
 		return "bd"
 	}
 	return provider
@@ -638,8 +641,8 @@ func beadsBackend(cityPath string) string {
 	return backend
 }
 
-func cityUsesDoltliteBeadsBackend(cityPath string) bool {
-	return beadsBackend(cityPath) == "doltlite"
+func cityUsesDoltBeadsBackend(cityPath string) bool {
+	return beadsBackend(cityPath) == "dolt"
 }
 
 func providerUsesBdStoreContract(provider string) bool {
@@ -651,7 +654,7 @@ func cityUsesBdStoreContract(cityPath string) bool {
 }
 
 func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
-	return cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath)
+	return cityUsesBdStoreContract(cityPath) && cityUsesDoltBeadsBackend(cityPath)
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
@@ -679,6 +682,9 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 	// rig's actual beads backend. The bd routing identity is metadata.json;
 	// config.yaml is a compatibility mirror and can survive migrations.
 	if scopeUsesBdStoreContract(resolvedScopeRoot) {
+		if provider == "plugin" {
+			return "plugin"
+		}
 		return "bd"
 	}
 	if scopeUsesFileStoreContract(resolvedScopeRoot) {
@@ -754,7 +760,16 @@ func bdProviderMismatchHint(scopeRoot, resolvedProvider string) string {
 //     operations. Used by testscript and integration tests.
 func beadsProvider(cityPath string) string {
 	raw := rawBeadsProvider(cityPath)
-	if raw == "bd" {
+	if (raw == "bd" || raw == "plugin") && cityUsesNativeBeadsBackend(cityPath) {
+		// Upstream-native backends are reached directly through the stock bd
+		// CLI. Registry-selected backend packs currently retain the historical
+		// provider="plugin" bootstrap marker, so native discovery takes
+		// precedence over that marker. The gc-beads-bd exec shim owns Dolt
+		// server lifecycle and the external backend-plugin bridge, neither of
+		// which applies here.
+		return "bd"
+	}
+	if raw == "bd" || raw == "plugin" {
 		return "exec:" + gcBeadsBdScriptPath(cityPath)
 	}
 	return raw

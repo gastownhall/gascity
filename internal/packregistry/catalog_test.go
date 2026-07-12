@@ -21,6 +21,12 @@ description = "Harbor-watch checks."
 source = "https://packages.example/lighthouse.git"
 source_kind = "git"
 
+  [[pack.plugin]]
+  kind = "beads-backend"
+  backend = "doltlite"
+  display_name = "DoltLite"
+  capabilities = ["setup", "provider"]
+
   [[pack.release]]
   version = "1.2.0"
   ref = "v1.2.0"
@@ -37,6 +43,9 @@ func TestValidateCatalogNamesReleasesAndHashes(t *testing.T) {
 	if err := ValidateCatalog(catalog, true); err != nil {
 		t.Fatalf("ValidateCatalog(valid): %v", err)
 	}
+	if got := catalog.Packs[0].Plugins[0]; got.Kind != "beads-backend" || got.Backend != "doltlite" {
+		t.Fatalf("plugin metadata not parsed: %+v", got)
+	}
 
 	cases := []struct {
 		name string
@@ -49,6 +58,8 @@ func TestValidateCatalogNamesReleasesAndHashes(t *testing.T) {
 		{"bad hash", `hash = "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"`, `hash = "sha256:nope"`},
 		{"bad source kind", `source_kind = "git"`, `source_kind = "archive"`},
 		{"bad release version", `version = "1.2.0"`, `version = "latest"`},
+		{"bad plugin kind", `kind = "beads-backend"`, `kind = "other"`},
+		{"missing plugin backend", `backend = "doltlite"`, `backend = ""`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

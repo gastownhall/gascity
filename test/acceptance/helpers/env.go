@@ -133,6 +133,31 @@ func (e *Env) Without(key string) *Env {
 	return e
 }
 
+// Clone returns an independent copy of the environment.
+func (e *Env) Clone() *Env {
+	if e == nil {
+		return &Env{vars: make(map[string]string)}
+	}
+	cp := &Env{vars: make(map[string]string, len(e.vars))}
+	for key, val := range e.vars {
+		cp.vars[key] = val
+	}
+	return cp
+}
+
+// WithFastFileBeads selects the lightweight acceptance backend. It is useful for
+// CLI smoke tests that do not assert backend or rig-prefix behavior.
+func (e *Env) WithFastFileBeads() *Env {
+	return e.With("GC_BEADS", "file").With("GC_DOLT", "skip")
+}
+
+// WithConfiguredBeadsBackend lets the city configuration and installed backend
+// plugins choose the beads backend. Use this for tests that exercise backend
+// setup, rig store scoping, or plugin behavior.
+func (e *Env) WithConfiguredBeadsBackend() *Env {
+	return e.Without("GC_BEADS").Without("GC_DOLT")
+}
+
 // List returns the environment as a sorted []string for exec.Cmd.Env.
 // Sorted for deterministic output in logs and debugging.
 func (e *Env) List() []string {

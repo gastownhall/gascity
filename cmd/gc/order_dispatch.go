@@ -357,6 +357,7 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 	if err != nil {
 		return orderSetSnapshot{}, err
 	}
+	allAA = filterOrdersForBackend(cityPath, cfg, allAA)
 	return orderSetSnapshot{
 		Orders:    append([]orders.Order(nil), allAA...),
 		Signature: orderSetSignature(allAA),

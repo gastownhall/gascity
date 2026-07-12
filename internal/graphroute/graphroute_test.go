@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -891,6 +892,51 @@ func TestAssignGraphStepRoute_ControlBindingPreservesDirectExecutionRoute(t *tes
 	}
 	if got := step.Metadata[GraphExecutionRigContextMetaKey]; got != "frontend" {
 		t.Fatalf("control execution rig context = %q, want frontend", got)
+	}
+}
+
+// TestAssignGraphStepRoute_NonControlStepOmitsControlDispatcherRoute pins the
+// structural guarantee the control-ready filter relies on
+// (internal/beads/control_ready_filter.go). That filter claims a bead for the
+// control dispatcher when its run-target / routed-to / execution-routed-to
+// metadata matches a control-dispatcher route, without checking gc.kind. That is
+// safe only because graph routing stamps a control-dispatcher route exclusively
+// on control-kind steps (DecorateGraphWorkflowRecipe gates the &controlRoute
+// binding on IsControlDispatcherKind). A non-control step routed with a nil
+// control binding gets its worker execution route in gc.routed_to, has its
+// execution-routed-to key cleared, and never carries a control-dispatcher route
+// in any key the filter matches — so it cannot be mis-claimed and quarantined by
+// the control dispatcher.
+func TestAssignGraphStepRoute_NonControlStepOmitsControlDispatcherRoute(t *testing.T) {
+	const controlRoute = "gascity/control-dispatcher"
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			// Stale routing from a prior decoration, including a control route the
+			// re-route must not leave behind.
+			beadmeta.RoutedToMetadataKey:          controlRoute,
+			beadmeta.ExecutionRoutedToMetadataKey: "stale-exec-route",
+		},
+	}
+	execution := GraphRouteBinding{QualifiedName: "gascity/claude", MetadataOnly: true}
+
+	AssignGraphStepRoute(step, execution, nil)
+
+	if got := step.Metadata[beadmeta.RoutedToMetadataKey]; got != "gascity/claude" {
+		t.Fatalf("non-control gc.routed_to = %q, want the worker execution route gascity/claude", got)
+	}
+	if got := step.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "" {
+		t.Fatalf("non-control execution-routed-to = %q, want empty (only control steps carry it)", got)
+	}
+	// None of the keys the control-ready filter matches on may hold a
+	// control-dispatcher route for a non-control step.
+	for _, key := range []string{
+		beadmeta.RunTargetMetadataKey,
+		beadmeta.RoutedToMetadataKey,
+		beadmeta.ExecutionRoutedToMetadataKey,
+	} {
+		if got := step.Metadata[key]; got == controlRoute {
+			t.Fatalf("non-control step carried control-dispatcher route %q in %q; the control-ready filter would mis-claim it", controlRoute, key)
+		}
 	}
 }
 

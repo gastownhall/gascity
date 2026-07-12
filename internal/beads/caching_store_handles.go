@@ -13,10 +13,16 @@ import (
 // historical lookups. List reads across both bead tiers regardless of the
 // caller's TierMode; use the underlying Store directly for intentionally
 // tier-scoped list queries.
+//
+// Ready and the other read methods may perform a one-time synchronous prime
+// from the backing store when the projection is not yet live. ReadyCacheOnly is
+// the strict variant that never primes — see its doc — for hot-path callers
+// that must not block on the backing store.
 type CachedReader interface {
 	Get(id string) (Bead, error)
 	List(query ListQuery) ([]Bead, error)
 	Ready(query ...ReadyQuery) ([]Bead, error)
+	ReadyCacheOnly(query ...ReadyQuery) ([]Bead, error)
 	DepList(id, direction string) ([]Dep, error)
 }
 
@@ -96,6 +102,14 @@ func (r logicalCachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 	return r.store.Ready(query...)
 }
 
+// ReadyCacheOnly delegates to the store's Ready: a plain (non-caching) store has
+// no separate backing tier to prime, so its in-process read already cannot block
+// on a remote cache prime. A CachingStore overrides this through its explicit
+// Handles() implementation with a strictly non-priming projection read.
+func (r logicalCachedStoreReader) ReadyCacheOnly(query ...ReadyQuery) ([]Bead, error) {
+	return r.store.Ready(query...)
+}
+
 func (r logicalCachedStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.DepList(id, direction)
 }
@@ -148,6 +162,20 @@ func (r cachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if err := r.store.ensureFullPrime(context.Background()); err != nil {
 		return nil, err
 	}
+	return r.store.cachedReadyOnly(readyQueryFromArgs(query))
+}
+
+// ReadyCacheOnly reads ready beads strictly from the in-memory projection and
+// never triggers a backing-store prime. When the projection is not live enough
+// to answer it returns ErrCacheUnavailable instead of priming, so a hot-path
+// caller (the control dispatcher's GET /beads/ready?cached=true) cannot block or
+// fail on the backing store the control-ready cache exists to bypass. Dirtiness
+// is scoped per bead: an unconfirmed cross-process write on an unrelated bead
+// omits only that bead (and any candidate that depends on it) from the result
+// rather than declining the whole read, so one dirty bead cannot stall a
+// cache-only reader that has no live fallback. Use Ready when a one-time
+// synchronous prime is acceptable.
+func (r cachedStoreReader) ReadyCacheOnly(query ...ReadyQuery) ([]Bead, error) {
 	return r.store.cachedReadyOnly(readyQueryFromArgs(query))
 }
 
@@ -231,15 +259,34 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
+	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil {
 		return nil, fmt.Errorf("reading ready beads from cache: %w", ErrCacheUnavailable)
 	}
+	// A dirty bead is an unconfirmed cross-process write-through conflict, not a
+	// reason to decline the whole read: scope the decline to the dirty beads
+	// themselves (and any candidate that depends on one) rather than returning
+	// ErrCacheUnavailable for every caller when len(c.dirty) > 0. The control
+	// dispatcher reads this path cache-only with no live fallback, so a
+	// whole-store decline let one unrelated dirty bead (mail, a session-lifecycle
+	// projection, an unrelated step) stall all graph control-ready dispatch until
+	// the next reconcile. Per-bead scoping mirrors cachedGetOnly's existing dirty
+	// decline and keeps the false-positive guarantee below.
+	hasDirty := len(c.dirty) > 0
 
 	statusByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
+		if hasDirty {
+			if _, dirty := c.dirty[b.ID]; dirty {
+				// Skip only the dirty bead: its cached status/assignee/routing may
+				// be stale, so serving it as ready off that row would strand it (the
+				// #2927 class). It is picked up once a confirming event or reconcile
+				// clears its dirty flag.
+				continue
+			}
+		}
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -264,6 +311,13 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
+		if hasDirty && dependencyDirty(c.dirty, deps) {
+			// A candidate whose blocking dependency is dirty cannot have its
+			// readiness confirmed from cache: the dep's cached status may be stale,
+			// so treating it as closed could dispatch a not-actually-ready bead (the
+			// #2927 false-positive class). Skip until the dep's dirty flag clears.
+			continue
+		}
 		if !cachedBeadReady(b, statusByID, deps) {
 			continue
 		}
@@ -273,6 +327,28 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 		}
 	}
 	return result, nil
+}
+
+// dependencyDirty reports whether any of a candidate's ready-blocking
+// dependencies is marked dirty. A dirty dependency's cached status is an
+// unconfirmed cross-process write, so it cannot be trusted to decide the
+// dependent bead's readiness from cache. Only ready-blocking types
+// (blocks/waits-for/conditional-blocks) feed cachedBeadReady, so a dirty
+// non-blocking edge — such as the parent-child edge every graph.v2 step holds
+// to its workflow root — cannot change cached readiness and must not suppress
+// the candidate; gating on isReadyBlockingDependencyType keeps the skip set to
+// exactly the deps whose staleness could flip the answer, mirroring
+// cachedBeadReady.
+func dependencyDirty(dirty map[string]struct{}, deps []Dep) bool {
+	for _, dep := range deps {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if _, ok := dirty[dep.DependsOnID]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CachingStore) cachedDepListOnly(id, direction string) ([]Dep, error) {

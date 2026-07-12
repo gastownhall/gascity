@@ -378,6 +378,12 @@ type City struct {
 	// land here too; conflicting re-declarations are composition errors.
 	// Runtime-only.
 	Runtimes map[string]DiscoveredRuntime `toml:"-" json:"-"`
+	// BackendPlugins holds pack-declared backend plugin bundles composed from
+	// [[backend_plugins]] entries. Each bundle describes the storage backend,
+	// setup/provider hook, and the Beads/Gas City plugin endpoints that work
+	// together for that backend.
+	// Runtime-only.
+	BackendPlugins []DiscoveredBackendPlugin `toml:"-" json:"-"`
 	// PackSkills holds binding-qualified shared skill catalogs composed
 	// from city-level imported packs. Runtime-only.
 	PackSkills []DiscoveredSkillCatalog `toml:"-" json:"-"`
@@ -1108,6 +1114,127 @@ type PackRuntimeEntry struct {
 	Protocol int `toml:"protocol,omitempty"`
 }
 
+// PackBackendPluginEntry declares a pack-provided backend plugin bundle.
+// A backend bundle can include both the bd/Beads endpoint and the Gas City
+// fastpath endpoint because Gas City bead storage always crosses Beads scope
+// and metadata boundaries.
+type PackBackendPluginEntry struct {
+	// Backend is the logical [beads].backend value this bundle implements.
+	Backend string `toml:"backend" jsonschema:"required"`
+	// Kind selects how bd reaches the backend. "plugin" (the default) uses
+	// the external endpoint contract introduced by the backend-plugin stack;
+	// "native" selects a storage driver compiled into stock upstream bd.
+	Kind string `toml:"kind,omitempty" jsonschema:"enum=plugin,enum=native"`
+	// Driver is the upstream bd --backend value for a native bundle. Gas City
+	// currently supports the upstream postgres and sqlite drivers.
+	Driver string `toml:"driver,omitempty" jsonschema:"enum=postgres,enum=sqlite"`
+	// SQLitePath is the default database path passed to bd init for a native
+	// SQLite bundle. Relative paths are resolved by bd beneath .beads/.
+	SQLitePath string `toml:"sqlite_path,omitempty"`
+	// SetupHook is the pack-relative exec provider script GC calls for
+	// backend initialization, metadata creation, and readiness repair.
+	SetupHook string `toml:"setup_hook,omitempty"`
+	// ProviderCommand is the bd-compatible provider command for normal
+	// lifecycle/data operations. It defaults to SetupHook when omitted.
+	ProviderCommand string `toml:"provider_command,omitempty"`
+	// PrepareCommand is an optional pack command to run before setup, for
+	// example to install endpoint binaries into the pack runtime directory.
+	PrepareCommand []string `toml:"prepare_command,omitempty"`
+	// StorePath is the backend-owned store path relative to the scope root.
+	StorePath string `toml:"store_path,omitempty"`
+	// Scope declares how this backend maps GC city/rig scopes to backend
+	// resources. GC owns rig topology; the plugin owns realizing each scope.
+	Scope PackBackendPluginScopePolicy `toml:"scope,omitempty"`
+	// BDCompatibility is the bd metadata/CLI contract this bundle expects.
+	BDCompatibility string `toml:"bd_compatibility,omitempty"`
+	// BeadsEndpoint is the bd backend plugin endpoint.
+	BeadsEndpoint PackBackendPluginEndpoint `toml:"beads_endpoint,omitempty"`
+	// GascityEndpoint is the Gas City fastpath/backend endpoint.
+	GascityEndpoint PackBackendPluginEndpoint `toml:"gascity_endpoint,omitempty"`
+	// Capabilities names backend surfaces this bundle supports, such as
+	// "setup", "provider", "metadata", "fastpath", "store-health", and
+	// "jsonl-export".
+	Capabilities []string `toml:"capabilities,omitempty"`
+}
+
+// PackBackendPluginScopePolicy describes the backend resource model a plugin
+// wants GC to use for each city/rig bead scope.
+type PackBackendPluginScopePolicy struct {
+	// Model names the scope topology. "per_scope" means every city/rig scope has
+	// its own backend namespace; "shared" means scopes share a backend resource.
+	Model string `toml:"model,omitempty"`
+	// Resource names the backend resource type, for example "database", "schema",
+	// "directory", or "external".
+	Resource string `toml:"resource,omitempty"`
+	// NamespaceFrom tells GC how to derive the resource namespace when the plugin
+	// setup hook is called. Supported values today: "prefix", "scope_name",
+	// "city_or_prefix", and "none".
+	NamespaceFrom string `toml:"namespace_from,omitempty"`
+	// InheritsCityConnection means rig scopes reuse city-level connection
+	// coordinates while selecting their own namespace.
+	InheritsCityConnection bool `toml:"inherits_city_connection,omitempty"`
+	// MetadataOwner declares who writes backend metadata. "plugin" means GC must
+	// not canonicalize backend-specific metadata for this backend.
+	MetadataOwner string `toml:"metadata_owner,omitempty"`
+	// Routes declares the routing contract. The default is "gc-prefix-routes",
+	// where GC owns prefix routing and writes routes.jsonl.
+	Routes string `toml:"routes,omitempty"`
+	// Adopt declares what plugin setup should do with an existing .beads scope:
+	// "validate_or_repair", "reject", or "skip".
+	Adopt string `toml:"adopt,omitempty"`
+	// Remove declares whether rig removal should preserve or drop backend data.
+	Remove string `toml:"remove,omitempty"`
+	// RequiresGit lets a backend pack require rig paths to be git repos.
+	RequiresGit bool `toml:"requires_git,omitempty"`
+}
+
+// PackBackendPluginEndpoint declares one process in a backend plugin bundle.
+type PackBackendPluginEndpoint struct {
+	Command  string   `toml:"command,omitempty"`
+	Args     []string `toml:"args,omitempty"`
+	Protocol string   `toml:"protocol,omitempty"`
+}
+
+// DiscoveredBackendPlugin is a resolved pack-declared backend plugin bundle.
+type DiscoveredBackendPlugin struct {
+	Backend         string
+	Kind            string
+	Driver          string
+	SQLitePath      string
+	SetupHook       string
+	ProviderCommand string
+	PrepareCommand  []string
+	StorePath       string
+	Scope           DiscoveredBackendPluginScopePolicy
+	BDCompatibility string
+	BeadsEndpoint   DiscoveredBackendPluginEndpoint
+	GascityEndpoint DiscoveredBackendPluginEndpoint
+	Capabilities    []string
+	PackName        string
+	PackDir         string
+}
+
+// DiscoveredBackendPluginScopePolicy is the resolved form of a pack-declared
+// backend scope policy.
+type DiscoveredBackendPluginScopePolicy struct {
+	Model                  string
+	Resource               string
+	NamespaceFrom          string
+	InheritsCityConnection bool
+	MetadataOwner          string
+	Routes                 string
+	Adopt                  string
+	Remove                 string
+	RequiresGit            bool
+}
+
+// DiscoveredBackendPluginEndpoint is one resolved process endpoint.
+type DiscoveredBackendPluginEndpoint struct {
+	Command  string
+	Args     []string
+	Protocol string
+}
+
 // PackCommandEntry declares a CLI subcommand provided by a pack.
 // Pack commands appear as gc <pack-name> <command-name> and let packs
 // ship operational tooling alongside orchestration config.
@@ -1362,6 +1489,16 @@ type BeadsConfig struct {
 	// Backend selects the bd storage engine when Provider is "bd".
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
+	// PostgresURL is the password-free connection URL used by the native
+	// upstream bd Postgres backend. Supply the password through the Beads/GC
+	// credential environment rather than embedding it in city.toml.
+	PostgresURL string `toml:"postgres_url,omitempty"`
+	// PostgresSchema optionally pins the city scope schema. Rig schemas are
+	// derived from the backend pack's scope namespace policy.
+	PostgresSchema string `toml:"postgres_schema,omitempty"`
+	// SQLitePath overrides the native SQLite database path. Relative paths are
+	// resolved beneath each scope's .beads directory.
+	SQLitePath string `toml:"sqlite_path,omitempty"`
 	// EventHooks controls installation of the bead event-forwarding hooks
 	// (.beads/hooks/on_create,on_update,on_close) that shell out to
 	// `gc event emit` on every bead write. Defaults to true. Set to false

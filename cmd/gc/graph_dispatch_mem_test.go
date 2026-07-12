@@ -335,6 +335,94 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	return store, convoy.ID, roots[0].ID
 }
 
+func startMemControlGateWorkflow(t *testing.T, cityPath string) (*beads.MemStore, string, string) {
+	t.Helper()
+
+	formulaDir := t.TempDir()
+	formulaContent := `
+formula = "control-gate-smoke"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "gate"
+title = "Pass control gate"
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "pass-check.sh"
+timeout = "30s"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "control-gate-smoke.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatalf("write control-gate-smoke formula: %v", err)
+	}
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", cityPath, err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pass-check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write pass-check.sh: %v", err)
+	}
+
+	runner := newFakeRunner()
+	cfg := buildMemGraphWorkflowConfig(t)
+	cfg.FormulaLayers.City = []string{formulaDir}
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "Run control gate smoke", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(target issue): %v", err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+	deps.CityPath = cityPath
+
+	worker, ok := resolveAgentIdentity(cfg, "worker", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(worker) failed")
+	}
+
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error { return nil }
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	opts := testOpts(worker, target.ID)
+	opts.OnFormula = "control-gate-smoke"
+	if code := doSling(opts, deps, store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
+	}
+
+	inputConvoys, err := store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("list input convoys: %v", err)
+	}
+	var inputConvoy beads.Bead
+	for _, candidate := range inputConvoys {
+		members, err := convoycore.Members(store, candidate.ID, true)
+		if err != nil {
+			t.Fatalf("members(%s): %v", candidate.ID, err)
+		}
+		if len(members) == 1 && members[0].ID == target.ID {
+			inputConvoy = candidate
+			break
+		}
+	}
+	if inputConvoy.ID == "" {
+		t.Fatalf("input convoy for %s not found in %+v", target.ID, inputConvoys)
+	}
+
+	roots, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoy.ID, "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("ListByMetadata(workflow root): %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
+	}
+	return store, target.ID, roots[0].ID
+}
+
 func TestSelectExecutableGraphWorkerBeadRejectsControlKinds(t *testing.T) {
 	ready := []beads.Bead{{
 		ID:       "gc-2",
@@ -506,6 +594,44 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 	root = mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
 		t.Fatalf("root = status %q outcome %q, want closed/pass", root.Status, root.Metadata["gc.outcome"])
+	}
+}
+
+func TestGraphWorkflowInMemoryOneControlDispatcherGateCompletes(t *testing.T) {
+	cityPath := t.TempDir()
+	store, targetID, workflowID := startMemControlGateWorkflow(t, cityPath)
+
+	runMemGraphWorkflowToCompletion(t, store, workflowID, targetID, "worker", cityPath, "success")
+
+	root := mustGetMemBead(t, store, workflowID)
+	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("root = status %q outcome %q, want closed/pass", root.Status, root.Metadata["gc.outcome"])
+	}
+
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": workflowID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("ListByMetadata(gc.root_bead_id=%q): %v", workflowID, err)
+	}
+
+	ralphCount := 0
+	for _, bead := range all {
+		if bead.Metadata["gc.kind"] != "ralph" {
+			continue
+		}
+		ralphCount++
+		if bead.Status != "closed" || bead.Metadata["gc.outcome"] != "pass" {
+			t.Fatalf("ralph gate %s = status %q outcome %q, want closed/pass", bead.ID, bead.Status, bead.Metadata["gc.outcome"])
+		}
+		if got := bead.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+			t.Fatalf("ralph gate %s routed_to = %q, want %q", bead.ID, got, config.ControlDispatcherAgentName)
+		}
+	}
+	if ralphCount != 1 {
+		t.Fatalf("ralph gate count = %d, want 1", ralphCount)
 	}
 }
 

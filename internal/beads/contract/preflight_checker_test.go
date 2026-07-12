@@ -169,6 +169,32 @@ func TestPreflightPassesOnHealthyDolt(t *testing.T) {
 	}
 }
 
+func TestPreflightDegradesOnDoltlitePluginBackend(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "doltlite",
+		"database": "doltlite",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "doltlite"}, "gc-local")
+	checker.Provider = "plugin"
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
+	assertCheckState(t, result, PreflightCheckProviderContract, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Fatalf("Fallback = %q, want %q", result.Fallback, PreflightFallbackBdStore)
+	}
+}
+
 func TestPreflightAcceptsExecGcBeadsBdProviderPath(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
@@ -195,6 +221,7 @@ func TestProviderUsesBDContract(t *testing.T) {
 	}{
 		{provider: "", want: true},
 		{provider: "bd", want: true},
+		{provider: "plugin", want: true},
 		{provider: " file ", want: false},
 		{provider: "exec:gc-beads-bd", want: true},
 		{provider: "exec:/tmp/gc-beads-bd", want: true},

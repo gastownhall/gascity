@@ -89,8 +89,7 @@ func tutorialTmuxTmpDir(runtimeDir string) string {
 func newTutorialBaseEnv(gcBinary, home, runtimeDir string) *helpers.Env {
 	env := helpers.NewEnv(gcBinary, home, runtimeDir).
 		Without("GC_SESSION").
-		Without("GC_BEADS").
-		Without("GC_DOLT").
+		WithConfiguredBeadsBackend().
 		With("DOLT_ROOT_PATH", home)
 	env.With("PATH", filepath.Join(home, ".local", "bin")+":"+env.Get("PATH"))
 	// Tutorial cities all use the same workspace name (`my-city`), so without an

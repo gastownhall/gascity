@@ -138,7 +138,7 @@ func ResolveQualifiedRigScopedTemplate(cfg *config.City, identity string) (confi
 	var match *config.Agent
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if a.Name != name || a.Dir != "" || a.Scope != "rig" {
+		if a.BindingQualifiedName() != name || a.Dir != "" || a.Scope != "rig" {
 			continue
 		}
 		if match != nil {

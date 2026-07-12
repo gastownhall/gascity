@@ -19,9 +19,14 @@ const ConfigSchema = 1
 
 const (
 	// DefaultRegistryName is the built-in public pack registry name.
-	DefaultRegistryName = "main"
+	DefaultRegistryName = "gascity-packs"
 	// DefaultRegistrySource is the public gascity-packs registry catalog.
 	DefaultRegistrySource = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
+	// ForkRegistryName is the project fork used while backend plugin packs are
+	// being developed ahead of the upstream registry.
+	ForkRegistryName = "gascity-packs-fork"
+	// ForkRegistrySource is the forked gascity-packs registry catalog.
+	ForkRegistrySource = "https://raw.githubusercontent.com/duncan4123/gascity-packs/main/registry.toml"
 )
 
 var registryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -44,6 +49,16 @@ func DefaultRegistry() Registry {
 	return Registry{Name: DefaultRegistryName, Source: DefaultRegistrySource}
 }
 
+// InitRegistries returns the registries that gc init should always consult for
+// backend plugin discovery while the plugin packs are staged across upstream and
+// the project fork.
+func InitRegistries() []Registry {
+	return []Registry{
+		DefaultRegistry(),
+		{Name: ForkRegistryName, Source: ForkRegistrySource},
+	}
+}
+
 // ConfigPath returns the registries.toml path for a Gas City home.
 func ConfigPath(home string) string {
 	return gchome.RegistriesPath(home)
@@ -56,13 +71,7 @@ func LoadConfig(home string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Config{
-				Schema: ConfigSchema,
-				Registries: []Registry{{
-					Name:   DefaultRegistryName,
-					Source: DefaultRegistrySource,
-				}},
-			}, nil
+			return Config{Schema: ConfigSchema, Registries: []Registry{DefaultRegistry()}}, nil
 		}
 		return cfg, fmt.Errorf("reading registries.toml: %w", err)
 	}
@@ -90,6 +99,38 @@ func EnsureDefaultRegistryConfig(home string) error {
 		}
 		return SaveConfig(home, Config{Registries: []Registry{DefaultRegistry()}})
 	})
+}
+
+// EnsureInitRegistryConfig ensures gc init can discover backend plugins from
+// both the upstream gascity-packs registry and the temporary project fork.
+func EnsureInitRegistryConfig(home string) error {
+	return WithConfigLock(home, func() error {
+		cfg, err := LoadConfig(home)
+		if err != nil {
+			return err
+		}
+		changed := false
+		for _, reg := range InitRegistries() {
+			if registryConfigured(cfg.Registries, reg) {
+				continue
+			}
+			cfg.Registries = append(cfg.Registries, reg)
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		return SaveConfig(home, cfg)
+	})
+}
+
+func registryConfigured(registries []Registry, target Registry) bool {
+	for _, reg := range registries {
+		if reg.Name == target.Name || reg.Source == target.Source {
+			return true
+		}
+	}
+	return false
 }
 
 // SaveConfig validates and writes registry configuration.

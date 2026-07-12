@@ -88,6 +88,38 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 	}
 }
 
+func TestOpenStoreAtForCityBackendPluginStoreTakesPrecedence(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := "/city"
+	backend := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "plugin",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("OpenBdStore called while backend plugin store is available")
+			return nil, nil
+		},
+		OpenBackendStore: func() (Store, error) {
+			return backend, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called while backend plugin store is available")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != backend {
+		t.Fatalf("Store = %T %#v, want backend plugin store", result.Store, result.Store)
+	}
+	if result.Diagnostic.Store != storeNameGascityBackend {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameGascityBackend)
+	}
+}
+
 func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{

@@ -325,9 +325,9 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		env[key] = ""
 	}
 	env["BEADS_DIR"] = dir + "/.beads"
-	if bdStoreBridgeUsesDoltliteBackend(dir) {
-		env["GC_BEADS_BACKEND"] = "doltlite"
-		env["BEADS_BACKEND"] = "doltlite"
+	if backend, ok := bdStoreBridgePluginBackend(dir); ok {
+		env["GC_BEADS_BACKEND"] = backend
+		env["BEADS_BACKEND"] = backend
 	} else {
 		env["GC_DOLT_HOST"] = host
 		env["BEADS_DOLT_SERVER_HOST"] = host
@@ -343,24 +343,27 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 	return env
 }
 
-func bdStoreBridgeUsesDoltliteBackend(dir string) bool {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")), "doltlite") ||
-		strings.EqualFold(strings.TrimSpace(os.Getenv("BEADS_BACKEND")), "doltlite") {
-		return true
+func bdStoreBridgePluginBackend(dir string) (string, bool) {
+	for _, key := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
+		if backend := strings.TrimSpace(os.Getenv(key)); isPluginBackendName(backend) {
+			return backend, true
+		}
 	}
 	data, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
 	if err != nil {
-		return false
+		return "", false
 	}
 	var meta struct {
-		Backend  string `json:"backend"`
-		Database string `json:"database"`
+		Backend string `json:"backend"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return false
+		return "", false
 	}
-	return strings.EqualFold(strings.TrimSpace(meta.Backend), "doltlite") ||
-		strings.EqualFold(strings.TrimSpace(meta.Database), "doltlite")
+	backend := strings.TrimSpace(meta.Backend)
+	if !isPluginBackendName(backend) {
+		return "", false
+	}
+	return backend, true
 }
 
 func decodeJSON(r io.Reader, dest any) error {

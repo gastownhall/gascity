@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -270,6 +271,13 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	return q
 }
 
+// CityReadyPartialLabel is the partialAggregator label the federated
+// /beads/ready handler records city-store failures under. ReadyBeads.
+// CityReadAuthoritative keys off it (partialAggregator records failures as
+// "<label>: <error>") to tell a partial read that omitted the city store —
+// where graph control beads live — apart from one that only lost a rig store.
+const CityReadyPartialLabel = "city"
+
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
@@ -287,7 +295,29 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		// /beads/ready is authoritative live readiness by default: it reads the
+		// live backing store so no caller ever sees a closed or newly-blocked
+		// bead reported as ready (TestBeadReadyUsesLiveLookup). The control
+		// dispatcher (api.Client.ListReadyBeads) opts into cached=true to read
+		// the supervisor cache projection instead, so its tight serve loop
+		// avoids the blocking/failing backing-store scan the control-ready cache
+		// exists to avoid. For the supervisor's CachingStore the Cached handle's
+		// ReadyCacheOnly reads the in-memory projection and never primes the
+		// backing store (returning ErrCacheUnavailable when the projection is not
+		// live, which the federation surfaces as a partial/outage so the
+		// dispatcher backs off instead of hanging on a cold cache); an unrelated
+		// dirty bead is scoped out per-bead rather than declining the whole read,
+		// so it cannot stall the fallback-free control lane. For a plain store
+		// both handles delegate to the same Ready, so non-caching backends behave
+		// identically on either path.
+		handles := beads.HandlesFor(store)
+		var ready []beads.Bead
+		var err error
+		if input.Cached {
+			ready, err = handles.Cached.ReadyCacheOnly()
+		} else {
+			ready, err = handles.Live.Ready()
+		}
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -312,7 +342,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// `bd ready` would never surface it. In production BeadStores() also returns
 	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
 	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
+	federate(CityReadyPartialLabel, s.state.CityBeadStore())
 	cityName := s.state.CityName()
 	for _, rigName := range rigNames {
 		if rigName == cityName {
@@ -324,6 +354,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
+
+	// Apply the control-ready predicate and per-group limit server-side, before
+	// serialization, when the caller (the control dispatcher) supplied them. This
+	// keeps the dispatcher from pulling the full federated ready set across the
+	// API just to discard everything that is not its own control work. An
+	// inactive filter (no control params) returns the set unchanged, so generic
+	// callers keep the full ready list.
+	all = beadReadyControlFilter(input).Apply(all)
 
 	if all == nil {
 		all = []beads.Bead{}
@@ -339,6 +377,35 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			PartialErrors: pa.messages(),
 		},
 	}, nil
+}
+
+// beadReadyControlFilter builds the server-side control-ready filter from the
+// /beads/ready query params. It is inactive (a no-op over the federated set)
+// unless control_assignees or control_routes is set, so generic ready callers
+// (CLI, dashboard) are unaffected.
+func beadReadyControlFilter(input *BeadReadyInput) beads.ControlReadyFilter {
+	return beads.ControlReadyFilter{
+		Assignees:     splitControlReadyList(input.ControlAssignees),
+		Routes:        splitControlReadyList(input.ControlRoutes),
+		PerGroupLimit: input.ControlLimit,
+	}
+}
+
+// splitControlReadyList splits a comma-separated control-ready param into a
+// trimmed, empty-free slice. Control assignees and routes are session names and
+// template/route identifiers, which never contain commas.
+func splitControlReadyList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.

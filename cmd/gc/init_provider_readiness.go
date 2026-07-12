@@ -75,19 +75,15 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		}
 	}
 	if !opts.skipProviderReadiness {
-		if err := runInitProviderPreflight(cityPath, stdout, stderr, opts.commandName); err != nil {
+		if _, err := loadInitProviderPreflightConfig(cityPath); err != nil {
+			fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", opts.commandName) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", opts.commandName, err)                //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", opts.commandName)                     //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	} else if !opts.showProgress && stdout != nil {
-		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
 	if err := ensureInitRemoteImportsInstalled(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: installing imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	hasRemoteImports, err := initHasRemoteImports(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: reading imports for provider readiness: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -99,10 +95,16 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if !opts.skipProviderReadiness && hasRemoteImports {
+	if err := prepareBeadsBackendPluginForInit(cityPath, cfg, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "%s: preparing beads backend plugin: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !opts.skipProviderReadiness {
 		if err := runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, opts.commandName); err != nil {
 			return 1
 		}
+	} else if !opts.showProgress && stdout != nil {
+		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
 	prefix := config.EffectiveHQPrefix(cfg)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {

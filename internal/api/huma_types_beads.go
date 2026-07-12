@@ -30,6 +30,31 @@ type BeadListInput struct {
 type BeadReadyInput struct {
 	CityScope
 	BlockingParam
+	// Cached opts into the supervisor cache projection instead of the
+	// authoritative live backing store. The control dispatcher
+	// (api.Client.ListReadyBeads) sets it so its tight serve loop reads ready
+	// work from the in-memory projection and avoids the blocking/failing
+	// backing-store scan the control-ready cache exists to avoid; cache
+	// unavailability surfaces as a partial/outage so the dispatcher backs off.
+	// Omitted (the default) the endpoint stays authoritative live readiness, so
+	// a closed or newly-blocked bead is never reported as ready.
+	Cached bool `query:"cached" required:"false" doc:"Serve ready work from the supervisor cache projection (eventually consistent) instead of the authoritative live backing store. Defaults to false (live)."`
+	// ControlAssignees and ControlRoutes opt into server-side control-ready
+	// filtering: only ready beads assigned to one of the comma-separated
+	// assignees, or unassigned beads routed (by run-target, routed-to, or
+	// execution-routed-to metadata) to one of the comma-separated routes, are
+	// returned. The control dispatcher sends its resolved assignee and route sets
+	// so the supervisor filters its control work out of the federated ready set
+	// before serialization, instead of shipping every rig's ready beads for the
+	// dispatcher to filter client-side. Empty (the default) returns the full
+	// federated ready set unchanged, so generic callers (CLI, dashboard) are
+	// unaffected.
+	ControlAssignees string `query:"control_assignees" required:"false" doc:"Comma-separated assignees: keep only ready beads assigned to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side."`
+	ControlRoutes    string `query:"control_routes" required:"false" doc:"Comma-separated routes: keep unassigned ready beads routed (run-target/routed-to/execution-routed-to) to one of these. Empty returns the full ready set. Used by the control dispatcher to filter server-side."`
+	// ControlLimit bounds how many ready beads each control assignee and each
+	// control route may contribute (per-group; 0 = unbounded). It is applied with
+	// ControlAssignees/ControlRoutes and ignored when both are empty.
+	ControlLimit int `query:"control_limit" required:"false" minimum:"0" doc:"Per-group cap on ready beads contributed by each control assignee and route. 0 = unbounded. Ignored unless control_assignees or control_routes is set."`
 }
 
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.

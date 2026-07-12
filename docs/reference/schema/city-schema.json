@@ -1011,6 +1011,18 @@
           "type": "string",
           "description": "Backend selects the bd storage engine when Provider is \"bd\".\nEmpty defaults to \"dolt\"; T3Code uses \"doltlite\" for local dev stores."
         },
+        "postgres_url": {
+          "type": "string",
+          "description": "PostgresURL is the password-free connection URL used by the native\nupstream bd Postgres backend. Supply the password through the Beads/GC\ncredential environment rather than embedding it in city.toml."
+        },
+        "postgres_schema": {
+          "type": "string",
+          "description": "PostgresSchema optionally pins the city scope schema. Rig schemas are\nderived from the backend pack's scope namespace policy."
+        },
+        "sqlite_path": {
+          "type": "string",
+          "description": "SQLitePath overrides the native SQLite database path. Relative paths are\nresolved beneath each scope's .beads directory."
+        },
         "event_hooks": {
           "type": "boolean",
           "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close) that shell out to\n`gc event emit` on every bead write. Defaults to true. Set to false\nonce the controller's native cache-events already observe bead changes\n(the bd_hooks doctor gate): the lifecycle then removes the event hooks\n(leaving git hooks untouched) and stops reinstalling them, clearing the\nper-write churn and the native-store gate.",

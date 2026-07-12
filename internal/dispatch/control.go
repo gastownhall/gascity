@@ -400,6 +400,9 @@ func IsTransientControllerError(err error) bool {
 	if errors.Is(err, errTransientControllerBoundary) {
 		return true
 	}
+	if errors.Is(err, ErrControllerAPIUnavailable) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	if isTransientWorkQueryFailure(msg) {
 		return true

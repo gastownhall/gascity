@@ -1520,6 +1520,54 @@ func TestInstantiateGraphWorkflowDefersAssignmentsUntilGraphWired(t *testing.T) 
 	}
 }
 
+func TestInstantiateSequentialGraphWorkflowEmbedsPastDependenciesOnCreate(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	base := beads.NewMemStore()
+	store := &recordingStore{Store: base}
+	recipe := &formula.Recipe{
+		Name: "review",
+		Steps: []formula.RecipeStep{
+			{
+				ID: "review", Title: "review", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			},
+			{ID: "review.validate-context", Title: "Validate report context", Type: "task"},
+			{ID: "review.write-report.spec", Title: "Step spec", Type: "spec"},
+			{ID: "review.write-report.iteration.1", Title: "Write review report", Type: "task"},
+			{ID: "review.write-report", Title: "Write review report", Type: "task", Metadata: map[string]string{"gc.kind": "ralph"}},
+			{ID: "review.workflow-finalize", Title: "Finalize workflow", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "review.write-report.iteration.1", DependsOnID: "review.validate-context", Type: "blocks"},
+			{StepID: "review.write-report", DependsOnID: "review.validate-context", Type: "blocks"},
+			{StepID: "review.write-report", DependsOnID: "review.write-report.iteration.1", Type: "blocks"},
+			{StepID: "review.workflow-finalize", DependsOnID: "review.write-report", Type: "blocks"},
+			{StepID: "review", DependsOnID: "review.workflow-finalize", Type: "blocks"},
+		},
+	}
+
+	if _, err := Instantiate(context.Background(), store, recipe, Options{}); err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	createdByRef := make(map[string]beads.Bead, len(store.created))
+	for _, created := range store.created {
+		createdByRef[created.Ref] = created
+	}
+	if got := createdByRef["review.write-report.iteration.1"].Needs; len(got) != 1 {
+		t.Fatalf("iteration create payload Needs = %#v, want dependency on validate-context", got)
+	}
+	if got := createdByRef["review.write-report"].Needs; len(got) != 2 {
+		t.Fatalf("ralph control create payload Needs = %#v, want two dependencies", got)
+	}
+	if got := createdByRef["review.workflow-finalize"].Needs; len(got) != 1 {
+		t.Fatalf("finalizer create payload Needs = %#v, want dependency on ralph control", got)
+	}
+}
+
 func TestInstantiateWithIdempotencyKey(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{

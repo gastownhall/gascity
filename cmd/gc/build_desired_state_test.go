@@ -60,6 +60,10 @@ func (s *readyStaticStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
 	return out, nil
 }
 
+func (s *readyStaticStore) ReadyCacheOnly(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return s.Ready(query...)
+}
+
 type controllerDemandHandlesStore struct {
 	beads.Store
 	handles beads.StoreHandles

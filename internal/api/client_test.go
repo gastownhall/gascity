@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -1361,6 +1362,82 @@ func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
 	}
 	if !ShouldFallback(err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
+	}
+}
+
+func TestClientListReadyBeadsPreservesPartial(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/beads/ready" {
+			t.Fatalf("path = %q, want /v0/city/alpha/beads/ready", r.URL.Path)
+		}
+		// The whole point of the control-ready path is that the dispatcher reads
+		// the cache projection, not the live store. If a refactor dropped the
+		// cached opt-in the dispatcher would silently revert to authoritative live
+		// reads — the exact blocking/failing scan this change exists to avoid.
+		if got := r.URL.Query().Get("cached"); got != "true" {
+			t.Errorf("cached query = %q, want %q", got, "true")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items":          []map[string]any{},
+			"total":          0,
+			"partial":        true,
+			"partial_errors": []string{CityReadyPartialLabel + ": read ready: store slow"},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.ListReadyBeads()
+	if err != nil {
+		t.Fatalf("ListReadyBeads: %v", err)
+	}
+	if !got.Partial {
+		t.Errorf("Partial = false, want true")
+	}
+	if len(got.PartialErrors) != 1 || !strings.HasPrefix(got.PartialErrors[0], CityReadyPartialLabel+": ") {
+		t.Errorf("PartialErrors = %v, want a city-store entry", got.PartialErrors)
+	}
+	// A partial read that omitted the city store is not authoritative for the
+	// control-ready scan: graph control beads live only in the city store.
+	if got.CityReadAuthoritative() {
+		t.Errorf("CityReadAuthoritative = true for a city-store partial read")
+	}
+}
+
+// TestClientListReadyBeadsSendsControlFilter proves the dispatcher's control
+// predicate and per-group limit are pushed into the request, so the supervisor
+// filters the federated ready set server-side instead of returning every rig's
+// ready beads for the client to filter.
+func TestClientListReadyBeadsSendsControlFilter(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("cached"); got != "true" {
+			t.Errorf("cached = %q, want true", got)
+		}
+		if got := q.Get("control_assignees"); got != "sess-a,sess-b" {
+			t.Errorf("control_assignees = %q, want sess-a,sess-b", got)
+		}
+		if got := q.Get("control_routes"); got != "route-1" {
+			t.Errorf("control_routes = %q, want route-1", got)
+		}
+		if got := q.Get("control_limit"); got != "20" {
+			t.Errorf("control_limit = %q, want 20", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{}, "total": 0,
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	if _, err := c.ListReadyBeads(beads.ControlReadyFilter{
+		Assignees:     []string{"sess-a", "sess-b"},
+		Routes:        []string{"route-1"},
+		PerGroupLimit: 20,
+	}); err != nil {
+		t.Fatalf("ListReadyBeads: %v", err)
 	}
 }
 

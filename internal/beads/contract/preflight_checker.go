@@ -109,14 +109,14 @@ func (c PreflightChecker) checkProvider() PreflightCheckResult {
 // store contract needed for native-store preflight and fallback decisions.
 func ProviderUsesBDContract(provider string) bool {
 	provider = strings.TrimSpace(provider)
-	if provider == "" || provider == "bd" {
+	if provider == "" || provider == "bd" || provider == "plugin" {
 		return true
 	}
 	if !strings.HasPrefix(provider, "exec:") {
 		return false
 	}
 	base := strings.TrimSuffix(filepath.Base(strings.TrimPrefix(provider, "exec:")), ".sh")
-	return base == "gc-beads-bd"
+	return base == "gc-beads-bd" || base == "gc-beads-doltlite-bd"
 }
 
 func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) PreflightCheckResult {
@@ -132,6 +132,8 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 	switch metadata.Backend {
 	case "dolt":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is dolt", details)
+	case "doltlite":
+		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is doltlite; native Dolt store is not applicable", details)
 	case "postgres":
 		if hasDSN && !hasSplit {
 			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
@@ -293,6 +295,11 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "dolt metadata contains postgres fields", details)
 		}
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
+	case "doltlite":
+		if hasDSN || hasSplit {
+			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "doltlite metadata contains postgres fields", details)
+		}
+		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses doltlite plugin shape", details)
 	case "postgres":
 		if hasDSN {
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", details)

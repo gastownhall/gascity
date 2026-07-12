@@ -4727,10 +4727,30 @@ func TestResolveSlingStoreRootUsesCanonicalRigRoot(t *testing.T) {
 		},
 	}
 
-	got := resolveSlingStoreRoot(cfg, cityPath, "plain text", config.Agent{Dir: "alpha"})
+	got := resolveSlingStoreRoot(cfg, cityPath, "plain text", config.Agent{Dir: "alpha"}, "alpha/worker", "")
 	want := filepath.Join(cityPath, "rigs", "alpha")
 	if got != want {
 		t.Fatalf("resolveSlingStoreRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveSlingStoreRootUsesQualifiedRigForDirlessRigScopedAgent(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city")
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "testrig", Path: filepath.Join("rigs", "testrig"), Prefix: "te"},
+		},
+	}
+
+	got := resolveSlingStoreRoot(cfg, cityPath, "plain text", config.Agent{Name: "run-operator", BindingName: "gc", Scope: "rig"}, "testrig/gc.run-operator", "")
+	want := filepath.Join(cityPath, "rigs", "testrig")
+	if got != want {
+		t.Fatalf("resolveSlingStoreRoot() = %q, want %q", got, want)
+	}
+
+	got = resolveSlingStoreRoot(cfg, cityPath, "plain text", config.Agent{Name: "run-operator", BindingName: "gc", Scope: "rig"}, "gc.run-operator", "testrig")
+	if got != want {
+		t.Fatalf("resolveSlingStoreRoot() with current rig = %q, want %q", got, want)
 	}
 }
 
@@ -4743,7 +4763,7 @@ func TestResolveSlingStoreRootPrefersBeadPrefixRig(t *testing.T) {
 		},
 	}
 
-	got := resolveSlingStoreRoot(cfg, cityPath, "be-123", config.Agent{Dir: "alpha"})
+	got := resolveSlingStoreRoot(cfg, cityPath, "be-123", config.Agent{Dir: "alpha"}, "alpha/worker", "")
 	want := filepath.Join(cityPath, "rigs", "beta")
 	if got != want {
 		t.Fatalf("resolveSlingStoreRoot() = %q, want %q", got, want)
@@ -4759,7 +4779,7 @@ func TestResolveSlingStoreRootUsesPrefixRigForConfiguredAllAlphaBeadID(t *testin
 		},
 	}
 
-	got := resolveSlingStoreRoot(cfg, cityPath, "FE-hello", config.Agent{Dir: "orders"})
+	got := resolveSlingStoreRoot(cfg, cityPath, "FE-hello", config.Agent{Dir: "orders"}, "orders/worker", "")
 	want := filepath.Join(cityPath, "rigs", "frontend")
 	if got != want {
 		t.Fatalf("resolveSlingStoreRoot() = %q, want %q", got, want)
@@ -4778,7 +4798,7 @@ func TestResolveSlingStoreRootHonorsHyphenatedRigPrefix(t *testing.T) {
 		},
 	}
 
-	got := resolveSlingStoreRoot(cfg, cityPath, "agent-diagnostics-hnn", config.Agent{Dir: "agent"})
+	got := resolveSlingStoreRoot(cfg, cityPath, "agent-diagnostics-hnn", config.Agent{Dir: "agent"}, "agent/worker", "")
 	want := filepath.Join(cityPath, "rigs", "agent-diag")
 	if got != want {
 		t.Fatalf("resolveSlingStoreRoot(agent-diagnostics-hnn) = %q, want %q (longest configured prefix should win)", got, want)
@@ -4786,7 +4806,7 @@ func TestResolveSlingStoreRootHonorsHyphenatedRigPrefix(t *testing.T) {
 
 	// Sanity check: a bead under the shorter "agent" prefix still resolves
 	// to that rig.
-	got = resolveSlingStoreRoot(cfg, cityPath, "agent-x1", config.Agent{Dir: "agent-diagnostics"})
+	got = resolveSlingStoreRoot(cfg, cityPath, "agent-x1", config.Agent{Dir: "agent-diagnostics"}, "agent-diagnostics/worker", "")
 	want = filepath.Join(cityPath, "rigs", "agent")
 	if got != want {
 		t.Fatalf("resolveSlingStoreRoot(agent-x1) = %q, want %q", got, want)
@@ -4802,7 +4822,7 @@ func TestResolveSlingStoreRootUsesCityRootForHQPrefix(t *testing.T) {
 		},
 	}
 
-	got := resolveSlingStoreRoot(cfg, cityPath, "hq-123", config.Agent{Dir: "alpha"})
+	got := resolveSlingStoreRoot(cfg, cityPath, "hq-123", config.Agent{Dir: "alpha"}, "alpha/worker", "")
 	if got != cityPath {
 		t.Fatalf("resolveSlingStoreRoot() = %q, want city root %q", got, cityPath)
 	}

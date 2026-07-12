@@ -1283,7 +1283,7 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 		return nil
 	}
 
-	return allAA
+	return filterOrdersForBackend(cs.cityPath, cfg, allAA)
 }
 
 // --- api.StateMutator implementation ---

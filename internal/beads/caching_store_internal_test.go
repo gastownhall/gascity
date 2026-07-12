@@ -4276,3 +4276,204 @@ func TestCachingStoreReadyReturnsCanonicalOrder(t *testing.T) {
 		t.Fatalf("cachedReadyOnly limit-3 order = %v, want %v", ids, want[:3])
 	}
 }
+
+// TestCachedReadyOnlySkipsUnrelatedDirtyBeadInsteadOfStalling is a regression
+// for the control-ready whole-store dirtiness stall. cachedReadyOnly used to
+// decline the entire read whenever any bead was dirty (len(c.dirty) > 0), so a
+// single unrelated dirty bead — mail, a session-lifecycle projection, an
+// unrelated step — returned ErrCacheUnavailable for every control-ready read
+// until the next reconcile (up to the 30–120s adaptive interval). The control
+// dispatcher reads cache-only with no live fallback, so that stalled all graph
+// control dispatch on unrelated dirtiness. The dirty bead is now skipped
+// per-bead (mirroring cachedGetOnly's existing per-bead dirty decline): the rest
+// of the ready set is served and the dirty bead is not served from its stale
+// row.
+func TestCachedReadyOnlySkipsUnrelatedDirtyBeadInsteadOfStalling(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	ready1, err := backing.Create(Bead{Title: "ready-1"})
+	if err != nil {
+		t.Fatalf("Create ready-1: %v", err)
+	}
+	ready2, err := backing.Create(Bead{Title: "ready-2"})
+	if err != nil {
+		t.Fatalf("Create ready-2: %v", err)
+	}
+	unrelated, err := backing.Create(Bead{Title: "unrelated"})
+	if err != nil {
+		t.Fatalf("Create unrelated: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Simulate an unconfirmed cross-process write-through conflict on a bead the
+	// control-ready query does not care about.
+	cache.mu.Lock()
+	cache.dirty[unrelated.ID] = struct{}{}
+	cache.mu.Unlock()
+
+	got, err := cache.cachedReadyOnly(ReadyQuery{})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly with one unrelated dirty bead = %v, want no error", err)
+	}
+	ids := map[string]bool{}
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if !ids[ready1.ID] || !ids[ready2.ID] {
+		t.Fatalf("cachedReadyOnly ids = %v, want ready-1 (%s) and ready-2 (%s) served despite unrelated dirty bead", ids, ready1.ID, ready2.ID)
+	}
+	if ids[unrelated.ID] {
+		t.Fatalf("cachedReadyOnly served dirty bead %s from its stale row; want it skipped", unrelated.ID)
+	}
+}
+
+// TestCachedReadyOnlySkipsCandidateWithDirtyDependency proves the per-bead skip
+// preserves the false-positive guarantee the dirty flag exists for (#2927): a
+// candidate whose blocking dependency is dirty cannot have its readiness
+// confirmed from cache — the dep's cached "closed" status may be stale — so it
+// is skipped rather than dispatched off an unconfirmed row. Unrelated ready
+// beads are still served.
+func TestCachedReadyOnlySkipsCandidateWithDirtyDependency(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	dep, err := backing.Create(Bead{Title: "dep"})
+	if err != nil {
+		t.Fatalf("Create dep: %v", err)
+	}
+	dependent, err := backing.Create(Bead{Title: "dependent", Dependencies: []Dep{{DependsOnID: dep.ID, Type: "blocks"}}})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+	other, err := backing.Create(Bead{Title: "other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Present the dependency as closed and pin the dependent's blocking edge,
+	// independent of how Prime loaded deps, so the dependent is a ready candidate.
+	cache.mu.Lock()
+	depBead := cache.beads[dep.ID]
+	depBead.Status = "closed"
+	cache.beads[dep.ID] = depBead
+	cache.deps[dependent.ID] = []Dep{{IssueID: dependent.ID, DependsOnID: dep.ID, Type: "blocks"}}
+	cache.mu.Unlock()
+
+	containsID := func(rows []Bead, id string) bool {
+		for _, b := range rows {
+			if b.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Precondition: with a clean cache the dependent is ready (dep closed).
+	clean, err := cache.cachedReadyOnly(ReadyQuery{})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly clean: %v", err)
+	}
+	if !containsID(clean, dependent.ID) {
+		t.Fatalf("clean cachedReadyOnly missing dependent %s; blocking edge not honored", dependent.ID)
+	}
+
+	// Mark the (closed) dependency dirty: its cached status is now unconfirmed,
+	// so the dependent's readiness can no longer be decided from cache.
+	cache.mu.Lock()
+	cache.dirty[dep.ID] = struct{}{}
+	cache.mu.Unlock()
+
+	got, err := cache.cachedReadyOnly(ReadyQuery{})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly with dirty dependency = %v, want no error", err)
+	}
+	if containsID(got, dependent.ID) {
+		t.Fatalf("cachedReadyOnly served dependent %s whose blocking dep %s is dirty; want it skipped", dependent.ID, dep.ID)
+	}
+	if !containsID(got, other.ID) {
+		t.Fatalf("cachedReadyOnly dropped unrelated ready bead %s", other.ID)
+	}
+}
+
+// TestCachedReadyOnlyServesCandidateWithDirtyNonBlockingDependency proves the
+// dirty-dependency skip is scoped to ready-blocking dependency types. A dirty
+// non-blocking dependency (parent-child, tracks, relates-to) can never change a
+// candidate's cached readiness — cachedBeadReady consults only blocking deps —
+// so it must not suppress an otherwise-ready candidate. graph.v2 control steps
+// hold a non-blocking parent-child edge to their workflow root, so gating
+// dependencyDirty on the blocking-type predicate keeps a race-dirty root from
+// starving its ready child control steps (the correlated-skip class this PR
+// removes at whole-store granularity, here at root granularity).
+func TestCachedReadyOnlyServesCandidateWithDirtyNonBlockingDependency(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	root, err := backing.Create(Bead{Title: "root"})
+	if err != nil {
+		t.Fatalf("Create root: %v", err)
+	}
+	child, err := backing.Create(Bead{Title: "child", Dependencies: []Dep{{DependsOnID: root.ID, Type: "parent-child"}}})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Pin the child's non-blocking parent-child edge to the root, independent of
+	// how Prime loaded deps. The root stays open: a parent-child edge never gates
+	// readiness, so the child is a ready candidate regardless of the root's status.
+	cache.mu.Lock()
+	cache.deps[child.ID] = []Dep{{IssueID: child.ID, DependsOnID: root.ID, Type: "parent-child"}}
+	cache.mu.Unlock()
+
+	containsID := func(rows []Bead, id string) bool {
+		for _, b := range rows {
+			if b.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Precondition: with a clean cache the child is ready (non-blocking dep does
+	// not gate it).
+	clean, err := cache.cachedReadyOnly(ReadyQuery{})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly clean: %v", err)
+	}
+	if !containsID(clean, child.ID) {
+		t.Fatalf("clean cachedReadyOnly missing child %s; non-blocking parent-child edge should not gate readiness", child.ID)
+	}
+
+	// Mark the root dirty: its cached status is now unconfirmed, but it is only a
+	// non-blocking parent-child dependency of the child, so it cannot affect the
+	// child's readiness. The child must still be served; only the dirty root is
+	// skipped from its own stale row.
+	cache.mu.Lock()
+	cache.dirty[root.ID] = struct{}{}
+	cache.mu.Unlock()
+
+	got, err := cache.cachedReadyOnly(ReadyQuery{})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly with dirty non-blocking dependency = %v, want no error", err)
+	}
+	if !containsID(got, child.ID) {
+		t.Fatalf("cachedReadyOnly dropped child %s whose only dirty dep %s is a non-blocking parent-child edge; want it served", child.ID, root.ID)
+	}
+	if containsID(got, root.ID) {
+		t.Fatalf("cachedReadyOnly served dirty root %s from its stale row; want it skipped", root.ID)
+	}
+}

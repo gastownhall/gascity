@@ -16,6 +16,7 @@ import (
 // omitted (json:"omitempty").
 func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
 	h := storehealth.Compute(cityPath, sizeBytes, liveRows, lastGCAt, lastGCStatus)
+	h.Path = resolvedStoreHealthPath(cityPath)
 	out := &StoreHealth{
 		Path:        h.Path,
 		SizeBytes:   h.SizeBytes,
@@ -31,15 +32,22 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 	return out
 }
 
-// collectStoreHealth measures the Dolt store at cityPath and the latest
+// collectStoreHealth measures the backend store at cityPath and the latest
 // maintenance event via ep, returning a populated *StoreHealth.
 // liveRowCount provides the live row count; callers without a store pass
 // nil and LiveRows is reported as zero.
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
-	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
+	size := storehealth.WalkSize(resolvedStoreHealthPath(cityPath))
 	rows := liveRowCount(store)
 	lastAt, lastStatus := storehealth.LastMaintenance(ep)
 	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
+}
+
+func resolvedStoreHealthPath(cityPath string) string {
+	if path, ok := beadsBackendPluginStorePath(cityPath); ok {
+		return path
+	}
+	return storehealth.StorePath(cityPath)
 }
 
 // liveRowCount returns the number of beads known to store, or 0 when

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +60,39 @@ func TestStoreHealthFromInputsFormatsLastGCAsRFC3339(t *testing.T) {
 	}
 	if h.LastGCStatus != "success" {
 		t.Errorf("LastGCStatus = %q, want success", h.LastGCStatus)
+	}
+}
+
+func TestStoreHealthFromInputsUsesPluginStorePath(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[beads]
+provider = "plugin"
+backend = "sqliteish"
+
+[workspace]
+includes = ["packs/sqliteish"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packDir := filepath.Join(cityPath, "packs", "sqliteish")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`[pack]
+name = "sqliteish"
+schema = 2
+
+[[backend_plugins]]
+backend = "sqliteish"
+store_path = ".beads/sqliteish"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := storeHealthFromInputs(cityPath, 0, 0, time.Time{}, "")
+	want := filepath.Join(cityPath, ".beads", "sqliteish")
+	if h.Path != want {
+		t.Fatalf("Path = %q, want plugin store path %q", h.Path, want)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1451,7 +1452,7 @@ func TestLoadMetadataStateReturnsZeroWhenFileMissing(t *testing.T) {
 	if ok {
 		t.Fatal("LoadMetadataState() ok = true, want false for missing file")
 	}
-	if state != (MetadataState{}) {
+	if !reflect.DeepEqual(state, MetadataState{}) {
 		t.Fatalf("LoadMetadataState() state = %+v, want zero value", state)
 	}
 }
@@ -1470,7 +1471,7 @@ func TestLoadMetadataStateAcceptsEmptyObject(t *testing.T) {
 	if !ok {
 		t.Fatal("LoadMetadataState({}) ok = false, want true")
 	}
-	if state != (MetadataState{}) {
+	if !reflect.DeepEqual(state, MetadataState{}) {
 		t.Fatalf("LoadMetadataState({}) state = %+v, want zero value", state)
 	}
 }
@@ -1523,6 +1524,14 @@ func TestLoadMetadataStateValidFixtures(t *testing.T) {
 				Database: "beads",
 			},
 		},
+		{
+			name:    "plugin backend name permitted",
+			fixture: "reject_unknown_backend.json",
+			want: MetadataState{
+				Database: "beads",
+				Backend:  "postgress",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1534,7 +1543,7 @@ func TestLoadMetadataStateValidFixtures(t *testing.T) {
 			if !ok {
 				t.Fatalf("LoadMetadataState(%s) ok = false, want true", tc.fixture)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("LoadMetadataState(%s) = %+v, want %+v", tc.fixture, got, tc.want)
 			}
 		})
@@ -1552,11 +1561,6 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			name:            "E1 invalid json",
 			fixture:         "reject_invalid_json.json",
 			wantErrContains: "invalid metadata.json:",
-		},
-		{
-			name:            "E2 unknown backend",
-			fixture:         "reject_unknown_backend.json",
-			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, postgres)`,
 		},
 		{
 			name:            "E3 mixed backends fires before required-fields",
@@ -1620,7 +1624,7 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			if ok {
 				t.Fatalf("LoadMetadataState(%s) ok = true, want false on rejection", tc.fixture)
 			}
-			if state != (MetadataState{}) {
+			if !reflect.DeepEqual(state, MetadataState{}) {
 				t.Fatalf("LoadMetadataState(%s) state = %+v, want zero value on rejection", tc.fixture, state)
 			}
 
@@ -1658,7 +1662,7 @@ func TestLoadMetadataStateSurfacesIOErrors(t *testing.T) {
 	if ok {
 		t.Fatalf("LoadMetadataState() ok = true on IO error")
 	}
-	if state != (MetadataState{}) {
+	if !reflect.DeepEqual(state, MetadataState{}) {
 		t.Fatalf("LoadMetadataState() state = %+v on IO error, want zero", state)
 	}
 	var parseErr *MetadataParseError

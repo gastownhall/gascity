@@ -213,8 +213,7 @@ func newIsolatedTierBEnv(t *testing.T, sessionProvider string) *helpers.Env {
 	}
 
 	return helpers.NewEnv(gcBin, gcHome, runtimeDir).
-		With("GC_BEADS", "file").
-		With("GC_DOLT", "skip").
+		WithFastFileBeads().
 		With("GC_SESSION", sessionProvider)
 }
 

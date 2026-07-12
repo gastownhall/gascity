@@ -76,6 +76,9 @@ func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string)
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" && backendRequiresDBOverride(env["GC_BEADS_BACKEND"]) {
+			args = bdArgsWithDBOverride(args, env["BEADS_DIR"])
+		}
 		start := time.Now()
 		trace := newBDExecTrace(start, dir, name, args)
 		trace("start", nil)
@@ -111,6 +114,35 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 			parent, ctx, name, timeout, start, out, stderr.String(), err)
 		trace(status, traceErr)
 		return out, resultErr
+	}
+}
+
+func bdArgsWithDBOverride(args []string, beadsDir string) []string {
+	beadsDir = strings.TrimSpace(beadsDir)
+	if beadsDir == "" || bdArgsHaveDBOverride(args) {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, "--db", beadsDir)
+	out = append(out, args...)
+	return out
+}
+
+func bdArgsHaveDBOverride(args []string) bool {
+	for _, arg := range args {
+		if arg == "--db" || strings.HasPrefix(arg, "--db=") {
+			return true
+		}
+	}
+	return false
+}
+
+func backendRequiresDBOverride(backend string) bool {
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "", "dolt", "postgres", "sqlite", "mysql":
+		return false
+	default:
+		return true
 	}
 }
 

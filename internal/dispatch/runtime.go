@@ -135,6 +135,15 @@ var ErrControlPending = errors.New("workflow control pending")
 // that cannot become valid by waiting.
 var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
 
+// ErrControllerAPIUnavailable reports that the supervisor/controller API used
+// to read control-ready work could not be reached (disabled via the GC_NO_API
+// escape hatch, or the controller is down/restarting). IsTransientControllerError
+// treats it as transient so the long-running control-dispatcher serve loop backs
+// off and retries instead of exiting the process; the cache-backed control-ready
+// scan has no direct-store fallback, so a hard error there would crash-loop the
+// dispatcher whenever the API blips.
+var ErrControllerAPIUnavailable = errors.New("controller API unavailable")
+
 // ProcessControl executes a graph.v2 control bead.
 //
 // The current graph.v2 runtime assumes a single controller processes a given

@@ -27,6 +27,31 @@ type Resolved struct {
 	Source   Source
 }
 
+// ProvisionConfig contains the process-level inputs for creating a managed
+// local PostgreSQL database. Keeping these reads in pgauth preserves the rule
+// that PostgreSQL environment access has one auditable boundary.
+type ProvisionConfig struct {
+	Database string
+	User     string
+	Host     string
+	Port     string
+	Password string
+	AdminURL string
+}
+
+// ProvisionConfigFromEnv resolves local-provisioning overrides using the
+// Gas City names first and the upstream Beads aliases second.
+func ProvisionConfigFromEnv() ProvisionConfig {
+	return ProvisionConfig{
+		Database: firstNonEmpty(os.Getenv("GC_POSTGRES_DATABASE"), os.Getenv("BEADS_POSTGRES_DATABASE")),
+		User:     firstNonEmpty(os.Getenv("GC_POSTGRES_USER"), os.Getenv("BEADS_POSTGRES_USER")),
+		Host:     firstNonEmpty(os.Getenv("GC_POSTGRES_HOST"), os.Getenv("BEADS_POSTGRES_HOST")),
+		Port:     firstNonEmpty(os.Getenv("GC_POSTGRES_PORT"), os.Getenv("BEADS_POSTGRES_PORT")),
+		Password: firstNonEmpty(os.Getenv("GC_POSTGRES_PASSWORD"), os.Getenv("BEADS_PG_PASSWORD"), os.Getenv("BEADS_POSTGRES_PASSWORD")),
+		AdminURL: firstNonEmpty(os.Getenv("GC_POSTGRES_ADMIN_URL"), os.Getenv("BEADS_POSTGRES_ADMIN_URL")),
+	}
+}
+
 // Source identifies the resolution tier that supplied Password.
 //
 // String returns a stable snake_case identifier suitable for events,
@@ -38,7 +63,7 @@ type Source int
 const (
 	SourceNone                Source = iota // no tier supplied a value
 	SourceProjectedGC                       // envMap["GC_POSTGRES_PASSWORD"]
-	SourceProjectedBeads                    // envMap["BEADS_POSTGRES_PASSWORD"]
+	SourceProjectedBeads                    // envMap["BEADS_PG_PASSWORD"] or legacy BEADS_POSTGRES_PASSWORD
 	SourceProcessEnvGC                      // os.Getenv("GC_POSTGRES_PASSWORD")
 	SourceScopeFile                         // <scope>/.beads/.env BEADS_POSTGRES_PASSWORD
 	SourceProcessEnvBeads                   // os.Getenv("BEADS_POSTGRES_PASSWORD")
@@ -75,6 +100,20 @@ func (s Source) String() string {
 // ErrNoPasswordResolvable is returned (wrapped) when every resolution tier
 // supplies an empty value. Discriminate with errors.Is.
 var ErrNoPasswordResolvable = errors.New("no postgres password resolvable")
+
+// PostgresURL returns the process-level upstream bd Postgres URL override.
+// Keeping the ambient read in this package preserves the credential boundary:
+// callers receive a value but do not reach into Postgres environment state.
+func PostgresURL() string {
+	return firstNonEmpty(os.Getenv("GC_POSTGRES_URL"), os.Getenv("BEADS_POSTGRES_URL"))
+}
+
+// PasswordCommand returns the upstream bd rotating-password helper. The
+// value is a command reference rather than credential output; callers project
+// it explicitly because generic subprocess filtering removes credential keys.
+func PasswordCommand() string {
+	return strings.TrimSpace(os.Getenv("BEADS_PG_PASSWORD_COMMAND"))
+}
 
 // PermissivePermissionError reports a credentials-bearing file whose mode
 // permits group/other read/write/execute or owner execute. The resolver
@@ -132,7 +171,7 @@ func ResolveFromEnv(envMap map[string]string, scopeRoot string, endpoint Endpoin
 			return Resolved{User: user, Password: value, Source: SourceProjectedGC}, nil
 		}
 		// Tier 2: envMap["BEADS_POSTGRES_PASSWORD"]
-		if value := strings.TrimSpace(envMap["BEADS_POSTGRES_PASSWORD"]); value != "" {
+		if value := firstNonEmpty(envMap["BEADS_PG_PASSWORD"], envMap["BEADS_POSTGRES_PASSWORD"]); value != "" {
 			return Resolved{User: user, Password: value, Source: SourceProjectedBeads}, nil
 		}
 	}
@@ -143,14 +182,14 @@ func ResolveFromEnv(envMap map[string]string, scopeRoot string, endpoint Endpoin
 	}
 
 	// Tier 4: <scope>/.beads/.env BEADS_POSTGRES_PASSWORD (chmod-checked)
-	if value, err := readEnvValueChecked(storeLocalEnvPath(scopeRoot), "BEADS_POSTGRES_PASSWORD"); err != nil {
+	if value, err := readFirstEnvValueChecked(storeLocalEnvPath(scopeRoot), "BEADS_PG_PASSWORD", "BEADS_POSTGRES_PASSWORD"); err != nil {
 		return Resolved{}, err
 	} else if value != "" {
 		return Resolved{User: user, Password: value, Source: SourceScopeFile}, nil
 	}
 
 	// Tier 5: os.Getenv("BEADS_POSTGRES_PASSWORD")
-	if value := strings.TrimSpace(os.Getenv("BEADS_POSTGRES_PASSWORD")); value != "" {
+	if value := firstNonEmpty(os.Getenv("BEADS_PG_PASSWORD"), os.Getenv("BEADS_POSTGRES_PASSWORD")); value != "" {
 		return Resolved{User: user, Password: value, Source: SourceProcessEnvBeads}, nil
 	}
 
@@ -187,7 +226,29 @@ func ResolveFromEnv(envMap map[string]string, scopeRoot string, endpoint Endpoin
 // gc doctor (slice 4) calls this helper to probe the on-disk steady state
 // without invoking the full resolver chain.
 func ReadStoreLocalPassword(scopeRoot string) (string, error) {
-	return readEnvValueChecked(storeLocalEnvPath(scopeRoot), "BEADS_POSTGRES_PASSWORD")
+	return readFirstEnvValueChecked(storeLocalEnvPath(scopeRoot), "BEADS_PG_PASSWORD", "BEADS_POSTGRES_PASSWORD")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func readFirstEnvValueChecked(path string, keys ...string) (string, error) {
+	for _, key := range keys {
+		value, err := readEnvValueChecked(path, key)
+		if err != nil {
+			return "", err
+		}
+		if value != "" {
+			return value, nil
+		}
+	}
+	return "", nil
 }
 
 // DefaultCredentialsPath returns the default beads credentials file path

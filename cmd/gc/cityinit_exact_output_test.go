@@ -18,7 +18,7 @@ func TestCityInitExactOutput_DefaultScaffold(t *testing.T) {
 		t.Fatalf("doInit code = %d, want 0", code)
 	}
 	const wantStdout = "[1/8] Creating runtime scaffold\n" +
-		"[2/8] Installing hooks (Claude Code)\n" +
+		"[2/8] Installing workspace hooks\n" +
 		"[3/8] Writing default prompts\n" +
 		"[4/8] Writing pack.toml\n" +
 		"[5/8] Writing city configuration\n" +
@@ -51,7 +51,7 @@ func TestCityInitExactOutput_CommandProviderSkipReadiness(t *testing.T) {
 		t.Fatalf("cmdInitWithOptions code = %d, want 0", code)
 	}
 	const wantStdout = "[1/8] Creating runtime scaffold\n" +
-		"[2/8] Installing hooks (Claude Code)\n" +
+		"[2/8] Installing workspace hooks\n" +
 		"[3/8] Writing default prompts\n" +
 		"[4/8] Writing pack.toml\n" +
 		"[5/8] Writing city configuration\n" +

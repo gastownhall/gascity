@@ -131,6 +131,8 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "plugin")
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
 	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
@@ -565,6 +567,87 @@ func TestFinalizeInitReportsRemoteImportInstallFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "installing imports: sync failed") {
 		t.Fatalf("stderr = %q, want import install failure", stderr.String())
+	}
+}
+
+func TestFinalizeInitPreparesBackendPluginBeforeProviderPreflightSeed(t *testing.T) {
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "plugin")
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{
+		"user.name":  "Test User",
+		"user.email": "test@example.com",
+	})
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := ensureCityScaffold(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, "commands", "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	orderPath := filepath.Join(cityPath, "order.log")
+	markerPath := filepath.Join(cityPath, ".gc", "backend-prepared")
+	buildScript := filepath.Join(cityPath, "commands", "build", "run.sh")
+	if err := os.WriteFile(buildScript, []byte("#!/bin/sh\n"+
+		"printf 'prepare:%s\\n' \"$*\" >> "+shellQuotePath(orderPath)+"\n"+
+		"touch "+shellQuotePath(markerPath)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setupHook := filepath.Join(cityPath, "assets", "scripts", "setup-doltlite.sh")
+	if err := os.WriteFile(setupHook, []byte("#!/bin/sh\n"+
+		"test -f "+shellQuotePath(markerPath)+" || { echo 'plugin was not prepared before setup' >&2; exit 1; }\n"+
+		"printf 'setup:%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> "+shellQuotePath(orderPath)+"\n"+
+		"mkdir -p \"$BEADS_DIR\"\n"+
+		"printf '{\"backend\":\"doltlite\"}\\n' > \"$BEADS_DIR/metadata.json\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeCityToml(t, cityPath, `[workspace]
+name = "bright-lights"
+
+[beads]
+provider = "plugin"
+backend = "doltlite"
+`)
+	writePackToml(t, cityPath, `[pack]
+name = "bright-lights"
+schema = 2
+
+[[backend_plugins]]
+backend = "doltlite"
+setup_hook = "assets/scripts/setup-doltlite.sh"
+prepare_command = ["build", "backend", "--install"]
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName: "gc init",
+		noStart:     true,
+	})
+	if code != 0 {
+		t.Fatalf("finalizeInit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(orderPath)
+	if err != nil {
+		t.Fatalf("ReadFile(order.log): %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("order log = %q, want prepare followed by setup", string(data))
+	}
+	if lines[0] != "prepare:backend --install" {
+		t.Fatalf("first lifecycle step = %q, want prepare", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "setup:init ") {
+		t.Fatalf("second lifecycle step = %q, want setup init", lines[1])
 	}
 }
 

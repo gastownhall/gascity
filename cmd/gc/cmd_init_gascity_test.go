@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -43,6 +44,7 @@ func TestInitWizardConfigProviderFlagDefaultsToGascity(t *testing.T) {
 
 func TestRunWizardBlankTemplateChoiceUsesGascity(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -75,6 +77,43 @@ func TestDoInitDefaultTemplateImportsGascityPack(t *testing.T) {
 	}
 	if _, ok := packCfg.Imports["gascity"]; !ok {
 		t.Fatalf("default pack.toml imports = %v, want gascity entry:\n%s", packCfg.Imports, packData)
+	}
+}
+
+func TestDoInitDefaultTemplateInstallsTmuxScrollKeybindings(t *testing.T) {
+	f := fsys.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packData := f.Files[filepath.Join("/bright-lights", "pack.toml")]
+	var packCfg initPackConfig
+	if _, err := toml.Decode(string(packData), &packCfg); err != nil {
+		t.Fatalf("decoding pack.toml: %v", err)
+	}
+	found := false
+	for _, cmd := range packCfg.Global.SessionLive {
+		if strings.Contains(cmd, "assets/scripts/tmux-keybindings.sh") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pack.toml [global].session_live = %v, want tmux keybindings hook:\n%s", packCfg.Global.SessionLive, packData)
+	}
+
+	scriptPath := filepath.Join("/bright-lights", "assets", "scripts", "tmux-keybindings.sh")
+	script := string(f.Files[scriptPath])
+	for _, want := range []string{"WheelUpPane", "WheelDownPane", "copy-mode -e"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("%s missing %q:\n%s", scriptPath, want, script)
+		}
+	}
+	if got := f.Modes[scriptPath].Perm(); got != 0o755 {
+		t.Fatalf("%s mode = %v, want 0755", scriptPath, got)
 	}
 }
 

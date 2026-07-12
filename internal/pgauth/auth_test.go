@@ -736,6 +736,23 @@ func TestDefaultCredentialsPath_PointsUnderHomeOrAppData(t *testing.T) {
 	}
 }
 
+func TestProvisionConfigFromEnvPrefersGasCityNames(t *testing.T) {
+	clearProcessEnv(t)
+	t.Setenv("GC_POSTGRES_DATABASE", "gc_database")
+	t.Setenv("BEADS_POSTGRES_DATABASE", "beads_database")
+	t.Setenv("GC_POSTGRES_USER", "gc_user")
+	t.Setenv("BEADS_POSTGRES_USER", "beads_user")
+	t.Setenv("GC_POSTGRES_ADMIN_URL", "postgres://gc-admin/postgres")
+	t.Setenv("BEADS_POSTGRES_ADMIN_URL", "postgres://beads-admin/postgres")
+	t.Setenv("GC_POSTGRES_PASSWORD", "gc-secret")
+	t.Setenv("BEADS_PG_PASSWORD", "beads-secret")
+
+	got := ProvisionConfigFromEnv()
+	if got.Database != "gc_database" || got.User != "gc_user" || got.AdminURL != "postgres://gc-admin/postgres" || got.Password != "gc-secret" {
+		t.Fatalf("ProvisionConfigFromEnv = %+v", got)
+	}
+}
+
 // pathHasSuffix returns true when p ends with suffix (uses filepath
 // semantics so test passes on Windows and POSIX).
 func pathHasSuffix(p, suffix string) bool {

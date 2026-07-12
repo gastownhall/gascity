@@ -132,8 +132,7 @@ func TestMain(m *testing.M) {
 
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
 		Without("GC_SESSION"). // use real tmux, not subprocess
-		Without("GC_BEADS").   // use real bd (dolt-backed) provider
-		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
+		WithConfiguredBeadsBackend().
 		With("CLAUDE_CONFIG_DIR", dstClaudeDir)
 	testEnvC = testEnvC.With("PATH", providerBinDir+":"+testEnvC.Get("PATH"))
 

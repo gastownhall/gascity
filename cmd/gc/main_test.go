@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -3187,8 +3188,21 @@ func stubWizardProviderReadiness(t *testing.T, configured ...string) {
 	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
 }
 
+func stubWizardBeadsBackendChoices(t *testing.T, choices ...wizardBeadsBackendChoice) {
+	t.Helper()
+	old := configuredWizardBeadsBackendChoices
+	if len(choices) == 0 {
+		choices = []wizardBeadsBackendChoice{defaultWizardBeadsBackendChoice()}
+	}
+	configuredWizardBeadsBackendChoices = func(context.Context) ([]wizardBeadsBackendChoice, error) {
+		return choices, nil
+	}
+	t.Cleanup(func() { configuredWizardBeadsBackendChoices = old })
+}
+
 func TestRunWizardDefaults(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
+	stubWizardBeadsBackendChoices(t)
 	// One configured provider is auto-selected after the template choice.
 	stdin := strings.NewReader("\n")
 	var stdout bytes.Buffer
@@ -3217,6 +3231,9 @@ func TestRunWizardDefaults(t *testing.T) {
 	if !strings.Contains(out, "Choose your coding agent:") {
 		t.Errorf("stdout missing agent prompt: %q", out)
 	}
+	if !strings.Contains(out, "Choose your beads backend:") {
+		t.Errorf("stdout missing beads backend prompt: %q", out)
+	}
 }
 
 func TestRunWizardNilStdin(t *testing.T) {
@@ -3240,6 +3257,7 @@ func TestRunWizardNilStdin(t *testing.T) {
 
 func TestRunWizardSelectGemini(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stubWizardBeadsBackendChoices(t)
 	// Default template + Gemini CLI.
 	stdin := strings.NewReader("\ngemini\n")
 	var stdout bytes.Buffer
@@ -3255,6 +3273,7 @@ func TestRunWizardSelectGemini(t *testing.T) {
 
 func TestRunWizardSelectCodex(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stubWizardBeadsBackendChoices(t)
 	// Default template + Codex by number.
 	stdin := strings.NewReader("\n2\n")
 	var stdout bytes.Buffer
@@ -3262,6 +3281,121 @@ func TestRunWizardSelectCodex(t *testing.T) {
 
 	if wiz.defaultProvider != "codex" {
 		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "codex")
+	}
+}
+
+func TestRunWizardSelectCodexAndDoltliteBackend(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stubWizardBeadsBackendChoices(t,
+		defaultWizardBeadsBackendChoice(),
+		wizardBeadsBackendChoice{
+			Backend:     "doltlite",
+			DisplayName: "DoltLite",
+			Description: "plugin-backed local store, no Dolt server",
+		},
+	)
+	// Default gascity template + Codex by number + DoltLite backend by number.
+	stdin := strings.NewReader("\n2\n2\n")
+	var stdout bytes.Buffer
+	wiz := runWizard(stdin, &stdout)
+
+	if wiz.defaultProvider != "codex" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "codex")
+	}
+	if wiz.beadsBackend != "doltlite" {
+		t.Errorf("beadsBackend = %q, want doltlite", wiz.beadsBackend)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Choose your beads backend:") {
+		t.Errorf("stdout missing beads backend prompt: %q", out)
+	}
+}
+
+func TestDiscoverWizardBeadsBackendChoicesFromRegistry(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	home := os.Getenv("GC_HOME")
+	registryBody := `schema = 1
+
+[[pack]]
+name = "bd-gc-dl"
+description = "Plugin-backed DoltLite beads backend."
+source = "https://github.com/gastownhall/gascity-packs.git//bd-gc-dl"
+source_kind = "git"
+
+[[pack.plugin]]
+kind = "beads-backend"
+backend = "doltlite"
+display_name = "DoltLite"
+capabilities = ["local store", "no Dolt server"]
+
+[[pack]]
+name = "bd-native-postgres"
+description = "Native PostgreSQL backend."
+source = "https://github.com/gastownhall/gascity-packs.git//bd-native-postgres"
+source_kind = "git"
+
+[[pack.plugin]]
+kind = "beads-backend"
+backend = "postgres"
+display_name = "PostgreSQL (native bd)"
+capabilities = ["native", "sql-backend"]
+
+[[pack]]
+name = "bd-native-sqlite"
+description = "Native SQLite backend."
+source = "https://github.com/gastownhall/gascity-packs.git//bd-native-sqlite"
+source_kind = "git"
+
+[[pack.plugin]]
+kind = "beads-backend"
+backend = "sqlite"
+display_name = "SQLite (native bd)"
+capabilities = ["native", "sql-backend"]
+`
+	for _, name := range []string{packregistry.DefaultRegistryName, packregistry.ForkRegistryName} {
+		if err := packregistry.WriteCatalogCache(home, name, []byte(registryBody)); err != nil {
+			t.Fatalf("WriteCatalogCache(%s): %v", name, err)
+		}
+	}
+	missingRegistry := filepath.Join(t.TempDir(), "missing-registry.toml")
+	if err := packregistry.SaveConfig(home, packregistry.Config{Registries: []packregistry.Registry{{
+		Name:   packregistry.DefaultRegistryName,
+		Source: missingRegistry,
+	}, {
+		Name:   packregistry.ForkRegistryName,
+		Source: missingRegistry,
+	}}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	cached, _, err := packregistry.ReadCachedRegistryCatalog(home, packregistry.Registry{Name: packregistry.DefaultRegistryName, Source: missingRegistry})
+	if err != nil {
+		t.Fatalf("ReadCachedRegistryCatalog: %v", err)
+	}
+	if len(cached.Packs) != 3 {
+		t.Fatalf("cached registry = %+v, want three backend packs", cached)
+	}
+
+	choices, err := discoverWizardBeadsBackendChoices(context.Background())
+	if err != nil {
+		t.Fatalf("discoverWizardBeadsBackendChoices: %v", err)
+	}
+	if len(choices) != 4 {
+		t.Fatalf("choices = %+v, want built-in dolt plus three registry backends", choices)
+	}
+	if choices[0].Backend != "" || choices[0].DisplayName != "dolt" {
+		t.Fatalf("first choice = %+v, want built-in dolt default", choices[0])
+	}
+	if choices[1].Backend != "doltlite" || choices[1].DisplayName != "DoltLite" {
+		t.Fatalf("plugin choice = %+v, want DoltLite doltlite", choices[1])
+	}
+	if choices[1].Description != "local store, no Dolt server" {
+		t.Fatalf("plugin description = %q, want capabilities", choices[1].Description)
+	}
+	if choices[2].Backend != "postgres" || choices[2].DisplayName != "PostgreSQL (native bd)" {
+		t.Fatalf("postgres choice = %+v, want native postgres", choices[2])
+	}
+	if choices[3].Backend != "sqlite" || choices[3].DisplayName != "SQLite (native bd)" {
+		t.Fatalf("sqlite choice = %+v, want native sqlite", choices[3])
 	}
 }
 
@@ -3289,6 +3423,7 @@ func TestRunWizardCustomTemplate(t *testing.T) {
 
 func TestRunWizardGastownTemplate(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
+	stubWizardBeadsBackendChoices(t)
 	// Select gastown template + default agent.
 	stdin := strings.NewReader("3\n")
 	var stdout bytes.Buffer
@@ -3304,6 +3439,7 @@ func TestRunWizardGastownTemplate(t *testing.T) {
 
 func TestRunWizardGastownByName(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("gastown\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3315,6 +3451,7 @@ func TestRunWizardGastownByName(t *testing.T) {
 
 func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("tutorial\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3329,6 +3466,7 @@ func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
 
 func TestRunWizardRequiresExplicitSelectionWhenMultipleProvidersConfigured(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude", "codex")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("\n\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3340,6 +3478,7 @@ func TestRunWizardRequiresExplicitSelectionWhenMultipleProvidersConfigured(t *te
 
 func TestRunWizardRejectsProviderOutsideReadinessSet(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("\ncursor\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3351,6 +3490,7 @@ func TestRunWizardRejectsProviderOutsideReadinessSet(t *testing.T) {
 
 func TestRunWizardNoCustomCommandOption(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("\n4\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3365,6 +3505,7 @@ func TestRunWizardNoCustomCommandOption(t *testing.T) {
 
 func TestRunWizardEOFStdin(t *testing.T) {
 	stubWizardProviderReadiness(t, "claude")
+	stubWizardBeadsBackendChoices(t)
 	stdin := strings.NewReader("")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3762,7 +3903,7 @@ func TestInitWizardConfigFromFlagsRejectsUnknownTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	template, _ := cmd.Flags().GetString("template")
-	if _, _, err := initWizardConfigFromFlags(cmd, "", "", nil, template, "", hostedDoltInitOptions{}); err == nil {
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", nil, template, "", "", hostedDoltInitOptions{}); err == nil {
 		t.Fatal("expected error for unknown template")
 	}
 }
@@ -3811,7 +3952,7 @@ func TestInitWizardConfigFromFlagsDefaultProviderInfersProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultProvider, _ := cmd.Flags().GetString("default-provider")
-	wiz, mode, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, "", "", hostedDoltInitOptions{})
+	wiz, mode, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, "", "", "", hostedDoltInitOptions{})
 	if err != nil {
 		t.Fatalf("initWizardConfigFromFlags: %v", err)
 	}
@@ -3836,7 +3977,7 @@ func TestInitWizardConfigFromFlagsProvidersCanonicalOrder(t *testing.T) {
 	}
 	defaultProvider, _ := cmd.Flags().GetString("default-provider")
 	providers, _ := cmd.Flags().GetStringArray("providers")
-	wiz, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, providers, "", "", hostedDoltInitOptions{})
+	wiz, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, providers, "", "", "", hostedDoltInitOptions{})
 	if err != nil {
 		t.Fatalf("initWizardConfigFromFlags: %v", err)
 	}
@@ -3851,7 +3992,7 @@ func TestInitWizardConfigFromFlagsProvidersRequireDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	providers, _ := cmd.Flags().GetStringArray("providers")
-	if _, _, err := initWizardConfigFromFlags(cmd, "", "", providers, "", "", hostedDoltInitOptions{}); err == nil {
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", providers, "", "", "", hostedDoltInitOptions{}); err == nil {
 		t.Fatal("expected --providers without --default-provider to fail")
 	}
 }
@@ -3862,7 +4003,7 @@ func TestInitWizardConfigFromFlagsRejectsProviderListTypo(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, _ := cmd.Flags().GetString("provider")
-	_, _, err := initWizardConfigFromFlags(cmd, provider, "", nil, "", "", hostedDoltInitOptions{})
+	_, _, err := initWizardConfigFromFlags(cmd, provider, "", nil, "", "", "", hostedDoltInitOptions{})
 	if err == nil {
 		t.Fatal("expected deprecated --provider list typo to fail")
 	}
@@ -3881,7 +4022,7 @@ func TestInitWizardConfigFromFlagsTemplateCustomRejectsProviders(t *testing.T) {
 	}
 	template, _ := cmd.Flags().GetString("template")
 	defaultProvider, _ := cmd.Flags().GetString("default-provider")
-	if _, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, template, "", hostedDoltInitOptions{}); err == nil {
+	if _, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, template, "", "", hostedDoltInitOptions{}); err == nil {
 		t.Fatal("expected --template custom with provider flags to fail")
 	}
 }
