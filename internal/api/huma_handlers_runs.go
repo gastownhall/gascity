@@ -218,13 +218,18 @@ type cancelRunResult struct {
 	status   RunStatus // resulting run status
 }
 
-// cancelRun winds down the run rooted at runID across every workflow store: it
-// stamps the cancel-intent marker on each open root, then closes the root and its
-// still-OPEN member beads with a canceled outcome. It leaves already-terminal
-// runs (and already-closed members) untouched — closing a completed member would
-// rewrite its recorded outcome, since the bd-backed CloseAll stamps metadata on
-// every id before closing. Any store read/write failure is returned so the caller
-// reports a 5xx rather than a phantom success.
+// cancelRun winds down the run rooted at runID across every workflow store,
+// closing each open root and its still-OPEN member beads with a canceled
+// outcome. It reuses the workflow teardown close ordering (descendants before
+// the root, blockers before blocked) so a strict store accepts the batch. The
+// cancel-intent marker is stamped root-only, together with the root's own close:
+// on an atomic store the two commit as one transaction, so a failed close
+// persists neither and never strands an open, half-marked root; on a non-atomic
+// store the marker is durably recorded so the returned 5xx's retry completes the
+// wind-down. Already-terminal runs (and already-closed members) are left
+// untouched — closing a completed member would rewrite its recorded outcome. Any
+// store read/write failure is returned so the caller reports a 5xx rather than a
+// phantom success.
 func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 	var res cancelRunResult
 	for _, info := range s.workflowStores() {
@@ -240,26 +245,13 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 			if isClosedStatus(root.Status) {
 				continue // already terminal — nothing to wind down
 			}
-			members, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
-				IncludeClosed: true,
-			})
-			if err != nil {
-				return res, err
-			}
-			ids := []string{root.ID}
-			for _, b := range members {
-				if b.ID != root.ID && !isClosedStatus(b.Status) {
-					ids = append(ids, b.ID) // open work only — never re-close a done step
-				}
-			}
-			if err := info.store.SetMetadataBatch(root.ID, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}); err != nil {
-				return res, err
-			}
-			n, err := info.store.CloseAll(ids, map[string]string{
-				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
-				"close_reason":              runCanceledCloseReason,
-			})
+			n, err := sourceworkflow.CloseWorkflowSubtreeAs(
+				info.store,
+				root.ID,
+				beadmeta.OutcomeCanceled,
+				runCanceledCloseReason,
+				map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+			)
 			if err != nil {
 				return res, err
 			}
@@ -365,8 +357,12 @@ func deriveRunStatus(lane runproj.RunLane, root beads.Bead, rootFound bool, star
 		}
 		return RunStatusCompleted
 	}
-	// A cancel was requested but the run root has not yet reached its terminal
-	// close (in-flight steps still winding down): report canceling.
+	// A cancel was requested but the root's terminal close is not yet durably
+	// recorded: on a non-atomic store the gc.cancel_requested marker persisted
+	// while the following root close failed, so cancelRun returned a retryable
+	// 5xx and the operator's retry finishes the wind-down. (On an atomic store a
+	// failed close rolls the marker back, so this state is not reachable there.)
+	// Report canceling meanwhile.
 	if rootFound && strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
 		return RunStatusCanceling
 	}

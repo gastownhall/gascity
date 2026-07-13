@@ -22,6 +22,76 @@ func (closeFailStore) CloseAll([]string, map[string]string) (int, error) {
 	return 0, errors.New("simulated store write failure")
 }
 
+// txCloseFailStore models a store whose Tx commits atomically (AtomicTx=true):
+// writes buffered inside the callback persist only when the callback returns nil.
+// Its transactional Close fails for failCloseID, standing in for a run root whose
+// close fails AFTER its cancel-marker metadata was written in the same Tx. Because
+// the Tx is atomic, that failure must roll the marker back, so the root never
+// lingers open carrying gc.cancel_requested / gc.outcome=canceled.
+type txCloseFailStore struct {
+	beads.Store
+	failCloseID string
+}
+
+func (txCloseFailStore) AtomicTx() bool { return true }
+
+func (s txCloseFailStore) Tx(_ string, fn func(beads.Tx) error) error {
+	buf := &bufferingTx{base: s.Store, failCloseID: s.failCloseID}
+	if err := fn(buf); err != nil {
+		return err // atomic rollback: buffered writes are discarded
+	}
+	return buf.flush()
+}
+
+// bufferingTx records writes and applies them to the base store only on flush, so
+// a callback error leaves the base store untouched (atomic-rollback semantics).
+type bufferingTx struct {
+	base        beads.Store
+	failCloseID string
+	metaWrites  []bufferedMeta
+	closes      []string
+}
+
+type bufferedMeta struct {
+	id  string
+	kvs map[string]string
+}
+
+func (b *bufferingTx) Create(beads.Bead) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("bufferingTx.Create unused in this test")
+}
+
+func (b *bufferingTx) Update(string, beads.UpdateOpts) error {
+	return errors.New("bufferingTx.Update unused in this test")
+}
+
+func (b *bufferingTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	b.metaWrites = append(b.metaWrites, bufferedMeta{id: id, kvs: kvs})
+	return nil
+}
+
+func (b *bufferingTx) Close(id string) error {
+	if id == b.failCloseID {
+		return errors.New("simulated root close failure")
+	}
+	b.closes = append(b.closes, id)
+	return nil
+}
+
+func (b *bufferingTx) flush() error {
+	for _, m := range b.metaWrites {
+		if err := b.base.SetMetadataBatch(m.id, m.kvs); err != nil {
+			return err
+		}
+	}
+	for _, id := range b.closes {
+		if _, err := b.base.CloseAll([]string{id}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // newWorkflowRun seeds a graph-workflow run (root + one open child step) in the
 // rig store and returns the server plus the store-assigned run root id.
 func newWorkflowRun(t *testing.T) (*Server, beads.Store, string) {
@@ -79,6 +149,27 @@ func TestRunCancelClosesRun(t *testing.T) {
 	}
 	if root.Metadata["gc.cancel_requested"] != "true" {
 		t.Errorf("root gc.cancel_requested = %q, want true", root.Metadata["gc.cancel_requested"])
+	}
+
+	// The cancel-intent marker is root-only: members close as canceled but must
+	// not be smeared with gc.cancel_requested.
+	members, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": runID},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) == 0 {
+		t.Fatal("expected at least one member step under the run root")
+	}
+	for _, m := range members {
+		if m.Metadata["gc.outcome"] != "canceled" {
+			t.Errorf("member %s gc.outcome = %q, want canceled", m.ID, m.Metadata["gc.outcome"])
+		}
+		if got := m.Metadata["gc.cancel_requested"]; got != "" {
+			t.Errorf("member %s gc.cancel_requested = %q, want empty (root-only marker)", m.ID, got)
+		}
 	}
 }
 
@@ -161,6 +252,59 @@ func TestRunCancelStoreFailureReports503(t *testing.T) {
 	}
 	if after.Status == "closed" {
 		t.Error("root was closed despite the reported failure")
+	}
+}
+
+// TestRunCancelAtomicRootCloseFailureRollsBackMarker guards the partial-close
+// finding on an atomic store: when the root's close fails AFTER its cancel marker
+// was written in the same transaction, the atomic Tx rolls the marker back. The
+// root stays open with no half-set gc.cancel_requested / gc.outcome=canceled, so
+// nothing strands it projecting "canceling"; the caller still gets a retryable
+// 5xx. This exercises the metadata-write-succeeds-then-close-fails path that a
+// fake failing CloseAll before mutation cannot reach.
+func TestRunCancelAtomicRootCloseFailureRollsBackMarker(t *testing.T) {
+	fs := newFakeState(t)
+	mem := fs.stores["myrig"]
+	root, err := mem.Create(beads.Bead{
+		Title:    "run root",
+		Type:     "molecule",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.Create(beads.Bead{Title: "open step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	// Reads and the descendant close batch use the real store; the root's
+	// transactional close fails after its marker write, and AtomicTx=true forces
+	// the whole Tx to roll back.
+	fs.stores["myrig"] = txCloseFailStore{Store: mem, failCloseID: root.ID}
+	s := &Server{state: fs}
+
+	_, err = s.humaHandleRunCancel(context.Background(), &RunCancelInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     root.ID,
+	})
+	if err == nil {
+		t.Fatal("cancel with a failing atomic root close returned nil error, want a retryable 5xx")
+	}
+	if !strings.Contains(err.Error(), "run cancel failed") {
+		t.Errorf("error = %q, want a cancel-failed 5xx", err.Error())
+	}
+
+	after, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status == "closed" {
+		t.Error("root was closed despite the reported close failure")
+	}
+	if got := after.Metadata["gc.cancel_requested"]; got != "" {
+		t.Errorf("root gc.cancel_requested = %q, want empty — the atomic Tx must roll the marker back on a failed close", got)
+	}
+	if got := after.Metadata["gc.outcome"]; got == "canceled" {
+		t.Error("root gc.outcome was rewritten to canceled despite the close failing; the marker must roll back")
 	}
 }
 
