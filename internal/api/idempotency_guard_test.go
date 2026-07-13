@@ -71,6 +71,7 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-order-by-name-enable":           true,
 	"post-v0-city-by-city-name-order-by-name-run":              true,
 	"post-v0-city-by-city-name-rig-by-name-by-action":          true,
+	"post-v0-city-by-city-name-runs-by-run-id-cancel":          true,
 	"post-v0-city-by-city-name-service-by-name-restart":        true,
 	"post-v0-city-by-city-name-session-by-id-close":            true,
 	"post-v0-city-by-city-name-session-by-id-kill":             true,
