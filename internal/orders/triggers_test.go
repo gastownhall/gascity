@@ -417,6 +417,27 @@ func TestCheckTriggerEventAllOrderTrackingFiltered(t *testing.T) {
 	}
 }
 
+func TestRegressionCheckTriggerEventOrderGeneratedBeadsFiltered(t *testing.T) {
+	// Regression: order-created wisps can carry only order-run before or instead
+	// of order-tracking, and v1.3.4 event logs wrap bead labels under payload.bead.
+	payloads := []json.RawMessage{
+		mustMarshalLabels(t, []string{"order-run:nudge-on-route"}),
+		json.RawMessage(`{"bead":{"labels":["order-tracking"]}}`),
+		json.RawMessage(`{"bead":{"labels":["order-run:nudge-on-route"]}}`),
+	}
+
+	for _, payload := range payloads {
+		ep := newEventsProvider(t, []events.Event{
+			{Type: "bead.updated", Payload: payload},
+		})
+		a := Order{Name: "nudge-on-route", Trigger: "event", On: "bead.updated"}
+		result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+		if result.Due {
+			t.Errorf("Due = true, want false for order-generated payload %s; reason: %s", payload, result.Reason)
+		}
+	}
+}
+
 func TestCheckTriggerEventNoPayloadNotFiltered(t *testing.T) {
 	// Events with no payload (legacy or non-bead events) must pass through —
 	// absence of a label is not the same as having the order-tracking label.
