@@ -1782,8 +1782,14 @@ func startPreparedStartCandidate(
 				// The warm-bind lane reads bind-edge metadata keys that session.Info
 				// does not project, so it re-reads the raw bead at this edge (same
 				// pattern as the idle-claim nudge lane).
-				if raw, rawErr := store.Get(item.candidate.info.ID); rawErr == nil {
-					deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+				//
+				// store is nil in unit contexts (and the cold-start path below
+				// guards it too); the warm-bind claim nudge is best-effort, so
+				// skip it rather than dereference a nil store.
+				if store != nil {
+					if raw, rawErr := store.Get(item.candidate.info.ID); rawErr == nil {
+						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+					}
 				}
 				return false, nil
 			}
