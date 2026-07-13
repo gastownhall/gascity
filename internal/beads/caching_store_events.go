@@ -707,9 +707,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	// Compare them order-insensitively. A backing store that returns these in a
 	// different order than the cache holds (the Dolt gcg rig store does not
 	// guarantee a stable order across scans) would otherwise register as a
-	// change on every reconcile pass — the cache-reconcile re-absorb flood that
-	// re-touched every live molecule wisp ~every 80s and starved review
-	// molecules from advancing (ga-ocypq2).
+	// change on every reconcile pass — one source of cache-reconcile re-absorb
+	// churn that needlessly re-touched live molecule wisps (ga-ocypq2).
 	if !skipLabels && !stringSetEqual(old.Labels, fresh.Labels) {
 		return true
 	}
