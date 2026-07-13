@@ -724,6 +724,44 @@ func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---
 
+// resolveGlobalStreamCursors builds the per-city cursor map for a global
+// event-stream Watch so that no registered city falls through to Watch(0),
+// which now replays a city's entire retained history across archives.
+//
+// With no resume cursor — a head-start client or the attach-only precheck —
+// every city starts from its latest cursor. With a resume cursor, cities the
+// cursor omits are floored to their latest cursor so a cursor that predates a
+// newly registered city cannot trigger a full-history flood for it. It fails
+// closed on a LatestCursor error rather than letting unresolved cities default
+// to cursor 0. The returned map is always non-nil on success.
+func resolveGlobalStreamCursors(mux *events.Multiplexer, resumeCursor string) (map[string]uint64, error) {
+	resumeCursor = strings.TrimSpace(resumeCursor)
+	if resumeCursor == "" {
+		cursors, err := mux.LatestCursor()
+		if err != nil {
+			return nil, err
+		}
+		if cursors == nil {
+			cursors = make(map[string]uint64)
+		}
+		return cursors, nil
+	}
+	cursors := events.ParseCursor(resumeCursor)
+	if cursors == nil {
+		cursors = make(map[string]uint64)
+	}
+	latest, err := mux.LatestCursor()
+	if err != nil {
+		return nil, err
+	}
+	for city, seq := range latest {
+		if _, ok := cursors[city]; !ok {
+			cursors[city] = seq
+		}
+	}
+	return cursors, nil
+}
+
 // precheckGlobalEventStream validates that the global event stream
 // can actually deliver events before committing 200 headers. Two
 // failure modes both produce 503 Problem Details instead of 200+EOF:
@@ -736,15 +774,24 @@ func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
 //     finds the newly-registered city in the mux.
 //  2. Providers exist but none can attach a watcher right now.
 //
-// The precheck attaches a watcher and closes it immediately — a
-// cheap probe that surfaces per-city watcher failures at the point
-// where we can still return a proper HTTP error.
+// The precheck attaches a watcher at each city's head cursor and closes it
+// immediately — a cheap probe that surfaces per-city watcher failures at the
+// point where we can still return a proper HTTP error. It must not attach with
+// nil cursors: nil defaults every child to Watch(0), which now replays the
+// entire retained history across archives, so a bare probe would gunzip and
+// decode archived batches for every city only to discard them when it closes.
+// Resolving head cursors keeps the probe cheap and fails closed exactly like
+// the streamGlobalEvents head-start path.
 func (sm *SupervisorMux) precheckGlobalEventStream(ctx context.Context, _ *SupervisorEventStreamInput) error {
 	mux := sm.buildMultiplexer()
 	if mux.Len() == 0 {
 		return apierr.ServiceUnavailable.Msg("no_providers: no event providers available")
 	}
-	probe, err := mux.Watch(ctx, nil)
+	cursors, err := resolveGlobalStreamCursors(mux, "")
+	if err != nil {
+		return apierr.ServiceUnavailable.Msg("cursor_failed: " + err.Error())
+	}
+	probe, err := mux.Watch(ctx, cursors)
 	if err != nil {
 		if errors.Is(err, events.ErrNoWatchers) {
 			return apierr.ServiceUnavailable.Msg("no_watchers: event providers are registered but none are watchable")
@@ -765,25 +812,14 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	}
 
 	mux := sm.buildMultiplexer()
-	var cursors map[string]uint64
-	if cursor == "" {
-		// Head-start (no resume cursor): every city streams from now. Fail
-		// closed on a LatestCursor error rather than let unresolved cities fall
-		// through to cursor 0, which Watch now treats as "replay the entire
-		// retained history" (across archives) — a head-start client must not get
-		// a full-history flood for a city whose head read hiccuped. The client
-		// can reconnect.
-		var err error
-		cursors, err = mux.LatestCursor()
-		if err != nil {
-			log.Printf("api: supervisor events-stream: latest cursor failed, refusing head-start replay: %v", err)
-			return
-		}
-	} else {
-		cursors = events.ParseCursor(cursor)
-	}
-	if cursors == nil {
-		cursors = make(map[string]uint64)
+	// Resolve per-city cursors so no city falls through to Watch(0) full-history
+	// replay: head-start clients start every city from now, and a resume cursor
+	// that omits a registered city floors that city to its latest cursor. Fail
+	// closed on a LatestCursor error — the client can reconnect.
+	cursors, err := resolveGlobalStreamCursors(mux, cursor)
+	if err != nil {
+		log.Printf("api: supervisor events-stream: resolving stream cursors failed, refusing full-history replay: %v", err)
+		return
 	}
 	mw, err := mux.Watch(hctx.Context(), cursors)
 	if err != nil {
