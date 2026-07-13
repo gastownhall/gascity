@@ -2504,6 +2504,126 @@ func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
 	}
 }
 
-// --- Compile-time interface check ---
+// --- SendDeduped (mail.DedupSender capability) ---
 
-var _ mail.Provider = (*Provider)(nil)
+func TestSendDedupedSuppressesWhileLiveCopyExists(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	first, suppressed, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("first SendDeduped: %v", err)
+	}
+	if suppressed {
+		t.Fatal("first send suppressed; want sent")
+	}
+	b, err := store.Get(first.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[mail.DedupKeyMetadataKey]; got != "dolt-compact-quarantine:hq" {
+		t.Fatalf("dedup key metadata = %q, want %q", got, "dolt-compact-quarantine:hq")
+	}
+
+	second, suppressed, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("second SendDeduped: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("second send not suppressed; want suppressed while first copy is live")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("suppressed send returned %q; want the live copy %q", second.ID, first.ID)
+	}
+	inbox, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if got := len(inbox); got != 1 {
+		t.Fatalf("inbox has %d messages; want 1", got)
+	}
+}
+
+func TestSendDedupedReadButUnarchivedStillSuppresses(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	first, _, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("SendDeduped: %v", err)
+	}
+	if _, err := p.Read(first.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	_, suppressed, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("SendDeduped after read: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("send after read-but-unarchived not suppressed; want suppressed")
+	}
+}
+
+func TestSendDedupedResendsAfterArchive(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	first, _, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("SendDeduped: %v", err)
+	}
+	if err := p.Archive(first.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	second, suppressed, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("SendDeduped after archive: %v", err)
+	}
+	if suppressed {
+		t.Fatal("send after archive suppressed; want a fresh message (archive ends the dedup horizon)")
+	}
+	if second.ID == first.ID {
+		t.Fatalf("re-send returned the archived message ID %q; want a new message", first.ID)
+	}
+}
+
+func TestSendDedupedScopedByKeyAndRecipient(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, _, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "b", "dolt-compact-quarantine:hq"); err != nil {
+		t.Fatalf("seed SendDeduped: %v", err)
+	}
+
+	// Same key, different recipient — independent stream.
+	_, suppressed, err := p.SendDeduped("controller", "deacon", "quarantine: hq", "b", "dolt-compact-quarantine:hq")
+	if err != nil {
+		t.Fatalf("SendDeduped to other recipient: %v", err)
+	}
+	if suppressed {
+		t.Fatal("send to a different recipient suppressed; want independent per recipient")
+	}
+
+	// Different key, same recipient — independent stream.
+	_, suppressed, err = p.SendDeduped("controller", "mayor", "quarantine: beads", "b", "dolt-compact-quarantine:beads")
+	if err != nil {
+		t.Fatalf("SendDeduped with other key: %v", err)
+	}
+	if suppressed {
+		t.Fatal("send with a different key suppressed; want independent per key")
+	}
+}
+
+func TestSendDedupedRequiresKey(t *testing.T) {
+	p := New(beads.NewMemStore())
+	if _, _, err := p.SendDeduped("controller", "mayor", "s", "b", "  "); err == nil {
+		t.Fatal("SendDeduped with blank key succeeded; want error")
+	}
+}
+
+// --- Compile-time interface checks ---
+
+var (
+	_ mail.Provider    = (*Provider)(nil)
+	_ mail.DedupSender = (*Provider)(nil)
+)

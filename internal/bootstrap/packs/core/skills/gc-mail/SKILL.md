@@ -17,6 +17,16 @@ gc mail reply <id> -m "reply body"                     # Reply to a message
 gc mail reply <id> -s "Re: topic" -m "reply body"      # Reply with subject
 ```
 
+For repeating notifications (a patrol or cooldown order that re-detects the
+same condition every run), add `--dedup <key>`: the send is suppressed (exit
+0) while a previous message with the same key to the same recipient is still
+live, so the recipient gets at most one copy per stream instead of one per
+interval. Once they archive it, the stream may alert again.
+
+```
+gc mail send mayor -s "disk warning" -m "..." --dedup "disk-warn:hq"
+```
+
 ## Reading
 
 ```

@@ -299,6 +299,9 @@ bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
+# Minimum seconds between RECURRING quarantine/stale-marker alert mails per
+# stream (marker-creation alerts are never throttled). Default one day.
+compact_alert_min_interval_secs="${GC_DOLT_COMPACT_ALERT_MIN_INTERVAL_SECS:-86400}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
     bare_gc=0
@@ -1302,15 +1305,68 @@ write_compact_marker() {
   return 0
 }
 
+# send_compact_quarantine_alert db type marker_path reason created_at [dedup_key]
+#
+# The optional dedup_key is passed for RECURRING alerts only (a marker that
+# already existed when this run started). Two stacked guards keep a
+# lingering marker from mailing the operator once per order cooldown:
+#   1. a last-sent epoch file under $PACK_STATE_DIR caps recurring alerts
+#      at one per compact_alert_min_interval_secs (default 24h), surviving
+#      the operator archiving the previous mail;
+#   2. `gc mail send --dedup` suppresses the send while the previous copy
+#      is still live in the recipient's mailbox (guards runs inside the
+#      interval when the epoch file was lost, and simultaneous dbs).
+# Marker-CREATION alerts pass no key — the transition into quarantine must
+# always mail, including a re-quarantine shortly after an operator cleared
+# the previous marker. The event is emitted unconditionally either way;
+# only the mail is throttled.
 send_compact_quarantine_alert() {
   _ca_db="$1"
   _ca_type="$2"
   _ca_path="$3"
   _ca_reason="$4"
   _ca_created_at="${5:-<unknown>}"
+  _ca_dedup="${6:-}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
   gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
-  gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
+  if [ -n "$_ca_dedup" ]; then
+    if compact_alert_recently_sent "$_ca_dedup"; then
+      return 0
+    fi
+    gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" --dedup "$_ca_dedup" || true
+    mark_compact_alert_sent "$_ca_dedup"
+  else
+    gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
+  fi
+}
+
+# compact_alert_state_file dedup_key — path of the last-sent epoch file for
+# one recurring-alert stream. Key characters unsafe in filenames are mapped
+# to '_' (keys are colon-separated type:db strings).
+compact_alert_state_file() {
+  printf '%s/compact-alert-sent/%s\n' "$PACK_STATE_DIR" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+# compact_alert_recently_sent dedup_key — true when the last recurring alert
+# for this key is younger than compact_alert_min_interval_secs. A missing or
+# unreadable state file reads as "not recent" (fail-open: an extra reminder
+# beats a silently suppressed one).
+compact_alert_recently_sent() {
+  _cars_file=$(compact_alert_state_file "$1")
+  _cars_last=$(cat "$_cars_file" 2>/dev/null) || return 1
+  case "$_cars_last" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  _cars_now=$(date -u +%s)
+  [ $(( _cars_now - _cars_last )) -lt "$compact_alert_min_interval_secs" ]
+}
+
+# mark_compact_alert_sent dedup_key — best-effort stamp of the last-sent
+# epoch for one recurring-alert stream.
+mark_compact_alert_sent() {
+  _mcas_file=$(compact_alert_state_file "$1")
+  mkdir -p "$(dirname "$_mcas_file")" 2>/dev/null || return 0
+  date -u +%s > "$_mcas_file" 2>/dev/null || true
 }
 
 ensure_compact_marker_writable() {
@@ -1435,7 +1491,7 @@ ensure_remote_push_retry_fresh() {
   if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
     printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
-    send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" || true
+    send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" "dolt-compact-stale:$(basename "$dir"):$db" || true
     return 1
   fi
   return 0
@@ -1818,7 +1874,7 @@ flatten_database() {
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
     printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
       "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" "dolt-compact-quarantine:$db" || true
     return 1
   fi
 
@@ -2505,7 +2561,7 @@ bare_gc_database() {
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
     printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
       "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" "dolt-compact-quarantine:$db" || true
     return 1
   fi
 

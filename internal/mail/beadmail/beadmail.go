@@ -116,9 +116,24 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
+	return p.sendWithExtraMetadata(from, to, subject, body, nil)
+}
+
+// sendWithExtraMetadata is the shared body of Send and SendDeduped: resolve
+// the sender route, derive title and thread label, merge extra metadata (the
+// dedup key), and create the message bead.
+func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra map[string]string) (mail.Message, error) {
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
+	}
+	if len(extra) > 0 {
+		if metadata == nil {
+			metadata = make(map[string]string, len(extra))
+		}
+		for k, v := range extra {
+			metadata[k] = v
+		}
 	}
 	threadID := generateThreadID()
 	labels := []string{"thread:" + threadID}
@@ -136,6 +151,43 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// SendDeduped implements the optional [mail.DedupSender] capability: it
+// creates the message unless a live (un-archived) message carrying the same
+// dedup key, addressed to the same recipient, already exists. The dedup probe
+// is one metadata-keyed list; a probe error fails the send rather than
+// risking a silent duplicate. Archiving deletes message beads, so an archived
+// notification leaves nothing to match — the dedup horizon is the previous
+// message's lifetime by design (see [mail.DedupSender]).
+func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup key is required")
+	}
+	if to == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
+	}
+	existing, err := p.store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
+		TierMode: beads.TierBoth,
+		Live:     true,
+	})
+	if err != nil {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
+	}
+	for _, b := range existing {
+		if b.Assignee == to {
+			return beadToMessage(b), true, nil
+		}
+	}
+	msg, err := p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.DedupKeyMetadataKey: key})
+	if err != nil {
+		return mail.Message{}, false, err
+	}
+	return msg, false, nil
 }
 
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
