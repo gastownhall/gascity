@@ -77,6 +77,16 @@ class PathsMatchTests(unittest.TestCase):
         self.assertTrue(cov.paths_match(["go.mod"], ["go.mod"]))
         self.assertFalse(cov.paths_match(["go.sum"], ["go.mod"]))
 
+    def test_bd_cli_contract_changes_trigger_all_version_cells(self) -> None:
+        filters = _filter_globs()
+        self.assertTrue(
+            cov.paths_match(
+                ["test/acceptance/beads_cli_contract_test.go"],
+                filters["beads"],
+            ),
+            "bd CLI contract changes must trigger previous, current, and HEAD cells",
+        )
+
     def test_trailing_wildcard_matches_within_segment(self) -> None:
         # `cmd/gc/session_*` and `contrib/session-scripts/gc-session-k8s*`
         self.assertTrue(cov.paths_match(["cmd/gc/session_pool.go"], ["cmd/gc/session_*"]))

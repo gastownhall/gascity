@@ -64,7 +64,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go
 
 ## build: compile gc binary with version metadata
 build:
@@ -412,6 +412,15 @@ ACCEPTANCE_TIMEOUT ?= 15m
 test-acceptance:
 	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
+## test-bd-cli-contract: run only Gas City's external bd CLI compatibility contract.
+## Keep this separate from hermetic Tier A so each supported bd version can run
+## the same focused manifest without rebuilding gc or repeating unrelated flows.
+BD_CLI_CONTRACT_TIMEOUT ?= 10m
+test-bd-cli-contract:
+	@command -v bd >/dev/null 2>&1 || (echo "Error: bd not found; cannot run external CLI contract" >&2; exit 1)
+	$(TEST_ENV) go test -tags acceptance_bd_contract -timeout $(BD_CLI_CONTRACT_TIMEOUT) -count=1 \
+		-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
+
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 ACCEPTANCE_B_TIMEOUT ?= 10m
 test-acceptance-b:
@@ -422,7 +431,7 @@ test-acceptance-c:
 	$(TEST_ENV) go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
 
 ## test-acceptance-all: run all acceptance tiers
-test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
+test-acceptance-all: test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c
 
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:

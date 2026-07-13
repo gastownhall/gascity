@@ -102,6 +102,14 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
+Tier A command acceptance and external-provider compatibility are separate
+gates. `make test-acceptance` uses controlled subprocess and file providers; it
+does not require inference or a `bd` executable. `make test-bd-cli-contract`
+runs the four version-sensitive `bd` CLI contracts under the dedicated
+`acceptance_bd_contract` build tag. CI applies that focused manifest to the
+minimum-supported, current, and main-HEAD `bd` versions without repeating the
+unrelated Tier A flows.
+
 #### Resource isolation via gascity-test.slice
 
 On hosts that provision a `gascity-test.slice` systemd user slice (resource

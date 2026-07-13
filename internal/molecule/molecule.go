@@ -238,10 +238,18 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("attach bead %s: %w", attachBeadID, err)
 	}
 
-	rootBeadID := parentBead.Metadata[beadmeta.RootBeadIDMetadataKey]
-	if rootBeadID == "" {
-		rootBeadID = attachBeadID
-	}
+	// Resolve the sub-DAG's workflow root through the canonical run chain
+	// (workflow_id -> molecule_id -> gc.root_bead_id -> the parent's own id),
+	// not gc.root_bead_id alone. A wisp/source bead grafted mid-workflow carries
+	// the true top root in workflow_id/molecule_id (written by sling) but no
+	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
+	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
+	// onto the attempt container, scope-check, and every child. Downstream
+	// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong
+	// root>) and burned ralph attempts (maintainer-city incident,
+	// gcg-wisp-y785sz). A genuine top-level head with no run chain still
+	// self-roots via its own id (ResolveRunID's selfID fallback).
+	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.

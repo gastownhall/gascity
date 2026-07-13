@@ -27,7 +27,14 @@ func TestTmuxConformance(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketName = testSocketName
-	p := NewProviderWithConfig(cfg)
+	// The conformance fixture is a generic long-running command, not an agent
+	// TUI with an observable idle prompt. Keep a short real timeout so the
+	// Provider.Nudge wait/fallback branch stays covered without consuming the
+	// production 30-second budget.
+	cfg.NudgeIdleTimeout = 250 * time.Millisecond
+	// Exercise the production construction path so one real tmux suite covers
+	// both the Provider contract and the seam-backed cut-over.
+	p := NewSeamBackedWithConfig(cfg)
 	var counter int64
 
 	runtimetest.RunProviderTestsWithOptions(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
