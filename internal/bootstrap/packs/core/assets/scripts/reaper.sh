@@ -2,7 +2,7 @@
 # reaper — close stale wisps with closed parents/roots, purge old closed data, auto-close stale and TTL-expired issues.
 #
 # Core exec order. All operations are deterministic: SQL queries with age
-# thresholds, bd close/update commands, count comparisons against alert
+# thresholds, gc bd close/update commands, count comparisons against alert
 # thresholds.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
@@ -715,9 +715,9 @@ close_city_issue() {
     (
         cd "$CITY_ABS"
         if [ -n "$force" ]; then
-            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --force --reason "$reason"
+            gc bd --city "$CITY_ABS" close "$issue_id" --force --reason "$reason"
         else
-            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --reason "$reason"
+            gc bd --city "$CITY_ABS" close "$issue_id" --reason "$reason"
         fi
     )
 }
@@ -869,7 +869,7 @@ while IFS= read -r DB; do
     # stamped with gc.root_store_ref for another store are skipped; cross-store
     # subtrees require cross-store traversal before reaping can be safe.
     # Wisp roots can be closed in every bead store. Issue roots are city issues,
-    # so their city-store close path uses bd close below.
+    # so their city-store close path uses gc bd close below.
     get_sql_count "$DB" "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
     TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
 
@@ -1150,7 +1150,7 @@ EOF
 if [ -d "$CITY_BEADS_DIR" ]; then
     SESSION_PRUNE_ATTEMPTED=1
     if [ -n "$SESSION_BEAD_PATTERN" ]; then
-        # ── bd prune path (existing behaviour, now pattern-configurable) ──────
+        # ── gc bd prune path (existing behaviour, now pattern-configurable) ──────
         SESSION_PRUNE_ANOMALY_SCOPE="session"
         case "$SESSION_BEAD_PATTERN" in
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
@@ -1158,7 +1158,7 @@ if [ -d "$CITY_BEADS_DIR" ]; then
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")
         if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); fi
         BD_PRUNE_ARGS+=(--json)
-        if PRUNE_JSON=$( ( cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" bd "${BD_PRUNE_ARGS[@]}" ) 2>/dev/null ); then :
+        if PRUNE_JSON=$( ( cd "$CITY_ABS" && gc bd --city "$CITY_ABS" "${BD_PRUNE_ARGS[@]}" ) 2>/dev/null ); then :
         else PRUNE_JSON='{"pruned_count":0}'; fi
         PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
         [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
