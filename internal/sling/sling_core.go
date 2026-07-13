@@ -121,6 +121,12 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
 			NoConvoy: opts.NoConvoy,
 		})
+		if check.Idempotent && onFormulaNeedsAttachment(opts, querier, deps) {
+			// The bead is routed to the target but carries no molecule — an
+			// earlier plain sling routed it raw. Do not treat --on as an
+			// idempotent no-op; fall through so the formula attaches.
+			check.Idempotent = false
+		}
 		if check.Idempotent {
 			result.Idempotent = true
 			result.DryRun = opts.DryRun
@@ -219,6 +225,32 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+// onFormulaNeedsAttachment reports whether this is an --on sling whose target
+// bead is routed to the agent but has no attached molecule yet. The
+// routed-idempotency check (gc.routed_to == target) treats such a bead as a
+// done no-op, but a bead can be routed raw by an earlier plain sling; a later
+// `--on <formula>` must still attach the formula, or the repair root sits
+// routed-but-unfanned. When a molecule is already attached, --on stays
+// idempotent (skip), and re-attach is handled by the attachment path
+// (CheckNoMoleculeChildren errors on a live molecule; a stale one is burned).
+func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) bool {
+	if opts.OnFormula == "" {
+		return false
+	}
+	if HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store) {
+		return false
+	}
+	// No molecule attached. Only override idempotency for an UNCLAIMED bead — the
+	// routed-raw footgun (gc.routed_to set, no assignee, no molecule). If a worker
+	// has already claimed it (assignee set), leave it idempotent rather than
+	// re-attaching a formula onto work in progress.
+	bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(bead.Assignee) == ""
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
