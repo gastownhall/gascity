@@ -3178,7 +3178,11 @@ func TestHasMoleculeChildren(t *testing.T) {
 		{ID: "BL-1", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
 	}, nil)
-	if !HasMoleculeChildren(store, "BL-1", store) {
+	has, err := HasMoleculeChildren(store, "BL-1", store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: unexpected error %v", err)
+	}
+	if !has {
 		t.Error("expected true")
 	}
 }

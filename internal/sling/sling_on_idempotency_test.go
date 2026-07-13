@@ -1,11 +1,26 @@
 package sling
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+// listErrStore wraps a Store but fails List, so the attachment probe in
+// CollectAttachedBeads returns an error with no attachments discovered. Get
+// still delegates to the embedded store, so a parent bead is found before the
+// probe runs -- the fixture models a transient store failure hit only while
+// enumerating a bead's molecule/workflow children.
+type listErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s listErrStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
 
 // A bead routed raw (gc.routed_to set, no molecule) by an earlier plain sling
 // reads as Idempotent, which would silently no-op a later `--on <formula>`.
@@ -26,12 +41,12 @@ func TestOnFormulaNeedsAttachment(t *testing.T) {
 	deps := SlingDeps{Store: store}
 
 	// A non---on sling never overrides idempotency.
-	if onFormulaNeedsAttachment(SlingOpts{BeadOrFormula: routedRaw.ID}, store, deps) {
-		t.Error("plain sling: onFormulaNeedsAttachment = true, want false")
+	if need, err := onFormulaNeedsAttachment(SlingOpts{BeadOrFormula: routedRaw.ID}, store, deps); need || err != nil {
+		t.Errorf("plain sling: onFormulaNeedsAttachment = (%v, %v), want (false, nil)", need, err)
 	}
 	// --on on a routed-raw (unclaimed, no-molecule) bead must attach (the footgun).
-	if !onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: routedRaw.ID}, store, deps) {
-		t.Error("routed-raw --on: onFormulaNeedsAttachment = false, want true (no molecule => must attach)")
+	if need, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: routedRaw.ID}, store, deps); !need || err != nil {
+		t.Errorf("routed-raw --on: onFormulaNeedsAttachment = (%v, %v), want (true, nil) (no molecule => must attach)", need, err)
 	}
 
 	// A CLAIMED bead (assignee set) with no molecule stays idempotent — do not
@@ -45,8 +60,8 @@ func TestOnFormulaNeedsAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create claimed: %v", err)
 	}
-	if onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: claimed.ID}, store, deps) {
-		t.Error("claimed --on: onFormulaNeedsAttachment = true, want false (worker owns it, stay idempotent)")
+	if need, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: claimed.ID}, store, deps); need || err != nil {
+		t.Errorf("claimed --on: onFormulaNeedsAttachment = (%v, %v), want (false, nil) (worker owns it, stay idempotent)", need, err)
 	}
 }
 
@@ -76,7 +91,46 @@ func TestRoutedRawBeadReadsIdempotentWhichOnFormulaMustOverride(t *testing.T) {
 		t.Fatalf("routed-raw bead: expected Idempotent=true (the footgun), got %+v", res)
 	}
 	// ...and the --on override fires because there is no molecule.
-	if !onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: bead.ID}, store, SlingDeps{Store: store}) {
-		t.Fatal("--on override should fire for a routed-raw bead with no molecule")
+	if need, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: bead.ID}, store, SlingDeps{Store: store}); !need || err != nil {
+		t.Fatalf("--on override should fire for a routed-raw bead with no molecule: got (%v, %v)", need, err)
+	}
+}
+
+// A routed-raw bead that ALREADY has a live molecule child must stay idempotent
+// under `--on`: the override fires only when there is no molecule to attach, so
+// re-slinging the same formula is a no-op rather than a re-attach. This pins the
+// idempotent-retry-preservation branch that a prior over-broad approach
+// regressed — asserted here directly rather than only in the doc comment.
+func TestOnFormulaNeedsAttachmentMoleculePresentStaysIdempotent(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
+	}, nil)
+	deps := SlingDeps{Store: store}
+	if need, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: "BL-1"}, store, deps); need || err != nil {
+		t.Errorf("molecule-present --on: onFormulaNeedsAttachment = (%v, %v), want (false, nil) (has molecule => stay idempotent)", need, err)
+	}
+}
+
+// If the molecule-attachment probe cannot complete, onFormulaNeedsAttachment must
+// NOT report that the bead needs attachment. A swallowed probe error previously
+// looked identical to "no molecule", which would flip a fail-closed idempotent
+// routed bead into a mutating attach path and risk a duplicate formula/workflow
+// attachment. On a probe error it must return (false, err) so the caller
+// preserves the idempotent state.
+func TestOnFormulaNeedsAttachmentProbeErrorStaysIdempotent(t *testing.T) {
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+	}, nil)
+	probeErr := errors.New("store unavailable")
+	store := listErrStore{Store: mem, err: probeErr}
+	deps := SlingDeps{Store: store}
+
+	need, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: "BL-1"}, store, deps)
+	if need {
+		t.Error("probe error: onFormulaNeedsAttachment = true, want false (cannot prove no molecule => fail closed)")
+	}
+	if !errors.Is(err, probeErr) {
+		t.Errorf("probe error: onFormulaNeedsAttachment err = %v, want %v surfaced", err, probeErr)
 	}
 }
