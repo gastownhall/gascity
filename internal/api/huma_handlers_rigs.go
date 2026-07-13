@@ -30,6 +30,22 @@ const (
 	rigVisibilityPoll    = 50 * time.Millisecond
 )
 
+// rigProvisionTimeout is the SERVER-OWNED ceiling on one async git_url
+// provision. The detached goroutine runs the clone + provision under a context
+// bounded by this deadline (git.Clone honors it via exec.CommandContext), so a
+// stalled/black-hole git server terminalizes the request through the normal
+// rollback + request.failed path instead of leaking the goroutine and wedging
+// the rig name / request_id until process restart. It is deliberately shorter
+// than the client's rigCreateWaitTimeout (30m) so the server bounds the work,
+// not the client. rigTeardownTimeout bounds the rollback teardown under a FRESH
+// context, because the provisioning context may already be canceled (its
+// deadline is what triggered the rollback). Both are vars so tests can shrink
+// them to exercise terminalization deterministically.
+var (
+	rigProvisionTimeout = 20 * time.Minute
+	rigTeardownTimeout  = 2 * time.Minute
+)
+
 // humaHandleRigList is the Huma-typed handler for GET /v0/rigs.
 func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*ListOutput[rigResponse], error) {
 	bp := input.toBlockingParams()
@@ -308,6 +324,13 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 	}
 
 	go func() {
+		// Bound the whole provision under a server-owned deadline so a stalled or
+		// black-hole git server terminalizes through the rollback + request.failed
+		// path instead of leaking this goroutine and wedging the rig name /
+		// request_id until process restart. git.Clone honors provCtx via
+		// exec.CommandContext; the client's own 30m wait does not bound the server.
+		provCtx, cancelProv := context.WithTimeout(context.Background(), rigProvisionTimeout)
+		defer cancelProv()
 		terminalized := false
 		defer s.recoverAsRequestFailed(reqID, RequestOperationRigCreate) // runs LAST (LIFO)
 		defer func() {                                                   // runs FIRST: panic backstop
@@ -322,7 +345,7 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 		// not re-clone over it; fail the request (the record's manifest keys are
 		// still set, so the boot sweep or the next retry completes teardown).
 		if !recloneManifest.IsEmpty() {
-			if tErr := sm.TeardownPartialRig(context.Background(), recloneManifest); tErr != nil {
+			if tErr := sm.TeardownPartialRig(provCtx, recloneManifest); tErr != nil {
 				log.Printf("api: rig create %s: reclone pre-drop: %v", reqID, tErr)
 				s.rigIdem.remove(city, entry)
 				terminalized = true
@@ -331,7 +354,7 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 			}
 		}
 
-		provisioned, err := sm.ProvisionRigFromGit(context.Background(), rigCfg, gitURL, onStep, onManifest)
+		provisioned, err := sm.ProvisionRigFromGit(provCtx, rigCfg, gitURL, onStep, onManifest)
 		if err != nil {
 			s.rollbackFailedProvision(sm, store, city, entry, manifest, err)
 			terminalized = true
@@ -366,8 +389,14 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 // carries the classified error_code.
 func (s *Server) rollbackFailedProvision(sm StateMutator, store beads.Store, city string, entry *liveProvision, manifest RigProvisionManifest, cause error) {
 	reqID := entry.requestID
+	// Teardown runs under a FRESH bounded context: the provisioning context may
+	// already be canceled (a provision-timeout is exactly what routes here), and
+	// the cleanup still needs its own deadline to drop the partial dir/DB rather
+	// than inheriting a dead context or blocking forever.
+	ctx, cancel := context.WithTimeout(context.Background(), rigTeardownTimeout)
+	defer cancel()
 	teardownOK := true
-	if tErr := sm.TeardownPartialRig(context.Background(), manifest); tErr != nil {
+	if tErr := sm.TeardownPartialRig(ctx, manifest); tErr != nil {
 		teardownOK = false
 		log.Printf("api: rig create %s: rollback teardown: %v", reqID, tErr)
 	}

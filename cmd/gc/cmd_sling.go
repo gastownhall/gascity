@@ -224,12 +224,12 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// (e.g. --stdin empty input) surfaces first. Genuine resolution errors (a bad
 	// --context, a remote client that fails to build) still fail immediately and
 	// non-fallbackably (gate G1).
-	remoteC, isRemote, _, rerr := resolveWriteTarget()
+	remoteC, isRemote, remoteTgt, rerr := resolveWriteTarget()
 	if rerr != nil && !isCityDiscoveryNotFound(rerr) {
 		return fail("city_resolve_failed", fmt.Sprintf("gc sling: %v", rerr))
 	}
 	if isRemote {
-		return cmdSlingRemote(remoteC, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
+		return cmdSlingRemote(remoteC, remoteTgt, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
 	}
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.

@@ -21,6 +21,10 @@ func remoteTestClient(t *testing.T, url string) *api.Client {
 	return c
 }
 
+func remoteTestTarget(url string) *remoteTarget {
+	return &remoteTarget{BaseURL: url, CityName: "mc", Source: remoteSourceURLFlag}
+}
+
 func TestParseSlingVars(t *testing.T) {
 	m, err := parseSlingVars([]string{"a=1", "b=two=parts"})
 	if err != nil {
@@ -57,23 +61,23 @@ func TestCmdSlingRemote_RefusesUnsupportedModes(t *testing.T) {
 	}{
 		{"stdin", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), []string{"mayor"}, false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, false, "", "", false, &out, &errb)
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor"}, false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, false, "", "", false, &out, &errb)
 		}, "stdin"},
 		{"dry-run", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), []string{"mayor", "BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
 		}, "dry-run"},
 		{"nudge", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), []string{"mayor", "BL-1"}, false, true /*nudge*/, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"}, false, true /*nudge*/, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
 		}, "not supported"},
 		{"one-arg", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), []string{"BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
 		}, "explicit target"},
 		{"inline-text", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), []string{"mayor", "write a readme"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "write a readme"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
 		}, "inline text"},
 	}
 	for _, tc := range cases {
@@ -99,7 +103,7 @@ func TestCmdSlingRemote_RoutesBead(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	code := cmdSlingRemote(remoteTestClient(t, srv.URL), []string{"mayor", "BL-42"},
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-42"},
 		false, false, true /*force*/, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
 	if code != 0 {
 		t.Fatalf("exit %d; stderr=%q", code, errb.String())
@@ -116,6 +120,11 @@ func TestCmdSlingRemote_RoutesBead(t *testing.T) {
 	if !strings.Contains(errb.String(), "w1") {
 		t.Errorf("warning not surfaced: %q", errb.String())
 	}
+	// The resolved remote target is echoed (human mode) so a mutation to a remote
+	// control plane is never silent -- matching `gc rig add`.
+	if !strings.Contains(errb.String(), "target:") || !strings.Contains(errb.String(), "mc @") {
+		t.Errorf("remote sling did not echo the resolved target: %q", errb.String())
+	}
 }
 
 // --json emits a machine-readable object.
@@ -127,7 +136,7 @@ func TestCmdSlingRemote_JSONOutput(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	code := cmdSlingRemote(remoteTestClient(t, srv.URL), []string{"mayor", "review"},
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "review"},
 		true /*formula*/, false, false, "", []string{"pr=42"}, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
 	if code != 0 {
 		t.Fatalf("exit %d; stderr=%q", code, errb.String())
@@ -142,5 +151,9 @@ func TestCmdSlingRemote_JSONOutput(t *testing.T) {
 	// Automation-critical fields align with the local `sling --json` shape.
 	if got["schema_version"] != "1" || got["success"] != true {
 		t.Errorf("json missing schema_version/success: %v", got)
+	}
+	// JSON mode must not emit the human target echo (JSONL/stderr purity).
+	if strings.Contains(errb.String(), "target:") {
+		t.Errorf("json-mode remote sling leaked a human target echo: %q", errb.String())
 	}
 }

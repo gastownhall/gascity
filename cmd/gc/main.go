@@ -534,6 +534,13 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 	if target, ok, derr := resolveStickyDefaultTarget(); derr != nil {
 		return resolvedContext{}, derr
 	} else if ok {
+		// Honor GC_NO_API on the sticky-default tier too: the explicit flag/env
+		// tiers guard it inside resolveRemoteSelection, and the escape hatch
+		// ("never route through the API") must apply consistently rather than be
+		// silently ignored for a sticky-default remote target.
+		if gerr := guardNoAPI(readRemoteSelection()); gerr != nil {
+			return resolvedContext{}, gerr
+		}
 		return resolvedContext{Remote: target}, nil
 	}
 	return resolvedContext{}, err

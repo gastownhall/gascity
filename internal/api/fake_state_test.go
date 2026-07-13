@@ -198,12 +198,13 @@ type fakeMutatorState struct {
 	// provisionErr AFTER emitting a created-dir manifest (a failure once the dir
 	// exists). teardownCalls records every TeardownPartialRig manifest;
 	// teardownErr, when set, makes TeardownPartialRig fail.
-	provisionMu    sync.Mutex
-	provisionCalls int
-	provisionFailN int
-	provisionErr   error
-	teardownCalls  []RigProvisionManifest
-	teardownErr    error
+	provisionMu             sync.Mutex
+	provisionCalls          int
+	provisionFailN          int
+	provisionErr            error
+	provisionCtxHadDeadline bool
+	teardownCalls           []RigProvisionManifest
+	teardownErr             error
 }
 
 func newFakeMutatorState(t *testing.T) *fakeMutatorState {
@@ -354,9 +355,19 @@ func (f *fakeMutatorState) CreateRig(r config.Rig) error {
 // created dir so persistence/rollback wiring is exercised. When provisionFailN
 // is set it returns provisionErr after the manifest is reported (a failure once
 // the dir exists), without appending the rig.
-func (f *fakeMutatorState) ProvisionRigFromGit(_ context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error) {
+func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error) {
+	_, hasDeadline := ctx.Deadline()
+	f.provisionMu.Lock()
+	f.provisionCtxHadDeadline = hasDeadline
+	f.provisionMu.Unlock()
 	if f.provisionGate != nil {
-		<-f.provisionGate
+		// Honor the caller's deadline while gated so a bounded provisioning context
+		// can terminalize a "stalled clone" instead of blocking forever.
+		select {
+		case <-f.provisionGate:
+		case <-ctx.Done():
+			return config.Rig{}, ctx.Err()
+		}
 	}
 	if onStep != nil {
 		onStep("clone", "cloning "+gitURL, false)
@@ -407,6 +418,14 @@ func (f *fakeMutatorState) teardownManifests() []RigProvisionManifest {
 	f.provisionMu.Lock()
 	defer f.provisionMu.Unlock()
 	return append([]RigProvisionManifest(nil), f.teardownCalls...)
+}
+
+// provisionHadDeadline reports whether the last ProvisionRigFromGit was called
+// with a context carrying a deadline (the server-owned provisioning bound).
+func (f *fakeMutatorState) provisionHadDeadline() bool {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	return f.provisionCtxHadDeadline
 }
 
 func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {

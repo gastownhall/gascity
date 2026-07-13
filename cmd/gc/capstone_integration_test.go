@@ -99,7 +99,7 @@ func TestCapstoneIntegrationRealMinter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed bead: %v", err)
 	}
-	if code := capstoneSling(client, "worker", seeded.ID, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := capstoneSling(h, client, "worker", seeded.ID, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("sling via real minter failed (exit=%d)", code)
 	}
 	routed, err := webStore.Get(seeded.ID)

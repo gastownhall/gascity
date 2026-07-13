@@ -106,6 +106,38 @@ func TestRigIdemDigestDeterministic(t *testing.T) {
 	}
 }
 
+// TestRigIdemDigestIgnoresGitURLCredential proves the digest binds a request_id
+// to the logical repository, not the embedded credential: the original
+// credential-bearing URL, the CLI's redacted retry recipe, and a rotated-token
+// retry all digest identically, so a same-request_id retry replays cleanly
+// instead of surfacing a spurious request_id conflict. A different repository
+// still digests differently.
+func TestRigIdemDigestIgnoresGitURLCredential(t *testing.T) {
+	base := RigCreateBody{Name: "web", Path: "rigs/web", RequestID: "req-cred0001"}
+	variant := func(gitURL string) string {
+		b := base
+		b.GitURL = gitURL
+		d, err := rigCreateDigest(b)
+		if err != nil {
+			t.Fatalf("rigCreateDigest(%q): %v", gitURL, err)
+		}
+		return d
+	}
+	original := variant("https://alice:s3cr3t-tok@github.com/o/r.git")
+	redacted := variant("https://***@github.com/o/r.git") // gitcred.RedactUserinfo form
+	rotated := variant("https://alice:new-tok-99@github.com/o/r.git")
+	anon := variant("https://github.com/o/r.git")
+	for name, d := range map[string]string{"redacted": redacted, "rotated": rotated, "anon": anon} {
+		if d != original {
+			t.Errorf("%s retry digest %s != original %s (credential leaked into digest)", name, d, original)
+		}
+	}
+	// A genuinely different repository must not collide.
+	if other := variant("https://alice:s3cr3t-tok@github.com/o/OTHER.git"); other == original {
+		t.Errorf("different repository digested identically: %s", other)
+	}
+}
+
 func TestRigIdemValidateRequestID(t *testing.T) {
 	accept := []string{
 		"550e8400-e29b-41d4-a716-446655440000", // UUIDv4
@@ -517,6 +549,116 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 		}
 		if nc.Rig != "web" {
 			t.Fatalf("conflict rig = %q, want web", nc.Rig)
+		}
+	})
+
+	t.Run("re-clone must not clobber a live same-name provision under a different id", func(t *testing.T) {
+		// Regression for the re-clone-vs-live-byName admission gap: a rolled_back
+		// request's retry short-circuits on its request_id axis straight to
+		// re-clone, which (before the fix) registered byName without ever
+		// consulting the name axis — overwriting a DIFFERENT live same-name
+		// provision and tearing down its in-flight working tree via the re-clone
+		// pre-drop. Admission must instead 409 rig_name_conflict and leave the
+		// live provision untouched.
+		store := beads.NewMemStore()
+		idx := newRigIdemIndex()
+
+		// req-X previously failed: a rolled_back durable record for "web".
+		reqX := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-x-00001"}
+		xDigest, _ := rigCreateDigest(reqX)
+		xid, err := createIdemRecord(store, "c1", "req-x-00001", xDigest, "3", "web", idemStateInFlight)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := markIdemRolledBack(store, xid); err != nil {
+			t.Fatal(err)
+		}
+
+		// A DIFFERENT request req-Y then claims the same name "web" and is live.
+		reqY := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-y-00002"}
+		yres, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", reqY)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if yres.outcome != rigAdmitNew {
+			t.Fatalf("req-Y outcome = %d, want rigAdmitNew", yres.outcome)
+		}
+
+		// req-X retries: its request_id axis routes to re-clone, but "web" is now
+		// held by req-Y. It must 409 at the name axis, pointing at req-Y's stream.
+		_, err = admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", reqX)
+		var nc *rigNameConflictError
+		if !errors.As(err, &nc) {
+			t.Fatalf("re-clone-vs-live-byName err = %v, want *rigNameConflictError", err)
+		}
+		if nc.Rig != "web" || nc.InFlightRequestID != "req-y-00002" || nc.InFlightCursor != "7" {
+			t.Fatalf("conflict = %+v, want it to point at live req-Y (cursor 7)", nc)
+		}
+
+		// req-Y's live entry must be intact (NOT overwritten by req-X's re-clone).
+		if live, ok := idx.lookupByName("c1", "web"); !ok || live != yres.entry {
+			t.Fatal("re-clone clobbered req-Y's live byName entry")
+		}
+		if live, ok := idx.lookup("c1", "req-y-00002"); !ok || live != yres.entry {
+			t.Fatal("re-clone clobbered req-Y's live request_id entry")
+		}
+		// req-X's durable record must remain rolled_back (never reset to in_flight).
+		rec, _ := lookupIdemRecord(store, "c1", "req-x-00001")
+		if rec == nil || rec.Metadata[metaIdemState] != idemStateRolledBack {
+			t.Fatalf("req-X record must stay rolled_back, got %+v", rec)
+		}
+	})
+
+	t.Run("re-clone must not clobber a committed same-name rig owned by a different request", func(t *testing.T) {
+		// Regression for the re-clone-vs-COMMITTED admission gap (F1). The
+		// re-clone-vs-live guard only inspects the live byName index; once the rival
+		// request has SUCCEEDED it removes its live byName entry, so the live guard
+		// no longer sees it, but the rig persists in config. Without the config gate
+		// a rolled_back request's retry would drive the re-clone pre-drop's
+		// os.RemoveAll over the committed rig's working tree + .beads store.
+		// Admission must instead 409 rig_name_conflict and never reach re-clone.
+		store := beads.NewMemStore()
+		idx := newRigIdemIndex()
+
+		// req-X previously failed: a rolled_back durable record for "web" with NO
+		// live entry. A rolled_back provision never committed its own name to config.
+		reqX := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-x-commit01"}
+		xDigest, _ := rigCreateDigest(reqX)
+		xid, err := createIdemRecord(store, "c1", "req-x-commit01", xDigest, "3", "web", idemStateInFlight)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := markIdemRolledBack(store, xid); err != nil {
+			t.Fatal(err)
+		}
+
+		// A DIFFERENT request req-Y has since COMMITTED "web" to config: it succeeded
+		// and removed its live byName entry, so the live index is empty for "web" but
+		// rigInConfig("web") is true.
+		inConfig := func(name string) bool { return name == "web" }
+
+		// req-X retries: its request_id axis routes to re-clone, but "web" is now a
+		// committed rig owned by req-Y. It must 409 rig_name_conflict.
+		_, err = admitRigCreate(idx, store, fixedCursor("9"), inConfig, nil, "c1", reqX)
+		var nc *rigNameConflictError
+		if !errors.As(err, &nc) {
+			t.Fatalf("re-clone-vs-committed err = %v, want *rigNameConflictError", err)
+		}
+		if nc.Rig != "web" {
+			t.Fatalf("conflict rig = %q, want web", nc.Rig)
+		}
+
+		// The rejected re-clone must have zero side effects: req-X's record stays
+		// rolled_back (never reset to in_flight) and no live entry was registered.
+		rec, _ := lookupIdemRecord(store, "c1", "req-x-commit01")
+		if rec == nil || rec.Metadata[metaIdemState] != idemStateRolledBack {
+			t.Fatalf("req-X record must stay rolled_back after a rejected re-clone, got %+v", rec)
+		}
+		if live, ok := idx.lookup("c1", "req-x-commit01"); ok {
+			t.Fatalf("rejected re-clone must not register a live request_id entry, got %+v", live)
+		}
+		if _, ok := idx.lookupByName("c1", "web"); ok {
+			t.Fatal("rejected re-clone must not register a byName entry")
 		}
 	})
 }

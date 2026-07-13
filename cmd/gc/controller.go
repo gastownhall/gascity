@@ -1390,14 +1390,20 @@ func runController(
 		// G23: a hardened bind (non-loopback + allow_mutations) previously booted
 		// silent. Emit the loud unauthenticated-read-plane warning so an operator
 		// cannot stand one up without seeing that the read surface needs a network
-		// front. grantGated is resolved the same way InstallWriteAuth did (which
-		// already succeeded, so a configured key is valid).
+		// front. grantGated and readAuthInstalled are resolved the same way
+		// InstallWriteAuth/InstallReadAuth did (both already succeeded, so a
+		// configured key is valid); a read-auth verifier suppresses the warning
+		// because the read plane is then authenticated.
 		if nonLocal && cfg.API.AllowMutations {
 			grantGated := false
 			if v, verr := api.ResolveWriteAuthVerifier(cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); verr == nil && v != nil {
 				grantGated = true
 			}
-			warnUnauthenticatedReadPlane(stderr, bind, grantGated)
+			readAuthInstalled := false
+			if v, verr := api.ResolveReadAuthVerifier(cfg.API.ReadAuthVerifyKey, cfg.API.ReadAuthRequired); verr == nil && v != nil {
+				readAuthInstalled = true
+			}
+			warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
 		}
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)

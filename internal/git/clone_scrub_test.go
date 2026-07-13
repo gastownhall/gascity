@@ -29,3 +29,21 @@ func TestScrubCloneErrorMasksParseableCredential(t *testing.T) {
 		t.Fatalf("scrubbed error still leaks the password: %q", got)
 	}
 }
+
+// TestScrubCloneErrorMasksPercentEncodedCredential covers a PARSEABLE URL whose
+// password is percent-encoded: url.Parse decodes it (User.Password() == "secret")
+// and re-encodes it (User.String() == "user:secret"), so neither matches the RAW
+// "user:se%63ret" git echoes verbatim. The unconditional raw-userinfo scrub must
+// mask it — before the fix this leaked because the raw-substring scrub only ran
+// when url.Parse failed.
+func TestScrubCloneErrorMasksPercentEncodedCredential(t *testing.T) {
+	raw := "https://user:se%63ret@host/repo.git"
+	gitOut := errors.New("git clone: fatal: unable to access 'https://user:se%63ret@host/repo.git/': the requested URL returned error: 403")
+	got := scrubCloneError(gitOut, raw).Error()
+	if strings.Contains(got, "se%63ret") {
+		t.Fatalf("scrubbed error still leaks the percent-encoded credential: %q", got)
+	}
+	if !strings.Contains(got, "***") {
+		t.Fatalf("expected the userinfo masked with ***, got %q", got)
+	}
+}

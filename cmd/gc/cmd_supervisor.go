@@ -1375,13 +1375,19 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
 	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
 	// the standalone controller seam) so an operator sees the read surface needs a
-	// network front. grantGated is resolved the same way InstallWriteAuth did.
+	// network front. grantGated and readAuthInstalled are resolved the same way
+	// InstallWriteAuth/InstallReadAuth did; a read-auth verifier suppresses the
+	// warning because the read plane is then authenticated.
 	if nonLocal && supCfg.Supervisor.AllowMutations {
 		grantGated := false
 		if v, verr := api.ResolveWriteAuthVerifier(supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); verr == nil && v != nil {
 			grantGated = true
 		}
-		warnUnauthenticatedReadPlane(stderr, bind, grantGated)
+		readAuthInstalled := false
+		if v, verr := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); verr == nil && v != nil {
+			readAuthInstalled = true
+		}
+		warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
 	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same

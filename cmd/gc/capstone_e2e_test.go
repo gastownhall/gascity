@@ -320,8 +320,8 @@ func capstoneRigAdd(h *capstoneHarness, c *api.Client, reqID string, stdout, std
 	return cmdRigAddRemote(c, h.target(), nil, capstonePublicGitURL(), reqID, "web", "gc", "main", nil, false, false, false, stdout, stderr)
 }
 
-func capstoneSling(c *api.Client, target, beadID string, stdout, stderr *bytes.Buffer) int {
-	return cmdSlingRemote(c, []string{target, beadID}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, stdout, stderr)
+func capstoneSling(h *capstoneHarness, c *api.Client, target, beadID string, stdout, stderr *bytes.Buffer) int {
+	return cmdSlingRemote(c, h.target(), []string{target, beadID}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, stdout, stderr)
 }
 
 // Scenario A + B — the capstone one-liner and the idempotent replay.
@@ -376,7 +376,7 @@ func TestCapstoneOneLinerAndIdempotentReplay(t *testing.T) {
 		t.Fatalf("seed bead into provisioned store: %v", err)
 	}
 	var slOut, slErr bytes.Buffer
-	if code := capstoneSling(client, "worker", seeded.ID, &slOut, &slErr); code != 0 {
+	if code := capstoneSling(h, client, "worker", seeded.ID, &slOut, &slErr); code != 0 {
 		t.Fatalf("sling exit=%d\nstdout=%s\nstderr=%s", code, slOut.String(), slErr.String())
 	}
 	if !strings.Contains(slOut.String(), "→ worker") {

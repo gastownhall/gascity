@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeToken builds a shape-valid token: base64url(payload) "." base64url(sig)
@@ -168,5 +169,47 @@ func TestRunGrantCommand_NonZeroExit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("error must carry stderr: %v", err)
+	}
+}
+
+// TestGrantSource_BoundsHelperContext proves the grant command runs under a
+// bounded, cancellable context so a hung signer cannot block a mutating request
+// forever. The stub runner records whether it got a deadline and blocks until
+// cancellation; with the helper timeout shrunk, Mint must return the
+// canceled-helper error promptly rather than hang. Regression for the
+// context.Background() unbounded-exec finding.
+func TestGrantSource_BoundsHelperContext(t *testing.T) {
+	s, err := NewGrantSource("gc-write-mint --key k.ed25519")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.helperTimeout <= 0 {
+		t.Fatalf("grant source must bound the helper exec, got timeout %v", s.helperTimeout)
+	}
+	s.helperTimeout = 20 * time.Millisecond
+
+	var sawDeadline bool
+	s.runner = func(ctx context.Context, _ string, _ GrantInfo) (string, error) {
+		_, sawDeadline = ctx.Deadline()
+		<-ctx.Done() // simulate a hung grant signer
+		return "", ctx.Err()
+	}
+
+	done := make(chan struct{})
+	var mintErr error
+	go func() {
+		_, mintErr = s.Mint(sampleInfo())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Mint did not return: the grant helper exec is unbounded")
+	}
+	if !sawDeadline {
+		t.Error("grant helper ran without a context deadline")
+	}
+	if mintErr == nil {
+		t.Error("Mint = nil error, want the canceled-helper error")
 	}
 }

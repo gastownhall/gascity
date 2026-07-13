@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/google/uuid"
 )
@@ -36,20 +35,8 @@ func cmdRigAddRemote(c *api.Client, target *remoteTarget, args []string,
 
 	// Refusals — fail fast, before any wire call, in an order that reports the
 	// most specific mismatch first.
-	if len(args) > 0 {
-		return fail("unsupported_remote", "gc rig add: a remote city cannot see a client filesystem path; use --git-url for a server-side clone")
-	}
-	if strings.TrimSpace(gitURL) == "" {
-		return fail("invalid_arguments", "gc rig add: a remote rig add requires --git-url (the server clones it)")
-	}
-	if adopt {
-		return fail("unsupported_remote", "gc rig add: --adopt reads the client's .beads/ directory and is not supported for a remote city")
-	}
-	if len(includes) > 0 {
-		return fail("unsupported_remote", "gc rig add: --include is not supported for a remote city yet")
-	}
-	if startSuspended {
-		return fail("unsupported_remote", "gc rig add: --start-suspended is not supported for a remote city yet")
+	if code, message, refused := rigAddRemoteRefusal(args, gitURL, adopt, includes, startSuspended); refused {
+		return fail(code, message)
 	}
 
 	name := strings.TrimSpace(nameFlag)
@@ -96,7 +83,34 @@ func cmdRigAddRemote(c *api.Client, target *remoteTarget, args []string,
 	if err != nil {
 		return renderRemoteRigAddError(err, target, gitURL, name, prefixFlag, defaultBranchFlag, jsonOutput, stdout, stderr)
 	}
+	return renderRemoteRigAddSuccess(res, name, jsonOutput, stdout, stderr)
+}
 
+// rigAddRemoteRefusal reports the first unsupported-for-remote mode in the
+// invocation (a client-filesystem positional path, a missing --git-url, or a
+// flag that needs local client state), returning its error code and message.
+// refused is false when every mode is remote-safe. The scan order reports the
+// most specific mismatch first.
+func rigAddRemoteRefusal(args []string, gitURL string, adopt bool, includes []string, startSuspended bool) (code, message string, refused bool) {
+	switch {
+	case len(args) > 0:
+		return "unsupported_remote", "gc rig add: a remote city cannot see a client filesystem path; use --git-url for a server-side clone", true
+	case strings.TrimSpace(gitURL) == "":
+		return "invalid_arguments", "gc rig add: a remote rig add requires --git-url (the server clones it)", true
+	case adopt:
+		return "unsupported_remote", "gc rig add: --adopt reads the client's .beads/ directory and is not supported for a remote city", true
+	case len(includes) > 0:
+		return "unsupported_remote", "gc rig add: --include is not supported for a remote city yet", true
+	case startSuspended:
+		return "unsupported_remote", "gc rig add: --start-suspended is not supported for a remote city yet", true
+	}
+	return "", "", false
+}
+
+// renderRemoteRigAddSuccess renders the terminal success of a remote rig add: a
+// single JSONL object on stdout in --json mode, or a human "provisioned/exists"
+// line. name is the fallback rig label when the server echoes none.
+func renderRemoteRigAddSuccess(res api.RigCreateResult, name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	rigName := res.Rig
 	if rigName == "" {
 		rigName = name
@@ -163,29 +177,32 @@ func renderRemoteRigAddError(err error, target *remoteTarget, gitURL, name, pref
 	switch {
 	case errors.As(err, &conflict):
 		if conflict.Code == "rig_name_conflict" && conflict.InFlightRequestID != "" {
-			// The in-flight request_id is bound to ANOTHER request's body; a re-POST
-			// of your body under it would 409. Watch its events instead of re-adding.
+			// The name is held by ANOTHER request's in-flight provision. There is no
+			// safe re-add: a re-POST under a fresh id 409s the name again, and a
+			// re-POST under its id (below) 409s on a body mismatch. Remote event
+			// streaming is not yet a supported gc command (gc events is gated to a
+			// local city), so the only honest, actionable guidance is to wait for
+			// that provision to settle, then re-run the original add — an idempotent
+			// replay once the rig exists.
 			msg := fmt.Sprintf("gc rig add: %v\n"+
-				"another request is provisioning this rig; watch it instead of re-submitting:\n%s",
-				conflict, rigWatchRecipe(flags, conflict.InFlightRequestID, conflict.EventCursor))
+				"another request (request_id=%s) is already provisioning this rig on this city.\n"+
+				"Wait for it to finish, then re-run your original `gc rig add` — it will replay the\n"+
+				"existing rig once that provision succeeds. Do not re-submit under its request_id.",
+				conflict, conflict.InFlightRequestID)
 			return fail("rig_name_conflict", msg)
 		}
 		return fail("rig_create_conflict", "gc rig add: "+conflict.Error())
 	case errors.As(err, &deadlineErr):
 		msg := fmt.Sprintf("gc rig add: %v\n"+
-			"the provision continues server-side. Re-attach the wait (idempotent):\n%s\n"+
-			"or inspect its events without streaming:\n%s",
+			"the provision continues server-side. Re-attach the wait (idempotent):\n%s",
 			deadlineErr,
-			rigAddReplayRecipe(flags, gitURL, name, prefix, defaultBranch, deadlineErr.RequestID),
-			rigWatchRecipe(flags, deadlineErr.RequestID, ""))
+			rigAddReplayRecipe(flags, gitURL, name, prefix, defaultBranch, deadlineErr.RequestID))
 		return fail("rig_stream_deadline", msg)
 	case errors.As(err, &waitErr):
 		msg := fmt.Sprintf("gc rig add: lost the provisioning stream: %v (request_id=%s)\n"+
-			"the provision continues server-side. Resume the wait (idempotent):\n%s\n"+
-			"or inspect the terminal event without streaming:\n%s",
+			"the provision continues server-side. Resume the wait (idempotent):\n%s",
 			waitErr.Err, waitErr.RequestID,
-			rigAddReplayRecipe(flags, gitURL, name, prefix, defaultBranch, waitErr.RequestID),
-			rigWatchRecipe(flags, waitErr.RequestID, ""))
+			rigAddReplayRecipe(flags, gitURL, name, prefix, defaultBranch, waitErr.RequestID))
 		return fail("rig_stream_lost", msg)
 	case errors.As(err, &failedErr):
 		msg := fmt.Sprintf("gc rig add: %s: %s (request_id=%s)\n"+
@@ -225,24 +242,6 @@ func rigAddReplayRecipe(flags, gitURL, name, prefix, defaultBranch, requestID st
 		fmt.Fprintf(&b, " --default-branch %s", shellSingleQuote(defaultBranch))
 	}
 	fmt.Fprintf(&b, " --request-id %s", shellSingleQuote(requestID))
-	return b.String()
-}
-
-// rigWatchRecipe builds the BODY-INDEPENDENT passive watch: it observes an
-// in-flight provision by request_id (progress stream + terminal events) and never
-// re-POSTs a body, so it cannot 409 against another request's in-flight id.
-// eventCursor, when set (and not the replay-everything "0"), seeds --after so the
-// watch resumes from where the provision began instead of replaying the whole log.
-func rigWatchRecipe(flags, requestID, eventCursor string) string {
-	after := ""
-	if c := strings.TrimSpace(eventCursor); c != "" && c != "0" {
-		after = " --after " + shellSingleQuote(c)
-	}
-	match := shellSingleQuote("request_id=" + requestID)
-	var b strings.Builder
-	fmt.Fprintf(&b, "  gc %s events --follow --type %s --payload-match %s%s\n", flags, events.RigProvisionProgress, match, after)
-	fmt.Fprintf(&b, "  gc %s events --watch --type %s --payload-match %s\n", flags, events.RequestResultRigCreate, match)
-	fmt.Fprintf(&b, "  gc %s events --watch --type %s --payload-match %s", flags, events.RequestFailed, match)
 	return b.String()
 }
 

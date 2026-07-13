@@ -9,11 +9,15 @@
 // (C3/G15). Keeping one fence avoids the two copies drifting — a security
 // regression the duplication would invite.
 //
-// The fence is one layer of defense in depth, not the sole control. It does NOT
-// close the DNS-rebinding TOCTOU window: git re-resolves the host at fetch time,
-// so a name that resolves public here can resolve internal at the fetch. That
-// residual is closed at the git subprocess by refusing redirects and
-// constraining transports; pinning the resolved IP is out of scope.
+// The fence is one layer of defense in depth. On its own, EnsurePublicHost does
+// NOT close the DNS-rebinding TOCTOU window: git re-resolves the host at fetch
+// time, so a name that resolves public here can resolve internal at the fetch.
+// The rig-clone path closes that residual with ResolvePublicHostStrict, which
+// returns the fence-approved addresses so the caller can PIN them at connection
+// time (git http.curloptResolve); git then connects to exactly those addresses
+// instead of re-resolving the name, and TLS still verifies against the original
+// hostname. Redirect refusal and transport constraints at the git subprocess are
+// the additional in-depth layers.
 package ssrf
 
 import (
@@ -79,26 +83,49 @@ func EnsurePublicHost(host string) error {
 // stays on the fail-open EnsurePublicHost — its long-standing behavior — so this
 // hardening is scoped to the new clone surface only.
 func EnsurePublicHostStrict(host string) error {
-	return ensurePublicHost(host, true)
+	_, err := resolvePublicHost(host, true)
+	return err
 }
 
-// ensurePublicHost is the shared classifier for EnsurePublicHost (failClosed
-// false) and EnsurePublicHostStrict (failClosed true). The only difference is
-// how a HostResolver error is handled: allowed through when fail-open, blocked
-// when fail-closed.
+// ResolvePublicHostStrict is EnsurePublicHostStrict plus the fence-approved
+// addresses to pin. It returns the resolved public IPs for a DNS name so the
+// rig-clone path can pass them to git via http.curloptResolve, closing the
+// DNS-rebinding TOCTOU: git connects to exactly these already-validated
+// addresses instead of re-resolving the name at fetch time, while TLS still
+// verifies against the hostname. It returns an EMPTY slice (with a nil error)
+// for a literal or encoded-literal IP host — there is no name to pin, and the
+// URL already names the address git will use. Any resolution error or internal
+// address fails closed exactly as EnsurePublicHostStrict does.
+func ResolvePublicHostStrict(host string) ([]net.IP, error) {
+	return resolvePublicHost(host, true)
+}
+
+// ensurePublicHost is the shared verdict-only entry for EnsurePublicHost
+// (failClosed false) and EnsurePublicHostStrict (failClosed true).
 func ensurePublicHost(host string, failClosed bool) error {
+	_, err := resolvePublicHost(host, failClosed)
+	return err
+}
+
+// resolvePublicHost is the shared classifier. It returns the DNS-resolved public
+// addresses of host (nil for a literal or encoded-literal IP, which needs no
+// pin: git connects to the address named in the URL and never resolves a name),
+// alongside the verdict. The only difference between the fail-open and
+// fail-closed modes is how a HostResolver error is handled: allowed through
+// (nil, nil) when fail-open, blocked when fail-closed.
+func resolvePublicHost(host string, failClosed bool) ([]net.IP, error) {
 	lower := strings.ToLower(strings.TrimSpace(host))
 	if lower == "" {
-		return ErrEmptyHost
+		return nil, ErrEmptyHost
 	}
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
-		return blockedHostErr(host, "loopback host")
+		return nil, blockedHostErr(host, "loopback host")
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if IsInternalIP(ip) {
-			return blockedHostErr(host, "internal IP address")
+			return nil, blockedHostErr(host, "internal IP address")
 		}
-		return nil
+		return nil, nil
 	}
 	if ip := ParseLooseIPv4(host); ip != nil {
 		// Encoded numeric literal (hex, octal, or dotless integer) that
@@ -108,23 +135,25 @@ func ensurePublicHost(host string, failClosed bool) error {
 		// endpoint. Classify the decoded destination so these forms cannot slip
 		// an internal target past the fence on a resolver that errors for them.
 		if IsInternalIP(ip) {
-			return blockedHostErr(host, "internal IP address")
+			return nil, blockedHostErr(host, "internal IP address")
 		}
-		return nil
+		return nil, nil
 	}
 	ips, err := HostResolver(host)
 	if err != nil {
 		if failClosed {
-			return blockedHostErr(host, "host resolution failed")
+			return nil, blockedHostErr(host, "host resolution failed")
 		}
-		return nil
+		return nil, nil
 	}
+	public := make([]net.IP, 0, len(ips))
 	for _, ip := range ips {
 		if IsInternalIP(ip) {
-			return blockedHostErr(host, "host resolves to an internal IP address")
+			return nil, blockedHostErr(host, "host resolves to an internal IP address")
 		}
+		public = append(public, ip)
 	}
-	return nil
+	return public, nil
 }
 
 // internalCIDRv4 are non-public IPv4 ranges Go's net.IP classifiers do NOT cover

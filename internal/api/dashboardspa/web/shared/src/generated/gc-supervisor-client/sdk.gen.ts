@@ -907,6 +907,8 @@ export const getV0CityByCityNameRigs = <ThrowOnError extends boolean = false>(op
 
 /**
  * Create a rig
+ *
+ * Create a rig. Without git_url, appends the rig to city.toml synchronously (201). With git_url, clones and provisions asynchronously: returns 202 with an event_cursor — watch the city event stream for request.result.rig.create, rig.provision.progress, or request.failed carrying the request_id — or 200 for an idempotent replay of a succeeded create.
  */
 export const createRig = <ThrowOnError extends boolean = false>(options: Options<CreateRigData, ThrowOnError>) => (options.client ?? client).post<CreateRigResponses, CreateRigErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/rigs',

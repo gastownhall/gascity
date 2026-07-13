@@ -11,7 +11,7 @@ import (
 // read surface, states the grant-gated write posture, and demands a network front.
 func TestWarnUnauthenticatedReadPlaneGrantGated(t *testing.T) {
 	var buf bytes.Buffer
-	warnUnauthenticatedReadPlane(&buf, "0.0.0.0", true)
+	warnUnauthenticatedReadPlane(&buf, "0.0.0.0", true, false)
 	out := buf.String()
 
 	if strings.Count(out, "WARNING:") != 1 {
@@ -43,7 +43,7 @@ func TestWarnUnauthenticatedReadPlaneGrantGated(t *testing.T) {
 // operator understands mutations are gated only by the network front.
 func TestWarnUnauthenticatedReadPlaneUnverified(t *testing.T) {
 	var buf bytes.Buffer
-	warnUnauthenticatedReadPlane(&buf, "10.1.2.3", false)
+	warnUnauthenticatedReadPlane(&buf, "10.1.2.3", false, false)
 	out := buf.String()
 
 	if !strings.Contains(out, "UNVERIFIED") {
@@ -59,6 +59,61 @@ func TestWarnUnauthenticatedReadPlaneUnverified(t *testing.T) {
 	for _, want := range []string{"beads", "transcripts", "network/TLS front"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("warning missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// When a read-auth verifier is installed, city-scoped /v0/city reads are
+// grant-gated, but the aggregate event feed (/v0/events*) and the /api dashboard
+// plane are NOT covered by city-scoped read-auth and stay open on the same
+// listener. The warning must be NARROWED — naming exactly those still-open
+// surfaces — not suppressed wholesale (which would misreport the bind as fully
+// hardened). Regression for the F2 over-suppression finding. The read-plane
+// enumeration is posture-independent, but the warning still reports the write
+// posture, which differs per grantGated (S1: read-auth branch must not drop the
+// mutation-auth signal).
+func TestWarnUnauthenticatedReadPlaneNarrowedWhenReadAuthInstalled(t *testing.T) {
+	for _, grantGated := range []bool{true, false} {
+		var buf bytes.Buffer
+		warnUnauthenticatedReadPlane(&buf, "0.0.0.0", grantGated, true /*readAuthInstalled*/)
+		out := buf.String()
+
+		if strings.Count(out, "WARNING:") != 1 {
+			t.Fatalf("read-auth installed (grantGated=%v): want exactly one WARNING line, got %d:\n%s", grantGated, strings.Count(out, "WARNING:"), out)
+		}
+		for _, want := range []string{
+			"0.0.0.0",
+			"/v0/events",
+			"/api/",
+			"rig-provisioning progress",
+			"network/TLS front",
+			"REQUIRED",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("narrowed warning (grantGated=%v) missing %q:\n%s", grantGated, want, out)
+			}
+		}
+		// It must acknowledge that city-scoped reads ARE gated rather than claim the
+		// entire read plane is unauthenticated.
+		if !strings.Contains(out, "X-GC-City-Read") {
+			t.Errorf("narrowed warning (grantGated=%v) must name the city-read grant:\n%s", grantGated, out)
+		}
+		// The write posture must still be reported even when read-auth is installed:
+		// grant-gated names the X-GC-City-Write grant, otherwise it is UNVERIFIED.
+		if grantGated {
+			if !strings.Contains(out, "X-GC-City-Write") {
+				t.Errorf("narrowed grant-gated warning must name the write grant X-GC-City-Write:\n%s", out)
+			}
+			if strings.Contains(out, "UNVERIFIED") {
+				t.Errorf("narrowed grant-gated warning must not claim UNVERIFIED write posture:\n%s", out)
+			}
+		} else {
+			if !strings.Contains(out, "UNVERIFIED") {
+				t.Errorf("narrowed unverified warning must say UNVERIFIED write posture:\n%s", out)
+			}
+			if strings.Contains(out, "X-GC-City-Write") {
+				t.Errorf("narrowed unverified warning must not name the write grant X-GC-City-Write:\n%s", out)
+			}
 		}
 	}
 }

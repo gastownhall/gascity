@@ -119,6 +119,7 @@ func TestClone_HardenedArgvGolden(t *testing.T) {
 		"protocol.ext.allow=never",
 		"protocol.file.allow=never",
 		"http.followRedirects=false",
+		"http.sslVerify=true",
 		"core.hooksPath=/dev/null",
 		"clone",
 		"--no-recurse-submodules",
@@ -128,6 +129,19 @@ func TestClone_HardenedArgvGolden(t *testing.T) {
 	}
 	if !containsInOrder(args, inOrder) {
 		t.Errorf("argv missing required tokens in order.\n got: %v\nwant subsequence: %v", args, inOrder)
+	}
+
+	// TLS verification is PINNED on argv so an inherited GIT_SSL_NO_VERIFY cannot
+	// silently disable the DNS-rebinding TLS backstop; a trickle peer is bounded
+	// at the transport layer; and TLS is never disabled.
+	if !contains(args, "http.sslVerify=true") {
+		t.Errorf("argv missing pinned http.sslVerify=true: %v", args)
+	}
+	if !contains(args, "http.lowSpeedLimit=1024") || !contains(args, "http.lowSpeedTime=120") {
+		t.Errorf("argv missing http.lowSpeed* trickle bound: %v", args)
+	}
+	if contains(args, "http.sslVerify=false") {
+		t.Errorf("argv disabled TLS verification: %v", args)
 	}
 
 	// Anti-regression: the permissive pack-helper flags must NEVER appear.
@@ -230,6 +244,54 @@ func TestClone_EmptyDstRejected(t *testing.T) {
 	}
 	if *called {
 		t.Error("Clone with empty dst spawned a subprocess")
+	}
+}
+
+func TestClone_ResolveOverridesPinAddress(t *testing.T) {
+	gotArgs, _, _ := captureClone(t, nil)
+	opts := CloneOptions{ResolveOverrides: []string{"example.com:443:93.184.216.34"}}
+	if err := Clone(context.Background(), "https://example.com/o/r", "/tmp/dst", opts); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	// The pin becomes an http.curloptResolve -c override so git connects to the
+	// caller-validated address instead of re-resolving the name.
+	if !contains(*gotArgs, "http.curloptResolve=example.com:443:93.184.216.34") {
+		t.Errorf("argv missing curloptResolve pin: %v", *gotArgs)
+	}
+	idx := indexOf(*gotArgs, "http.curloptResolve=example.com:443:93.184.216.34")
+	if idx <= 0 || (*gotArgs)[idx-1] != "-c" {
+		t.Errorf("curloptResolve pin not passed as a -c override: %v", *gotArgs)
+	}
+	// No overrides -> no pin.
+	gotArgs2, _, _ := captureClone(t, nil)
+	if err := Clone(context.Background(), "https://example.com/o/r", "/tmp/dst", CloneOptions{}); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	for _, a := range *gotArgs2 {
+		if strings.HasPrefix(a, "http.curloptResolve=") {
+			t.Errorf("argv pinned resolution without ResolveOverrides: %v", *gotArgs2)
+		}
+	}
+}
+
+func TestClone_EnvStripsTLSAndProxyBypass(t *testing.T) {
+	// An inherited environment carrying TLS/proxy-bypass vars must not reach the
+	// clone subprocess -- they could weaken TLS or reroute the fetch.
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	t.Setenv("HTTPS_PROXY", "http://attacker.example:8080")
+	t.Setenv("https_proxy", "http://attacker.example:8080")
+	t.Setenv("ALL_PROXY", "socks5://attacker.example:1080")
+	t.Setenv("GIT_PROXY_COMMAND", "/bin/sh")
+	_, gotEnv, _ := captureClone(t, nil)
+	if err := Clone(context.Background(), "https://github.com/o/r", "/tmp/dst", CloneOptions{}); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	for _, banned := range []string{"GIT_SSL_NO_VERIFY", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "GIT_PROXY_COMMAND"} {
+		for _, e := range *gotEnv {
+			if k, _, ok := strings.Cut(e, "="); ok && k == banned {
+				t.Errorf("clone env leaked bypass var %q: %v", banned, e)
+			}
+		}
 	}
 }
 

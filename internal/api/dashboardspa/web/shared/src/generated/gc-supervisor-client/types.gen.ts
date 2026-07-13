@@ -835,7 +835,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2560,7 +2560,7 @@ export type RequestFailedPayload = {
     /**
      * Which operation failed.
      */
-    operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit';
+    operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit' | 'rig.create';
     /**
      * Correlation ID from the 202 response.
      */
@@ -2590,34 +2590,77 @@ export type RigActionBody = {
     status: string;
 };
 
-export type RigCreateInputBody = {
+export type RigCreateBody = {
     /**
      * Mainline branch (e.g. main, master). Auto-detected when omitted.
      */
     default_branch?: string;
     /**
+     * Git URL to clone (triggers async provisioning).
+     */
+    git_url?: string;
+    /**
      * Rig name.
      */
     name: string;
     /**
-     * Filesystem path.
+     * Filesystem path (server-derived for git_url clones).
      */
-    path: string;
+    path?: string;
     /**
      * Session name prefix.
      */
     prefix?: string;
+    /**
+     * Client-supplied idempotency key; reuse across retries.
+     */
+    request_id?: string;
 };
 
-export type RigCreatedOutputBody = {
+export type RigCreateResponseBody = {
     /**
-     * Created rig name.
+     * Resolved mainline branch (created/exists).
+     */
+    default_branch?: string;
+    /**
+     * City event-stream cursor captured before accept (202 only); pass as after_seq to the events stream to receive request.result.rig.create / rig.provision.progress / request.failed without replaying unrelated backlog.
+     */
+    event_cursor?: string;
+    /**
+     * Resolved session-name prefix (created/exists).
+     */
+    prefix?: string;
+    /**
+     * Correlation ID; echo of the request's request_id, or a server-minted id on 202.
+     */
+    request_id?: string;
+    /**
+     * Rig name (created/exists).
+     */
+    rig?: string;
+    /**
+     * created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).
+     */
+    status: 'created' | 'accepted' | 'exists';
+};
+
+export type RigCreateSucceededPayload = {
+    /**
+     * Resolved mainline branch.
+     */
+    default_branch: string;
+    /**
+     * Resolved session-name prefix.
+     */
+    prefix: string;
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+    /**
+     * Rig name that was provisioned.
      */
     rig: string;
-    /**
-     * Operation result.
-     */
-    status: string;
 };
 
 export type RigPatch = {
@@ -2653,6 +2696,29 @@ export type RigPatchSetInputBody = {
      * Override suspended state.
      */
     suspended?: boolean;
+};
+
+export type RigProvisionProgressPayload = {
+    /**
+     * Human-readable step detail.
+     */
+    detail?: string;
+    /**
+     * Correlation ID from the 202 response (empty on sync 201 provisions).
+     */
+    request_id?: string;
+    /**
+     * Rig name being provisioned.
+     */
+    rig: string;
+    /**
+     * Provisioning step that completed (clone, beads-init, packs, config, routes, …).
+     */
+    step: string;
+    /**
+     * True when the step reports a warn-and-continue condition.
+     */
+    warn?: boolean;
 };
 
 export type RigResponse = {
@@ -3745,6 +3811,10 @@ export type SupervisorRequestPayload = {
      */
     remote_addr_class: 'loopback' | 'private' | 'public' | 'unknown';
     /**
+     * The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line.
+     */
+    request_id?: string;
+    /**
      * HTTP response status code. Start-phase records use 0 before the final response status is known.
      */
     status: number;
@@ -3918,12 +3988,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultCityCreate) | ({
     type: 'request.result.city.unregister';
 } & TypedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.rig.create';
+} & TypedEventStreamEnvelopeRequestResultRigCreate) | ({
     type: 'request.result.session.create';
 } & TypedEventStreamEnvelopeRequestResultSessionCreate) | ({
     type: 'request.result.session.message';
 } & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'rig.provision.progress';
+} & TypedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -4807,6 +4881,23 @@ export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
 };
 
 /**
+ * TypedEventStreamEnvelope request.result.rig.create
+ */
+export type TypedEventStreamEnvelopeRequestResultRigCreate = {
+    actor: string;
+    message?: string;
+    payload: RigCreateSucceededPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.result.rig.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope request.result.session.create
  */
 export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
@@ -4854,6 +4945,23 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope rig.provision.progress
+ */
+export type TypedEventStreamEnvelopeRigProvisionProgress = {
+    actor: string;
+    message?: string;
+    payload: RigProvisionProgressPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.provision.progress';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5350,12 +5458,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultCityCreate) | ({
     type: 'request.result.city.unregister';
 } & TypedTaggedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.rig.create';
+} & TypedTaggedEventStreamEnvelopeRequestResultRigCreate) | ({
     type: 'request.result.session.create';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionCreate) | ({
     type: 'request.result.session.message';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'rig.provision.progress';
+} & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -6288,6 +6400,24 @@ export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope request.result.rig.create
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultRigCreate = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RigCreateSucceededPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.result.rig.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope request.result.session.create
  */
 export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
@@ -6338,6 +6468,24 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope rig.provision.progress
+ */
+export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RigProvisionProgressPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.provision.progress';
     workflow?: WorkflowEventProjection;
 };
 
@@ -14094,7 +14242,7 @@ export type GetV0CityByCityNameRigsResponses = {
 export type GetV0CityByCityNameRigsResponse = GetV0CityByCityNameRigsResponses[keyof GetV0CityByCityNameRigsResponses];
 
 export type CreateRigData = {
-    body: RigCreateInputBody;
+    body: RigCreateBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -14117,46 +14265,26 @@ export type CreateRigData = {
 
 export type CreateRigErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateRigError = CreateRigErrors[keyof CreateRigErrors];
 
 export type CreateRigResponses = {
     /**
+     * Rig already exists — idempotent request_id replay of a succeeded async create.
+     */
+    200: RigCreateResponseBody;
+    /**
      * Created
      */
-    201: RigCreatedOutputBody;
+    201: RigCreateResponseBody;
+    /**
+     * Provisioning accepted; watch the city event stream from event_cursor for request.result.rig.create, rig.provision.progress, or request.failed with this request_id.
+     */
+    202: RigCreateResponseBody;
 };
 
 export type CreateRigResponse = CreateRigResponses[keyof CreateRigResponses];

@@ -31,6 +31,20 @@ const ExecInfoEnv = "GC_EXEC_INFO"
 // handed to an in-flight request cannot expire mid-flight.
 const expirySkew = 30 * time.Second
 
+// credentialHelperTimeout / interactiveCredentialHelperTimeout bound how long a
+// credential command may run before it is canceled. The mint runs BEFORE the
+// remote HTTP request is created, so without a bound a hung helper blocks every
+// remote read/write forever — the REST timeout and SSE idle deadlines only govern
+// the request itself, not the exec that precedes it. A non-interactive helper is a
+// machine round-trip (to an STS/OAuth endpoint at most), so it is bounded tightly;
+// an interactive helper may be a human completing a browser/device login, so it is
+// bounded generously but still finitely. Neither ever runs under an unbounded
+// context.
+const (
+	credentialHelperTimeout            = 2 * time.Minute
+	interactiveCredentialHelperTimeout = 10 * time.Minute
+)
+
 // ExecInfo is the JSON handed to the credential command via GC_EXEC_INFO.
 type ExecInfo struct {
 	Version string   `json:"version"`
@@ -65,6 +79,10 @@ type CredentialSource struct {
 	city        string
 	interactive bool
 
+	// helperTimeout bounds one credential-command exec so a hung helper cannot
+	// block the caller forever (always > 0; see NewCredentialSource).
+	helperTimeout time.Duration
+
 	now    func() time.Time
 	runner runFunc
 
@@ -84,13 +102,18 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 	if strings.TrimSpace(serverURL) == "" {
 		return nil, errors.New("clientauth: server URL is required")
 	}
+	timeout := credentialHelperTimeout
+	if interactive {
+		timeout = interactiveCredentialHelperTimeout
+	}
 	return &CredentialSource{
-		command:     command,
-		serverURL:   serverURL,
-		city:        city,
-		interactive: interactive,
-		now:         time.Now,
-		runner:      runCredentialCommand,
+		command:       command,
+		serverURL:     serverURL,
+		city:          city,
+		interactive:   interactive,
+		helperTimeout: timeout,
+		now:           time.Now,
+		runner:        runCredentialCommand,
 	}, nil
 }
 
@@ -119,7 +142,11 @@ func (s *CredentialSource) mintLocked() (string, error) {
 		Version: Version,
 		Spec:    ExecSpec{ServerURL: s.serverURL, City: s.city, Interactive: s.interactive},
 	}
-	res, err := s.runner(context.Background(), s.command, info)
+	// Bound the exec so a hung helper is canceled instead of blocking the caller
+	// (and every remote request behind this lock) indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), s.helperTimeout)
+	defer cancel()
+	res, err := s.runner(ctx, s.command, info)
 	if err != nil {
 		return "", err
 	}
