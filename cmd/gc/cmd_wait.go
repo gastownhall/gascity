@@ -1125,11 +1125,11 @@ func lookupSessionBeadByID(store beads.Store, id string) (beads.Bead, bool, erro
 	return bead, true, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, store, now, nil)
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, store, sp, now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(store)
@@ -1192,7 +1192,9 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
-		if waitNudgeProviderNeedsPoller(sessionBead) && !nudgeDispatcherIsSupervisor(cfg) {
+		// Event-capable session providers retire the sidecar class: the
+		// supervisor's nudge event dispatcher owns queued delivery there.
+		if waitNudgeProviderNeedsPoller(sessionBead) && !nudgeDispatcherIsSupervisor(cfg) && !providerRetiresNudgePollers(sp) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}

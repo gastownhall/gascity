@@ -288,6 +288,12 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
+			// Resolve the session provider so the spawn respects the
+			// event-capable suppression. Fail open on resolution errors
+			// (nil provider → today's spawn) — a hook must not start
+			// failing because the provider config is momentarily broken.
+			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+			hookSP, _ := newSessionProviderFromContextWithError(spctx, nil)
 			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
@@ -297,7 +303,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}))
+			}), hookSP)
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {

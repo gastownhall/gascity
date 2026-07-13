@@ -444,6 +444,57 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 }
 
+// sessionEventedFake makes runtime.Fake event-capable so tests can assert the
+// deferred-submit path suppresses its sidecar poller for such providers.
+type sessionEventedFake struct{ *runtime.Fake }
+
+func (f sessionEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	ch := make(chan runtime.SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := sessionEventedFake{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1 (the item must still queue; only the sidecar is suppressed)", len(state.Pending))
+	}
+	if pollerCalls != 0 {
+		t.Fatalf("pollerCalls = %d, want 0 for an event-capable provider (supervisor event dispatcher owns delivery)", pollerCalls)
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")

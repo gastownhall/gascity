@@ -542,7 +542,11 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
-	if m.supportsFollowUpLocked(b) {
+	// Providers with a push session-event stream retire the sidecar poller
+	// class: the supervisor's nudge event dispatcher delivers queued items
+	// (deferred submits included) on idle events and dispatch passes, and a
+	// spawned poller would only race it.
+	if _, eventCapable := m.sp.(runtime.SessionEventProvider); !eventCapable && m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil

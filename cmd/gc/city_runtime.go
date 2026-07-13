@@ -119,6 +119,7 @@ type CityRuntime struct {
 	sessionPhasesLast   time.Time                    // last tick that ran the session phases (reconciler goroutine only)
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	nudgeEvents         *nudgeEventDispatcher        // provider idle events → queued-nudge delivery; wired by run()
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
@@ -678,13 +679,24 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Bridge the provider's push session-event stream (if it has one) into
+	// queued-nudge delivery: an idle event delivers waiting nudges within
+	// seconds via the provider's verified delivery, and the sidecar poller
+	// class retires for such providers. Config reload re-points the
+	// dispatcher when it swaps the provider.
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix)
+	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
 	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
 	// eventual delivery if the wake is missed (socket race, listener
-	// restart). Legacy mode skips the listener entirely; per-session
-	// pollers continue to own delivery.
-	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
+	// restart). Event-capable providers get the listener in BOTH dispatcher
+	// modes — their sidecar spawn is suppressed, so the event dispatcher
+	// (kicked by this listener and by idle events) owns queued delivery.
+	// Legacy mode on polled providers skips the listener entirely;
+	// per-session pollers continue to own delivery.
+	if (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()) && cr.cityPath != "" {
 		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
@@ -2059,6 +2071,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if providerChanged && cr.sessionEvents != nil {
 		cr.sessionEvents.restart(nextSp)
 	}
+	if cr.nudgeEvents != nil {
+		cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
+	}
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
@@ -2390,7 +2405,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); err != nil {
+	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, cr.sp, time.Now(), dispatchSessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
@@ -2895,6 +2910,17 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 // at the end of each patrol tick so a missed wake doesn't strand a queue
 // item past the patrol interval.
 func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+	// Event-capable providers route every pass through the nudge event
+	// dispatcher's worker: a delivery blocks for seconds (idle wait,
+	// paste+submit confirm), which must not stall the reconciler loop, and
+	// the single worker serializes supervisor-side deliveries. This runs in
+	// BOTH nudge_dispatcher modes — with the sidecar spawn suppressed for
+	// event-capable providers, it is the delivery engine for legacy-mode
+	// cities too.
+	if cr.nudgeEvents != nil && cr.nudgeEvents.active() {
+		cr.nudgeEvents.kickAll()
+		return
+	}
 	if !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return
 	}
