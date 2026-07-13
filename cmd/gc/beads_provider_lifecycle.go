@@ -1050,6 +1050,17 @@ func initFileStoreForDir(cityPath, dir string) error {
 // Acquires a per-city semaphore to prevent concurrent health/recovery
 // operations from causing a thundering herd when dolt bounces.
 func healthBeadsProvider(cityPath string) error {
+	return healthBeadsProviderContext(context.Background(), cityPath, true)
+}
+
+// healthBeadsProviderContext is healthBeadsProvider with a caller-owned
+// deadline. Native read reconnects skip the all-scope readiness barrier: their
+// immediately following OpenNativeStorage call is the scoped readiness check
+// and already shares this context.
+func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForScopes bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return nil
 	}
@@ -1058,7 +1069,7 @@ func healthBeadsProvider(cityPath string) error {
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
-		release, err := acquireProviderSemaphoreForOp(cityPath, "health")
+		release, err := acquireProviderSemaphoreForOpContext(ctx, cityPath, "health")
 		if err != nil {
 			return err
 		}
@@ -1069,7 +1080,7 @@ func healthBeadsProvider(cityPath string) error {
 		if err != nil {
 			return err
 		}
-		if err := runProviderOpWithEnv(script, providerEnv, "health"); err != nil {
+		if err := runProviderOpWithEnvContext(ctx, script, providerEnv, "health"); err != nil {
 			if providerUsesBdStoreContract(provider) {
 				owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
 				if ownershipErr != nil {
@@ -1098,14 +1109,16 @@ func healthBeadsProvider(cityPath string) error {
 				}
 				lastBeadsProviderRecover.Store(cityKey, now)
 			}
-			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
+			if recErr := runProviderOpWithEnvContext(ctx, script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
 			}
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
 				return fmt.Errorf("recovered but failed to publish managed dolt runtime state: %w", pubErr)
 			}
-			if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
-				return fmt.Errorf("recovered but store not ready: %w", waitErr)
+			if waitForScopes {
+				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
+					return fmt.Errorf("recovered but store not ready: %w", waitErr)
+				}
 			}
 		} else if providerUsesBdStoreContract(provider) && currentManagedDoltPort(cityPath) == "" {
 			owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
@@ -1118,8 +1131,10 @@ func healthBeadsProvider(cityPath string) error {
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
 				return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", pubErr)
 			}
-			if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
-				return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", waitErr)
+			if waitForScopes {
+				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
+					return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", waitErr)
+				}
 			}
 		}
 		return nil
@@ -2116,7 +2131,11 @@ func acquireProviderSemaphore(ctx context.Context, cityPath string) (func(), err
 }
 
 func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
-	ctx, cancel := providerLifecycleContext(context.Background(), providerOpTimeout(op))
+	return acquireProviderSemaphoreForOpContext(context.Background(), cityPath, op)
+}
+
+func acquireProviderSemaphoreForOpContext(parent context.Context, cityPath, op string) (func(), error) {
+	ctx, cancel := providerLifecycleContext(parent, providerOpTimeout(op))
 	release, err := acquireProviderSemaphore(ctx, cityPath)
 	if err != nil {
 		cancel()
@@ -2162,11 +2181,15 @@ func runProviderOp(script, cityPath string, args ...string) error {
 }
 
 func runProviderOpWithEnv(script string, environ []string, args ...string) error {
+	return runProviderOpWithEnvContext(context.Background(), script, environ, args...)
+}
+
+func runProviderOpWithEnvContext(parent context.Context, script string, environ []string, args ...string) error {
 	op := ""
 	if len(args) > 0 {
 		op = args[0]
 	}
-	ctx, cancel := providerLifecycleContext(context.Background(), providerOpTimeout(op))
+	ctx, cancel := providerLifecycleContext(parent, providerOpTimeout(op))
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, args...)
@@ -2181,6 +2204,9 @@ func runProviderOpWithEnv(script string, environ []string, args ...string) error
 
 	err := cmd.Run()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("exec beads %s: %w", args[0], ctxErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
 			return nil // Not needed
