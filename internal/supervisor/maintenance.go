@@ -194,6 +194,18 @@ type StoreMaintenanceLoop struct {
 
 	lastRunAt time.Time
 	history   []MaintenanceRun
+
+	// Alert dedup state (guarded by mu — written only inside a cycle).
+	// alertFingerprint is the stage+error of the failure last alerted; empty
+	// means the loop is in the healthy state (or alerts were never sent).
+	// Alerts fire on fingerprint CHANGE — a new failure, a different failure,
+	// or recovery — never per interval, so a persistently failing store mails
+	// the operator once, not every run (plus once on recovery). State is
+	// in-memory: a supervisor restart re-alerts a still-failing store once,
+	// which doubles as a liveness reminder.
+	alertFingerprint string
+	alertSince       time.Time
+	alertSuppressed  int
 }
 
 // MaintenanceInProgressError is returned by TriggerNow when the maintenance
@@ -435,11 +447,14 @@ func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath
 	return run
 }
 
-// emitRunEvent records the typed gc.store.maintenance.done or
-// gc.store.maintenance.failed event for a completed run. The failed
-// variant fires when run.Err is non-empty; the done variant otherwise.
-// Emission failures are swallowed (the recorder itself is best-effort).
+// emitRunEvent is the single run-completion side-effect point: it drives
+// the operator-alert state machine and records the typed
+// gc.store.maintenance.done or gc.store.maintenance.failed event. The
+// failed variant fires when run.Err is non-empty; the done variant
+// otherwise. Emission failures are swallowed (the recorder itself is
+// best-effort). Callers hold m.mu (the alert state is mu-guarded).
 func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
+	m.maybeSendAlertLocked(run)
 	if m.recorder == nil {
 		return
 	}
@@ -479,8 +494,36 @@ func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
 		Ts:      run.FinishedAt,
 		Payload: raw,
 	})
+}
+
+// maybeSendAlertLocked drives the operator-alert state machine after each
+// run. Mail fires on failure-fingerprint CHANGE only: entering a failure
+// state (or the failure changing shape) sends one alert; identical repeats
+// are counted but suppressed; the first success after an alerted failure
+// sends one recovery notice. Caller must hold m.mu.
+func (m *StoreMaintenanceLoop) maybeSendAlertLocked(run MaintenanceRun) {
+	fingerprint := ""
 	if run.Err != "" {
+		fingerprint = run.Stage + "\x00" + run.Err
+	}
+	switch fingerprint {
+	case m.alertFingerprint:
+		// Healthy→healthy is a no-op; an unchanged failure is suppressed.
+		if fingerprint != "" {
+			m.alertSuppressed++
+		}
+	case "":
+		// Failure→success: recovery notice, back to the healthy state.
+		m.sendRecoveryNotice(run)
+		m.alertFingerprint = ""
+		m.alertSince = time.Time{}
+		m.alertSuppressed = 0
+	default:
+		// New failure, or the failure changed shape mid-streak.
 		m.sendFailureAlert(run)
+		m.alertFingerprint = fingerprint
+		m.alertSince = run.StartedAt
+		m.alertSuppressed = 0
 	}
 }
 
@@ -553,10 +596,11 @@ func (m *StoreMaintenanceLoop) emitDiskEvent(eventType string, free int64) {
 }
 
 // sendFailureAlert posts one best-effort operator alert mail for a
-// failed maintenance run. It is a no-op when Mail is unset or AlertTo
-// is empty; Send errors are logged to stderr but never propagate. The
-// subject and body shape is stable and documented in the runbook
-// (ga-d5y / ga-sec).
+// failed maintenance run. Callers gate it on fingerprint change (see
+// maybeSendAlertLocked) so it fires once per distinct failure, not per
+// interval. It is a no-op when Mail is unset or AlertTo is empty; Send
+// errors are logged to stderr but never propagate. The subject and body
+// shape is stable and documented in the runbook (ga-d5y / ga-sec).
 func (m *StoreMaintenanceLoop) sendFailureAlert(run MaintenanceRun) {
 	if m.mail == nil || m.cfg.AlertTo == "" {
 		return
@@ -581,6 +625,34 @@ func (m *StoreMaintenanceLoop) sendFailureAlert(run MaintenanceRun) {
 
 	if _, err := m.mail.Send(maintenanceActor, m.cfg.AlertTo, subject, body.String()); err != nil {
 		fmt.Fprintf(m.stderr, "store-maintenance: alert mail send failed: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// sendRecoveryNotice posts one best-effort operator mail when a run
+// succeeds after an alerted failure streak, closing the loop opened by
+// sendFailureAlert. Caller must hold m.mu (it reads the alert dedup
+// state). No-op when Mail is unset, AlertTo is empty, or no failure
+// alert was actually sent for the streak.
+func (m *StoreMaintenanceLoop) sendRecoveryNotice(run MaintenanceRun) {
+	if m.mail == nil || m.cfg.AlertTo == "" || m.alertFingerprint == "" {
+		return
+	}
+	stage, errMsg, _ := strings.Cut(m.alertFingerprint, "\x00")
+
+	subject := fmt.Sprintf("[RECOVERED] Dolt store maintenance succeeded after failing: %s", stage)
+	var body strings.Builder
+	fmt.Fprintf(&body, "Dolt store maintenance recovered.\n\n")
+	fmt.Fprintf(&body, "Failed stage:  %s\n", stage)
+	fmt.Fprintf(&body, "Last error:    %s\n", errMsg)
+	if !m.alertSince.IsZero() {
+		fmt.Fprintf(&body, "Failing since: %s\n", m.alertSince.UTC().Format(time.RFC3339))
+	}
+	fmt.Fprintf(&body, "Repeats:       %d suppressed after the first alert\n", m.alertSuppressed)
+	fmt.Fprintf(&body, "Recovered at:  %s\n", run.FinishedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&body, "City:          %s\n", m.cityPath)
+
+	if _, err := m.mail.Send(maintenanceActor, m.cfg.AlertTo, subject, body.String()); err != nil {
+		fmt.Fprintf(m.stderr, "store-maintenance: recovery mail send failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 }
 
