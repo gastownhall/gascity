@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -159,9 +159,9 @@ func orderedMailProviderReadResults[T any](names []string, results map[string]ma
 func mailReadAPIError(err error) error {
 	var timeoutErr *mailReadTimeoutError
 	if errors.As(err, &timeoutErr) {
-		return huma.Error503ServiceUnavailable(timeoutErr.Error())
+		return apierr.ServiceUnavailable.Msg(timeoutErr.Error())
 	}
-	return huma.Error500InternalServerError(err.Error())
+	return apierr.Internal.Msg(err.Error())
 }
 
 func allMailProvidersFailedError(partialErrs []string, storeSlow bool) error {
@@ -169,7 +169,7 @@ func allMailProvidersFailedError(partialErrs []string, storeSlow bool) error {
 	if storeSlow {
 		detail = "store_slow: " + detail
 	}
-	return huma.Error503ServiceUnavailable(detail)
+	return apierr.ServiceUnavailable.Msg(detail)
 }
 
 // humaHandleMailList is the Huma-typed handler for GET /v0/mail.
@@ -374,7 +374,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		}, nil
 
 	default:
-		return nil, huma.Error400BadRequest("unsupported status filter: " + status + "; supported: unread, all")
+		return nil, apierr.InvalidRequest.Msg("unsupported status filter: " + status + "; supported: unread, all")
 	}
 }
 
@@ -402,12 +402,12 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 	})
 	if err != nil {
 		if errors.Is(err, mail.ErrNotFound) {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, apierr.MailNotFound.Msg(err.Error())
 		}
 		return nil, mailReadAPIError(err)
 	}
 	if !result.Found {
-		return nil, huma.Error404NotFound("message " + id + " not found")
+		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 	result.Message.Rig = result.Rig
 	return &IndexOutput[mail.Message]{
@@ -424,49 +424,33 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errMailNoBeadStore) {
-			return nil, huma.Error400BadRequest(resolveErr.Error())
+			return nil, apierr.InvalidRequest.Msg(resolveErr.Error())
 		}
-		return nil, huma.Error400BadRequest(resolveErr.Error())
+		return nil, apierr.InvalidRequest.Msg(resolveErr.Error())
 	}
 
 	mp := s.findMailProvider(input.Body.Rig)
 	if mp == nil {
-		return nil, huma.Error400BadRequest("no mail provider available")
+		return nil, apierr.InvalidRequest.Msg("no mail provider available")
 	}
 
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/mail:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, huma.Error422UnprocessableEntity("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: send at most once per Idempotency-Key. On replay the closure
+	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
+	// fires. The helper guarantees the reservation is released on a send error.
+	msg, err := withIdempotency(s, "/v0/mail", input.IdempotencyKey, input.Body,
+		func() (mail.Message, error) {
+			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
+			telemetry.RecordMailOp(ctx, "send", sendErr)
+			if sendErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(sendErr.Error())
 			}
-			if existing.pending {
-				return nil, huma.Error409Conflict("in_flight: request with this Idempotency-Key is already in progress")
-			}
-			// Replay cached typed response (Fix 3l).
-			if msg, ok := replayAs[mail.Message](existing); ok {
-				return &IndexOutput[mail.Message]{
-					Index: s.latestIndex(),
-					Body:  msg,
-				}, nil
-			}
-		}
-	}
-
-	msg, err := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
-	telemetry.RecordMailOp(ctx, "send", err)
+			sent.Rig = input.Body.Rig
+			s.recordMailEvent(events.MailSent, sent.From, sent.ID, input.Body.Rig, &sent)
+			return sent, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, err
 	}
-	msg.Rig = input.Body.Rig
-	s.idem.storeResponse(idemKey, bodyHash, msg)
-	s.recordMailEvent(events.MailSent, msg.From, msg.ID, input.Body.Rig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),
@@ -545,7 +529,7 @@ func (s *Server) humaHandleMailThread(ctx context.Context, input *MailThreadInpu
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
 		if mp == nil {
-			return nil, huma.Error404NotFound("rig " + rig + " not found")
+			return nil, apierr.RigNotFound.Msg("rig " + rig + " not found")
 		}
 		msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
 			return mp.Thread(threadID)
@@ -599,18 +583,18 @@ func (s *Server) humaHandleMailRead(ctx context.Context, input *MailReadInput) (
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if mp == nil {
-		return nil, huma.Error404NotFound("message " + id + " not found")
+		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 	if err := mp.MarkRead(id); err != nil {
 		telemetry.RecordMailOp(ctx, "mark_read", err)
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	telemetry.RecordMailOp(ctx, "mark_read", nil)
 	if err := waitForMailReadState(ctx, mp, id, true); err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	s.recordMailEvent(events.MailMarkedRead, "api", id, resolvedRig, nil)
 	resp := &OKResponse{}
@@ -624,18 +608,18 @@ func (s *Server) humaHandleMailMarkUnread(ctx context.Context, input *MailMarkUn
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if mp == nil {
-		return nil, huma.Error404NotFound("message " + id + " not found")
+		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 	if err := mp.MarkUnread(id); err != nil {
 		telemetry.RecordMailOp(ctx, "mark_unread", err)
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	telemetry.RecordMailOp(ctx, "mark_unread", nil)
 	if err := waitForMailReadState(ctx, mp, id, false); err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	s.recordMailEvent(events.MailMarkedUnread, "api", id, resolvedRig, nil)
 	resp := &OKResponse{}
@@ -673,7 +657,7 @@ func (s *Server) humaHandleMailArchive(ctx context.Context, input *MailArchiveIn
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if mp == nil {
 		// Idempotent: archive removes the bead, so a repeat call finds no
@@ -689,7 +673,7 @@ func (s *Server) humaHandleMailArchive(ctx context.Context, input *MailArchiveIn
 			return resp, nil
 		}
 		telemetry.RecordMailOp(ctx, "archive", err)
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	telemetry.RecordMailOp(ctx, "archive", nil)
 	s.recordMailEvent(events.MailArchived, "api", id, resolvedRig, nil)
@@ -705,16 +689,16 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 
 	mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
 	if mpErr != nil {
-		return nil, huma.Error500InternalServerError(mpErr.Error())
+		return nil, apierr.Internal.Msg(mpErr.Error())
 	}
 	if mp == nil {
-		return nil, huma.Error404NotFound("message " + id + " not found")
+		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 
 	msg, err := mp.Reply(id, input.Body.From, input.Body.Subject, input.Body.Body)
 	telemetry.RecordMailOp(ctx, "reply", err)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	msg.Rig = resolvedRig
 	s.recordMailEvent(events.MailReplied, msg.From, msg.ID, resolvedRig, &msg)
@@ -731,7 +715,7 @@ func (s *Server) humaHandleMailDelete(ctx context.Context, input *MailDeleteInpu
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if mp == nil {
 		// Idempotent: delete removes the bead, so a repeat call finds no
@@ -747,7 +731,7 @@ func (s *Server) humaHandleMailDelete(ctx context.Context, input *MailDeleteInpu
 			return resp, nil
 		}
 		telemetry.RecordMailOp(ctx, "delete", err)
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	telemetry.RecordMailOp(ctx, "delete", nil)
 	s.recordMailEvent(events.MailDeleted, "api", id, resolvedRig, nil)

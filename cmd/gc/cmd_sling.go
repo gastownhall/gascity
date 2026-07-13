@@ -576,13 +576,6 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	deps.Router = cliBeadRouter{deps: deps}
-	// Wire the rig→city control-dispatcher fallback (#3454) into the sling
-	// graph-routing path. deps.CityPath is read lazily at routing time, and the
-	// closure short-circuits before opening a store when no city.toml exists, so
-	// it never spins up a managed Dolt backend on a bare working dir.
-	deps.ControlDispatcherRuntimeMissing = func(qualifiedName string) bool {
-		return controlDispatcherSessionRuntimeMissing(deps.CityPath, qualifiedName)
-	}
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
@@ -927,7 +920,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	}
 	if result.DryRun {
 		if jsonOutput {
-			return writeSlingJSONResult(result, jsonStdout, stderr)
+			return writeSlingJSONResult(result, "", jsonStdout, stderr)
 		}
 		// For batch dry-run, look up the container bead for display.
 		// DoSling sets ContainerType on the result only when it actually
@@ -954,8 +947,21 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	if result.NudgeAgent != nil {
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, humanStdout, stderr)
 	}
+	// Success only (never dry-run or error): surface a dashboard deep link
+	// when one resolves. Resolution failure degrades silently to no link.
+	dashboardURL, dashboardRunsList := slingDashboardURLHook(deps.CityPath, result)
 	if jsonOutput {
-		return writeSlingJSONResult(result, jsonStdout, stderr)
+		return writeSlingJSONResult(result, dashboardURL, jsonStdout, stderr)
+	}
+	if dashboardURL != "" {
+		// Runs-list landings lag the dashboard's cache-reconcile cycle by
+		// up to a couple of minutes, so set that expectation inline;
+		// run-detail links render immediately and stay bare.
+		suffix := ""
+		if dashboardRunsList {
+			suffix = " (new work can take a minute or two to appear)"
+		}
+		fmt.Fprintf(humanStdout, "Dashboard: %s%s\n", dashboardURL, suffix) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
@@ -982,6 +988,7 @@ type slingJSONResult struct {
 	Routed        bool                   `json:"routed"`
 	Queued        bool                   `json:"queued"`
 	DryRun        bool                   `json:"dry_run"`
+	DashboardURL  string                 `json:"dashboard_url,omitempty"`
 	Warnings      []string               `json:"warnings,omitempty"`
 	Batch         *slingJSONBatchSummary `json:"batch,omitempty"`
 }
@@ -995,8 +1002,9 @@ type slingJSONBatchSummary struct {
 	Idempotent    int    `json:"idempotent"`
 }
 
-func writeSlingJSONResult(result sling.SlingResult, stdout, stderr io.Writer) int {
+func writeSlingJSONResult(result sling.SlingResult, dashboardURL string, stdout, stderr io.Writer) int {
 	payload := slingJSONFromResult(result)
+	payload.DashboardURL = dashboardURL
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1385,10 +1393,16 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 
 	if a.SupportsInstanceExpansion() {
 		sp0 := scaleParamsFor(a)
-		tryNudgeStore := func(sessionStore beads.Store) bool {
-			refs := resolvePoolSessionRefs(sessionStore, cfg, a.Name, a.Dir, sp0, a, cityName, st, sp, stderr)
+		tryNudgeStore := func(rawStore beads.Store) bool {
+			// Session lookups (pool refs, running check, target fence) route to the
+			// session coordination-class store; the queued-nudge enqueue inside
+			// deliverSlingNudge stays on rawStore (nudges class). Identity today
+			// (cliSessionStore is the identity resolver), so byte-identical until a
+			// [beads.classes.sessions] relocation lands.
+			sessStore := cliSessionStore(rawStore, cfg, cityPath)
+			refs := resolvePoolSessionRefs(sessStore, cfg, a.Name, a.Dir, sp0, a, cityName, st, sp, stderr)
 			for _, ref := range refs {
-				running, err := workerSessionTargetRunningWithConfig(cityPath, sessionStore, sp, cfg, ref.sessionName)
+				running, err := workerSessionTargetRunningWithConfig(cityPath, sessStore, sp, cfg, ref.sessionName)
 				if err != nil || !running {
 					continue
 				}
@@ -1397,8 +1411,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", ref.qualifiedInstance) //nolint:errcheck // best-effort
 					return true
 				}
-				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessionStore, ref.sessionName)
-				deliverSlingNudge(target, sp, sessionStore, cityPath, stdout, stderr)
+				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessStore, ref.sessionName)
+				deliverSlingNudge(target, sp, rawStore, cityPath, stdout, stderr)
 				return true
 			}
 			return false
@@ -1422,9 +1436,12 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		return
 	}
 
-	// Fixed agent: nudge directly.
-	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
-	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, store, sn)
+	// Fixed agent: nudge directly. Session lookups route to the session
+	// coordination-class store; deliverSlingNudge keeps the nudge enqueue on the
+	// plain store. Identity today.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
+	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
 	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
 }
 
@@ -1487,11 +1504,17 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 
 func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
-	obs, err := workerObserveNudgeTarget(target, store, sp)
+	// Session observation/handle and the last-nudge-delivered stamp route to the
+	// session coordination-class store (derived from the target's cfg+cityPath); the
+	// queued-nudge enqueue below stays on the passed store (nudges class). Identity
+	// today (cliSessionStore is the identity resolver; a nil target.cfg → identity
+	// too), so byte-identical until a [beads.classes.sessions] relocation lands.
+	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
+	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	running := err == nil && obs.Running
 	now := time.Now()
 	if running {
-		handle, err := workerHandleForNudgeTarget(target, store, sp)
+		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
 				Text:     msg,
@@ -1501,9 +1524,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-				var sessFront *session.InfoStore
+				var sessFront *session.Store
 				if store != nil {
-					sessFront = sessionFrontDoor(store)
+					sessFront = cliSessionFrontDoor(store, target.cfg, target.cityPath)
 				}
 				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
 				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
@@ -1661,7 +1684,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 
 	// Nudge section.
 	if opts.Nudge {
-		printNudgePreview(w, a, deps.CityName, deps.SP, deps.Store, deps.Cfg)
+		printNudgePreview(w, a, deps.CityName, deps.CityPath, deps.SP, deps.Store, deps.Cfg)
 	}
 
 	w("No side effects executed (--dry-run).")
@@ -1747,7 +1770,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 
 	// Nudge section.
 	if opts.Nudge {
-		printNudgePreview(w, a, deps.CityName, deps.SP, deps.Store, deps.Cfg)
+		printNudgePreview(w, a, deps.CityName, deps.CityPath, deps.SP, deps.Store, deps.Cfg)
 	}
 
 	w("No side effects executed (--dry-run).")
@@ -1823,13 +1846,15 @@ func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQu
 }
 
 // printNudgePreview prints the Nudge section for dry-run output.
-func printNudgePreview(w func(string), a config.Agent, cityName string,
+func printNudgePreview(w func(string), a config.Agent, cityName, cityPath string,
 	sp runtime.Provider, store beads.Store, cfg *config.City,
 ) {
 	st := cfg.Workspace.SessionTemplate
 	w("Nudge:")
-	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
-	running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+	// Dry-run session reads route to the session coordination-class store. Identity today.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
+	running, err := workerSessionTargetRunningWithConfig("", sessStore, sp, cfg, sn)
 	if err == nil && running {
 		w("  Would nudge " + a.QualifiedName() + " (session " + sn + ").")
 		w("  Currently: running ✓")

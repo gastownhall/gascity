@@ -35,11 +35,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing fanout: %w", bead.ID, err)
 		}
-		closedBead, err := store.Get(bead.ID)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading closed fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -77,11 +73,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed fanout: %w", bead.ID, err)
 		}
-		closedBead, err := store.Get(bead.ID)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading failed fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -96,11 +88,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing empty fanout: %w", bead.ID, err)
 		}
-		closedBead, err := store.Get(bead.ID)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: reloading empty fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -156,7 +144,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				return ControlResult{}, fmt.Errorf("%s: preparing fragment %d: %w", bead.ID, index+1, err)
 			}
 		}
-		routeFanoutFragmentSteps(fragment, bead, opts, store)
+		if err := routeFanoutFragmentSteps(fragment, bead, opts, store); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: routing fragment %d: %w", bead.ID, index+1, err)
+		}
 		externalDeps := expectedFragmentExternalDeps(fragment, mode, previousSinkIDs)
 		existingMapping, err := resolveExistingFragmentInstanceFromBeads(store, workflowBeads, rootID, fragment, externalDeps, fragmentResumeMatchOptions{
 			StepRefAliases:     fanoutLegacyStepAliases(fragment, targetRef, sourceRef, index),
@@ -292,13 +282,17 @@ type fragmentResumeMatchOptions struct {
 	FanoutSinkBlockers map[string]struct{}
 }
 
-func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions, store beads.Store) {
+func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions, store beads.Store) error {
 	if fragment == nil {
-		return
+		return nil
 	}
 	executionRoute := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
-	routeCfg := loadAttemptRouteConfig(opts.CityPath)
+	routeCfg, err := opts.routeConfig()
+	if err != nil {
+		return fmt.Errorf("loading fanout route config: %w", err)
+	}
+	rootStoreRef := strings.TrimSpace(control.Metadata[beadmeta.RootStoreRefMetadataKey])
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
 		if step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
@@ -310,12 +304,22 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 			}
 			step.Metadata[beadmeta.ExecutionRigContextMetadataKey] = executionRigContext
 		}
+		if rootStoreRef != "" {
+			if step.Metadata == nil {
+				step.Metadata = make(map[string]string)
+			}
+			// Fanout attachments stay in the parent graph store. The parent ref is
+			// authoritative over any stale value carried by a fragment template.
+			step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
+		}
 		if isAttemptControlKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			target := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 			if target == "" {
 				target = fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
 			}
-			applyAttemptControlStepRoute(step, target, routeCfg, store)
+			if err := applyAttemptControlStepRoute(step, target, routeCfg, store); err != nil {
+				return fmt.Errorf("routing fanout control step %s: %w", step.ID, err)
+			}
 			continue
 		}
 		if fanoutFragmentStepHasRoute(*step) {
@@ -327,6 +331,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		}
 		applyAttemptStepRoute(step, target, routeCfg, store)
 	}
+	return nil
 }
 
 func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, routeCfg *config.City) string {

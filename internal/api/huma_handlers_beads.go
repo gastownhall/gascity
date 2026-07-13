@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -345,7 +345,10 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
 	rootID := input.RootID
 	if rootID == "" {
-		return nil, huma.Error400BadRequest("rootID is required")
+		// Defensive: the {rootID} path segment is required, so the router never
+		// dispatches here with an empty id. Unreachable in practice, hence the op
+		// does not declare a 400 in its error contract.
+		return nil, apierr.InvalidRequest.Msg("rootID is required")
 	}
 
 	var root beads.Bead
@@ -356,19 +359,19 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		root = b
 		foundStore = store
 		break
 	}
 	if foundStore == nil {
-		return nil, huma.Error404NotFound("bead " + rootID + " not found")
+		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 
 	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	beadIndex := make(map[string]beads.Bead, len(graphBeads))
 	for _, b := range graphBeads {
@@ -377,7 +380,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 	deps, depPartial := collectWorkflowDeps(foundStore, beadIndex)
 	if depPartial {
-		return nil, huma.Error500InternalServerError("listing bead graph dependencies failed")
+		return nil, apierr.Internal.Msg("listing bead graph dependencies failed")
 	}
 	deps = mergeWorkflowDeps(deps, parentEdges)
 
@@ -406,7 +409,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		return &IndexOutput[beads.Bead]{
 			Index:     s.latestIndex(),
@@ -414,7 +417,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			Body:      b,
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
@@ -426,14 +429,14 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		children, err := store.List(beads.ListQuery{
 			ParentID: id,
 			Sort:     beads.SortCreatedAsc,
 		})
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		children = appendMetadataAttachedChildren(store, parent, children)
 		if children == nil {
@@ -444,7 +447,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			Body:  BeadDepsResponse{Children: children},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // BeadDepsResponse is the response shape for GET /v0/bead/{id}/deps.
@@ -455,63 +458,43 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/beads:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, huma.Error422UnprocessableEntity("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: run the create at most once per Idempotency-Key. The helper
+	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
+	// released on any error, so every fallible step lives in the closure.
+	b, err := withIdempotency(s, "/v0/beads", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			if existing.pending {
-				return nil, huma.Error409Conflict("in_flight: request with this Idempotency-Key is already in progress")
+			assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			if err != nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
 			}
-			// Replay cached typed response (Fix 3l).
-			if b, ok := replayAs[beads.Bead](existing); ok {
-				return &IndexOutput[beads.Bead]{
-					Index: s.latestIndex(),
-					Body:  b,
-				}, nil
+			created, err := store.Create(beads.Bead{
+				Title:       input.Body.Title,
+				Type:        input.Body.Type,
+				Priority:    input.Body.Priority,
+				Assignee:    assignee,
+				Description: input.Body.Description,
+				Labels:      input.Body.Labels,
+				ParentID:    input.Body.Parent,
+				Metadata:    input.Body.Metadata,
+				DeferUntil:  input.Body.DeferUntil,
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
 			}
-		}
-	}
-
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")
-	}
-	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			// Some stores return a minimal create envelope and require a
+			// follow-up read for the canonical persisted bead state.
+			if persisted, getErr := store.Get(created.ID); getErr == nil {
+				created = persisted
+			}
+			return created, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error400BadRequest(err.Error())
+		return nil, err
 	}
-
-	b, err := store.Create(beads.Bead{
-		Title:       input.Body.Title,
-		Type:        input.Body.Type,
-		Priority:    input.Body.Priority,
-		Assignee:    assignee,
-		Description: input.Body.Description,
-		Labels:      input.Body.Labels,
-		ParentID:    input.Body.Parent,
-		Metadata:    input.Body.Metadata,
-		DeferUntil:  input.Body.DeferUntil,
-	})
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error500InternalServerError(err.Error())
-	}
-
-	// Some stores return a minimal create envelope and require a follow-up
-	// read for the canonical persisted bead state.
-	if persisted, getErr := store.Get(b.ID); getErr == nil {
-		b = persisted
-	}
-	s.idem.storeResponse(idemKey, bodyHash, b)
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
@@ -527,19 +510,19 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadReopen is the Huma-typed handler for POST /v0/bead/{id}/reopen.
@@ -552,19 +535,19 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Status != "closed" {
-			return nil, huma.Error409Conflict("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+			return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 		}
 		if err := store.Reopen(id); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "reopened"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
@@ -575,11 +558,11 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		// Once Get succeeded in this store, treat Update-ErrNotFound as a
 		// concurrent-delete race rather than "try the next store" — the bead
@@ -587,16 +570,16 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		// that happens to share the ID prefix.
 		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		return &IndexOutput[map[string]string]{
 			Index: s.latestIndex(),
 			Body:  map[string]string{"status": "assigned", "assignee": assignee},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadUpdate is the Huma-typed handler for POST /v0/bead/{id}/update
@@ -638,12 +621,12 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if body.Assignee != nil {
 			assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 			if err != nil {
-				return nil, huma.Error400BadRequest(err.Error())
+				return nil, apierr.InvalidRequest.Msg(err.Error())
 			}
 			opts.Assignee = &assignee
 		}
@@ -657,17 +640,17 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		// the mutation to a different store that happens to share the ID.
 		if err := store.Update(id, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
 			if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
 				if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
 					if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-						return nil, huma.Error409Conflict("conflict: bead " + id + " was reparented concurrently")
+						return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
 					}
-					return nil, huma.Error500InternalServerError(err.Error())
+					return nil, apierr.Internal.Msg(err.Error())
 				}
 			}
 		}
@@ -675,7 +658,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		resp.Body.Status = "updated"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
@@ -689,17 +672,17 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }

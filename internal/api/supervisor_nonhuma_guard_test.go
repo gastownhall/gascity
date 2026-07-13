@@ -26,9 +26,10 @@ func TestSupervisorNonHumaSurfacesAreSanctioned(t *testing.T) {
 	}
 
 	sanctioned := map[string]bool{
-		"/v0/city/{cityName}/svc/": true, // workspace-service pass-through
-		"/":                        true, // embedded dashboard SPA (WithStaticHandler)
-		"/api/":                    true, // host-side dashboard plane (WithAPIPlane)
+		"/v0/city/{cityName}/svc/":  true, // workspace-service pass-through
+		"/v0/city/{cityName}/hook/": true, // webhook receiver (E3) — raw body for HMAC/ed25519
+		"/":                         true, // embedded dashboard SPA (WithStaticHandler)
+		"/api/":                     true, // host-side dashboard plane (WithAPIPlane)
 	}
 
 	found := map[string]bool{}

@@ -544,7 +544,7 @@ prompt_template = "prompts/worker.md"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity: %v", err)
 	}
-	seededSessionID, err := session.NewInfoStore(beads.SessionStore{Store: store}).CreateSession(session.CreateSpec{
+	seededSessionID, err := session.NewStore(beads.SessionStore{Store: store}).CreateSession(session.CreateSpec{
 		Title:     "worker",
 		AgentName: "worker",
 		Metadata: map[string]string{

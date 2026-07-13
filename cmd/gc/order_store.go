@@ -23,15 +23,40 @@ type (
 	orderStoresResolver func(orders.Order) ([]beads.OrdersStore, error)
 )
 
-// unwrapOrdersStores returns the underlying beads.Store values of a typed
-// orders-store slice. The per-order resolution outputs are strongly typed as
-// beads.OrdersStore, but the cross-store gate/history reads
-// (orders.LastRunAcrossStores, orders.CursorAcrossStores, bdCursorAcrossStores,
-// store.List) are class-agnostic federated helpers shared with the dispatch and
-// by-id paths, so the typed slice is unwrapped to []beads.Store exactly at that
-// boundary. Each element carries the same underlying store, so the reads are
-// byte-identical.
-func unwrapOrdersStores(stores []beads.OrdersStore) []beads.Store {
+// orderFrontDoorsForStores wraps a federation of raw stores (the dispatcher's
+// city + rig scopes) as order front doors for the mixed orders+graph reads
+// (LastRunAcross / CursorAcross). Each store is used as BOTH the orders leg and
+// the graph leg: on a single-store city the order-tracking beads and the
+// wisp/molecule roots are colocated, so the two legs wrap one store and the
+// union deduplicates to a single read — byte-identical to the pre-split behavior.
+// Under a graph-store split the dispatcher's per-scope store resolution would
+// supply a distinct graph leg; that resolution is a separate concern from this
+// front-door construction.
+func orderFrontDoorsForStores(stores []beads.Store) []*orders.Store {
+	out := make([]*orders.Store, 0, len(stores))
+	for _, s := range stores {
+		out = append(out, orders.NewStoreWithGraph(beads.OrdersStore{Store: s}, beads.GraphStore{Store: s}))
+	}
+	return out
+}
+
+// orderFrontDoorsForTypedStores is orderFrontDoorsForStores over already
+// class-typed orders stores (the per-order resolution outputs), preserving the
+// same orders-leg/graph-leg pairing.
+func orderFrontDoorsForTypedStores(stores []beads.OrdersStore) []*orders.Store {
+	out := make([]*orders.Store, 0, len(stores))
+	for _, s := range stores {
+		out = append(out, orders.NewStoreWithGraph(s, beads.GraphStore(s)))
+	}
+	return out
+}
+
+// rawOrderStores returns the underlying stores of a typed orders-store slice for
+// the ONE remaining raw federated read: bdCursorAcrossStores, which reads the
+// order:<name> event-cursor labels the dispatcher stamps on wisp/molecule roots
+// (a graph-class residual read, tracked separately from the typed Cursor path).
+// The typed LastRun/Cursor reads no longer unwrap — they take order front doors.
+func rawOrderStores(stores []beads.OrdersStore) []beads.Store {
 	out := make([]beads.Store, len(stores))
 	for i, s := range stores {
 		out[i] = s.Store
@@ -146,7 +171,7 @@ func orderStoreTargetKey(target execStoreTarget) string {
 	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
 }
 
-func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
+func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order, vars map[string]string) ([]string, error) {
 	if err := validateOrderExecEnvOverrides(a); err != nil {
 		return nil, err
 	}
@@ -197,11 +222,22 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
 	ensureProjectedPostgresEnvExplicit(env)
+	// Carry the controller's GitHub CLI auth token into the exec order so its
+	// `gh` calls authenticate. Projected before the [order.env] loop below so an
+	// order can still scope its own GH_TOKEN; see projectGitHubTokenExecEnv.
+	projectGitHubTokenExecEnv(env)
 	// Order-supplied [order.env] entries take effect last so they can tune
 	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
 	// noisy city) without editing the order's shell scripts or the parent
 	// process environment.
 	for k, v := range a.Env {
+		env[k] = v
+	}
+	// Dispatch-time vars (webhook rule args / `gc order run --var`) overlay
+	// last so the args channel reaches an exec order's process. Reserved-key
+	// namespacing/guarding for these dynamic vars is deferred (see the design's
+	// R4); the static [order.env] guard above is unchanged.
+	for k, v := range vars {
 		env[k] = v
 	}
 	return mergeRuntimeEnv(nil, env), nil
@@ -230,7 +266,7 @@ func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target exec
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
 		return orders.TriggerOptions{}, nil
 	}
-	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
+	env, err := orderExecEnvWithError(cityPath, cfg, target, a, nil)
 	if err != nil {
 		return orders.TriggerOptions{}, err
 	}
@@ -269,7 +305,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 		env["GC_DOLT_MANAGED_LOCAL"] = "1"
 		applyManagedDoltRuntimeLayoutEnv(env, cityPath)
 	}
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {

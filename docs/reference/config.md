@@ -41,6 +41,8 @@ City is the top-level configuration for a Gas City instance.
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
+| `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
+| `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
@@ -67,6 +69,8 @@ APIConfig configures the HTTP API server.
 | `allow_mutations` | boolean |  |  | AllowMutations overrides the default read-only behavior when bind is non-localhost. Set to true in containerized environments where the API must bind to 0.0.0.0 for health probes but mutations are still safe. |
 | `write_auth_verify_key` | string |  |  | WriteAuthVerifyKey, when set, requires every mutating request to an already-registered city — the per-city routes under /v0/city/&#123;cityName&#125; — to carry a signed write grant from a configured trusted authority. It gates all per-city writes (beads, mail, sessions, agents, and config), not only config edits. City registry creation (POST /v0/city) is not covered: a grant binds a path-resident city name, which a not-yet-created city lacks, so creation stays governed by the supervisor-registry guards. Built-in callers (the bundled gc API client and dashboard SPA) send only the CSRF header and mint no grant, so enabling this gate turns their direct city mutations away with a clear 401; such deployments front mutations through the trusted authority that mints grants instead. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. |
 | `write_auth_required` | boolean |  |  | WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate writes fails closed if the key is ever dropped. The GC_CITY_WRITE_REQUIRED=1 env var has the same effect. |
+| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an already-registered city on the typed per-city API — the routes under /v0/city/&#123;cityName&#125; — to carry a signed read grant from a configured trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding in-process, grant-based admission control to the typed city read surface (beads, mail, sessions, agent transcripts) instead of trusting network position.  Scope boundary: this gate covers ONLY the typed /v0/city/&#123;cityName&#125; read routes. It does NOT cover other surfaces on the same listener that can also expose per-city data: the supervisor-scope aggregate event feed (/v0/events and /v0/events/stream, which multiplex every running city's events), the default-on dashboard host plane (/api/*, including its /api/city/&#123;cityName&#125;/* samplers, run detail, run diff, and config reads), and the supervisor-scope routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the only complete mitigation is to front the whole listener with the grant-minting authority/edge (the intended deployment), which protects every surface above. Disabling the dashboard host plane with GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/* only, while the supervisor-scope event feed /v0/events and /v0/events/stream stays readable by network position until the follow-up supervisor-scope grant lands. Gating those feeds is tracked as that follow-up work.  Built-in callers (the bundled gc API client and dashboard SPA) mint no grant, so enabling this gate turns their direct /v0/city reads away with a clear 401; such deployments front reads through the authority that mints grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_READ_EPOCH_FLOOR env var; it has no config field. |
+| `read_auth_required` | boolean |  |  | ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1 env var has the same effect. |
 
 ## Agent
 
@@ -852,6 +856,104 @@ UsageConfig holds usage-fact sink settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the usage sink backend:   - "discard" / "fake" → drop all facts   - "exec:&lt;script&gt;" → user-supplied script (JSON fact per line on stdin)   - "" / "local" → durable file-backed JSONL at .gc/usage.jsonl (default) |
+
+## Webhook
+
+Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under /v0/city/{city}/hook/{name}.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the unique webhook identifier and mount segment. |
+| `scope` | string |  |  | Scope selects city- or rig-scoped dispatch semantics, mirroring Order.Scope. Empty defaults to city. Enum: `city`, `rig` |
+| `rig` | string |  |  | Rig is the authoritative rig binding for a rig-scoped webhook (Scope=="rig"). It is REQUIRED when scope="rig" and forbidden otherwise: the receiver copies it into the dispatch scope so the sink constrains delivery to this rig (R4), and a rule that names any other rig is refused. Without it a rig-scoped webhook fails closed (it can target no rig). Leave unset for city scope. |
+| `publication` | ServicePublicationConfig |  |  | Publication declares generic publication intent, reusing the service publication contract. Pack/fragment-contributed public webhooks are capped to tenant unless the city grants them via [webhooks].allow_public. |
+| `verify` | WebhookVerify |  |  | Verify declares the signature verification scheme and its inputs. |
+| `rule` | []WebhookRule |  |  | Rules maps verified provider events to dispatch targets. |
+| `max_per_minute` | integer |  |  | MaxPerMinute is an optional per-webhook self-imposed sustained request ceiling for the E8 rate limiter. SECURITY: a [[webhook]] block may be pack-contributed, and a pack must never be able to weaken the operator's flood defense, so this value may only LOWER a webhook's effective limit — it is min-clamped to the operator-owned ceiling and can never raise it (see WebhookPolicyConfig.EffectiveRateLimit). Leave unset to inherit the operator default/override. |
+
+## WebhookAllowPublic
+
+WebhookAllowPublic is one operator-authored public-exposure grant.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the webhook name being granted public exposure. |
+| `source` | string | **yes** |  | Source is the pack/fragment provenance the grant is scoped to. Matched against the webhook's stamped SourceDir. |
+| `digest` | string |  |  | Digest pins the content digest of the granted webhook's security-relevant fields (see WebhookContentDigest). It is REQUIRED for the grant to honor public exposure: applyWebhookPackGuard recomputes the digest at load and caps the webhook to tenant when the grant has no digest or the digest no longer matches (R3 content-scoped consent), so a content-swap upgrade of a public hook auto-downgrades until the operator re-consents to the new digest. The downgrade warning names the digest to pin. |
+
+## WebhookJWTPolicy
+
+WebhookJWTPolicy is one operator-owned jwt-jwks trust anchor.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the webhook this policy applies to (matched against Webhook.Name). |
+| `issuer` | string | **yes** |  | Issuer is the required "iss" claim, pinned exactly. |
+| `audience` | string | **yes** |  | Audience is the required "aud" claim. |
+| `jwks_url` | string | **yes** |  | JWKSURL is the https endpoint publishing the signing keys. |
+
+## WebhookPolicyConfig
+
+WebhookPolicyConfig holds city-level webhook governance authored in the root city.toml under [webhooks].
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `allow_public` | []WebhookAllowPublic |  |  | AllowPublic lists &#123;name, source&#125; grants that permit a pack/fragment webhook to keep publication.visibility="public". Default-closed: a pack/fragment public webhook with no matching grant is capped to tenant. |
+| `jwt_policy` | []WebhookJWTPolicy |  |  | JWTPolicies pins the operator-owned trust anchor for each jwt-jwks webhook, keyed by webhook name. Per security review R1, a jwt-jwks webhook's issuer, audience, and JWKS URL are operator-owned and must come from here (the root city.toml [webhooks] block), never from a pack-authored [webhook.verify] table — otherwise a pack could point the trust root at an attacker-controlled issuer/JWKS. The receiver (E3) reads this, not WebhookVerify.Issuer/etc., when constructing the jwt-jwks verifier. |
+| `rate_limit` | WebhookRateLimitConfig |  |  | RateLimit holds the operator-owned E8 per-webhook rate-limit governance: the fleet default plus optional per-webhook overrides. Because the whole [webhooks] table is never merged from packs or fragments, a pack cannot touch these values — it can only LOWER its own limit via Webhook.MaxPerMinute (clamped in EffectiveRateLimit). This is the trust boundary for the flood defense: the operator sets the ceiling; packs may only self-restrict below it.  A pointer so an absent [webhooks].rate_limit round-trips cleanly (a zero-value nested table is not suppressed by BurntSushi's omitempty); nil means "use the built-in defaults". |
+
+## WebhookRateLimitConfig
+
+WebhookRateLimitConfig is the operator-owned rate-limit policy authored under the root city.toml [webhooks].rate_limit table.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `per_minute` | integer |  |  | PerMinute is the default sustained request ceiling applied to every webhook that declares no lower self-limit. 0 uses defaultWebhookRateLimitPerMinute. |
+| `burst` | integer |  |  | Burst is the token-bucket burst allowance. 0 uses defaultWebhookRateLimitBurst. |
+| `override` | []WebhookRateLimitOverride |  |  | Overrides pins an operator-chosen limit for a specific webhook by name. Operator authority: an override may raise OR lower that webhook's limit — it is the operator, not a pack, declaring it. A pack's own MaxPerMinute can then only clamp further downward, never above the override. |
+
+## WebhookRateLimitOverride
+
+WebhookRateLimitOverride is one operator-authored per-webhook rate-limit pin.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  |  |
+| `per_minute` | integer |  |  |  |
+| `burst` | integer |  |  |  |
+
+## WebhookRule
+
+WebhookRule maps one verified provider event to a dispatch target.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `event` | string | **yes** |  | Event is the provider event type this rule matches (e.g. pull_request). |
+| `match` | map[string]string |  |  | Match is an exact-equality dotted-path predicate over the payload. |
+| `order` | string |  |  | Order is the target order name for target="order" rules. |
+| `rig` | string |  |  | Rig optionally scopes the dispatched order to a rig. |
+| `target` | string |  |  | Target selects the dispatch sink: "order" (default) or "conversation". Enum: `order`, `conversation` |
+| `args` | map[string]string |  |  | Args maps declared order params to &#123;&#123;payload.path&#125;&#125; projections. |
+
+## WebhookVerify
+
+WebhookVerify declares how an inbound delivery is authenticated.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scheme` | string |  |  | Scheme selects the built-in verifier (see knownWebhookSchemes). |
+| `secret_env` | string |  |  | SecretEnv names the environment variable holding the HMAC/shared secret. |
+| `secret_key` | string |  |  | SecretKey is an optional stable rotation-slot identifier. Empty defaults to SecretEnv. |
+| `signature_header` | string |  |  | SignatureHeader overrides the request header carrying the signature for generic HMAC schemes (e.g. X-Plane-Signature). |
+| `event_header` | string |  |  | EventHeader names the request header carrying the provider event type. |
+| `dedup_header` | string |  |  | DedupHeader names the request header whose value is surfaced as the delivery id on webhook.received events for observability. It does NOT key at-least-once dedup for the signature-only schemes (github-hmac-sha256, hmac-sha256, slack-v0, discord-ed25519): those dedup on a hash of the signed body, because an unsigned or coarse header cannot safely key dedup — a captured valid delivery could be replayed under a fresh header id to re-fire the order. Only jwt-jwks keys dedup directly, on its signed per-delivery-unique "jti". As a consequence two deliveries with byte-identical signed bodies inside the dedup window collapse to one dispatch, so a source that must resend an identical payload has to carry a unique value inside the signed body. |
+| `timestamp_header` | string |  |  | TimestampHeader optionally names a request header carrying a signed timestamp for replay defense. |
+| `replay_window` | string |  |  | ReplayWindow bounds the accepted signed-timestamp skew (Go duration). |
+| `issuer` | string |  |  | Issuer, JWKSURL, and Audience pin the jwt-jwks trust anchor. Per the security review (R1) these are operator-owned and must be declared in city.toml, never in pack TOML. |
+| `jwks_url` | string |  |  |  |
+| `audience` | string |  |  |  |
+| `bearer_env` | string |  |  | BearerEnv optionally names an env var holding an additional per-source bearer token checked alongside the signature. |
+| `allowed_cidrs` | []string |  |  | AllowedCIDRs optionally restricts accepted source addresses (e.g. the GitHub webhook CIDR allowlist). |
 
 ## Workspace
 

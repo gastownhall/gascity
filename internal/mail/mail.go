@@ -40,6 +40,10 @@ const (
 	// sent through [DedupSender.SendDeduped]. Repeating notifiers (patrol
 	// orders, maintenance loops) use it to suppress duplicate alerts.
 	DedupKeyMetadataKey = "mail.dedup_key"
+	// ReadMetadataKey mirrors the "read" label as a queryable metadata flag
+	// ("true"/"false"), set alongside the label by MarkRead/MarkUnread. Retention
+	// sweeps query it directly (the label-based query is recipient-scoped).
+	ReadMetadataKey = "mail.read"
 )
 
 // Message represents a mail message between agents or humans.

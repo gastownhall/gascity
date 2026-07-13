@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -174,23 +175,23 @@ func TestWispGC_ClosesOpenSpecSidecarsForClosedWorkflowRoots(t *testing.T) {
 func TestWispGC_PurgesExpiredReadMessageRetention(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
-		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
-		makeGCMessageWisp("unread-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "false"}),
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}),
+		makeGCMessageWisp("unread-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "false"}),
 		makeGCMessageWisp("unset-old", now.Add(-2*time.Hour), nil),
-		makeGCMessageWisp("read-recent", now.Add(-30*time.Minute), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("read-recent", now.Add(-30*time.Minute), map[string]string{mail.ReadMetadataKey: "true"}),
 		{
 			ID:        "read-main-tier",
 			Status:    "open",
 			Type:      "message",
 			CreatedAt: now.Add(-2 * time.Hour),
-			Metadata:  map[string]string{mailReadMetadataKey: "true"},
+			Metadata:  map[string]string{mail.ReadMetadataKey: "true"},
 		},
 		{
 			ID:        "read-task-wisp",
 			Status:    "open",
 			Type:      "task",
 			CreatedAt: now.Add(-2 * time.Hour),
-			Metadata:  map[string]string{mailReadMetadataKey: "true"},
+			Metadata:  map[string]string{mail.ReadMetadataKey: "true"},
 			Ephemeral: true,
 		},
 	})
@@ -217,7 +218,7 @@ func TestWispGC_PurgesExpiredReadMessageRetention(t *testing.T) {
 func TestWispGC_ReadMessageRetentionZeroDisablesAndSuppressesLog(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
-		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}),
 	})
 
 	logOutput := captureWispGCLog(t, func() {
@@ -241,7 +242,7 @@ func TestWispGC_ReadMessageRetentionZeroDisablesAndSuppressesLog(t *testing.T) {
 func TestWispGC_ReadMessageRetentionLogsCountAndTTL(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
-		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}),
 	})
 
 	logOutput := captureWispGCLog(t, func() {

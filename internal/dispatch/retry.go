@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -162,7 +163,13 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		return ControlResult{}, fmt.Errorf("%s: unsupported gc.retry_state %q", bead.ID, bead.Metadata[beadmeta.RetryStateMetadataKey])
 	}
 
-	if beadUsesMetadataPoolRoute(subject, opts.CityPath) {
+	// A routeConfig error is intentionally tolerated here: retry preserves the
+	// prior attempt's already-stamped routes rather than scope-routing, so a nil
+	// cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
+	// (control.go, fanout.go) fail closed on this error because they scope-route
+	// through applyAttemptControlStepRoute.
+	routeCfg, _ := opts.routeConfig()
+	if beadUsesMetadataPoolRouteWithConfig(subject, routeCfg) {
 		if opts.RecycleSession == nil {
 			return ControlResult{}, fmt.Errorf("%s: pooled retry subject %s requires RecycleSession callback", bead.ID, subject.ID)
 		}
@@ -180,7 +187,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	}
 
 	if bead.Metadata[beadmeta.RetryStateMetadataKey] != beadmeta.SpawnStateSpawned {
-		if err := appendRetryAttempt(store, logicalID, subject, bead, nextAttempt, opts.CityPath); err != nil {
+		if err := appendRetryAttempt(store, logicalID, subject, bead, nextAttempt, routeCfg); err != nil {
 			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
@@ -491,7 +498,7 @@ func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject 
 	return store.SetMetadataBatch(logicalID, batch)
 }
 
-func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval beads.Bead, nextAttempt int, cityPath string) error {
+func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval beads.Bead, nextAttempt int, routeCfg *config.City) error {
 	oldAttempt, err := strconv.Atoi(prevRun.Metadata[beadmeta.AttemptMetadataKey])
 	if err != nil || oldAttempt < 1 {
 		return fmt.Errorf("%s: invalid gc.attempt %q", prevRun.ID, prevRun.Metadata[beadmeta.AttemptMetadataKey])
@@ -522,7 +529,7 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 	}
 
 	if nextRun.ID == "" {
-		nextRun, err = store.Create(retryAttemptBead(prevRun, logicalID, runRef, nextAttempt, cityPath))
+		nextRun, err = store.Create(retryAttemptBead(prevRun, logicalID, runRef, nextAttempt, routeCfg))
 		if err != nil {
 			return fmt.Errorf("creating retry run bead: %w", err)
 		}
@@ -543,10 +550,10 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 	return nil
 }
 
-func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, cityPath string) beads.Bead {
+func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, routeCfg *config.City) beads.Bead {
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
-	assignee := retryPreservedAssignee(prev, cityPath)
+	assignee := retryPreservedAssigneeWithConfig(prev, routeCfg)
 	if assignee == "" {
 		clearSessionAffinityMetadata(meta)
 	}

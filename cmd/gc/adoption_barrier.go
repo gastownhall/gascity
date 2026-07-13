@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -54,7 +53,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // sessions have beads).
 func runAdoptionBarrier(
 	cityPath string,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	cityName string,
@@ -67,10 +66,9 @@ func runAdoptionBarrier(
 	if sessFront == nil {
 		return result, false
 	}
-	// Session-bead list queries below go through the raw store the front door
-	// wraps (sessionpkg.ListAllSessionBeads takes a beads.Store); creates go
-	// through the front door. Same underlying store, so behavior is unchanged.
-	store := sessFront.Store().Store
+	// Session-bead list queries below go through the typed session front door
+	// (sessFront.ListAll); creates go through the front door too. Same underlying
+	// store, so behavior is unchanged.
 
 	// Step 1: List all running sessions.
 	running, err := sp.ListRunning("")
@@ -92,32 +90,27 @@ func runAdoptionBarrier(
 	// lost their gc:session label (after a crash or partial write) still
 	// participate in adoption dedup. Without the union, those beads would
 	// be invisible here and adoption would re-create duplicates.
-	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
+	existing, err := sessFront.ListAll(sessionpkg.ListAllOptions{})
 	if err != nil {
 		fmt.Fprintf(stderr, "adoption barrier: listing beads: %v\n", err) //nolint:errcheck
 		return result, false
 	}
 	bySessionName := make(map[string]bool, len(existing))
-	for _, b := range existing {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if b.Status == "closed" {
+	for _, info := range existing {
+		// ListAll already filters via IsSessionBeadOrRepairable and excludes closed.
+		if info.Closed {
 			continue // closed beads don't count for dedup
 		}
-		if sn := b.Metadata["session_name"]; sn != "" {
+		if sn := info.SessionNameMetadata; sn != "" {
 			bySessionName[sn] = true
 		}
 	}
 
 	// Build config agent lookup: session_name -> agent config.
 	// Also build a reverse lookup by qualified name for pool instance resolution.
-	// Uses the already-loaded session beads to avoid N store queries.
+	// Uses the already-loaded session Infos to avoid N store queries.
 	st := cfg.Workspace.SessionTemplate
-	snapshot := &sessionBeadSnapshot{}
-	for _, b := range existing {
-		if b.Status != "closed" && sessionpkg.IsSessionBeadOrRepairable(b) {
-			snapshot.add(b)
-		}
-	}
+	snapshot := newSessionBeadSnapshotFromInfos(existing)
 	agentBySession := make(map[string]*config.Agent, len(cfg.Agents))
 	agentByQN := make(map[string]*config.Agent, len(cfg.Agents))
 	agentBaseSessionName := make(map[string]string, len(cfg.Agents))
@@ -167,17 +160,19 @@ func runAdoptionBarrier(
 			continue
 		}
 
-		// Build bead metadata. Config/live hashes are left empty —
-		// syncSessionBeads populates them from built agent objects.
-		meta := map[string]string{
-			"session_name":       sessionName,
-			"state":              "active",
-			"generation":         strconv.Itoa(sessionpkg.DefaultGeneration),
-			"continuation_epoch": strconv.Itoa(sessionpkg.DefaultContinuationEpoch),
-			"instance_token":     sessionpkg.NewInstanceToken(),
-		}
-
 		detail := adoptionDetail{SessionName: sessionName}
+
+		// Resolve the canonical agent_name and pool slot BEFORE deriving identity
+		// metadata, so desiredSessionIdentity emits agent_name/pool_slot (and, for
+		// config-resolved agents, the durable canonical record) instead of the
+		// former hand-stamps. resolvedAgentName / resolvedSlot hold exactly the
+		// values the old hand-stamps used; the orphan arm resolves to
+		// agent_name=sessionName but is NOT config-resolved, so it mints no
+		// canonical record (S19 S2-3).
+		var (
+			resolvedAgentName string
+			resolvedSlot      int
+		)
 
 		if isConfigAgent {
 			if isPoolInstance {
@@ -186,14 +181,14 @@ func runAdoptionBarrier(
 				slot := parsePoolSlot(sessionName)
 				instanceName := fmt.Sprintf("%s-%d", cfgAgent.QualifiedName(), slot)
 				detail.AgentName = instanceName
-				meta["agent_name"] = instanceName
+				resolvedAgentName = instanceName
 			} else {
 				detail.AgentName = cfgAgent.QualifiedName()
-				meta["agent_name"] = cfgAgent.QualifiedName()
+				resolvedAgentName = cfgAgent.QualifiedName()
 			}
 		} else {
 			detail.AgentName = sessionName
-			meta["agent_name"] = sessionName
+			resolvedAgentName = sessionName
 		}
 
 		// Detect pool instances from session name suffix.
@@ -207,7 +202,7 @@ func runAdoptionBarrier(
 				sessionName, cfgAgent.QualifiedName())
 		case slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion():
 			detail.PoolSlot = slot
-			meta["pool_slot"] = strconv.Itoa(slot)
+			resolvedSlot = slot
 			if maxSess := cfgAgent.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess >= 0 && slot > *maxSess {
 				detail.OutOfBounds = true
 				fmt.Fprintf(stderr, "adoption barrier: %s pool slot %d exceeds max %d (adopt-then-drain)\n", //nolint:errcheck
@@ -225,6 +220,19 @@ func runAdoptionBarrier(
 				sessionName, slot)
 		}
 
+		// Build bead metadata. Config/live hashes are left empty —
+		// syncSessionBeads populates them from built agent objects.
+		meta := desiredSessionIdentity(sessionIdentityInputs{
+			AgentName:         resolvedAgentName,
+			SessionName:       sessionName,
+			State:             "active",
+			Generation:        sessionpkg.DefaultGeneration,
+			ContinuationEpoch: sessionpkg.DefaultContinuationEpoch,
+			InstanceToken:     sessionpkg.NewInstanceToken(),
+			PoolSlot:          resolvedSlot,
+			ConfigResolved:    isConfigAgent,
+		})
+
 		if dryRun {
 			result.Adopted++
 			result.Details = append(result.Details, detail)
@@ -234,13 +242,18 @@ func runAdoptionBarrier(
 		alreadyHadBead := false
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			if _, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+			beadID, err := sessFront.CreateSession(sessionpkg.CreateSpec{
 				Title:     detail.AgentName,
 				AgentName: detail.AgentName,
 				Metadata:  meta,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
 			}
+			// S19 Stage 3 shadow: record the legacy canonical-identity stamp built
+			// by desiredSessionIdentity for this adopted bead (no-op unless the
+			// shadow harness is enabled).
+			recordLegacyCompareWrites(beadID, "adoptionBarrier.create", meta)
 			return nil
 		}
 		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {
@@ -274,22 +287,13 @@ func runAdoptionBarrier(
 	return result, passed
 }
 
-func openSessionBeadExists(sessFront *sessionpkg.InfoStore, sessionName string) (bool, error) {
-	existing, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
-		Metadata: map[string]string{"session_name": sessionName},
-		Live:     true,
-	})
-	if err != nil {
-		return false, fmt.Errorf("listing session beads for %q: %w", sessionName, err)
-	}
-	for _, b := range existing {
-		if b.Status == "closed" {
-			continue
-		}
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		return true, nil
-	}
-	return false, nil
+func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
+	// HasOpenSessionNamed is the Live-tier existence probe: a session_name-filtered,
+	// CachingStore-bypassing union scan so the adoption barrier observes just-created
+	// beads immediately. It is byte-equivalent to the prior inline Live ListAll +
+	// closed filter this wrapped. The Live bypass is pinned by
+	// TestHasOpenSessionNamed in internal/session.
+	return sessFront.HasOpenSessionNamed(sessionName)
 }
 
 // resolvePoolBase attempts to match a pool instance session name back to its

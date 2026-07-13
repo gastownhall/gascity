@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestProjectLifecycleNormalizesCompatibilityStates(t *testing.T) {
@@ -72,11 +74,9 @@ func TestProjectLifecycleNormalizesCompatibilityStates(t *testing.T) {
 			if tt.wantBase == BaseStateClosed {
 				status = "closed"
 			}
-			view := ProjectLifecycle(LifecycleInput{
-				Status:   status,
-				Metadata: tt.metadata,
-				Now:      now,
-			})
+			input := LifecycleInputFromMetadata(status, tt.metadata)
+			input.Now = now
+			view := ProjectLifecycle(input)
 
 			if view.BaseState != tt.wantBase {
 				t.Fatalf("BaseState = %q, want %q", view.BaseState, tt.wantBase)
@@ -102,13 +102,10 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 		{
 			name: "pending create claim is a one-shot wake cause",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                "creating",
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-				},
-				Now: now,
+				Status:             "open",
+				StoredState:        "creating",
+				PendingCreateClaim: true,
+				Now:                now,
 			},
 			wantDesired: DesiredStateRunning,
 			wantCauses:  []WakeCause{WakeCausePendingCreate},
@@ -116,13 +113,10 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 		{
 			name: "explicit wake request is a durable wake cause",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":        "asleep",
-					"session_name": "s-worker",
-					"wake_request": "explicit",
-				},
-				Now: now,
+				Status:      "open",
+				StoredState: "asleep",
+				WakeRequest: "explicit",
+				Now:         now,
 			},
 			wantDesired: DesiredStateRunning,
 			wantCauses:  []WakeCause{WakeCauseExplicit},
@@ -130,14 +124,11 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 		{
 			name: "future hold blocks an otherwise runnable create claim",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                "creating",
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-					"held_until":           future,
-				},
-				Now: now,
+				Status:             "open",
+				StoredState:        "creating",
+				PendingCreateClaim: true,
+				HeldUntil:          future,
+				Now:                now,
 			},
 			wantDesired:  DesiredStateBlocked,
 			wantBlockers: []LifecycleBlocker{BlockerHeld},
@@ -146,15 +137,12 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 		{
 			name: "future quarantine blocks pin wake",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":               "archived",
-					"session_name":        "s-worker",
-					"pin_awake":           "true",
-					"quarantined_until":   future,
-					"continuity_eligible": "true",
-				},
-				Now: now,
+				Status:             "open",
+				StoredState:        "archived",
+				PinAwake:           "true",
+				QuarantinedUntil:   future,
+				ContinuityEligible: "true",
+				Now:                now,
 			},
 			wantDesired:  DesiredStateBlocked,
 			wantBlockers: []LifecycleBlocker{BlockerQuarantined},
@@ -185,16 +173,13 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 func TestProjectLifecycleCreatingStalenessUsesPendingCreateStartedAt(t *testing.T) {
 	now := time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC)
 	view := ProjectLifecycle(LifecycleInput{
-		Status: "open",
-		Metadata: map[string]string{
-			"state":                     string(StateCreating),
-			"session_name":              "s-worker",
-			"pending_create_started_at": now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
-		},
-		Runtime:            RuntimeFacts{Observed: true, Alive: false},
-		CreatedAt:          now.Add(-2 * time.Minute),
-		StaleCreatingAfter: time.Minute,
-		Now:                now,
+		Status:                 "open",
+		StoredState:            string(StateCreating),
+		PendingCreateStartedAt: now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
+		Runtime:                RuntimeFacts{Observed: true, Alive: false},
+		CreatedAt:              now.Add(-2 * time.Minute),
+		StaleCreatingAfter:     time.Minute,
+		Now:                    now,
 	})
 
 	if view.RuntimeProjection != RuntimeProjectionFreshCreating {
@@ -261,15 +246,12 @@ func TestProjectLifecycleNamedIdentityProjection(t *testing.T) {
 		{
 			name: "materialized continuity eligible named bead is canonical",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                     "asleep",
-					"session_name":              "s-worker",
-					"configured_named_identity": "worker",
-					"continuity_eligible":       "true",
-				},
-				PreserveIdentity: true,
-				Now:              now,
+				Status:                  "open",
+				StoredState:             "asleep",
+				ConfiguredNamedIdentity: "worker",
+				ContinuityEligible:      "true",
+				PreserveIdentity:        true,
+				Now:                     now,
 			},
 			wantIdentity: IdentityCanonical,
 			wantDesired:  DesiredStateAsleep,
@@ -324,18 +306,16 @@ func TestProjectLifecycleConflictIsBlockerOverlay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			view := ProjectLifecycle(LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                     "asleep",
-					"session_name":              "s-worker",
-					"configured_named_identity": "worker",
-					"continuity_eligible":       "true",
-				},
-				NamedIdentity: tt.namedInput,
-				WakeCauses:    []WakeCause{WakeCauseNamedAlways},
-				Now:           now,
+			input := LifecycleInputFromMetadata("open", map[string]string{
+				"state":                     "asleep",
+				"session_name":              "s-worker",
+				"configured_named_identity": "worker",
+				"continuity_eligible":       "true",
 			})
+			input.NamedIdentity = tt.namedInput
+			input.WakeCauses = []WakeCause{WakeCauseNamedAlways}
+			input.Now = now
+			view := ProjectLifecycle(input)
 
 			if view.Identity != IdentityCanonical {
 				t.Fatalf("Identity = %q, want canonical ownership with blocker overlay", view.Identity)
@@ -363,13 +343,10 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "alive runtime heals advisory state to awake",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":        "asleep",
-					"session_name": "s-worker",
-				},
-				Runtime: RuntimeFacts{Observed: true, Alive: true},
-				Now:     now,
+				Status:      "open",
+				StoredState: "asleep",
+				Runtime:     RuntimeFacts{Observed: true, Alive: true},
+				Now:         now,
 			},
 			wantRuntime:         RuntimeProjectionAlive,
 			wantReconciledState: StateAwake,
@@ -377,15 +354,12 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "dead active runtime heals to asleep and resets stale resume identity",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":               "active",
-					"session_name":        "s-worker",
-					"session_key":         "old-provider-conversation",
-					"started_config_hash": "old-config",
-				},
-				Runtime: RuntimeFacts{Observed: true, Alive: false},
-				Now:     now,
+				Status:            "open",
+				StoredState:       "active",
+				SessionKey:        "old-provider-conversation",
+				StartedConfigHash: "old-config",
+				Runtime:           RuntimeFacts{Observed: true, Alive: false},
+				Now:               now,
 			},
 			wantRuntime:         RuntimeProjectionMissing,
 			wantReconciledState: StateAsleep,
@@ -394,16 +368,13 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "dead active runtime with rate-limit reason preserves resume identity",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":               "active",
-					"session_name":        "s-worker",
-					"session_key":         "provider-conversation",
-					"started_config_hash": "config",
-					"sleep_reason":        "rate_limit",
-				},
-				Runtime: RuntimeFacts{Observed: true, Alive: false},
-				Now:     now,
+				Status:            "open",
+				StoredState:       "active",
+				SessionKey:        "provider-conversation",
+				StartedConfigHash: "config",
+				SleepReason:       "rate_limit",
+				Runtime:           RuntimeFacts{Observed: true, Alive: false},
+				Now:               now,
 			},
 			wantRuntime:         RuntimeProjectionMissing,
 			wantReconciledState: StateAsleep,
@@ -411,16 +382,13 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "dead active runtime with runtime-missing reason preserves resume identity",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":               "active",
-					"session_name":        "s-worker",
-					"session_key":         "provider-conversation",
-					"started_config_hash": "config",
-					"sleep_reason":        "runtime-missing",
-				},
-				Runtime: RuntimeFacts{Observed: true, Alive: false},
-				Now:     now,
+				Status:            "open",
+				StoredState:       "active",
+				SessionKey:        "provider-conversation",
+				StartedConfigHash: "config",
+				SleepReason:       "runtime-missing",
+				Runtime:           RuntimeFacts{Observed: true, Alive: false},
+				Now:               now,
 			},
 			wantRuntime:         RuntimeProjectionMissing,
 			wantReconciledState: StateAsleep,
@@ -428,11 +396,8 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":        "creating",
-					"session_name": "s-worker",
-				},
+				Status:             "open",
+				StoredState:        "creating",
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-30 * time.Second),
 				StaleCreatingAfter: time.Minute,
@@ -444,12 +409,9 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "stale creating state heals to asleep and resets stale resume identity",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":        "creating",
-					"session_name": "s-worker",
-					"session_key":  "old-provider-conversation",
-				},
+				Status:             "open",
+				StoredState:        "creating",
+				SessionKey:         "old-provider-conversation",
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-2 * time.Minute),
 				StaleCreatingAfter: time.Minute,
@@ -466,14 +428,11 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			// runtime, the bead heals to asleep and the claim no longer wins.
 			name: "stale creating heals to asleep even with pending_create_claim",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                "creating",
-					"session_name":         "s-worker",
-					"session_key":          "old-provider-conversation",
-					"pending_create_claim": "true",
-					"last_woke_at":         now.Add(-2 * time.Minute).UTC().Format(time.RFC3339),
-				},
+				Status:             "open",
+				StoredState:        "creating",
+				SessionKey:         "old-provider-conversation",
+				PendingCreateClaim: true,
+				LastWokeAt:         now.Add(-2 * time.Minute).UTC().Format(time.RFC3339),
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-2 * time.Minute),
 				StaleCreatingAfter: time.Minute,
@@ -486,12 +445,9 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "start-pending with pending_create_claim stays start-pending",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                string(StateStartPending),
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-				},
+				Status:             "open",
+				StoredState:        string(StateStartPending),
+				PendingCreateClaim: true,
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-2 * time.Minute),
 				StaleCreatingAfter: time.Minute,
@@ -506,13 +462,10 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			// raced.
 			name: "fresh creating with pending_create_claim stays in creating",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                "creating",
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-					"last_woke_at":         now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
-				},
+				Status:             "open",
+				StoredState:        "creating",
+				PendingCreateClaim: true,
+				LastWokeAt:         now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-30 * time.Second),
 				StaleCreatingAfter: time.Minute,
@@ -524,12 +477,9 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "failed-create with pending_create_claim stays failed-create",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                string(StateFailedCreate),
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-				},
+				Status:             "open",
+				StoredState:        string(StateFailedCreate),
+				PendingCreateClaim: true,
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-30 * time.Second),
 				StaleCreatingAfter: time.Minute,
@@ -541,14 +491,11 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 		{
 			name: "non-creating pending_create_claim remains start requested",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                "active",
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-				},
-				Runtime: RuntimeFacts{Observed: true, Alive: false},
-				Now:     now,
+				Status:             "open",
+				StoredState:        "active",
+				PendingCreateClaim: true,
+				Runtime:            RuntimeFacts{Observed: true, Alive: false},
+				Now:                now,
 			},
 			wantRuntime:         RuntimeProjectionStartRequested,
 			wantReconciledState: StateStartPending,
@@ -581,26 +528,20 @@ func TestProjectLifecycleMissingConfigBlocksWake(t *testing.T) {
 		{
 			name: "orphaned continuity eligible named bead keeps identity but blocks wake",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                     "orphaned",
-					"session_name":              "s-worker",
-					"configured_named_identity": "worker",
-					"continuity_eligible":       "true",
-					"pin_awake":                 "true",
-				},
-				Now: now,
+				Status:                  "open",
+				StoredState:             "orphaned",
+				ConfiguredNamedIdentity: "worker",
+				ContinuityEligible:      "true",
+				PinAwake:                "true",
+				Now:                     now,
 			},
 		},
 		{
 			name: "known missing config blocks otherwise active materialized identity",
 			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":        "asleep",
-					"session_name": "s-worker",
-					"pin_awake":    "true",
-				},
+				Status:        "open",
+				StoredState:   "asleep",
+				PinAwake:      "true",
 				ConfigMissing: true,
 				Now:           now,
 			},
@@ -793,6 +734,126 @@ func TestLifecycleDisplayReasonWithLivenessSuppressesTerminalResetPending(t *tes
 	}
 }
 
+// livenessInfoBead builds an open (or closed) session bead from a metadata map,
+// so the InfoFromPersistedBead projection the twin consumes carries the same
+// fields LifecycleDisplayReasonWithLiveness reads off the raw map.
+func livenessInfoBead(status string, meta map[string]string) beads.Bead {
+	return beads.Bead{ID: "gc-liveness", Type: "session", Status: status, Labels: []string{"gc:session"}, Metadata: meta}
+}
+
+// TestLifecycleDisplayReasonWithLivenessInfoEquivalence is the load-bearing
+// oracle for LifecycleDisplayReasonWithLivenessInfo. It (1) asserts the exact
+// reason for each non-trivial branch directly — so a mutation of the twin's
+// circuit-open or reset-pending branch fails without depending on the raw form —
+// and (2) sweeps the same corpus through the raw LifecycleDisplayReasonWithLiveness
+// to pin byte-identity (the display path feeds the twin Info.SessionName as the
+// sessionName the raw form would receive).
+func TestLifecycleDisplayReasonWithLivenessInfoEquivalence(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	isRunning := func(name string) bool { return name == "worker-live" }
+
+	cases := []struct {
+		name   string
+		status string
+		meta   map[string]string
+		want   string
+	}{
+		{
+			name:   "circuit open wins over sleep reason",
+			status: "open",
+			meta:   map[string]string{SessionCircuitStateMetadataKey: SessionCircuitStateOpen, "sleep_reason": "user-hold"},
+			want:   LifecycleReasonCircuitOpen,
+		},
+		{
+			name:   "reset-pending via restart_requested wins over circuit open",
+			status: "open",
+			meta: map[string]string{
+				"restart_requested":            "true",
+				"session_name":                 "worker-live",
+				SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+			},
+			want: LifecycleReasonResetPending,
+		},
+		{
+			name:   "reset-pending via continuation_reset_pending",
+			status: "open",
+			meta:   map[string]string{"continuation_reset_pending": "true", "session_name": "worker-live", "sleep_reason": "user-hold"},
+			want:   LifecycleReasonResetPending,
+		},
+		{
+			name:   "restart requested but runtime dead falls through",
+			status: "open",
+			meta:   map[string]string{"restart_requested": "true", "session_name": "worker-dead", SessionCircuitStateMetadataKey: SessionCircuitStateOpen},
+			want:   LifecycleReasonCircuitOpen,
+		},
+		{
+			name:   "sleep reason visible",
+			status: "open",
+			meta:   map[string]string{"sleep_reason": "wait-hold", "quarantined_until": future, "held_until": future},
+			want:   "wait-hold",
+		},
+		{
+			name:   "future quarantine visible",
+			status: "open",
+			meta:   map[string]string{"quarantined_until": future},
+			want:   "quarantine",
+		},
+		{
+			name:   "expired quarantine not visible",
+			status: "open",
+			meta:   map[string]string{"quarantined_until": past},
+			want:   "",
+		},
+		{
+			name:   "wait hold visible",
+			status: "open",
+			meta:   map[string]string{"wait_hold": "true"},
+			want:   "wait-hold",
+		},
+		{
+			name:   "future user hold visible",
+			status: "open",
+			meta:   map[string]string{"held_until": future},
+			want:   "user-hold",
+		},
+		{
+			name:   "closed suppresses reset-pending and circuit open",
+			status: "closed",
+			meta: map[string]string{
+				"restart_requested":            "true",
+				"session_name":                 "worker-live",
+				SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+			},
+			want: "",
+		},
+		{
+			name:   "empty",
+			status: "open",
+			meta:   map[string]string{},
+			want:   "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := livenessInfoBead(tc.status, tc.meta)
+			info := infoFromPersistedBead(bead)
+			got := LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning)
+			if got != tc.want {
+				t.Fatalf("LifecycleDisplayReasonWithLivenessInfo = %q, want %q", got, tc.want)
+			}
+			// Byte-identity against the raw form the display path replaces, fed the
+			// same sessionName (Info.SessionName) it supplies.
+			raw := LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now, info.SessionName, isRunning)
+			if got != raw {
+				t.Fatalf("twin %q diverged from raw LifecycleDisplayReasonWithLiveness %q", got, raw)
+			}
+		})
+	}
+}
+
 func TestLifecycleWakeConflictStateUsesProjectedTerminalStates(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -982,8 +1043,8 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
-				`sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])`,
-				`sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])`,
+				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,
+				`sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)`,
 			},
 			forbidden: []string{
 				`batch := map[string]string{"held_until": ""}`,

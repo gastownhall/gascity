@@ -83,20 +83,6 @@ func warmClaimTriggerStore(session beads.Bead, cityStore beads.Store, rigStores 
 	return cityStore
 }
 
-// isUnclaimedTrigger reports whether the pool slot's trigger bead is still waiting
-// to be claimed: status open and not already assigned to this slot (a non-empty
-// assignee equal to the session means the claim is mid-flight). in_progress /
-// closed / blocked are all "not ours to nudge".
-func isUnclaimedTrigger(w beads.Bead, sessName string) bool {
-	if !strings.EqualFold(strings.TrimSpace(w.Status), "open") {
-		return false // in_progress / closed / blocked → not ours to nudge
-	}
-	if assignee := strings.TrimSpace(w.Assignee); assignee != "" && assignee == sessName {
-		return false
-	}
-	return true
-}
-
 // deliverWarmBindClaimNudge delivers a pool slot's claim nudge to an already
 // running, idle slot that had on-demand work bound to it (bindPoolSessionTriggerBead)
 // after it was last Started. Cold Provider.Start delivers this nudge as a

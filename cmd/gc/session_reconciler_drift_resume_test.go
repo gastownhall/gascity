@@ -46,7 +46,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	clk := &clock.Fake{Time: time.Date(2026, 5, 13, 16, 23, 30, 0, time.UTC)}
 
 	prepared, err := prepareStartCandidateForCity(
-		startCandidate{session: &got, tp: tp, order: 0},
+		startCandidate{info: env.sessionInfo(got.ID), tp: tp, order: 0},
 		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
 	)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -279,7 +279,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 
 	woken := executePlannedStarts(
 		context.Background(),
-		[]startCandidate{{session: &got, tp: tp, order: 0}},
+		[]startCandidate{{info: env.sessionInfo(got.ID), tp: tp, order: 0}},
 		cfg,
 		map[string]TemplateParams{"mayor": tp},
 		env.sp,
@@ -333,7 +333,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 		"started_config_hash": priorStartedConfigHash,
 	})
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserv
 	session := env.createSessionBead("mayor", "mayor")
 	// No session_key, no started_config_hash — the session never started.
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1029,7 +1030,7 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, true, &stdout, &stderr)
+	code := doOrderRunWithJSON(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, true, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1107,7 +1108,7 @@ func TestOrderRunJSONRejectsExecWithoutRunning(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "release-exec", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()}, nil, true, &stdout, &stderr)
+	code := doOrderRunWithJSON(aa, "release-exec", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()}, nil, true, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doOrderRunWithJSON exec = %d, want 1", code)
 	}
@@ -1202,7 +1203,7 @@ on = "bead.closed"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("release-exec", "", false, &stdout, &stderr)
+	code := cmdOrderRun("release-exec", "", false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2204,6 +2205,9 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 func TestOrderRunGraphWorkflowDecoratesStepRouting(t *testing.T) {
 	cityDir := t.TempDir()
 	formulaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	cityToml := `[workspace]
 name = "test-city"
@@ -2211,8 +2215,23 @@ name = "test-city"
 [daemon]
 formula_v2 = true
 
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
 [[agent]]
 name = "quinn"
+dir = "fixture"
+min_active_sessions = 0
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fixture"
 max_active_sessions = 1
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -2233,7 +2252,7 @@ title = "Do work"
 	}
 
 	aa := []orders.Order{
-		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
+		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "fixture/quinn", FormulaLayer: formulaDir},
 	}
 	store := beads.NewMemStore()
 
@@ -2249,7 +2268,24 @@ title = "Do work"
 
 	foundRoot := false
 	foundWorker := false
+	foundControl := false
 	for _, bead := range all {
+		if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "city:test-city" {
+			t.Fatalf("%s gc.root_store_ref = %q, want city:test-city", bead.Title, got)
+		}
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != config.ControlDispatcherAgentName {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want owning city dispatcher", got)
+			}
+			if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "city:test-city" {
+				t.Fatalf("workflow-finalize gc.root_store_ref = %q, want city:test-city", got)
+			}
+			if got := bead.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "fixture/quinn" {
+				t.Fatalf("workflow-finalize execution route = %q, want fixture/quinn", got)
+			}
+			foundControl = true
+			continue
+		}
 		switch bead.Title {
 		case "graph-work":
 			if bead.Assignee != "" {
@@ -2258,13 +2294,22 @@ title = "Do work"
 			if bead.Metadata["gc.kind"] != "workflow" {
 				t.Fatalf("workflow root gc.kind = %q, want workflow", bead.Metadata["gc.kind"])
 			}
-			if bead.Metadata["gc.routed_to"] != "quinn" {
-				t.Fatalf("workflow root gc.routed_to = %q, want quinn", bead.Metadata["gc.routed_to"])
+			if bead.Metadata["gc.routed_to"] != "fixture/quinn" {
+				t.Fatalf("workflow root gc.routed_to = %q, want fixture/quinn", bead.Metadata["gc.routed_to"])
+			}
+			if got := bead.Metadata[beadmeta.ScopeKindMetadataKey]; got != "city" {
+				t.Fatalf("workflow root gc.scope_kind = %q, want city", got)
+			}
+			if got := bead.Metadata[beadmeta.ScopeRefMetadataKey]; got != "test-city" {
+				t.Fatalf("workflow root gc.scope_ref = %q, want test-city", got)
 			}
 			foundRoot = true
 		case "Do work":
 			if bead.Assignee != "" {
 				t.Fatalf("worker assignee = %q, want empty child under routed workflow root", bead.Assignee)
+			}
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/quinn" {
+				t.Fatalf("worker gc.routed_to = %q, want fixture/quinn", got)
 			}
 			foundWorker = true
 		}
@@ -2275,6 +2320,160 @@ title = "Do work"
 	}
 	if !foundWorker {
 		t.Fatal("missing workflow child step")
+	}
+	if !foundControl {
+		t.Fatal("missing workflow-finalize control step")
+	}
+}
+
+func TestOrderRunGraphWorkflowWithoutPoolUsesPerStepTargetAndRigStore(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "fixture")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
+[[agent]]
+name = "worker"
+dir = "fixture"
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fixture"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphFormula := `
+formula = "rig-order-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Rig work"
+metadata = { "gc.run_target" = "worker" }
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "rig-order-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "rig-patrol", Rig: "fixture", Formula: "rig-order-work", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir}
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	if code := doOrderRun([]orders.Order{a}, a.Name, a.Rig, cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundWork, foundControl bool
+	for _, bead := range all {
+		if got := bead.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "rig:fixture" {
+			t.Fatalf("%s gc.root_store_ref = %q, want rig:fixture", bead.Title, got)
+		}
+		switch bead.Metadata[beadmeta.KindMetadataKey] {
+		case beadmeta.KindWorkflowFinalize:
+			if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/control-dispatcher" {
+				t.Fatalf("finalize gc.routed_to = %q, want fixture/control-dispatcher", got)
+			}
+			foundControl = true
+		default:
+			if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+				if got := bead.Metadata[beadmeta.ScopeKindMetadataKey]; got != "rig" {
+					t.Fatalf("workflow root gc.scope_kind = %q, want rig", got)
+				}
+				if got := bead.Metadata[beadmeta.ScopeRefMetadataKey]; got != "fixture" {
+					t.Fatalf("workflow root gc.scope_ref = %q, want fixture", got)
+				}
+			}
+			if bead.Title == "Rig work" {
+				if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/worker" {
+					t.Fatalf("work gc.routed_to = %q, want fixture/worker", got)
+				}
+				foundWork = true
+			}
+		}
+	}
+	if !foundWork || !foundControl {
+		t.Fatalf("found work=%v control=%v; beads=%+v", foundWork, foundControl, all)
+	}
+}
+
+func TestOrderRunGraphWorkflowMissingRigDispatcherFailsBeforeInstantiate(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
+[[agent]]
+name = "worker"
+dir = "fixture"
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "missing-dispatcher.toml"), []byte(`
+formula = "missing-dispatcher"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Rig work"
+metadata = { "gc.run_target" = "worker" }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "rig-patrol", Rig: "fixture", Formula: "missing-dispatcher", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir}
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	if code := doOrderRun([]orders.Order{a}, a.Name, a.Rig, cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1", code)
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("open beads = %+v, want no graph materialized", all)
+	}
+	if !strings.Contains(stderr.String(), `control-dispatcher agent for rig "fixture" not found`) {
+		t.Fatalf("stderr = %q, want missing rig dispatcher", stderr.String())
 	}
 }
 
@@ -2359,7 +2558,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2432,7 +2631,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2519,7 +2718,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2579,7 +2778,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2660,7 +2859,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2690,7 +2889,7 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	elapsed := time.Since(start)
 	if code == 0 {
 		t.Fatalf("doOrderRunExec = 0, want timeout failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
@@ -2723,7 +2922,7 @@ dolt.auto-start: false
 	a := orders.Order{Name: "pg-env", Trigger: "event", On: events.BeadClosed, Exec: "true"}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExecTracked(a, cityDir, nil, orders.NewStore(beads.OrdersStore{Store: store}), eventLog, &stdout, &stderr)
+	code := doOrderRunExecTracked(a, cityDir, nil, orders.NewStore(beads.OrdersStore{Store: store}), eventLog, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("doOrderRunExecTracked = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -2776,7 +2975,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, &stdout, &stderr)
+	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2810,7 +3009,7 @@ dolt.auto-start: false
 
 	a := orders.Order{Name: "pg-env", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 	var stdout, stderr bytes.Buffer
-	result := doOrderRunExecResult(a, cityDir, nil, &stdout, &stderr)
+	result := doOrderRunExecResult(a, cityDir, nil, nil, &stdout, &stderr)
 	if result.code == 0 {
 		t.Fatalf("doOrderRunExecResult = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -2822,6 +3021,54 @@ dolt.auto-start: false
 	}
 	if !strings.Contains(stderr.String(), "[redacted]") {
 		t.Fatalf("stderr = %q, want redaction marker", stderr.String())
+	}
+}
+
+// TestOrderRunExecFailureRedactsProjectedGitHubToken proves that when a manual
+// `gc order run` exec order fails after echoing the controller's projected
+// GitHub token, the token is redacted from the error and combined output
+// printed to stderr. The exec env now projects GH_TOKEN/GITHUB_TOKEN into the
+// child (see projectGitHubTokenExecEnv), so the manual failure path must scrub
+// them just like the controller dispatch path does.
+func TestOrderRunExecFailureRedactsProjectedGitHubToken(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	// Echo the projected token to the child's combined output, then fail so the
+	// error+output branch runs.
+	a := orders.Order{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN"; exit 1`,
+	}
+
+	var stdout, stderr bytes.Buffer
+	result := doOrderRunExecResult(a, cityDir, cfg, nil, &stdout, &stderr)
+	if result.code == 0 {
+		t.Fatalf("doOrderRunExecResult = 0, want exec failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if result.failureLabel != "exec-failed" {
+		t.Fatalf("failureLabel = %q, want exec-failed", result.failureLabel)
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("stderr leaked projected GitHub token: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[redacted]") {
+		t.Fatalf("stderr = %q, want redaction marker for the echoed token", stderr.String())
 	}
 }
 
@@ -3609,5 +3856,78 @@ func TestOrderScopedName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("orderScopedName(%q, %q) = %q, want %q", tc.name, tc.rig, got, tc.want)
 		}
+	}
+}
+
+// TestOrderCheckCooldownFastPathBypassesLastRunStore proves the cooldown
+// short-circuit: a recent order.fired event keeps a cooldown order not-due
+// without ever consulting the (slow, Dolt-backed) last-run store. The store
+// is rigged to error if queried, so a clean not-due result confirms the
+// fast path took over.
+func TestOrderCheckCooldownFastPathBypassesLastRunStore(t *testing.T) {
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	// Any query against this store errors — it must not be reached.
+	failStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: failStore}}, nil
+	}
+
+	// Recent order.fired event, well within the 24h cooldown.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest", Ts: now.Add(-1 * time.Hour)})
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1 (cooldown active, not due); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("last-run store was consulted despite in-window event; fast path did not bypass it:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cooldown") {
+		t.Fatalf("stdout missing not-due cooldown row:\n%s", stdout.String())
+	}
+}
+
+// TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore proves the other
+// half of the guarantee: an order.fired event older than the cooldown interval
+// does not short-circuit, so the last-run store is still consulted (and here,
+// its error surfaces).
+func TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore(t *testing.T) {
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	failStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: failStore}}, nil
+	}
+
+	// Stale order.fired event, older than the 24h cooldown.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest", Ts: now.Add(-25 * time.Hour)})
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1 when last-run store errors after stale event; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("stale event did not fall through to last-run store; expected last-run error in stderr:\n%s", stderr.String())
 	}
 }

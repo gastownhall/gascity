@@ -950,7 +950,7 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
 	for _, root := range matches {
-		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {

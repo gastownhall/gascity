@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 )
@@ -77,7 +78,8 @@ func (s *Server) humaHandlePackList(_ context.Context, _ *PackListInput) (*PackL
 // PackAddInput is the body for POST /v0/city/{cityName}/packs.
 type PackAddInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Source  string `json:"source" minLength:"1" doc:"Pack source: a remote git URL or registry ref (a sub-path of a repo is allowed)." example:"https://github.com/org/repo/tree/main/packs/review"`
 		Name    string `json:"name,omitempty" doc:"Optional local binding name override; derived from the source when omitted."`
 		Version string `json:"version,omitempty" doc:"Optional semver constraint for a git-backed pack." example:"^1.2.0"`
@@ -99,21 +101,31 @@ type PackAddedOutput struct {
 // lock + install, so the pack's templates compose into the city.
 // POST /v0/city/{cityName}/packs.
 func (s *Server) humaHandlePackAdd(_ context.Context, input *PackAddInput) (*PackAddedOutput, error) {
-	// SSRF fence: AddImport shells `git ls-remote <source>` synchronously and
-	// its contract requires HTTP callers to validate the source first. Reject
-	// local/file sources and internal-network destinations before the import
-	// seam runs. Kept outside the write lock — it is read-only and may resolve
-	// DNS.
-	if err := validateHTTPPackSource(input.Body.Source); err != nil {
-		return nil, packImportHTTPError(err)
-	}
-	var res *importsvc.AddResult
-	if err := s.serializeConfigWrite(func() error {
-		var addErr error
-		res, addErr = packAddImport(fsys.OSFS{}, s.state.CityPath(), input.Body.Source, input.Body.Name, input.Body.Version)
-		return addErr
-	}); err != nil {
-		return nil, packImportHTTPError(err)
+	// Idempotency: import at most once per Idempotency-Key — a pack add shells
+	// out to git and is exactly the expensive, retry-prone create the key is
+	// for. The cached value is the AddResult the response body echoes.
+	res, err := withIdempotency(s, "/v0/packs", input.IdempotencyKey, input.Body,
+		func() (importsvc.AddResult, error) {
+			// SSRF fence: AddImport shells `git ls-remote <source>` synchronously and
+			// its contract requires HTTP callers to validate the source first. Reject
+			// local/file sources and internal-network destinations before the import
+			// seam runs. Kept outside the write lock — it is read-only and may resolve
+			// DNS.
+			if err := validateHTTPPackSource(input.Body.Source); err != nil {
+				return importsvc.AddResult{}, packImportHTTPError(err)
+			}
+			var added *importsvc.AddResult
+			if err := s.serializeConfigWrite(func() error {
+				var addErr error
+				added, addErr = packAddImport(fsys.OSFS{}, s.state.CityPath(), input.Body.Source, input.Body.Name, input.Body.Version)
+				return addErr
+			}); err != nil {
+				return importsvc.AddResult{}, packImportHTTPError(err)
+			}
+			return *added, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	out := &PackAddedOutput{}
 	out.Body.Name = res.Name
@@ -172,21 +184,21 @@ func packImportHTTPError(err error) error {
 		// ErrNameDerive and ErrReservedPrefix are client input-validation failures
 		// (no derivable name, or a reserved "default-rig:" name), so they are 400s
 		// like ErrInvalidSource, not 500s.
-		return huma.Error400BadRequest(err.Error())
+		return apierr.InvalidRequest.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrImportExists):
-		return huma.Error409Conflict(err.Error())
+		return apierr.ConflictWrongState.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrNotFound):
-		return huma.Error404NotFound(err.Error())
+		return apierr.PackNotFound.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrVersionResolveFailed):
 		// Resolving the operator-named source via `git ls-remote` is a genuinely
 		// upstream dependency, so a failure here is a bad gateway.
-		return huma.Error502BadGateway(err.Error())
+		return apierr.BadGateway.Msg(err.Error())
 	case errors.Is(err, importsvc.ErrInstallFailed):
 		// ErrInstallFailed wraps LOCAL failures too (the import-graph read,
 		// manifest save, lockfile write), not just an upstream clone, so it maps
 		// to a server error — matching importsvc's documented HTTP 500.
-		return huma.Error500InternalServerError("pack install failed", err)
+		return apierr.Internal.With("pack install failed", &huma.ErrorDetail{Message: err.Error()})
 	default:
-		return huma.Error500InternalServerError("pack import failed", err)
+		return apierr.Internal.With("pack import failed", &huma.ErrorDetail{Message: err.Error()})
 	}
 }

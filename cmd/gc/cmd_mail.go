@@ -900,15 +900,11 @@ func isStorelessMailProvider() bool {
 	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
-// sessionMailboxAddress / sessionMailboxAddresses delegate to the session-class
-// front-door codec (internal/session) so the session-bead metadata vocabulary
-// (alias / alias_history / session_name) lives in one place. The per-session-id
-// resolution paths route through InfoStore.MailboxAddress(es); these thin
-// wrappers remain for the list-scan sites that already hold a []beads.Bead.
-func sessionMailboxAddress(b beads.Bead) string {
-	return session.MailboxAddress(b)
-}
-
+// sessionMailboxAddresses delegates to the session-class front-door codec
+// (internal/session) so the session-bead metadata vocabulary (alias /
+// alias_history / session_name) lives in one place. Its sole remaining caller
+// holds a single bead already fetched by id; the list-scan sites now read
+// session.Info directly via session.MailboxAddress*FromInfo.
 func sessionMailboxAddresses(b beads.Bead) []string {
 	return session.MailboxAddresses(b)
 }
@@ -931,7 +927,7 @@ func resolveMailIdentityCached(store beads.Store, identifier string, cache *mail
 		}
 		return "", err
 	}
-	address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+	address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -952,7 +948,7 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
 		if err == nil {
-			address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+			address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 			if err != nil {
 				return "", err
 			}
@@ -1033,11 +1029,12 @@ func listLiveSessionMailboxesCached(store beads.Store, cache *mailIdentitySessio
 	if err != nil {
 		return nil, err
 	}
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if info.Closed {
 			continue
 		}
-		if address := sessionMailboxAddress(b); address != "" {
+		if address := session.MailboxAddressFromInfo(info); address != "" {
 			recipients[address] = true
 		}
 	}
@@ -1055,7 +1052,7 @@ type resolvedMailTarget struct {
 // A nil cache disables memoization; the zero value memoizes on first use.
 type mailIdentitySessionCache struct {
 	mu      sync.Mutex
-	list    []beads.Bead
+	list    []session.Info
 	fetched bool
 }
 
@@ -1071,16 +1068,20 @@ func ambientMailTargetConfig() (string, *config.City) {
 	return cityPath, cfg
 }
 
-func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]beads.Bead, error) {
+// listMailIdentitySessions memoizes the open session Infos for identity
+// resolution. It preserves the pre-typed cache semantics exactly: the default
+// direct union with IncludeClosed implicit-false (loadOpenSessionInfos), with the
+// per-loop closed filter kept in the callers.
+func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]session.Info, error) {
 	if cache == nil {
-		return session.ListAllSessionBeads(store, beads.ListQuery{})
+		return loadOpenSessionInfos(store)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.fetched {
 		return cache.list, nil
 	}
-	list, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	list, err := loadOpenSessionInfos(store)
 	if err != nil {
 		return nil, err
 	}
@@ -1101,19 +1102,20 @@ func resolveLiveConfiguredNamedMailTargetCached(store beads.Store, identifier st
 
 	matches := make(map[string]resolvedMailTarget)
 	order := make([]string, 0, 2)
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if info.Closed {
 			continue
 		}
-		identity := strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata])
+		identity := namedSessionIdentityInfo(info)
 		if identity == "" || targetBasename(identity) != identifier {
 			continue
 		}
-		addresses := sessionMailboxAddresses(b)
+		addresses := session.MailboxAddressesFromInfo(info)
 		if len(addresses) == 0 {
 			continue
 		}
-		display := sessionMailboxAddress(b)
+		display := session.MailboxAddressFromInfo(info)
 		if display == "" {
 			display = addresses[0]
 		}
@@ -1151,9 +1153,16 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, store
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
 	if store != nil && cfg != nil {
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
+		// Route the session-ID resolve and the mailbox-identity bead read through
+		// the session coordination-class store so a [beads.classes.sessions]
+		// relocation reaches mail target resolution. Identity at the default
+		// backend. (Mirrors cmd_nudge's sessStore routing; the sibling resolvers
+		// resolveMailTargetsCached / resolveMailIdentityWithConfigCached carry the
+		// same pre-existing gap and are swept on the mail DI pass.)
+		sessStore := cliSessionStore(store, cfg, cityPath)
+		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
 		if err == nil {
-			b, err := store.Get(sessionID)
+			b, err := sessStore.Get(sessionID)
 			if err != nil {
 				return resolvedMailTarget{}, err
 			}
@@ -1191,7 +1200,7 @@ func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailI
 		}
 		return resolvedMailTarget{}, err
 	}
-	addresses, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
+	addresses, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}

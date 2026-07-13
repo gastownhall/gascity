@@ -129,3 +129,49 @@ func TestBuiltinCodexModelChoicesUseAvailable53CodexAlias(t *testing.T) {
 		t.Fatal("codex model choices missing gpt-5.3-codex")
 	}
 }
+
+func TestBuiltinCodexModelChoicesIncludeGPT56Variants(t *testing.T) {
+	codex, ok := BuiltinProviders()["codex"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing codex")
+	}
+
+	var modelOption BuiltinProviderOption
+	for _, option := range codex.OptionsSchema {
+		if option.Key == "model" {
+			modelOption = option
+			break
+		}
+	}
+	if modelOption.Key == "" {
+		t.Fatal("codex provider missing model option")
+	}
+
+	byValue := make(map[string]BuiltinOptionChoice, len(modelOption.Choices))
+	for _, choice := range modelOption.Choices {
+		byValue[choice.Value] = choice
+	}
+
+	wantLabels := map[string]string{
+		"gpt-5.6-sol":   "GPT-5.6 Sol",
+		"gpt-5.6-terra": "GPT-5.6 Terra",
+		"gpt-5.6-luna":  "GPT-5.6 Luna",
+	}
+	for value, wantLabel := range wantLabels {
+		choice, ok := byValue[value]
+		if !ok {
+			t.Fatalf("codex model choices missing %q", value)
+		}
+		if choice.Label != wantLabel {
+			t.Errorf("%s label = %q, want %q", value, choice.Label, wantLabel)
+		}
+		wantFlagArgs := []string{"--model", value}
+		if len(choice.FlagArgs) != 2 || choice.FlagArgs[0] != wantFlagArgs[0] || choice.FlagArgs[1] != wantFlagArgs[1] {
+			t.Errorf("%s FlagArgs = %v, want %v", value, choice.FlagArgs, wantFlagArgs)
+		}
+		if len(choice.FlagAliases) != 1 || len(choice.FlagAliases[0]) != 2 ||
+			choice.FlagAliases[0][0] != "-m" || choice.FlagAliases[0][1] != value {
+			t.Errorf("%s FlagAliases = %v, want [[-m %s]]", value, choice.FlagAliases, value)
+		}
+	}
+}

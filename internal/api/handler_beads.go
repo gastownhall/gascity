@@ -26,7 +26,10 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	for _, child := range children {
 		seen[child.ID] = struct{}{}
 	}
-	for _, key := range []string{"molecule_id", "workflow_id"} {
+	// NOTE: "workflow_id" is the bare (non-prefixed) metadata key, distinct
+	// from beadmeta.WorkflowIDMetadataKey ("gc.workflow_id") — do NOT substitute
+	// the prefixed constant here or this would surface a different key.
+	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
 		attachedID := strings.TrimSpace(parent.Metadata[key])
 		if attachedID == "" {
 			continue
@@ -59,10 +62,10 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	}
 	// A work bead's stored assignee may be ANY of the resolved session's
 	// identity forms — the bead ID, session_name, alias, configured named
-	// identity, or a prior alias — so match against all of them (mirrors
-	// sessionBeadAssigneeIdentities used by the reconciler). Without this the
-	// session-name form written by assign/update (and the claim path) would be
-	// invisible to ?assignee=<alias|id> list filters.
+	// identity, or a prior alias — so match against all of them via the confined
+	// session.AssigneeIdentities codec. Without this the session-name form
+	// written by assign/update (and the claim path) would be invisible to
+	// ?assignee=<alias|id> list filters.
 	seen := map[string]bool{}
 	var terms []string
 	add := func(v string) {
@@ -75,12 +78,13 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	}
 	add(assignee)
 	add(id)
-	if b, getErr := store.Get(id); getErr == nil {
-		add(b.Metadata["session_name"])
-		add(b.Metadata["alias"])
-		add(b.Metadata[session.NamedSessionIdentityMetadata])
-		for _, prior := range session.AliasHistory(b.Metadata) {
-			add(prior)
+	// id is a resolved session id; read its identity forms through the session
+	// front door. A non-session or absent id (the front door rejects it) simply
+	// contributes no extra identity terms — the base assignee/id terms above still
+	// drive the ?assignee filter.
+	if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+		for _, identity := range session.AssigneeIdentities(info) {
+			add(identity)
 		}
 	}
 	return terms
@@ -105,34 +109,29 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		}
 		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
 	}
-	b, err := store.Get(id)
+	sessFront := session.NewStore(beads.SessionStore{Store: store})
+	info, err := sessFront.Get(id)
 	if err != nil {
+		// The front door rejects a present-but-non-session bead with
+		// ErrSessionNotFound — keep the "must resolve to a session" contract; any
+		// other error surfaces as the lookup failure.
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+		}
 		return "", fmt.Errorf("looking up resolved assignee session %q: %w", id, err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	if info.Closed {
 		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
 	}
-	session.RepairEmptyType(store, &b)
-	return sessionBeadAssigneeIdentifier(b), nil
-}
-
-// sessionBeadAssigneeIdentifier returns the durable agent-facing identity form
-// of a session bead — its session_name, else alias, else configured named
-// identity — falling back to the bead ID when no name metadata is present so a
-// resolved assignment is never silently cleared. This is the form the agent
-// claims and verifies work with (BEADS_ACTOR / GC_SESSION_NAME), so stamping it
-// keeps assign/update consistent with the claim path (which already stores the
-// raw session-name) and with the form-agnostic session matching in the
-// reconciler (sessionBeadAssigneeIdentities). Stamping the bare bead ID here
-// instead made template-routed continuation work unclaimable by name-matching
-// agents.
-func sessionBeadAssigneeIdentifier(b beads.Bead) string {
-	for _, key := range []string{"session_name", "alias", session.NamedSessionIdentityMetadata} {
-		if v := strings.TrimSpace(b.Metadata[key]); v != "" {
-			return v
-		}
+	// Preserve the empty-type heal RepairEmptyType performed here: a repairable
+	// (type-lost) session bead is healed back to the canonical type as a side
+	// effect of being assigned. RepairTypeBestEffort writes only the type field
+	// and logs a failed write (as RepairEmptyType did), so this is byte-equivalent
+	// to the retired heal.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	return b.ID
+	return session.AssigneeIdentifier(info), nil
 }
 
 // findStore returns the bead store for the given rig. If rig is empty, returns

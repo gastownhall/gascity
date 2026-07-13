@@ -10,8 +10,42 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/usage"
 )
+
+// TestComputeFactGetCandidate is the usage-lane Get-budget gate: emitDueComputeFacts only
+// issues a per-session store Get when computeFactGetCandidate returns true, so this pins
+// the pre-Get filter that keeps a steady fleet of parked, already-accounted sessions at
+// zero Gets. A mutation that drops any filter clause (terminal-state, awake-interval
+// present, or interval-not-already-emitted) flips a case and fails.
+func TestComputeFactGetCandidate(t *testing.T) {
+	info := func(state, awake, emitted string) session.Info {
+		return sessiontest.SeedBead(t, beads.Bead{
+			ID: "gc-x", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+			Metadata: map[string]string{"state": state, "awake_started_at": awake, "usage_compute_emitted_at": emitted},
+		})
+	}
+	const t1 = "2026-01-02T00:30:00Z"
+	cases := []struct {
+		name string
+		info session.Info
+		want bool
+	}{
+		{"active-not-terminal", info("active", t1, ""), false},
+		{"terminal-no-awake", info("asleep", "", ""), false},
+		{"terminal-awake-not-emitted", info("asleep", t1, ""), true},
+		{"terminal-awake-already-emitted", info("asleep", t1, t1), false},
+		{"terminal-awake-emitted-stale-interval", info("asleep", t1, "2026-01-01T00:00:00Z"), true},
+		{"drained-terminal", info("drained", t1, ""), true},
+	}
+	for _, tc := range cases {
+		if got := computeFactGetCandidate(tc.info); got != tc.want {
+			t.Errorf("%s: computeFactGetCandidate = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
 
 type captureSink struct{ facts []usage.Fact }
 

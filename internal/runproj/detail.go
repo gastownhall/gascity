@@ -1,12 +1,103 @@
 package runproj
 
 import (
+	"errors"
 	"fmt"
-	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// ErrRunNotFound is the sentinel wrapped by SnapshotForRun (and everything
+// built on it) when the requested run root is absent from the folded beads —
+// the run is truly unknown to the projection, as opposed to present but
+// unprojectable (UnsupportedRunError). Callers branch on it with errors.Is;
+// the dashboard BFF uses it to grant a just-slung run's deep link a warming
+// grace window instead of a terminal 404.
+var ErrRunNotFound = errors.New("run not found")
+
+// snapshotScanCount counts every snapshotForRun invocation. It exists so a test
+// can prove the single-scan entry points fold a run exactly once (the detail
+// path used to scan twice — once for the formula target, once for the build).
+// It carries no production behavior.
+var snapshotScanCount atomic.Int64
+
+// RunSnapshot is an opaque, already-computed run snapshot. It lets a caller fold
+// a run's beads ONCE (SnapshotForRun) and then serve both the formula-target
+// extraction (FormulaTargetFromSnapshot) and the full detail build
+// (BuildRunDetailFromSnapshot) off that single scan, instead of re-scanning the
+// city's beads per operation. The internal shape stays package-private; callers
+// treat the value as a token.
+type RunSnapshot struct {
+	raw runSnapshot
+}
+
+// SnapshotForRun folds beadList into the run rooted at runID exactly once,
+// returning an opaque snapshot both FormulaTargetFromSnapshot and
+// BuildRunDetailFromSnapshot consume. version and eventSeq parameterize the
+// snapshot identity (the golden passes 1/100; the live tailer passes a real
+// version and its LastSeq cursor). It returns an error only when the run root is
+// absent from beadList; that error wraps ErrRunNotFound.
+func SnapshotForRun(beadList []beads.Bead, runID string, version int, eventSeq int64) (RunSnapshot, error) {
+	raw, err := snapshotForRun(beadList, runID, version, eventSeq)
+	if err != nil {
+		return RunSnapshot{}, err
+	}
+	return RunSnapshot{raw: raw}, nil
+}
+
+// FormulaTargetFromSnapshot resolves the compiled-formula name, preview target,
+// and run scope from an already-computed snapshot, applying the exact identity
+// and scope resolution RunFormulaTargetForRun applies. ok is false when the run
+// is not a fetchable graph.v2 run, lacks a formula name+target, or has no valid
+// scope.
+//
+// The resolution reads only version/seq-INDEPENDENT snapshot fields (the root
+// bead's formula metadata and the scope kind/ref/root-store-ref), so a snapshot
+// built with a real version/eventSeq yields the same target a zero-version
+// snapshot would — the invariant that lets detail() fold once and serve both.
+func FormulaTargetFromSnapshot(snap RunSnapshot) (name, target, scopeKind, scopeRef string, ok bool) {
+	return formulaTargetFromSnapshot(snap.raw)
+}
+
+// BuildRunDetailFromSnapshot projects an already-computed snapshot into the
+// run-detail DTO, layering the optional request-time sessions and compiled
+// formula detail (both nil on the golden path). It is the single-scan analog of
+// BuildRunDetailWithSessionsAndFormula: same inputs, same output, but off a
+// snapshot the caller already folded. fetchFailure records why a live
+// formula-detail fetch failed when formulaDetail is nil (empty defaults to
+// upstream_error).
+func BuildRunDetailFromSnapshot(snap RunSnapshot, sessions []DashboardSession, formulaDetail *FormulaOrderingDetail, fetchFailure RunFormulaDetailFetchFailure) (FormulaRunDetail, error) {
+	return enrichFormulaRun(snap.raw, sessions, formulaDetail.toInput(), fetchFailure)
+}
+
+// BuildRunDetailForRun folds a run ONCE and returns both the detail DTO and the
+// run's compiled-formula target in one scan. It is a combined convenience entry
+// point for callers (and tests) that already hold the formula and want the
+// target plus the detail off a single fold. The dashboard BFF does NOT call it:
+// its detail() drives the same primitives directly (SnapshotForRun →
+// FormulaTargetFromSnapshot → BuildRunDetailFromSnapshot) so it can cache the
+// folded snapshot across requests and layer request-time sessions/formula
+// enrichment per build — a chicken-and-egg this combined form cannot express,
+// since it needs the fetched formula as input but only returns the target used
+// to fetch it. Keeping the composition here gives it one tested home.
+//
+// The (name, target, scopeKind, scopeRef, targetOK) return is the formula target
+// resolved off the SAME snapshot as the detail, so it equals what
+// RunFormulaTargetForRun would report for the run. A caller fetches the compiled
+// formula from that target and passes it back in on a later build (the formula
+// detail is request-time enrichment, layered per build, not carried in the
+// snapshot).
+func BuildRunDetailForRun(beadList []beads.Bead, runID string, version int, eventSeq int64, sessions []DashboardSession, formulaDetail *FormulaOrderingDetail, fetchFailure RunFormulaDetailFetchFailure) (detail FormulaRunDetail, name, target, scopeKind, scopeRef string, targetOK bool, err error) {
+	snap, err := SnapshotForRun(beadList, runID, version, eventSeq)
+	if err != nil {
+		return FormulaRunDetail{}, "", "", "", "", false, err
+	}
+	name, target, scopeKind, scopeRef, targetOK = FormulaTargetFromSnapshot(snap)
+	detail, err = BuildRunDetailFromSnapshot(snap, sessions, formulaDetail, fetchFailure)
+	return detail, name, target, scopeKind, scopeRef, targetOK, err
+}
 
 // UnsupportedRunReason distinguishes the expected v1/wisp case ("not_run_view" —
 // the run lists but has no graph.v2 detail) from a malformed graph.v2 snapshot
@@ -95,6 +186,15 @@ func RunFormulaTargetForRun(beadList []beads.Bead, runID string) (name, target, 
 	if err != nil {
 		return "", "", "", "", false
 	}
+	return formulaTargetFromSnapshot(snap)
+}
+
+// formulaTargetFromSnapshot is the shared formula-target resolution both
+// RunFormulaTargetForRun and FormulaTargetFromSnapshot delegate to. It reads only
+// version/seq-independent snapshot fields, so the result is identical whether the
+// snapshot was built at version=0 (the old target-only scan) or at the run's real
+// version/seq (the single-scan build).
+func formulaTargetFromSnapshot(snap runSnapshot) (name, target, scopeKind, scopeRef string, ok bool) {
 	if !isGraphV2(snap) {
 		return "", "", "", "", false
 	}
@@ -117,6 +217,7 @@ func RunFormulaTargetForRun(beadList []beads.Bead, runID string) (name, target, 
 // dependencies plus the root→member parent edges, so the detail graph renders the
 // actual step→step DAG the supervisor snapshot carried, not just parent links.
 func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq int64) (runSnapshot, error) {
+	snapshotScanCount.Add(1)
 	rootIdx := -1
 	for i := range beadList {
 		if beadList[i].ID == rootID {
@@ -125,20 +226,11 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		}
 	}
 	if rootIdx < 0 {
-		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
+		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q: %w", rootID, ErrRunNotFound)
 	}
 	root := beadList[rootIdx]
 
-	var members []beads.Bead
-	for i := range beadList {
-		b := beadList[i]
-		if b.ID == rootID ||
-			b.ParentID == rootID ||
-			b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID ||
-			strings.HasPrefix(b.ID, rootID+".") {
-			members = append(members, b)
-		}
-	}
+	members := RunMembers(beadList, rootID)
 
 	snapBeads := make([]runSnapshotBead, 0, len(members))
 	for i := range members {
@@ -535,7 +627,43 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 		StreamableSessionIDs:   streamableSessionIDs,
 		StatusCounts:           visibleStatuses,
 		AllStatusCounts:        allStatuses,
+		Terminal:               deriveRunTerminal(visibleStatuses, visibleCount),
 	}
+}
+
+// terminalRunNodeStatuses and nonTerminalRunNodeStatuses partition every
+// RunNodeStatus value (shared/src/run-detail.ts) into its terminality class.
+// This is the single Go-side source of the taxonomy the client used to
+// duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
+// newly-added status must be explicitly classified here (or the test fails).
+var (
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped"}
+	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
+)
+
+// deriveRunTerminal reports whether the run has reached a terminal state, using
+// the visible-node status census. It matches the retired client isTerminalProgress
+// fold exactly: terminal iff there is at least one visible node, no visible node
+// sits in a non-terminal status, and the terminal-status tally covers every
+// visible node.
+func deriveRunTerminal(visibleStatuses nodeStatusCounts, visibleCount int) bool {
+	if visibleCount <= 0 {
+		return false
+	}
+	if sumStatusCounts(visibleStatuses, nonTerminalRunNodeStatuses) > 0 {
+		return false
+	}
+	return sumStatusCounts(visibleStatuses, terminalRunNodeStatuses) >= visibleCount
+}
+
+// sumStatusCounts totals the counts of the given statuses (absent statuses
+// contribute zero), mirroring the client's `?? 0` reduction.
+func sumStatusCounts(counts nodeStatusCounts, statuses []string) int {
+	total := 0
+	for _, status := range statuses {
+		total += counts.counts[status]
+	}
+	return total
 }
 
 // runSnapshotSequenceOf renders the snapshot-sequence union. Port of TS

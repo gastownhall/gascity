@@ -22,7 +22,7 @@ func TestCreateHandoffMailRoutesThroughProviderSeam(t *testing.T) {
 	// The seam return type is mail.Message; this assignment fails to compile if
 	// createHandoffMail still leaks *beads.Bead at the call site.
 	var msg mail.Message
-	msg, ok := createHandoffMail(store, rec, "mayor", "mayor",
+	msg, ok := createHandoffMail(store, store, rec, "mayor", "mayor",
 		[]string{"HANDOFF: context full", "drain now"}, "HANDOFF: context cycle",
 		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &stderr)
 	if !ok {

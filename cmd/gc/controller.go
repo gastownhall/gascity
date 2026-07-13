@@ -269,7 +269,12 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 		})
 		return
 	}
-	if err := resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+	// Route the session circuit-breaker reset through the session
+	// coordination-class store so a [beads.classes.sessions] relocation reaches
+	// this socket-command path. No-refresh loader: this runs inside the running
+	// controller (packs already materialized); nil cfg → cliSessionStore identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err := resetSessionCircuitBreakerState(cliSessionStore(store, cfg, cityPath), sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
 			Outcome: "failed",
 			Error:   err.Error(),
@@ -948,6 +953,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := config.ValidateServices(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
+	if err := config.ValidateWebhooks(newCfg.Webhooks); err != nil {
+		return failWithWarnings(fmt.Errorf("validating webhooks: %w", err))
+	}
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
@@ -1357,6 +1365,12 @@ func runController(
 		// Fail closed at boot if write-auth is required but no key is set.
 		if err := api.InstallWriteAuth(apiMux, cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); err != nil {
 			fmt.Fprintf(stderr, "api: write-auth: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		// Gate city reads on a signed read grant when configured. Fail closed at
+		// boot if read-auth is required but no key is set.
+		if err := api.InstallReadAuth(apiMux, cfg.API.ReadAuthVerifyKey, cfg.API.ReadAuthRequired); err != nil {
+			fmt.Fprintf(stderr, "api: read-auth: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))

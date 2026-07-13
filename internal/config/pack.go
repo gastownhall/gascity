@@ -50,6 +50,7 @@ type PackConfig struct {
 	Agents        []Agent                     `toml:"agent,omitempty"`
 	NamedSessions []NamedSession              `toml:"named_session,omitempty"`
 	Services      []Service                   `toml:"service,omitempty"`
+	Webhooks      []Webhook                   `toml:"webhook,omitempty"`
 	Providers     map[string]ProviderSpec     `toml:"providers,omitempty"`
 	Upstreams     map[string]UpstreamSpec     `toml:"upstreams,omitempty"`
 	Runtimes      map[string]PackRuntimeEntry `toml:"runtimes,omitempty"`
@@ -624,6 +625,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		allRequires = append(allRequires, reqs...)
 		allGlobals = append(allGlobals, globals...)
 		cfg.Services = append(cfg.Services, services...)
+		cfg.Webhooks = append(cfg.Webhooks, cachedPackWebhooks(cache, topoDir)...)
 		packName := tcPackName(fs, topoPath)
 		if packName == "" && len(cachedPackCommands(cache, topoDir)) > 0 {
 			return nil, nil, nil, fmt.Errorf("city pack %q: discovered commands require [pack].name for CLI binding", ref)
@@ -734,6 +736,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			doctors := cachedPackDoctors(cache, impDir)
 			runtimes := cachedPackRuntimes(cache, impDir)
 			skills := cachedPackSkills(cache, impDir)
+			webhooks := cachedPackWebhooks(cache, impDir)
 			mcpTopoDirs := topoDirs
 
 			// by this import. Nested pack dependencies reached through
@@ -760,6 +763,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				reqs = cachedPackLocalRequires(cache, impDir)
 				globals = cachedPackLocalGlobals(cache, impDir)
 				skills = filterSkillsByPackDir(skills, impDir)
+				webhooks = filterWebhooksBySourceDir(webhooks, impDir)
 				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
 
@@ -839,6 +843,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			allRequires = append(allRequires, reqs...)
 			allGlobals = append(allGlobals, globals...)
 			cfg.Services = append(cfg.Services, services...)
+			cfg.Webhooks = append(cfg.Webhooks, webhooks...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 			// Register pack-declared runtimes city-wide (collisions error).
@@ -1100,6 +1105,7 @@ type packLoadResult struct {
 	upstreams      map[string]UpstreamSpec
 	localUpstreams map[string]UpstreamSpec
 	services       []Service
+	webhooks       []Webhook
 	topoDirs       []string
 	localTopoDirs  []string
 	requires       []PackRequirement
@@ -1272,6 +1278,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var includedAgents []Agent
 	var includedNamedSessions []NamedSession
 	var includedServices []Service
+	var includedWebhooks []Webhook
 	var includedTopoDirs []string
 	var allRequires []PackRequirement
 	var includedGlobals []ResolvedPackGlobal
@@ -1300,6 +1307,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedAgents = append(includedAgents, incAgents...)
 		includedNamedSessions = append(includedNamedSessions, incNamedSessions...)
 		includedServices = append(includedServices, incServices...)
+		includedWebhooks = append(includedWebhooks, cachedPackWebhooks(cache, incTopoDir)...)
 		includedTopoDirs = append(includedTopoDirs, incTopoDirs...)
 		allRequires = append(allRequires, incReqs...)
 		includedGlobals = append(includedGlobals, incGlobals...)
@@ -1361,6 +1369,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		impDoctors := cachedPackDoctors(cache, impDir)
 		impRuntimes := cachedPackRuntimes(cache, impDir)
 		impSkills := cachedPackSkills(cache, impDir)
+		impWebhooks := cachedPackWebhooks(cache, impDir)
 
 		// When transitive = false, strip agents that came from the
 		// imported pack's nested dependencies. We keep only agents
@@ -1387,6 +1396,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			impReqs = cachedPackLocalRequires(cache, impDir)
 			impGlobals = cachedPackLocalGlobals(cache, impDir)
 			impSkills = filterSkillsByPackDir(impSkills, impDir)
+			impWebhooks = filterWebhooksBySourceDir(impWebhooks, impDir)
 		}
 
 		// Stamp binding name on all agents and named sessions from this import.
@@ -1453,6 +1463,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedAgents = append(includedAgents, impAgents...)
 		includedNamedSessions = append(includedNamedSessions, impNamedSessions...)
 		includedServices = append(includedServices, impServices...)
+		includedWebhooks = append(includedWebhooks, impWebhooks...)
 		includedTopoDirs = append(includedTopoDirs, impTopoDirs...)
 		allRequires = append(allRequires, impReqs...)
 		includedGlobals = append(includedGlobals, impGlobals...)
@@ -1574,10 +1585,16 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		}
 	}
 
+	// Stamp this pack's own webhooks with pack provenance. The default-closed
+	// public pack-guard runs once post-composition in LoadWithIncludes; here we
+	// only record where each webhook came from.
+	webhooks := stampWebhookSource(tc.Webhooks, topoDir)
+
 	// Merge: included agents first (base), then parent agents (override).
 	includedAgents = append(includedAgents, agents...)
 	includedNamedSessions = append(includedNamedSessions, namedSessions...)
 	includedServices = append(includedServices, services...)
+	includedWebhooks = append(includedWebhooks, webhooks...)
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedRuntimes = append(includedRuntimes, localRuntimes...)
@@ -1661,6 +1678,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		upstreams:      mergedUpstreams,
 		localUpstreams: tc.Upstreams,
 		services:       includedServices,
+		webhooks:       includedWebhooks,
 		topoDirs:       topoDirs,
 		localTopoDirs:  []string{topoDir},
 		requires:       allRequires,
@@ -1690,6 +1708,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		upstreams:      deepCopyUpstreamSpecs(in.upstreams),
 		localUpstreams: deepCopyUpstreamSpecs(in.localUpstreams),
 		services:       deepCopyServices(in.services),
+		webhooks:       deepCopyWebhooks(in.webhooks),
 		topoDirs:       append([]string(nil), in.topoDirs...),
 		localTopoDirs:  append([]string(nil), in.localTopoDirs...),
 		requires:       append([]PackRequirement(nil), in.requires...),
@@ -1708,29 +1727,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 func deepCopyAgents(in []Agent) []Agent {
 	out := make([]Agent, len(in))
 	for i := range in {
-		out[i] = in[i]
-		out[i].Args = append([]string(nil), in[i].Args...)
-		out[i].PreStart = append([]string(nil), in[i].PreStart...)
-		out[i].ProcessNames = append([]string(nil), in[i].ProcessNames...)
-		out[i].Env = deepCopyStringMap(in[i].Env)
-		out[i].OptionDefaults = deepCopyStringMap(in[i].OptionDefaults)
-		out[i].NamepoolNames = append([]string(nil), in[i].NamepoolNames...)
-		out[i].InstallAgentHooks = append([]string(nil), in[i].InstallAgentHooks...)
-		out[i].SessionSetup = append([]string(nil), in[i].SessionSetup...)
-		out[i].SessionLive = append([]string(nil), in[i].SessionLive...)
-		out[i].InjectFragments = append([]string(nil), in[i].InjectFragments...)
-		out[i].AppendFragments = append([]string(nil), in[i].AppendFragments...)
-		out[i].DependsOn = append([]string(nil), in[i].DependsOn...)
-		out[i].MaxActiveSessions = copyIntPtr(in[i].MaxActiveSessions)
-		out[i].MinActiveSessions = copyIntPtr(in[i].MinActiveSessions)
-		out[i].ReadyDelayMs = copyIntPtr(in[i].ReadyDelayMs)
-		out[i].EmitsPermissionWarning = copyBoolPtr(in[i].EmitsPermissionWarning)
-		out[i].HooksInstalled = copyBoolPtr(in[i].HooksInstalled)
-		out[i].InjectAssignedSkills = copyBoolPtr(in[i].InjectAssignedSkills)
-		out[i].DefaultSlingFormula = copyStringPtr(in[i].DefaultSlingFormula)
-		out[i].InheritedDefaultSlingFormula = copyStringPtr(in[i].InheritedDefaultSlingFormula)
-		out[i].InheritedAppendFragments = append([]string(nil), in[i].InheritedAppendFragments...)
-		out[i].Attach = copyBoolPtr(in[i].Attach)
+		out[i] = in[i].Clone()
 	}
 	return out
 }
@@ -1876,9 +1873,16 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 	}
 }
 
-func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
+// cachedPackField resolves topoDir to an absolute cache key, looks up its
+// loaded pack result, and returns get(result). It holds the nil-cache guard,
+// absolute-path resolution, and cache-miss protocol once so each field
+// accessor is a one-line get closure. get must deep-copy any slice or map it
+// returns, preserving the copy-on-read contract the accessors rely on. The
+// zero value of T (nil for slices and maps) is returned on a miss.
+func cachedPackField[T any](cache *packLoadCache, topoDir string, get func(*packLoadResult) T) T {
+	var zero T
 	if cache == nil {
-		return nil
+		return zero
 	}
 	absDir, err := filepath.Abs(topoDir)
 	if err != nil {
@@ -1886,115 +1890,57 @@ func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredComman
 	}
 	result, ok := cache.results[absDir]
 	if !ok {
-		return nil
+		return zero
 	}
-	out := deepCopyCommands(result.commands)
-	return out
+	return get(result)
+}
+
+func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredCommand {
+		return deepCopyCommands(r.commands)
+	})
 }
 
 func cachedPackWarnings(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.warnings...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.warnings...)
+	})
 }
 
 func cachedPackLocalWarnings(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.localWarnings...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.localWarnings...)
+	})
 }
 
 func cachedPackLocalProviders(cache *packLoadCache, topoDir string) map[string]ProviderSpec {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyProviderSpecs(result.localProviders)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]ProviderSpec {
+		return deepCopyProviderSpecs(r.localProviders)
+	})
 }
 
 func cachedPackLocalUpstreams(cache *packLoadCache, topoDir string) map[string]UpstreamSpec {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyUpstreamSpecs(result.localUpstreams)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]UpstreamSpec {
+		return deepCopyUpstreamSpecs(r.localUpstreams)
+	})
 }
 
 func cachedPackLocalTopoDirs(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.localTopoDirs...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.localTopoDirs...)
+	})
 }
 
 func cachedPackLocalRequires(cache *packLoadCache, topoDir string) []PackRequirement {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]PackRequirement(nil), result.localRequires...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []PackRequirement {
+		return append([]PackRequirement(nil), r.localRequires...)
+	})
 }
 
 func cachedPackLocalGlobals(cache *packLoadCache, topoDir string) []ResolvedPackGlobal {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyResolvedPackGlobals(result.localGlobals)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []ResolvedPackGlobal {
+		return deepCopyResolvedPackGlobals(r.localGlobals)
+	})
 }
 
 func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir string) []NamedSession {
@@ -2013,19 +1959,9 @@ func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir stri
 }
 
 func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	out := deepCopyDoctors(result.doctors)
-	return out
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredDoctor {
+		return deepCopyDoctors(r.doctors)
+	})
 }
 
 // isOSFileSystem reports whether fs is the real operating-system
@@ -2042,18 +1978,9 @@ func isOSFileSystem(fs fsys.FS) bool {
 }
 
 func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCatalog {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopySkills(result.skills)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredSkillCatalog {
+		return deepCopySkills(r.skills)
+	})
 }
 
 func filterCommandsByPackDir(commands []DiscoveredCommand, packDir string) []DiscoveredCommand {
@@ -2785,156 +2712,75 @@ func applyOverrides(agents []Agent, overrides []AgentOverride, _ string) error {
 	return nil
 }
 
-// applyAgentOverride applies a single override to an agent.
+// applyAgentOverride applies a single rig-scoped override to an agent. The
+// override's Dir is the only field unique to the rig-override surface; every
+// other overridable field is copied into an AgentPatch by toAgentPatch and
+// merged through the shared applyAgentMutation body, so patch and override can
+// never diverge field-by-field. See applyAgentMutation for the enforcement
+// tests.
 func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.Dir != nil {
 		a.Dir = *ov.Dir
 	}
-	if ov.WorkDir != nil {
-		a.WorkDir = *ov.WorkDir
-	}
-	if ov.TmuxAlias != nil {
-		a.TmuxAlias = *ov.TmuxAlias
-	}
-	if ov.Scope != nil {
-		a.Scope = *ov.Scope
-	}
-	if ov.Suspended != nil {
-		a.Suspended = *ov.Suspended
-	}
-	if len(ov.PreStart) > 0 {
-		a.PreStart = append([]string(nil), ov.PreStart...)
-	}
-	if len(ov.PreStartAppend) > 0 {
-		a.PreStart = append(a.PreStart, ov.PreStartAppend...)
-	}
-	if ov.PromptTemplate != nil {
-		a.PromptTemplate = *ov.PromptTemplate
-	}
-	if ov.Session != nil {
-		a.Session = *ov.Session
-	}
-	if ov.Provider != nil {
-		a.Provider = *ov.Provider
-	}
-	if ov.Upstream != nil {
-		a.Upstream = *ov.Upstream
-	}
-	if ov.Args != nil {
-		a.Args = append([]string(nil), (*ov.Args)...)
-	}
-	if ov.StartCommand != nil {
-		a.StartCommand = *ov.StartCommand
-	}
-	if ov.Lifecycle != nil {
-		a.Lifecycle = *ov.Lifecycle
-	}
-	if ov.Nudge != nil {
-		a.Nudge = *ov.Nudge
-	}
-	if ov.IdleTimeout != nil {
-		a.IdleTimeout = *ov.IdleTimeout
-	}
-	if ov.MaxSessionAge != nil {
-		a.MaxSessionAge = *ov.MaxSessionAge
-	}
-	if ov.MaxSessionAgeJitter != nil {
-		a.MaxSessionAgeJitter = *ov.MaxSessionAgeJitter
-	}
-	if ov.SleepAfterIdle != nil {
-		a.SleepAfterIdle = NormalizeSleepAfterIdle(*ov.SleepAfterIdle)
-		a.SleepAfterIdleSource = "rig_override"
-	}
-	if len(ov.InstallAgentHooks) > 0 {
-		a.InstallAgentHooks = append([]string(nil), ov.InstallAgentHooks...)
-	}
-	if len(ov.InstallAgentHooksAppend) > 0 {
-		a.InstallAgentHooks = append(a.InstallAgentHooks, ov.InstallAgentHooksAppend...)
-	}
-	if ov.HooksInstalled != nil {
-		a.HooksInstalled = ov.HooksInstalled
-	}
-	if ov.InjectAssignedSkills != nil {
-		a.InjectAssignedSkills = ov.InjectAssignedSkills
-	}
-	if len(ov.SessionSetup) > 0 {
-		a.SessionSetup = append([]string(nil), ov.SessionSetup...)
-	}
-	if len(ov.SessionSetupAppend) > 0 {
-		a.SessionSetup = append(a.SessionSetup, ov.SessionSetupAppend...)
-	}
-	if ov.SessionSetupScript != nil {
-		a.SessionSetupScript = *ov.SessionSetupScript
-	}
-	if len(ov.SessionLive) > 0 {
-		a.SessionLive = append([]string(nil), ov.SessionLive...)
-	}
-	if len(ov.SessionLiveAppend) > 0 {
-		a.SessionLive = append(a.SessionLive, ov.SessionLiveAppend...)
-	}
-	if ov.OverlayDir != nil {
-		a.OverlayDir = *ov.OverlayDir
-	}
-	if ov.DefaultSlingFormula != nil {
-		a.DefaultSlingFormula = ov.DefaultSlingFormula
-	}
-	if ov.Attach != nil {
-		a.Attach = ov.Attach
-	}
-	if len(ov.DependsOn) > 0 {
-		a.DependsOn = append([]string(nil), ov.DependsOn...)
-	}
-	if ov.ResumeCommand != nil {
-		a.ResumeCommand = *ov.ResumeCommand
-	}
-	if ov.WakeMode != nil {
-		a.WakeMode = *ov.WakeMode
-	}
-	if ov.MouseMode != nil {
-		a.MouseMode = *ov.MouseMode
-	}
-	if ov.InjectFragments != nil {
-		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)
-	}
-	if len(ov.AppendFragments) > 0 {
-		a.AppendFragments = append([]string(nil), ov.AppendFragments...)
-	}
-	if len(ov.InjectFragmentsAppend) > 0 {
-		a.InjectFragments = append(a.InjectFragments, ov.InjectFragmentsAppend...)
-	}
-	if ov.MaxActiveSessions != nil {
-		a.MaxActiveSessions = ov.MaxActiveSessions
-	}
-	if ov.MinActiveSessions != nil {
-		a.MinActiveSessions = ov.MinActiveSessions
-	}
-	if ov.ScaleCheck != nil {
-		a.ScaleCheck = *ov.ScaleCheck
-	}
-	// Env: additive merge.
-	if len(ov.Env) > 0 {
-		if a.Env == nil {
-			a.Env = make(map[string]string, len(ov.Env))
-		}
-		for k, v := range ov.Env {
-			a.Env[k] = v
-		}
-	}
-	for _, k := range ov.EnvRemove {
-		delete(a.Env, k)
-	}
-	// OptionDefaults: additive merge (override keys win).
-	if len(ov.OptionDefaults) > 0 {
-		if a.OptionDefaults == nil {
-			a.OptionDefaults = make(map[string]string, len(ov.OptionDefaults))
-		}
-		for k, v := range ov.OptionDefaults {
-			a.OptionDefaults[k] = v
-		}
-	}
-	// Pool: sub-field patching.
-	if ov.Pool != nil {
-		applyPoolOverride(a, ov.Pool)
+	applyAgentMutation(a, ov.toAgentPatch(), SessionSleepSourceRigOverride)
+}
+
+// toAgentPatch adapts a rig-scoped AgentOverride into the equivalent
+// AgentPatch so both override surfaces share applyAgentMutation. Only the
+// overridable fields are copied; the targeting keys (Agent, Dir) are handled
+// by the caller. TestAgentFieldSync keeps the two field sets aligned, and
+// TestApplyAgentOverrideCoversAllFields proves every field copied here reaches
+// the agent — a missed field fails the build.
+func (ov *AgentOverride) toAgentPatch() *AgentPatch {
+	return &AgentPatch{
+		WorkDir:                 ov.WorkDir,
+		TmuxAlias:               ov.TmuxAlias,
+		Scope:                   ov.Scope,
+		Suspended:               ov.Suspended,
+		Pool:                    ov.Pool,
+		Env:                     ov.Env,
+		EnvRemove:               ov.EnvRemove,
+		PreStart:                ov.PreStart,
+		PromptTemplate:          ov.PromptTemplate,
+		Session:                 ov.Session,
+		Provider:                ov.Provider,
+		Upstream:                ov.Upstream,
+		Args:                    ov.Args,
+		StartCommand:            ov.StartCommand,
+		Lifecycle:               ov.Lifecycle,
+		Nudge:                   ov.Nudge,
+		IdleTimeout:             ov.IdleTimeout,
+		MaxSessionAge:           ov.MaxSessionAge,
+		MaxSessionAgeJitter:     ov.MaxSessionAgeJitter,
+		SleepAfterIdle:          ov.SleepAfterIdle,
+		InstallAgentHooks:       ov.InstallAgentHooks,
+		Skills:                  ov.Skills,
+		MCP:                     ov.MCP,
+		SkillsAppend:            ov.SkillsAppend,
+		MCPAppend:               ov.MCPAppend,
+		HooksInstalled:          ov.HooksInstalled,
+		InjectAssignedSkills:    ov.InjectAssignedSkills,
+		SessionSetup:            ov.SessionSetup,
+		SessionSetupScript:      ov.SessionSetupScript,
+		SessionLive:             ov.SessionLive,
+		OverlayDir:              ov.OverlayDir,
+		DefaultSlingFormula:     ov.DefaultSlingFormula,
+		InjectFragments:         ov.InjectFragments,
+		AppendFragments:         ov.AppendFragments,
+		Attach:                  ov.Attach,
+		DependsOn:               ov.DependsOn,
+		ResumeCommand:           ov.ResumeCommand,
+		WakeMode:                ov.WakeMode,
+		MouseMode:               ov.MouseMode,
+		PreStartAppend:          ov.PreStartAppend,
+		SessionSetupAppend:      ov.SessionSetupAppend,
+		SessionLiveAppend:       ov.SessionLiveAppend,
+		InstallAgentHooksAppend: ov.InstallAgentHooksAppend,
+		InjectFragmentsAppend:   ov.InjectFragmentsAppend,
+		MaxActiveSessions:       ov.MaxActiveSessions,
+		MinActiveSessions:       ov.MinActiveSessions,
+		ScaleCheck:              ov.ScaleCheck,
+		OptionDefaults:          ov.OptionDefaults,
 	}
 }
 

@@ -66,19 +66,23 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 
 	cfg, _ := loadCityConfig(cityPath, stderr)
 
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+	// Every store consumer here is session-class (ID resolution, worker handle,
+	// session-bead load), so route the whole flow through the session
+	// coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, sessionID)
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, newSessionProvider(), cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	bead, err := store.Get(sessionID)
+	bead, err := sessStore.Get(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: loading session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		return 1

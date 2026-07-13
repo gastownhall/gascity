@@ -89,7 +89,7 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 				t.Fatalf("store.Create(): %v", err)
 			}
 
-			if _, err := session.WakeSession(store, b, time.Now()); err != nil {
+			if _, err := session.NewStore(beads.SessionStore{Store: store}).WakeSession(b.ID, time.Now(), session.WakeOpts{}); err != nil {
 				t.Fatalf("WakeSession: %v", err)
 			}
 
@@ -402,6 +402,11 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionWake() = %d, want rejection; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	// Pin the CLI wake-conflict artifact: the fused WakeSession returns a
+	// WakeConflictError the CLI renders as "session <id> is <state>".
+	if want := "gc session wake: session " + sessionID + " is archived"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderr.String())
 	}
 }
 

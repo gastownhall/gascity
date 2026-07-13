@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/session"
@@ -247,23 +246,31 @@ func loadSessionsForCompletion() []session.Info {
 		if err != nil {
 			return
 		}
+		// loadSessionsForCompletion reads only session-class state (session beads
+		// plus the session catalog), so route through the session
+		// coordination-class store for relocation-safety.
+		sessStore := cliSessionStore(store, cfg, cityPath)
 		providerCtx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-		allSessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
-			Sort: beads.SortCreatedDesc,
-		})
+		// One union scan via the snapshot loader (front-door migration keeps
+		// ListAllSessionBeads out of the CLI) feeds both the provider and the
+		// typed listing.
+		sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 		if err != nil {
 			return
 		}
-		sessionBeads := newSessionBeadSnapshot(allSessionBeads)
 		sp, err := newSessionProviderFromContextWithError(providerCtx, sessionBeads)
 		if err != nil {
 			return
 		}
-		catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
+		catalog, err := workerSessionCatalogWithConfig("", sessStore, sp, providerCtx.cfg)
 		if err != nil {
 			return
 		}
-		sessions = catalog.ListFullFromBeads(allSessionBeads, "", "").Sessions
+		sessions = catalog.ListFromInfos(sessionBeads.OpenInfos(), "", "")
+		// loadSessionBeadSnapshot loads unsorted; restore the created-desc order the
+		// retired sorted completion feed produced so `gc <cmd> <TAB>` candidates
+		// surface newest-first (shared comparator with the session lister).
+		sortSessionsCreatedDesc(sessions)
 	})
 	return sessions
 }

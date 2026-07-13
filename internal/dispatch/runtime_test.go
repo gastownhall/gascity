@@ -2533,6 +2533,137 @@ func TestProcessWorkflowFinalizeIgnoresTransientRetryDescendant(t *testing.T) {
 	}
 }
 
+// TestTerminalAbortScopeFailureSupersededHardAttemptIsNotTerminal proves FIX 2:
+// the supersession guard applies to the hard failure class too. A closed
+// abort_scope bead that carries gc.attempt + gc.logical_bead_id is one attempt
+// among many, so it must not count as a terminal abort even when it closed
+// hard; a genuinely terminal, non-superseded hard failure still counts.
+func TestTerminalAbortScopeFailureSupersededHardAttemptIsNotTerminal(t *testing.T) {
+	t.Parallel()
+
+	base := map[string]string{
+		"gc.on_fail":       "abort_scope",
+		"gc.outcome":       "fail",
+		"gc.failure_class": "hard",
+	}
+	clone := func(extra map[string]string) beads.Bead {
+		meta := map[string]string{}
+		for k, v := range base {
+			meta[k] = v
+		}
+		for k, v := range extra {
+			meta[k] = v
+		}
+		return beads.Bead{Status: "closed", Metadata: meta}
+	}
+
+	// v1 pattern: a cloned retry-run attempt of a logical bead that later passed.
+	superseded := clone(map[string]string{
+		"gc.kind":            "retry-run",
+		"gc.attempt":         "3",
+		"gc.logical_bead_id": "logical-1",
+	})
+	if terminalAbortScopeFailure(superseded) {
+		t.Fatalf("superseded (v1) hard abort_scope attempt must not be terminal")
+	}
+
+	// v2 pattern: original kind, distinguished by gc.attempt + gc.logical_bead_id.
+	supersededV2 := clone(map[string]string{
+		"gc.attempt":         "5",
+		"gc.logical_bead_id": "logical-2",
+	})
+	if terminalAbortScopeFailure(supersededV2) {
+		t.Fatalf("superseded (v2) hard abort_scope attempt must not be terminal")
+	}
+
+	// Non-superseded hard abort_scope failure is still terminal.
+	if !terminalAbortScopeFailure(clone(nil)) {
+		t.Fatalf("non-superseded hard abort_scope failure must be terminal")
+	}
+}
+
+// TestProcessWorkflowFinalizeIgnoresSupersededHardRetryDescendant is the FIX 2
+// integration guard for #4008: a review loop whose iteration.3 attempt closed
+// control_dispatch_error/hard but whose later iterations passed must finalize
+// as pass, not fail. The superseded hard attempt must not outvote the passing
+// later iterations at finalize.
+func TestProcessWorkflowFinalizeIgnoresSupersededHardRetryDescendant(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	// Logical review step that ultimately PASSED on a later iteration.
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review-codex logical",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": workflow.ID,
+			"gc.outcome":      "pass",
+		},
+	})
+	// Superseded attempt.3 that closed control_dispatch_error/hard before the
+	// later iterations recovered. Carries gc.attempt + gc.logical_bead_id.
+	_ = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review-codex attempt 3 (superseded)",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.scope_ref":       "body",
+			"gc.scope_role":      "member",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "hard",
+			"gc.failure_reason":  "control_dispatch_error",
+			"gc.on_fail":         "abort_scope",
+			"gc.attempt":         "3",
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "cleanup",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.kind":         "cleanup",
+			"gc.outcome":      "pass",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("workflow = status %q outcome %q, want closed/pass", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+	}
+}
+
 func TestProcessWorkflowFinalizeUsesCloseOperationForTerminalBeads(t *testing.T) {
 	t.Parallel()
 
@@ -5605,6 +5736,10 @@ path = "/tmp/gascity"
 [[agent]]
 name = "reviewer"
 dir = "gascity"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "gascity"
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -5746,13 +5881,14 @@ on_exhausted = "hard_fail"
 		Title: "Expand fanout for survey",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.kind":         "fanout",
-			"gc.root_bead_id": workflow.ID,
-			"gc.control_for":  "demo.survey",
-			"gc.routed_to":    "gascity/control-dispatcher",
-			"gc.for_each":     "output.items",
-			"gc.bond":         "expansion-review",
-			"gc.fanout_mode":  "parallel",
+			"gc.kind":           "fanout",
+			"gc.root_bead_id":   workflow.ID,
+			"gc.root_store_ref": "rig:gascity",
+			"gc.control_for":    "demo.survey",
+			"gc.routed_to":      "gascity/control-dispatcher",
+			"gc.for_each":       "output.items",
+			"gc.bond":           "expansion-review",
+			"gc.fanout_mode":    "parallel",
 		},
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
@@ -5999,7 +6135,9 @@ metadata = { "gc.scope_ref" = "{scope_ref}" }
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	opts := testProcessOptionsWithControlDispatcher("")
+	opts.FormulaSearchPaths = []string{dir}
+	result, err := ProcessControl(store, fanout, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -6081,7 +6219,9 @@ metadata = { "gc.scope_ref" = "{scope_ref}" }
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	opts := testProcessOptionsWithControlDispatcher("")
+	opts.FormulaSearchPaths = []string{dir}
+	result, err := ProcessControl(store, fanout, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -6330,7 +6470,9 @@ on_exhausted = "hard_fail"
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment: %v", err)
 	}
-	routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store)
+	if err := routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store); err != nil {
+		t.Fatalf("routeFanoutFragmentSteps: %v", err)
+	}
 	if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}
@@ -9622,5 +9764,180 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 	}
 	if !result.Processed {
 		t.Fatalf("result = %+v, want processed", result)
+	}
+}
+
+// TestCloseScopeAsPassedSharedConvergence exercises the single scope-close
+// helper that both processScopeCheck branches and reconcileTerminalScopedMember
+// now share: propagate non-gc.* member metadata onto the body, write the
+// resolved output_json, and close the body pass unless it is already closed.
+func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		bodyStatus     string
+		wantCloseTrace bool
+	}{
+		{name: "open body closes pass", bodyStatus: "open", wantCloseTrace: true},
+		{name: "already closed body is not re-closed", bodyStatus: "closed", wantCloseTrace: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			})
+			body := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "body",
+				Type:   "task",
+				Status: tc.bodyStatus,
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": workflow.ID,
+					"gc.scope_ref":    "body",
+					"gc.step_ref":     "demo.body",
+				},
+			})
+			subject := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "member",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id": workflow.ID,
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "member",
+					"gc.outcome":      "pass",
+					"gc.output_json":  `{"verdict":"approved"}`,
+					"review.verdict":  "done",
+				},
+			})
+
+			snapshot, err := loadScopeSnapshotWithBody(store, workflow.ID, "body", body)
+			if err != nil {
+				t.Fatalf("loadScopeSnapshotWithBody: %v", err)
+			}
+			var trace bytes.Buffer
+			opts := ProcessOptions{Tracef: func(format string, args ...any) {
+				fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+			}}
+			if err := closeScopeAsPassed(store, snapshot, subject, opts, subject.ID); err != nil {
+				t.Fatalf("closeScopeAsPassed: %v", err)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" {
+				t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+			}
+			// Member metadata and output_json bubble onto the body regardless of
+			// whether the body was already closed.
+			if got := bodyAfter.Metadata["review.verdict"]; got != "done" {
+				t.Fatalf("body review.verdict = %q, want done", got)
+			}
+			if got := bodyAfter.Metadata["gc.output_json"]; got != `{"verdict":"approved"}` {
+				t.Fatalf("body gc.output_json = %q, want approved payload", got)
+			}
+			if tc.wantCloseTrace {
+				if got := bodyAfter.Metadata["gc.outcome"]; got != "pass" {
+					t.Fatalf("body outcome = %q, want pass", got)
+				}
+			}
+
+			traceText := trace.String()
+			for _, want := range []string{"phase=propagate-metadata", "phase=resolve-output", "phase=write-output", "phase=reload-body"} {
+				if !strings.Contains(traceText, want) {
+					t.Fatalf("trace missing %q:\n%s", want, traceText)
+				}
+			}
+			gotClose := strings.Contains(traceText, "phase=close-body ")
+			if gotClose != tc.wantCloseTrace {
+				t.Fatalf("close-body trace present=%v, want %v:\n%s", gotClose, tc.wantCloseTrace, traceText)
+			}
+		})
+	}
+}
+
+// TestAbortScopeSharedConvergence exercises the single scope-abort helper shared
+// by processScopeCheck and reconcileTerminalScopedMember: skip still-open
+// members, propagate closed-member metadata onto the body, and close the body
+// fail.
+func TestAbortScopeSharedConvergence(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "failed member",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+			"review.verdict":  "blocked",
+		},
+	})
+	openMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "open member",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	snapshot, err := loadScopeSnapshotWithBody(store, workflow.ID, "body", body)
+	if err != nil {
+		t.Fatalf("loadScopeSnapshotWithBody: %v", err)
+	}
+	var trace bytes.Buffer
+	opts := ProcessOptions{Tracef: func(format string, args ...any) {
+		fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+	}}
+	skipped, err := abortScope(store, snapshot, opts, failed.ID)
+	if err != nil {
+		t.Fatalf("abortScope: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	if got := bodyAfter.Metadata["review.verdict"]; got != "blocked" {
+		t.Fatalf("body review.verdict = %q, want blocked", got)
+	}
+	openAfter := mustGetBead(t, store, openMember.ID)
+	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("open member = status %q outcome %q, want closed/skipped", openAfter.Status, openAfter.Metadata["gc.outcome"])
+	}
+
+	traceText := trace.String()
+	for _, want := range []string{"phase=skip-open-members", "phase=propagate-metadata", "phase=close-body-fail"} {
+		if !strings.Contains(traceText, want) {
+			t.Fatalf("trace missing %q:\n%s", want, traceText)
+		}
 	}
 }

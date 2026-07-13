@@ -126,6 +126,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
 	}
+	if err := config.ValidateWebhooks(c.cfg.Webhooks); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("webhook validation: %v", err)
+		return r
+	}
 	if err := config.ValidateServices(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)

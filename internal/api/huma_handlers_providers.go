@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -125,45 +125,54 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 		}, nil
 	}
 
-	return nil, huma.Error404NotFound("provider " + name + " not found")
+	return nil, apierr.ProviderNotFound.Msg("provider " + name + " not found")
 }
 
 // humaHandleProviderCreate is the Huma-typed handler for POST /v0/providers.
 // Name and Command required via struct tags on ProviderCreateInput.
 func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCreateInput) (*ProviderCreatedOutput, error) {
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		return nil, errMutationsNotSupported
-	}
+	// Idempotency: create at most once per Idempotency-Key. The cached value is
+	// the provider name; the response body is rebuilt from it on replay.
+	name, err := withIdempotency(s, "/v0/providers", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			sm, ok := s.state.(StateMutator)
+			if !ok {
+				return "", errMutationsNotSupported
+			}
 
-	spec := config.ProviderSpec{
-		DisplayName: input.Body.DisplayName,
-		Base:        input.Body.Base,
-		Command:     input.Body.Command,
-		ACPCommand:  input.Body.ACPCommand,
-		Args:        input.Body.Args,
-		ACPArgs:     input.Body.ACPArgs,
-		ArgsAppend:  input.Body.ArgsAppend,
-		PromptMode:  input.Body.PromptMode,
-		PromptFlag:  input.Body.PromptFlag,
-		Env:         input.Body.Env,
-	}
-	if input.Body.ReadyDelayMs != 0 {
-		spec.ReadyDelayMs = input.Body.ReadyDelayMs
-	}
-	if input.Body.OptionsSchemaMerge != nil {
-		spec.OptionsSchemaMerge = *input.Body.OptionsSchemaMerge
-	}
-	if input.Body.OptionDefaults != nil {
-		spec.OptionDefaults = input.Body.OptionDefaults
-	}
+			spec := config.ProviderSpec{
+				DisplayName: input.Body.DisplayName,
+				Base:        input.Body.Base,
+				Command:     input.Body.Command,
+				ACPCommand:  input.Body.ACPCommand,
+				Args:        input.Body.Args,
+				ACPArgs:     input.Body.ACPArgs,
+				ArgsAppend:  input.Body.ArgsAppend,
+				PromptMode:  input.Body.PromptMode,
+				PromptFlag:  input.Body.PromptFlag,
+				Env:         input.Body.Env,
+			}
+			if input.Body.ReadyDelayMs != 0 {
+				spec.ReadyDelayMs = input.Body.ReadyDelayMs
+			}
+			if input.Body.OptionsSchemaMerge != nil {
+				spec.OptionsSchemaMerge = *input.Body.OptionsSchemaMerge
+			}
+			if input.Body.OptionDefaults != nil {
+				spec.OptionDefaults = input.Body.OptionDefaults
+			}
 
-	if err := sm.CreateProvider(input.Body.Name, spec); err != nil {
-		return nil, mutationError(err)
+			if err := sm.CreateProvider(input.Body.Name, spec); err != nil {
+				return "", mutationError(err)
+			}
+			return input.Body.Name, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	resp := &ProviderCreatedOutput{}
 	resp.Body.Status = "created"
-	resp.Body.Provider = input.Body.Name
+	resp.Body.Provider = name
 	return resp, nil
 }
 
@@ -196,7 +205,7 @@ func (s *Server) humaHandleProviderUpdate(_ context.Context, input *ProviderUpda
 		msg := err.Error()
 		// Preserve the special builtin-override hint.
 		if strings.Contains(msg, "not found") && isBuiltinProvider(input.Name) {
-			return nil, huma.Error409Conflict(
+			return nil, apierr.ConflictWrongState.Msg(
 				"provider " + input.Name + " is a builtin; use PUT /v0/patches/providers to override")
 		}
 		return nil, mutationError(err)
@@ -217,7 +226,7 @@ func (s *Server) humaHandleProviderDelete(_ context.Context, input *ProviderDele
 		msg := err.Error()
 		// Preserve the special builtin-override hint.
 		if strings.Contains(msg, "not found") && isBuiltinProvider(input.Name) {
-			return nil, huma.Error409Conflict(
+			return nil, apierr.ConflictWrongState.Msg(
 				"provider " + input.Name + " is a builtin; use DELETE /v0/patches/provider/" + input.Name + " to remove overrides")
 		}
 		return nil, mutationError(err)

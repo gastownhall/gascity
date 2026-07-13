@@ -890,17 +890,8 @@ func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 	}
 
 	srv := New(fs)
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateBeadOnly(
-		"myrig/worker",
-		"Chat",
-		"",
-		t.TempDir(),
-		"",
-		"",
-		nil,
-		session.ProviderResume{SessionIDFlag: "--stale-session-id"},
-	)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Chat", Command: "", WorkDir: t.TempDir(), Provider: "", Transport: "", Resume: session.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -942,17 +933,8 @@ func TestWorkerFactorySessionByIDPreservesStoredResolvedCommand(t *testing.T) {
 	}
 
 	srv := New(fs)
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateBeadOnly(
-		"myrig/worker",
-		"Chat",
-		"/bin/echo --composed",
-		t.TempDir(),
-		"resolved-worker",
-		"",
-		nil,
-		session.ProviderResume{SessionIDFlag: "--stale-session-id"},
-	)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Chat", Command: "/bin/echo --composed", WorkDir: t.TempDir(), Provider: "resolved-worker", Transport: "", Resume: session.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -990,22 +972,13 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	}
 
 	srv := New(fs)
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(
-		context.Background(),
-		"myrig/worker",
-		"Chat",
-		"legacy-agent",
-		t.TempDir(),
-		"resolved-worker",
-		nil,
-		session.ProviderResume{
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "resolved-worker", Env: nil, Resume: session.ProviderResume{
 			ResumeFlag:    "--old-resume",
 			ResumeStyle:   "flag",
 			SessionIDFlag: "--session-id-resolved",
-		},
-		runtime.Config{},
-	)
+		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1044,21 +1017,12 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	fs.cfg.Providers["resolved-worker"] = spec
 
 	srv := New(fs)
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(
-		context.Background(),
-		"myrig/worker",
-		"Chat",
-		"/bin/echo --skip-permissions",
-		t.TempDir(),
-		"resolved-worker",
-		nil,
-		session.ProviderResume{
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "/bin/echo --skip-permissions", WorkDir: t.TempDir(), Provider: "resolved-worker", Env: nil, Resume: session.ProviderResume{
 			ResumeCommand: "/bin/echo resume {{.SessionKey}} --skip-permissions",
 			SessionIDFlag: "--session-id",
-		},
-		runtime.Config{},
-	)
+		}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1105,17 +1069,8 @@ func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t
 	}
 
 	srv := New(fs)
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateBeadOnly(
-		"myrig/worker",
-		"Chat",
-		"",
-		t.TempDir(),
-		"",
-		"",
-		nil,
-		session.ProviderResume{SessionIDFlag: "--stale-session-id"},
-	)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Chat", Command: "", WorkDir: t.TempDir(), Provider: "", Transport: "", Resume: session.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}

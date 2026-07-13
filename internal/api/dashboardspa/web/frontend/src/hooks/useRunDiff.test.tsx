@@ -1,4 +1,4 @@
-import { cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import type { RunDiffResponse } from 'gas-city-dashboard-shared';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { invalidate } from '../api/cache';
@@ -81,6 +81,44 @@ describe('useRunDiff', () => {
       },
       {},
     );
+  });
+
+  it('sends refresh=true on an explicit manual refresh (the bypass-lane client contract)', async () => {
+    mockRunDiff.mockResolvedValue(okDiff());
+
+    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    if (result.current.kind !== 'ready') throw new Error('diff did not load');
+    mockRunDiff.mockClear();
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(mockRunDiff).toHaveBeenCalledWith(
+      'wf-1',
+      { executionPath: knownPath() },
+      { refresh: true },
+    );
+  });
+
+  it('omits refresh on cheapRefresh (the event-driven cheap-lane client contract)', async () => {
+    mockRunDiff.mockResolvedValue(okDiff());
+
+    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    if (result.current.kind !== 'ready') throw new Error('diff did not load');
+    mockRunDiff.mockClear();
+
+    await act(async () => {
+      await result.current.cheapRefresh();
+    });
+
+    // cheapRefresh omits `refresh: true` — the cheap-lane client contract for a
+    // future server-side diff cache. It is inert on the wire today (runQuery
+    // drops the flag, no cache exists); the live burst protection is the
+    // tab-gating + useGcEventRefresh coalescing, not this flag.
+    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', { executionPath: knownPath() }, {});
   });
 });
 

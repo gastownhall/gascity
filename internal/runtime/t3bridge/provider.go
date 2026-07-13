@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1731,7 +1732,7 @@ func activityFromBeadEvent(ev events.Event, bead beads.Bead) (string, string, ma
 			"beadStatus": bead.Status,
 			"assignee":   bead.Assignee,
 			"formula":    bead.Ref,
-			"moleculeId": bead.Metadata["molecule_id"],
+			"moleculeId": bead.Metadata[beadmeta.MoleculeIDMetadataKey],
 			"eventType":  ev.Type,
 		}
 	case ev.Type == events.BeadUpdated:
@@ -1745,7 +1746,7 @@ func activityFromBeadEvent(ev events.Event, bead beads.Bead) (string, string, ma
 			"beadStatus": bead.Status,
 			"assignee":   bead.Assignee,
 			"formula":    bead.Ref,
-			"moleculeId": bead.Metadata["molecule_id"],
+			"moleculeId": bead.Metadata[beadmeta.MoleculeIDMetadataKey],
 			"eventType":  ev.Type,
 		}
 	default:
@@ -1755,7 +1756,7 @@ func activityFromBeadEvent(ev events.Event, bead beads.Bead) (string, string, ma
 			"beadStatus": bead.Status,
 			"assignee":   bead.Assignee,
 			"formula":    bead.Ref,
-			"moleculeId": bead.Metadata["molecule_id"],
+			"moleculeId": bead.Metadata[beadmeta.MoleculeIDMetadataKey],
 			"eventType":  ev.Type,
 		}
 	}
@@ -1796,7 +1797,7 @@ func (p *Provider) refreshAssignmentProjection(threadID string, envelope Startup
 	next.Assignment.ConvoyTotalCount = convoyTotalCount
 	next.Assignment.Formula = bead.Ref
 	if next.Assignment.MoleculeID == "" {
-		next.Assignment.MoleculeID = bead.Metadata["molecule_id"]
+		next.Assignment.MoleculeID = bead.Metadata[beadmeta.MoleculeIDMetadataKey]
 	}
 	_ = p.dispatchThreadMeta(threadID, buildGCMetadata(next, providerName, nil))
 }

@@ -7,8 +7,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
-	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -23,29 +22,22 @@ import (
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
-	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
-	sessions := listResult.Sessions
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	for i := range listResult.Beads {
-		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
-	}
+	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
 	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, s.state.SessionProvider(), hasDeferredQueue)
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
@@ -107,7 +99,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
@@ -117,7 +109,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -138,7 +130,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
@@ -169,7 +161,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		after := input.After
 
 		if before != "" && after != "" {
-			return nil, huma.Error422UnprocessableEntity("before and after are mutually exclusive")
+			return nil, apierr.ValidationFailed.Msg("before and after are mutually exclusive")
 		}
 
 		if wantRaw {
@@ -183,7 +175,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
 			}
 			if err != nil {
-				return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
+				return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 			}
 			return &IndexOutput[sessionTranscriptGetResponse]{
 				Index: s.latestIndex(),
@@ -208,7 +200,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
 		}
 		if err != nil {
-			return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
+			return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 		}
 
 		turns := make([]outputTurn, 0, len(sess.Messages))
@@ -248,7 +240,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
 		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
 		if peekErr != nil {
-			return nil, huma.Error500InternalServerError(peekErr.Error())
+			return nil, apierr.Internal.Msg(peekErr.Error())
 		}
 		turns := []outputTurn{}
 		if output != "" {
@@ -285,7 +277,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionPendingResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
 	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
@@ -345,13 +337,13 @@ type cityPendingProbe struct {
 func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	mgr := s.sessionManager(store.Store)
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	// Active sessions can be awaiting a human decision — and so can legacy
 	// empty-state ("none") beads, which the codebase treats as active for
@@ -363,11 +355,11 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	// runtime that could be holding a pending decision. Pending() itself
 	// degrades gracefully (runtime-gone -> no pending), so over-including a
 	// dormant empty-state bead is harmless.
-	// ListFullFromBeads takes a comma-separated state filter; StateNone is the
-	// empty string, so this resolves to "active," — both states, closed beads
-	// still excluded by ListFullFromBeads' status guard.
+	// ListFromInfos takes a comma-separated state filter; StateNone is the empty
+	// string, so this resolves to "active," — both states, closed beads still
+	// excluded by the status guard (sessionMatchesFiltersInfo).
 	stateFilter := strings.Join([]string{string(session.StateActive), string(session.StateNone)}, ",")
-	sessions := mgr.ListFullFromBeads(all, stateFilter, "").Sessions
+	sessions := mgr.ListFromInfos(infos, stateFilter, "")
 
 	// Probe sessions concurrently with bounded fan-out. Pending() can be
 	// expensive per session (e.g. a tmux pane capture), so probing a
@@ -427,7 +419,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionAgentListResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
@@ -450,7 +442,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 	mappings, err := sessionlog.FindAgentMappings(logPath)
 	if err != nil {
 		log.Printf("gc api: session %s agent mapping failed for %s: %v", id, logPath, err)
-		return nil, huma.Error500InternalServerError("failed to list agents")
+		return nil, apierr.Internal.Msg("failed to list agents")
 	}
 	if mappings == nil {
 		mappings = []sessionlog.AgentMapping{}
@@ -468,7 +460,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgentGetInput) (*IndexOutput[sessionAgentGetResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
@@ -477,10 +469,10 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 	}
 
 	if input.AgentID == "" {
-		return nil, huma.Error400BadRequest("agentId is required")
+		return nil, apierr.InvalidRequest.Msg("agentId is required")
 	}
 	if err := sessionlog.ValidateAgentID(input.AgentID); err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
+		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
 	mgr := s.sessionManager(store.Store)
@@ -489,15 +481,15 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		return nil, humaSessionManagerError(err)
 	}
 	if logPath == "" {
-		return nil, huma.Error404NotFound("no transcript found for session " + id)
+		return nil, apierr.SessionNotFound.Msg("no transcript found for session " + id)
 	}
 
 	agentSession, err := sessionlog.ReadAgentSession(logPath, input.AgentID)
 	if err != nil {
 		if errors.Is(err, sessionlog.ErrAgentNotFound) {
-			return nil, huma.Error404NotFound("agent not found")
+			return nil, apierr.AgentNotFound.Msg("agent not found")
 		}
-		return nil, huma.Error500InternalServerError("failed to read agent transcript")
+		return nil, apierr.Internal.Msg("failed to read agent transcript")
 	}
 
 	return &IndexOutput[sessionAgentGetResponse]{

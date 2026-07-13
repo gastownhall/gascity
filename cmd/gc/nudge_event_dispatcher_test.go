@@ -115,9 +115,9 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
 	mgr := newSessionManagerWithConfig(dir, store, sp, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateSession: %v", err)
 	}
 	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)

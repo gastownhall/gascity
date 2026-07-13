@@ -509,8 +509,8 @@ probe, abort the idle-sleep attempt for that tick.
   non-probe work, so no new idle probe is started once that reserve
   would be consumed
 - remaining candidates are skipped until the next tick
-- `advanceSessionDrains` always runs even when the tick admits zero new
-  probes
+- `advanceSessionDrainsWithSessionsTraced` always runs even when the tick
+  admits zero new probes
 
 If the provider does not support `WaitForIdle`, the controller may still
 sleep based on timed inactivity only when the session capability is

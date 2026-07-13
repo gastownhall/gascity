@@ -221,15 +221,15 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Persist kind, option metadata, and project_id on the bead.
 	// NOTE: template_overrides (options + initial_message) is already set via
-	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
-	// overwrite it here — the old code clobbered initial_message by writing
-	// only the options portion.
+	// extraMeta on the deferred handle.Create (Manager.CreateSession) above.
+	// Do NOT overwrite it here — the old code clobbered initial_message by
+	// writing only the options portion.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	s.state.Poke() // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 
@@ -401,7 +401,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store.Store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 

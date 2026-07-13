@@ -71,6 +71,10 @@ func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep e
 		return checkEvent(a, ep, cursorFn)
 	case "manual":
 		return TriggerResult{Due: false, Reason: "manual trigger — use gc order run"}
+	case "webhook":
+		// Webhook-triggered orders are dispatched only by the supervisor webhook
+		// receiver; like manual, they are never tick-fired.
+		return TriggerResult{Due: false, Reason: "webhook trigger — dispatched by the webhook receiver"}
 	default:
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("unknown trigger %q", a.Trigger)}
 	}

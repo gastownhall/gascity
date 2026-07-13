@@ -303,7 +303,7 @@ func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
 	}
 }
 
-func TestSessionBeadSnapshotFindSessionNameByNamedIdentity(t *testing.T) {
+func TestSessionBeadSnapshotFindInfoByNamedIdentity(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
@@ -314,8 +314,12 @@ func TestSessionBeadSnapshotFindSessionNameByNamedIdentity(t *testing.T) {
 		},
 	}})
 
-	if got := snapshot.FindSessionNameByNamedIdentity("reviewer"); got != "custom-reviewer" {
-		t.Fatalf("FindSessionNameByNamedIdentity(reviewer) = %q, want %q", got, "custom-reviewer")
+	info, ok := snapshot.FindInfoByNamedIdentity("reviewer")
+	if !ok {
+		t.Fatal("FindInfoByNamedIdentity(reviewer) = false, want the seeded session")
+	}
+	if got := strings.TrimSpace(info.SessionNameMetadata); got != "custom-reviewer" {
+		t.Fatalf("FindInfoByNamedIdentity(reviewer) session_name = %q, want %q", got, "custom-reviewer")
 	}
 }
 

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -194,7 +195,7 @@ func TestOrderFiringCurrent_UsesNewestOrderRunHistory(t *testing.T) {
 	}, nil)
 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(order orders.Order) (time.Time, error) {
-		return orders.LastRunFuncForStore(store)(order.ScopedName())
+		return orders.NewStoreWithGraph(beads.OrdersStore{Store: store}, beads.GraphStore{Store: store}).LastRun(order.ScopedName())
 	}))
 	check.clock = func() time.Time { return now }
 	result := check.Run(&CheckContext{CityPath: cityPath})
@@ -576,4 +577,63 @@ func runOrderFiringCurrentTest(t *testing.T, cfg *config.City, cityPath string, 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath)
 	check.clock = func() time.Time { return now }
 	return check.Run(&CheckContext{CityPath: cityPath})
+}
+
+func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 4 * time.Hour
+	order := orders.Order{Name: "cleanup-cooldown", Trigger: "cooldown"}
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: now.Add(-1 * time.Hour)},
+	}
+
+	lastRunCalled := false
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			lastRunCalled = true
+			return time.Time{}, fmt.Errorf("lastRun must not be consulted for a recent event")
+		},
+	}
+
+	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	if err != nil {
+		t.Fatalf("latestOrderFiredAt returned error: %v", err)
+	}
+	if lastRunCalled {
+		t.Fatalf("lastRun was consulted for an in-band event; want fast path to skip it")
+	}
+	if want := now.Add(-1 * time.Hour); !got.Equal(want) {
+		t.Fatalf("latest = %v, want %v (event timestamp)", got, want)
+	}
+}
+
+func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 4 * time.Hour
+	order := orders.Order{Name: "mol-dog-stale-db", Trigger: "cron"}
+	// Event age (13h) exceeds expected*1.5 (6h), so the fast path must not apply.
+	staleEvent := now.Add(-13 * time.Hour)
+	freshRun := now.Add(-1 * time.Hour)
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: staleEvent},
+	}
+
+	lastRunCalled := false
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			lastRunCalled = true
+			return freshRun, nil
+		},
+	}
+
+	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	if err != nil {
+		t.Fatalf("latestOrderFiredAt returned error: %v", err)
+	}
+	if !lastRunCalled {
+		t.Fatalf("lastRun was not consulted for a stale event; want order-run history queried")
+	}
+	if !got.Equal(freshRun) {
+		t.Fatalf("latest = %v, want %v (newer order-run history)", got, freshRun)
+	}
 }

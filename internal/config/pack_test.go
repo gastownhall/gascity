@@ -5290,3 +5290,43 @@ func TestMergeHoistedCityNamedSessions_DedupAcrossBindings(t *testing.T) {
 		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
 	}
 }
+
+func TestCachedPackField(t *testing.T) {
+	dir := t.TempDir()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &packLoadCache{results: map[string]*packLoadResult{
+		abs: {warnings: []string{"w1", "w2"}},
+	}}
+
+	get := func(r *packLoadResult) []string { return append([]string(nil), r.warnings...) }
+
+	t.Run("nil cache returns zero value", func(t *testing.T) {
+		if got := cachedPackField(nil, dir, get); got != nil {
+			t.Errorf("cachedPackField(nil) = %v, want nil", got)
+		}
+	})
+
+	t.Run("cache miss returns zero value", func(t *testing.T) {
+		if got := cachedPackField(cache, filepath.Join(dir, "missing"), get); got != nil {
+			t.Errorf("cachedPackField(miss) = %v, want nil", got)
+		}
+	})
+
+	t.Run("cache hit resolves relative path and runs get", func(t *testing.T) {
+		got := cachedPackField(cache, dir, get)
+		if len(got) != 2 || got[0] != "w1" || got[1] != "w2" {
+			t.Errorf("cachedPackField(hit) = %v, want [w1 w2]", got)
+		}
+	})
+
+	t.Run("get closure copies on read", func(t *testing.T) {
+		got := cachedPackField(cache, dir, get)
+		got[0] = "mutated"
+		if cache.results[abs].warnings[0] != "w1" {
+			t.Errorf("get closure did not copy: cache mutated to %q", cache.results[abs].warnings[0])
+		}
+	})
+}

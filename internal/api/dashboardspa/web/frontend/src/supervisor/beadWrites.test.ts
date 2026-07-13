@@ -6,11 +6,7 @@ import {
   type SupervisorApi,
 } from './client';
 import { setActiveCity } from '../api/cityBase';
-import {
-  closeSupervisorBead,
-  createAndSlingSupervisorBead,
-  nudgeSupervisorAgent,
-} from './beadWrites';
+import { closeSupervisorBead, createAndSlingSupervisorBead } from './beadWrites';
 
 // The operator display alias is now runtime config (OperatorConfigContext),
 // no longer a shared constant (gascity-dashboard-bhvn). A bead write must still
@@ -32,8 +28,6 @@ const baseApi: SupervisorApi = {
   createBead: vi.fn(),
   updateBead: vi.fn(),
   closeBead: vi.fn(),
-  nudgeAgent: vi.fn(),
-  agentPrime: vi.fn(),
   sling: vi.fn(),
   formulaFeed: vi.fn(),
   listMail: vi.fn(),
@@ -63,33 +57,13 @@ describe('supervisor bead writes', () => {
     resetSupervisorApiForTests();
   });
 
-  it('closes a bead directly through the supervisor API with a trimmed reason', async () => {
+  it('closes a bead directly through the supervisor API', async () => {
     const closeBead = vi.fn(async () => ({ status: 'closed' }));
     setSupervisorApiForTests({ ...baseApi, closeBead });
 
-    await closeSupervisorBead('td-bead-abc123', '  operator verified duplicate  ');
+    await closeSupervisorBead('td-bead-abc123');
 
-    expect(closeBead).toHaveBeenCalledWith('test-city', 'td-bead-abc123', {
-      reason: 'operator verified duplicate',
-    });
-  });
-
-  it('omits the optional close body when the reason is blank', async () => {
-    const closeBead = vi.fn(async () => ({ status: 'closed' }));
-    setSupervisorApiForTests({ ...baseApi, closeBead });
-
-    await closeSupervisorBead('td-bead-abc123', '   ');
-
-    expect(closeBead).toHaveBeenCalledWith('test-city', 'td-bead-abc123', undefined);
-  });
-
-  it('nudges an agent directly through the supervisor API with a trimmed alias', async () => {
-    const nudgeAgent = vi.fn(async () => ({ status: 'ok' }));
-    setSupervisorApiForTests({ ...baseApi, nudgeAgent });
-
-    await nudgeSupervisorAgent('  mayor  ');
-
-    expect(nudgeAgent).toHaveBeenCalledWith('test-city', 'mayor');
+    expect(closeBead).toHaveBeenCalledWith('test-city', 'td-bead-abc123');
   });
 
   it('creates and slings a bead directly through the supervisor API with trimmed input', async () => {
@@ -173,20 +147,17 @@ describe('supervisor bead writes', () => {
     }));
     const sling = vi.fn(async () => ({ status: 'ok', bead: 'td-new-1', target: 'mayor' }));
     const closeBead = vi.fn(async () => ({ status: 'closed' }));
-    const nudgeAgent = vi.fn(async () => ({ status: 'ok' }));
     setSupervisorApiForTests({
       ...baseApi,
       updateBead,
       createBead,
       sling,
       closeBead,
-      nudgeAgent,
     });
 
     // Exercise every exported bead-write helper. (claimSupervisorBead, the only
     // helper that ever called updateBead, was removed in 2j8e.8.)
-    await closeSupervisorBead('td-bead-abc123', 'done');
-    await nudgeSupervisorAgent('mayor');
+    await closeSupervisorBead('td-bead-abc123');
     await createAndSlingSupervisorBead({
       title: 'Route failing work',
       description: '',
@@ -196,9 +167,8 @@ describe('supervisor bead writes', () => {
 
     // The write surface was actually driven — without this, the assignee
     // assertions below could pass vacuously if a helper stopped issuing its
-    // mutation. nudgeAgent carries no body, so it has no assignee to check.
+    // mutation.
     expect(closeBead).toHaveBeenCalled();
-    expect(nudgeAgent).toHaveBeenCalled();
     expect(createBead).toHaveBeenCalled();
     expect(sling).toHaveBeenCalled();
 

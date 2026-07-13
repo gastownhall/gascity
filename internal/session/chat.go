@@ -148,12 +148,22 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "continuation_reset_pending", "true"); err != nil {
 		return fmt.Errorf("clearing stale resume metadata continuation_reset_pending: %w", err)
 	}
+	// Priming markers share started_config_hash's lifetime (S19 Stage 2): this
+	// stale-resume clear forces a fresh start, so the markers reset with it.
+	for _, k := range primingResetKeys {
+		if err := m.store.SetMetadata(id, k, ""); err != nil {
+			return fmt.Errorf("clearing stale resume metadata %s: %w", k, err)
+		}
+	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
 	}
 	b.Metadata["session_key"] = ""
 	b.Metadata["started_config_hash"] = ""
 	b.Metadata["continuation_reset_pending"] = "true"
+	for _, k := range primingResetKeys {
+		b.Metadata[k] = ""
+	}
 	return nil
 }
 
@@ -202,7 +212,16 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 	}
 	cfg.Command = freshCmd
-	m.killExistingOrphans(ctx, id)
+	// Refuse the fresh start if a prior escaped process for this session could
+	// not be confirmed dead: a survivor would race this replacement for the
+	// same work bead. This path reuses the existing bead ID, so there is no
+	// fresh-create to roll back — unroute and propagate the error before Start.
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
 			unroute()
@@ -371,7 +390,17 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	m.killExistingOrphans(ctx, id)
+	// Refuse to resume if a prior escaped process for this session could not be
+	// confirmed dead: a survivor would race this replacement for the same work
+	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
+	// exact "old process survives alongside its replacement" scenario. No
+	// fresh-create to roll back, so unroute and propagate before Start.
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
@@ -482,7 +511,16 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	m.killExistingOrphans(ctx, id)
+	// Refuse to respawn if a prior escaped process for this session could not
+	// be confirmed dead: a survivor would race this replacement for the same
+	// work bead. This is the reconciler respawn bridge on a stable/reused bead
+	// ID. No fresh-create to roll back, so unroute and propagate before Start.
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
@@ -972,7 +1010,11 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		return "", err
 	}
 	if len(sameWorkDirSessions) > 1 {
-		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirSessions); path != "" {
+		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
+		for _, s := range sameWorkDirSessions {
+			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
+		}
+		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
 			return path, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same

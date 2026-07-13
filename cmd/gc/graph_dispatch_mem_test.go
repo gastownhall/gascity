@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -13,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -534,6 +538,333 @@ func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testi
 	}
 	if !foundControl {
 		t.Fatal("expected at least one control-dispatcher bead")
+	}
+}
+
+func TestGraphWorkflowControlLaneUsesOwningStoreScope(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		rigContext      string
+		storeRef        string
+		wantDispatcher  string
+		otherDispatcher string
+	}{
+		{
+			name:            "city graph",
+			storeRef:        "city:test-city",
+			wantDispatcher:  "core.control-dispatcher",
+			otherDispatcher: "fixture/core.control-dispatcher",
+		},
+		{
+			name:            "rig graph",
+			rigContext:      "fixture",
+			storeRef:        "rig:fixture",
+			wantDispatcher:  "fixture/core.control-dispatcher",
+			otherDispatcher: "core.control-dispatcher",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := buildMemGraphWorkflowConfig(t)
+			cfg.Workspace.Prefix = "hq"
+			cfg.Rigs = []config.Rig{{Name: "fixture", Path: t.TempDir(), Prefix: "gc"}}
+			cityDispatcher := testControlDispatcherAgent("")
+			cityDispatcher.BindingName = "core"
+			rigDispatcher := testControlDispatcherAgent("fixture")
+			rigDispatcher.BindingName = "core"
+			cfg.Agents = []config.Agent{
+				{Name: "worker", MaxActiveSessions: intPtr(1)},
+				{Name: "worker", Dir: "fixture", MaxActiveSessions: intPtr(1)},
+				cityDispatcher,
+				rigDispatcher,
+			}
+
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			ownerStore := beads.Store(cityStore)
+			otherStore := beads.Store(rigStore)
+			if tt.rigContext != "" {
+				ownerStore, otherStore = rigStore, cityStore
+			}
+
+			item, err := ownerStore.Create(beads.Bead{Title: "Run scoped workflow", Type: "task"})
+			if err != nil {
+				t.Fatalf("Create(item): %v", err)
+			}
+			convoy, err := ownerStore.Create(beads.Bead{Title: "Run scoped workflow", Type: "convoy"})
+			if err != nil {
+				t.Fatalf("Create(convoy): %v", err)
+			}
+			if err := convoycore.TrackItem(ownerStore, convoy.ID, item.ID); err != nil {
+				t.Fatalf("TrackItem: %v", err)
+			}
+
+			worker, ok := resolveAgentIdentity(cfg, "worker", tt.rigContext)
+			if !ok {
+				t.Fatalf("resolveAgentIdentity(worker, %q) failed", tt.rigContext)
+			}
+			runner := newFakeRunner()
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.Store = ownerStore
+			deps.StoreRef = tt.storeRef
+			deps.CityPath = t.TempDir()
+
+			oldPoke := slingPokeController
+			slingPokeController = func(string) error { return nil }
+			t.Cleanup(func() { slingPokeController = oldPoke })
+
+			opts := testOpts(worker, convoy.ID)
+			opts.OnFormula = "mol-scoped-work"
+			if code := doSling(opts, deps, ownerStore, stdout, stderr); code != 0 {
+				t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
+			}
+
+			roots, err := ownerStore.ListByMetadata(map[string]string{
+				"gc.input_convoy_id": convoy.ID,
+				"gc.kind":            "workflow",
+			}, 1)
+			if err != nil {
+				t.Fatalf("ListByMetadata(workflow root): %v", err)
+			}
+			if len(roots) != 1 {
+				t.Fatalf("workflow root count = %d, want 1", len(roots))
+			}
+			if got := roots[0].Metadata["gc.root_store_ref"]; got != tt.storeRef {
+				t.Fatalf("root gc.root_store_ref = %q, want %q", got, tt.storeRef)
+			}
+
+			otherBeads, err := otherStore.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+			if err != nil {
+				t.Fatalf("List(other store): %v", err)
+			}
+			if len(otherBeads) != 0 {
+				t.Fatalf("other store contains %d beads, want none before reconciliation", len(otherBeads))
+			}
+
+			graphBeads, err := ownerStore.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+			if err != nil {
+				t.Fatalf("List(owner store): %v", err)
+			}
+			controlCount := 0
+			for _, bead := range graphBeads {
+				if bead.Metadata["gc.root_bead_id"] != roots[0].ID || !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
+					continue
+				}
+				controlCount++
+				if got := bead.Metadata["gc.routed_to"]; got != tt.wantDispatcher {
+					t.Fatalf("control bead %s gc.routed_to = %q, want %q", bead.ID, got, tt.wantDispatcher)
+				}
+			}
+			if controlCount == 0 {
+				t.Fatal("expected graph control beads")
+			}
+
+			result := buildDesiredStateWithSessionBeads(
+				"test-city",
+				deps.CityPath,
+				time.Now().UTC(),
+				cfg,
+				runtime.NewFake(),
+				cityStore,
+				map[string]beads.Store{"fixture": rigStore},
+				newSessionBeadSnapshot(nil),
+				nil,
+				io.Discard,
+			)
+			if got := result.ScaleCheckCounts[tt.wantDispatcher]; got != 1 {
+				t.Fatalf("ScaleCheckCounts[%q] = %d, want 1", tt.wantDispatcher, got)
+			}
+			if got := result.ScaleCheckCounts[tt.otherDispatcher]; got != 0 {
+				t.Fatalf("ScaleCheckCounts[%q] = %d, want 0", tt.otherDispatcher, got)
+			}
+			dispatcherTemplates := make(map[string]bool)
+			for _, desired := range result.State {
+				if strings.HasSuffix(desired.TemplateName, "control-dispatcher") {
+					dispatcherTemplates[desired.TemplateName] = true
+				}
+			}
+			if len(dispatcherTemplates) != 1 || !dispatcherTemplates[tt.wantDispatcher] {
+				t.Fatalf("desired dispatcher templates = %v, want only %q", dispatcherTemplates, tt.wantDispatcher)
+			}
+		})
+	}
+}
+
+func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "fixture")
+	cfg := buildMemGraphWorkflowConfig(t)
+	cfg.Rigs = []config.Rig{{Name: "fixture", Path: rigPath}}
+	cityDispatcher := testControlDispatcherAgent("")
+	cityDispatcher.BindingName = "core"
+	rigDispatcher := testControlDispatcherAgent("fixture")
+	rigDispatcher.BindingName = "core"
+	cfg.Agents = []config.Agent{cityDispatcher, rigDispatcher}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "rig-control-e2e",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "rig-control-e2e",
+				Title:  "Rig workflow",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{
+				ID:    "rig-control-e2e.workflow-finalize",
+				Title: "Finalize rig workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind": "workflow-finalize",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "rig-control-e2e.workflow-finalize", DependsOnID: "rig-control-e2e", Type: "parent-child"},
+			{StepID: "rig-control-e2e", DependsOnID: "rig-control-e2e.workflow-finalize", Type: "blocks"},
+		},
+	}
+	if err := graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
+		recipe,
+		nil,
+		"",
+		"",
+		"",
+		"rig:fixture",
+		graphroute.GraphRouteBinding{},
+		rigStore,
+		cfg.Workspace.Name,
+		cfg,
+		cliGraphrouteDeps(cityPath),
+	); err != nil {
+		t.Fatalf("decorate rig graph: %v", err)
+	}
+	inst, err := molecule.Instantiate(context.Background(), rigStore, recipe, molecule.Options{})
+	if err != nil {
+		t.Fatalf("instantiate rig graph: %v", err)
+	}
+	finalizerID := inst.IDMapping["rig-control-e2e.workflow-finalize"]
+	finalizer := mustGetMemBead(t, rigStore, finalizerID)
+	if got := finalizer.Metadata["gc.root_store_ref"]; got != "rig:fixture" {
+		t.Fatalf("finalizer root store ref = %q, want rig:fixture", got)
+	}
+	wantRoute := rigDispatcher.QualifiedName()
+	if got := finalizer.Metadata["gc.routed_to"]; got != wantRoute {
+		t.Fatalf("finalizer route = %q, want %q", got, wantRoute)
+	}
+	cityBeads, err := cityStore.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list city store: %v", err)
+	}
+	if len(cityBeads) != 0 {
+		t.Fatalf("city store has %d graph beads, want graph wholly in rig store", len(cityBeads))
+	}
+
+	// A city-routed control bead in the rig store is deliberately unreachable
+	// from the rig dispatcher's query. It makes any accidental cross-scope alias
+	// broadening observable: the serve pass would select this malformed decoy and
+	// fail instead of quietly passing after advancing the real finalizer.
+	decoy, err := rigStore.Create(beads.Bead{
+		Title:  "Wrongly city-routed control decoy",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow-finalize",
+			"gc.routed_to": "core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create city-route decoy: %v", err)
+	}
+
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	wantBareRoute := "fixture/control-dispatcher"
+	serveQuery := workflowServeControlReadyQuery(rigDispatcher)
+	queryCalls := 0
+	workflowServeList = func(workQuery, dir string, _ map[string]string) ([]hookBead, error) {
+		queryCalls++
+		if canonicalTestPath(dir) != canonicalTestPath(rigPath) {
+			t.Fatalf("serve query dir = %q, want rig store %q", dir, rigPath)
+		}
+		for _, want := range []string{
+			"GC_CONTROL_TARGET='" + wantRoute + "'",
+			"GC_CONTROL_BARE_TARGET='" + wantBareRoute + "'",
+		} {
+			if !strings.Contains(workQuery, want) {
+				t.Fatalf("rig serve query missing %q: %q", want, workQuery)
+			}
+		}
+		for _, forbidden := range []string{
+			"GC_CONTROL_TARGET='core.control-dispatcher'",
+			"GC_CONTROL_BARE_TARGET='control-dispatcher'",
+		} {
+			if strings.Contains(workQuery, forbidden) {
+				t.Fatalf("rig serve query contains city alias %q: %q", forbidden, workQuery)
+			}
+		}
+		ready := memGraphReady(t, rigStore)
+		var selected []hookBead
+		for _, candidate := range ready {
+			if !graphroute.IsControlDispatcherKind(candidate.Metadata["gc.kind"]) {
+				continue
+			}
+			route := candidate.Metadata["gc.routed_to"]
+			if route != wantRoute && route != wantBareRoute {
+				continue
+			}
+			selected = append(selected, hookBead{ID: candidate.ID, Metadata: hookBeadMetadata(candidate.Metadata)})
+		}
+		return selected, nil
+	}
+	controlDispatcherServe = func(gotCityPath, storePath, beadID string, _ io.Writer, _ io.Writer) error {
+		if canonicalTestPath(gotCityPath) != canonicalTestPath(cityPath) {
+			return fmt.Errorf("control city path = %q, want %q", gotCityPath, cityPath)
+		}
+		if canonicalTestPath(storePath) != canonicalTestPath(rigPath) {
+			return fmt.Errorf("control store path = %q, want %q", storePath, rigPath)
+		}
+		bead, getErr := rigStore.Get(beadID)
+		if getErr != nil {
+			return getErr
+		}
+		_, processErr := dispatch.ProcessControl(rigStore, bead, dispatch.ProcessOptions{CityPath: cityPath})
+		return processErr
+	}
+
+	if _, err := drainWorkflowServeWork(rigDispatcher, cityPath, rigPath, serveQuery, nil, io.Discard); err != nil {
+		t.Fatalf("drain rig workflow serve: %v", err)
+	}
+	if queryCalls < 2 {
+		t.Fatalf("serve query calls = %d, want selection plus empty confirmation", queryCalls)
+	}
+	root := mustGetMemBead(t, rigStore, inst.RootID)
+	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("rig workflow root = status %q outcome %q, want closed/pass", root.Status, root.Metadata["gc.outcome"])
+	}
+	finalizer = mustGetMemBead(t, rigStore, finalizerID)
+	if finalizer.Status != "closed" || finalizer.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("rig finalizer = status %q outcome %q, want closed/pass", finalizer.Status, finalizer.Metadata["gc.outcome"])
+	}
+	decoy = mustGetMemBead(t, rigStore, decoy.ID)
+	if decoy.Status != "open" {
+		t.Fatalf("city-routed rig-store decoy status = %q, want open/unclaimed", decoy.Status)
 	}
 }
 

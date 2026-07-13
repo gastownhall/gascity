@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
@@ -233,18 +234,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {
-		beadResponses = append(beadResponses, workflowBeadResponse{
-			ID:            bead.ID,
-			Title:         bead.Title,
-			Status:        workflowStatus(bead),
-			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
-			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
-			Assignee:      strings.TrimSpace(bead.Assignee),
-			Metadata:      cloneStringMap(bead.Metadata),
-		})
+		beadResponses = append(beadResponses, workflowBeadResponseFromBead(bead))
 	}
 
 	snapshot := &workflowSnapshotResponse{
@@ -475,12 +465,7 @@ func workflowAttempt(bead beads.Bead) *int {
 }
 
 func workflowAttemptValue(bead beads.Bead) int {
-	raw := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
-	if raw == "" {
-		return 0
-	}
-	v, _ := strconv.Atoi(raw)
-	return v
+	return molecule.WorkflowAttempt(bead)
 }
 
 func isTerminalWorkflowStatus(status string) bool {
@@ -543,41 +528,35 @@ func cloneStringMap(src map[string]string) map[string]string {
 }
 
 func workflowKind(bead beads.Bead) string {
-	if bead.Metadata != nil {
-		if kind := strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]); kind != "" {
-			return kind
-		}
-	}
-	return strings.TrimSpace(bead.Type)
+	return molecule.WorkflowKind(bead)
 }
 
 func workflowStatus(bead beads.Bead) string {
-	outcome := strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey])
-	hasAssignment := strings.TrimSpace(bead.Assignee) != ""
-	switch strings.TrimSpace(bead.Status) {
-	case "closed":
-		switch outcome {
-		case beadmeta.OutcomeFail:
-			return "failed"
-		case beadmeta.OutcomeSkipped:
-			return "skipped"
-		}
-		return "completed"
-	case "in_progress":
-		if hasAssignment {
-			return "active"
-		}
-		return "pending"
-	case "open":
-		return "pending"
-	default:
-		switch outcome {
-		case beadmeta.OutcomeFail:
-			return "failed"
-		case beadmeta.OutcomeSkipped:
-			return "skipped"
-		}
-		return strings.TrimSpace(bead.Status)
+	return molecule.WorkflowStatus(bead)
+}
+
+// workflowBeadResponseFromBead maps a workflow bead onto its snapshot response
+// node through the molecule.WorkflowBead codec — the single mapping shared by the
+// snapshot, SQL-fast-path, and event-projection build loops. The codec already
+// clones the metadata map (preserving nil -> nil for the wire's "metadata":
+// null), so cloneStringMap is not called here.
+func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
+	wb := molecule.WorkflowBeadFromBead(bead)
+	var attempt *int
+	if wb.Attempt > 0 {
+		attempt = &wb.Attempt
+	}
+	return workflowBeadResponse{
+		ID:            wb.ID,
+		Title:         wb.Title,
+		Status:        wb.Status,
+		Kind:          wb.Kind,
+		StepRef:       wb.StepRef,
+		Attempt:       attempt,
+		LogicalBeadID: wb.LogicalBeadID,
+		ScopeRef:      wb.ScopeRef,
+		Assignee:      wb.Assignee,
+		Metadata:      wb.Metadata,
 	}
 }
 

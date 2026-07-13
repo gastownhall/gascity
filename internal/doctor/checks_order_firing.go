@@ -135,7 +135,7 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAt(firedEvents, order)
+		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -533,9 +533,12 @@ func latestControllerStartedAt(eventPath string) (time.Time, error) {
 	return latest, nil
 }
 
-func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order) (time.Time, error) {
+func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
 	latest := latestOrderFiredAt(evts, order.ScopedName())
 	if c.lastRun == nil {
+		return latest, nil
+	}
+	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
 		return latest, nil
 	}
 	runAt, err := c.lastRun(order)

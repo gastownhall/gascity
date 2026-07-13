@@ -826,6 +826,12 @@
           },
           "type": "array"
         },
+        "webhook": {
+          "items": {
+            "$ref": "#/$defs/Webhook"
+          },
+          "type": "array"
+        },
         "providers": {
           "additionalProperties": {
             "$ref": "#/$defs/ProviderSpec"
@@ -1447,6 +1453,155 @@
       "additionalProperties": false,
       "type": "object",
       "description": "UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream axis: WHO serves+resolves the model)."
+    },
+    "Webhook": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the unique webhook identifier and mount segment."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Scope selects city- or rig-scoped dispatch semantics, mirroring\nOrder.Scope. Empty defaults to city."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the authoritative rig binding for a rig-scoped webhook (Scope==\"rig\").\nIt is REQUIRED when scope=\"rig\" and forbidden otherwise: the receiver copies\nit into the dispatch scope so the sink constrains delivery to this rig (R4),\nand a rule that names any other rig is refused. Without it a rig-scoped\nwebhook fails closed (it can target no rig). Leave unset for city scope."
+        },
+        "publication": {
+          "$ref": "#/$defs/ServicePublicationConfig",
+          "description": "Publication declares generic publication intent, reusing the service\npublication contract. Pack/fragment-contributed public webhooks are\ncapped to tenant unless the city grants them via [webhooks].allow_public."
+        },
+        "verify": {
+          "$ref": "#/$defs/WebhookVerify",
+          "description": "Verify declares the signature verification scheme and its inputs."
+        },
+        "rule": {
+          "items": {
+            "$ref": "#/$defs/WebhookRule"
+          },
+          "type": "array",
+          "description": "Rules maps verified provider events to dispatch targets."
+        },
+        "max_per_minute": {
+          "type": "integer",
+          "description": "MaxPerMinute is an optional per-webhook self-imposed sustained request\nceiling for the E8 rate limiter. SECURITY: a [[webhook]] block may be\npack-contributed, and a pack must never be able to weaken the operator's\nflood defense, so this value may only LOWER a webhook's effective limit —\nit is min-clamped to the operator-owned ceiling and can never raise it (see\nWebhookPolicyConfig.EffectiveRateLimit). Leave unset to inherit the operator\ndefault/override."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under /v0/city/{city}/hook/{name}."
+    },
+    "WebhookRule": {
+      "properties": {
+        "event": {
+          "type": "string",
+          "description": "Event is the provider event type this rule matches (e.g. pull_request)."
+        },
+        "match": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Match is an exact-equality dotted-path predicate over the payload."
+        },
+        "order": {
+          "type": "string",
+          "description": "Order is the target order name for target=\"order\" rules."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig optionally scopes the dispatched order to a rig."
+        },
+        "target": {
+          "type": "string",
+          "enum": [
+            "order",
+            "conversation"
+          ],
+          "description": "Target selects the dispatch sink: \"order\" (default) or \"conversation\"."
+        },
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Args maps declared order params to {{payload.path}} projections."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "event"
+      ],
+      "description": "WebhookRule maps one verified provider event to a dispatch target."
+    },
+    "WebhookVerify": {
+      "properties": {
+        "scheme": {
+          "type": "string",
+          "description": "Scheme selects the built-in verifier (see knownWebhookSchemes)."
+        },
+        "secret_env": {
+          "type": "string",
+          "description": "SecretEnv names the environment variable holding the HMAC/shared secret."
+        },
+        "secret_key": {
+          "type": "string",
+          "description": "SecretKey is an optional stable rotation-slot identifier. Empty defaults\nto SecretEnv."
+        },
+        "signature_header": {
+          "type": "string",
+          "description": "SignatureHeader overrides the request header carrying the signature for\ngeneric HMAC schemes (e.g. X-Plane-Signature)."
+        },
+        "event_header": {
+          "type": "string",
+          "description": "EventHeader names the request header carrying the provider event type."
+        },
+        "dedup_header": {
+          "type": "string",
+          "description": "DedupHeader names the request header whose value is surfaced as the\ndelivery id on webhook.received events for observability. It does NOT key\nat-least-once dedup for the signature-only schemes (github-hmac-sha256,\nhmac-sha256, slack-v0, discord-ed25519): those dedup on a hash of the\nsigned body, because an unsigned or coarse header cannot safely key dedup —\na captured valid delivery could be replayed under a fresh header id to\nre-fire the order. Only jwt-jwks keys dedup directly, on its signed\nper-delivery-unique \"jti\". As a consequence two deliveries with\nbyte-identical signed bodies inside the dedup window collapse to one\ndispatch, so a source that must resend an identical payload has to carry a\nunique value inside the signed body."
+        },
+        "timestamp_header": {
+          "type": "string",
+          "description": "TimestampHeader optionally names a request header carrying a signed\ntimestamp for replay defense."
+        },
+        "replay_window": {
+          "type": "string",
+          "description": "ReplayWindow bounds the accepted signed-timestamp skew (Go duration)."
+        },
+        "issuer": {
+          "type": "string",
+          "description": "Issuer, JWKSURL, and Audience pin the jwt-jwks trust anchor. Per the\nsecurity review (R1) these are operator-owned and must be declared in\ncity.toml, never in pack TOML."
+        },
+        "jwks_url": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string"
+        },
+        "bearer_env": {
+          "type": "string",
+          "description": "BearerEnv optionally names an env var holding an additional per-source\nbearer token checked alongside the signature."
+        },
+        "allowed_cidrs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AllowedCIDRs optionally restricts accepted source addresses (e.g. the\nGitHub webhook CIDR allowlist)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "WebhookVerify declares how an inbound delivery is authenticated."
     }
   },
   "title": "Gas City Pack Manifest",

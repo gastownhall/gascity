@@ -183,3 +183,80 @@ func TestSharedTemplateAssignee_Tier1CrashRecoveryCrossAdopts(t *testing.T) {
 	t.Logf("Tier-1 crash-recovery surfaced a live sibling's shared-template claim %s (cross-adoption); "+
 		"a concrete-alias claim %s was correctly invisible", shared.ID, concrete.ID)
 }
+
+// TestNamedWorkReady_ExpandedIdentityTemplate_NoCanonicalBead_DoesNotMaterialize
+// pins down the CURRENT, INTENTIONAL behavior described in ga-tpe9od: a named
+// session on a template that SupportsExpandedSessionIdentities() (named_session
+// + max_active_sessions>1, the same shape as the test above), whose canonical
+// session bead is absent (crash + reap), holding in-progress work self-claimed
+// under its own bare identity, does NOT get namedWorkReady demand from that
+// bead — the Candidate-B guard (ga-i1d0tr) discards the match unconditionally,
+// regardless of whether it's a legitimate self-claim. This is accepted today
+// because Candidate A (concrete-alias claims, ga-98gjgb) is not yet live
+// fleet-wide, so a bare-identity assignee on such a template can't yet be
+// trusted as unambiguous. See bd show ga-tpe9od for the full decision and the
+// trigger for revisiting this guard.
+func TestNamedWorkReady_ExpandedIdentityTemplate_NoCanonicalBead_DoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "gascity")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// The named session's own in-progress work, self-claimed under its bare
+	// identity (not a pool slot's claim — no gc.routed_to here). Simulates a
+	// crash + reap: sessionBeads is nil below, so no canonical session bead
+	// exists for this identity; only this orphaned in-progress work remains.
+	b, err := rigStore.Create(beads.Bead{
+		Title:    "builder's own in-progress work, orphaned by crash+reap",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "gascity/builder",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(b.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gc"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "builder",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3), // expanded identities: SupportsExpandedSessionIdentities() == true
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "builder",
+			Dir:      "gascity",
+			Mode:     "on_demand",
+		}},
+	}
+
+	// sessionBeads=nil => findCanonicalNamedSessionBead reports hasCanonical=false
+	// for every identity (no canonical session bead present at all).
+	dsResult := buildDesiredStateWithSessionBeads(
+		"gc", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		cityStore, map[string]beads.Store{"gascity": rigStore}, nil, nil, io.Discard,
+	)
+
+	if demand := dsResult.NamedSessionDemand["gascity/builder"]; demand {
+		t.Fatalf("NamedSessionDemand[gascity/builder] = true, want false — the Candidate-B guard "+
+			"should have discarded the bare-identity match on this expanded-identity template; "+
+			"NamedSessionDemand=%v", dsResult.NamedSessionDemand)
+	}
+	for key, tp := range dsResult.State {
+		if tp.TemplateName == "gascity/builder" {
+			t.Fatalf("gascity/builder materialized as %q despite no canonical bead and no namedWorkReady "+
+				"demand (mode=on_demand) — ga-tpe9od's accepted gap should leave it un-materialized, not "+
+				"silently start provisioning it; State=%v", key, dsResult.State)
+		}
+	}
+}

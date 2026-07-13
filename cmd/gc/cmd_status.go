@@ -89,7 +89,7 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 			store = opened
 		}
 	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, store, stderr)
+	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
 	c, reason := rigStatusAPIClient(cityPath)

@@ -46,7 +46,7 @@ func getState(t *testing.T, m *Manager, id string) State {
 func TestConformance_CreatingState(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	// Create a bead in creating state.
 	b, err := store.Create(beads.Bead{
@@ -87,7 +87,7 @@ func TestConformance_CreatingState(t *testing.T) {
 func TestConformance_DrainState(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "worker")
 
@@ -128,7 +128,7 @@ func TestConformance_DrainState(t *testing.T) {
 func TestConformance_QuarantineState(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "worker")
 	if err := store.SetMetadata(id, "last_woke_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -157,7 +157,7 @@ func TestConformance_QuarantineState(t *testing.T) {
 func TestConformance_ArchivedReactivation(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "worker")
 
@@ -203,7 +203,7 @@ func TestConformance_IllegalTransitionDraining(t *testing.T) {
 	// Drain puts a session in Draining; Suspend from Draining is illegal.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "worker")
 
@@ -241,7 +241,7 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	// with an illegal-transition error that blocks `gc stop` city-wide.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "dog")
 	b, err := store.Get(id)
@@ -276,7 +276,7 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 func TestConformance_QuarantineReactivation(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManager(store, sp)
+	m := NewManagerWithOptions(store, sp)
 
 	id := createTestSession(t, m, "crasher")
 
@@ -310,5 +310,28 @@ func TestConformance_QuarantineReactivation(t *testing.T) {
 	// Quarantined non-terminal sessions remain continuity eligible by default.
 	if b.Metadata["continuity_eligible"] != "true" {
 		t.Errorf("continuity_eligible = %q, want true", b.Metadata["continuity_eligible"])
+	}
+}
+
+func TestCanonicalLifecycleState(t *testing.T) {
+	cases := []struct {
+		name string
+		in   State
+		want State
+	}{
+		{"empty legacy state normalizes to active", StateNone, StateActive},
+		{"awake alias normalizes to active", StateAwake, StateActive},
+		{"active is unchanged", StateActive, StateActive},
+		{"asleep is unchanged", StateAsleep, StateAsleep},
+		{"suspended is unchanged", StateSuspended, StateSuspended},
+		{"failed-create is unchanged", StateFailedCreate, StateFailedCreate},
+		{"drained is not remapped here", State("drained"), State("drained")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalLifecycleState(tc.in); got != tc.want {
+				t.Errorf("canonicalLifecycleState(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

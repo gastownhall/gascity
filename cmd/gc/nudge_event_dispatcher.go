@@ -325,13 +325,16 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if store.Store == nil {
 		return
 	}
-	sessionBeads, err := loadSessionBeadSnapshot(store.Store)
+	// Session-class reads route through the session store (identity today);
+	// the nudge queue stays on its own store.
+	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)
+	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, sp, d.quiescence, obs)
+		ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, sessStore, sp, d.quiescence, obs)
 		if ok || err != nil {
 			return ok, err
 		}
@@ -351,7 +354,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		}
 		return false, nil
 	}
-	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, store.Store, sp, sessionBeads, sessionFilter, deliver); err != nil {
+	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 }

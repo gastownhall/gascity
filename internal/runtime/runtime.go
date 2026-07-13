@@ -48,6 +48,24 @@ var ErrSessionNotFound = errors.New("session not found")
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
 var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 
+// ErrRuntimeUnavailable reports that a runtime-liveness query could not observe
+// the underlying runtime at all — the tmux server was unreachable, the process
+// table could not be scanned, etc. It is the runtime-side analog of a partial
+// bead-store read: an observation FAILURE, not the fact "no sessions exist". A
+// destructive reconciler arm (close-as-orphaned, heal-to-asleep, sweep) must
+// treat it as "I could not tell" and defer, exactly as it defers on a partial
+// store read (storeQueryPartial) — never as ground truth that every session is
+// gone. Providers wrap it (with errors.Is-visible provider-specific causes) so
+// callers can dispatch on it with errors.Is.
+//
+// This is distinct from [PartialListError]. ErrRuntimeUnavailable is the
+// single-observation-total-failure signal: zero usable data, used to preserve
+// StateCache last-known-good. PartialListError is the multi-backend-merge
+// signal: partial-but-usable results from [MergeBackendListResults], which does
+// not even emit PartialListError for a total failure. The two are intentionally
+// separate signals for separate call paths.
+var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
+
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
 // subprocess/acp/t3bridge). Composite/wrapping providers return it from their

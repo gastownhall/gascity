@@ -309,6 +309,12 @@ func findCredentialInOtherLayer(normalizedMatch, excludePath string) string {
 		if em, _ := normalizeCredentialMatch(lr.Match); em != normalizedMatch {
 			continue
 		}
+		// Synthetic origins ($GH_TOKEN, $GITHUB_TOKEN, $GC_GIT_CREDENTIAL_COMMAND)
+		// are ambient env/command layers, not files a user can edit, so never point
+		// the "use --global or edit that file" guidance at one.
+		if strings.HasPrefix(lr.Origin, "$") {
+			continue
+		}
 		if originAbs, _ := filepath.Abs(lr.Origin); originAbs != excludeAbs {
 			return lr.Origin
 		}

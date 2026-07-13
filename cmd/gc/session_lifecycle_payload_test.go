@@ -63,7 +63,7 @@ func TestHandoffRemoteEmitsTypedSessionStoppedPayload(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "deacon", "deacon", "mayor",
+	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
 		[]string{"Context refresh", "body"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())

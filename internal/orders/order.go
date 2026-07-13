@@ -6,6 +6,7 @@ package orders
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,6 +67,11 @@ type Order struct {
 	// environment. Env is supported only for exec orders; controller-
 	// owned routing and identity keys are rejected before dispatch.
 	Env map[string]string `toml:"env,omitempty"`
+	// Params declares the named arguments this order accepts through the
+	// dispatch args channel (webhook rules and `gc order run --var`). A param
+	// marked required must be present in the dispatch vars or the order refuses
+	// to fire. Use the `[order.params]` TOML table, e.g. `repo = { required = true }`.
+	Params map[string]OrderParam `toml:"params,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
@@ -74,6 +80,14 @@ type Order struct {
 	// Rig is the rig name this order is scoped to. Empty for city-level orders.
 	// Set by the scanning caller, not from TOML.
 	Rig string `toml:"-"`
+}
+
+// OrderParam describes one declared order parameter in the `[order.params]`
+// table.
+type OrderParam struct {
+	// Required makes dispatch fail when the param is absent from the vars
+	// supplied by the args channel.
+	Required bool `toml:"required,omitempty"`
 }
 
 // ScopedName returns a rig-qualified key for label scoping.
@@ -86,22 +100,23 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string            `toml:"description,omitempty"`
-	Formula     string            `toml:"formula,omitempty"`
-	Exec        string            `toml:"exec,omitempty"`
-	Scope       string            `toml:"scope,omitempty"`
-	Trigger     string            `toml:"trigger,omitempty"`
-	Gate        string            `toml:"gate,omitempty"`
-	Interval    string            `toml:"interval,omitempty"`
-	Schedule    string            `toml:"schedule,omitempty"`
-	Check       string            `toml:"check,omitempty"`
-	On          string            `toml:"on,omitempty"`
-	Pool        string            `toml:"pool,omitempty"`
-	Timeout     string            `toml:"timeout,omitempty"`
-	Enabled     *bool             `toml:"enabled,omitempty"`
-	Idempotent  bool              `toml:"idempotent,omitempty"`
-	Env         map[string]string `toml:"env,omitempty"`
-	SkipAliases []string          `toml:"skip_aliases,omitempty"`
+	Description string                `toml:"description,omitempty"`
+	Formula     string                `toml:"formula,omitempty"`
+	Exec        string                `toml:"exec,omitempty"`
+	Scope       string                `toml:"scope,omitempty"`
+	Trigger     string                `toml:"trigger,omitempty"`
+	Gate        string                `toml:"gate,omitempty"`
+	Interval    string                `toml:"interval,omitempty"`
+	Schedule    string                `toml:"schedule,omitempty"`
+	Check       string                `toml:"check,omitempty"`
+	On          string                `toml:"on,omitempty"`
+	Pool        string                `toml:"pool,omitempty"`
+	Timeout     string                `toml:"timeout,omitempty"`
+	Enabled     *bool                 `toml:"enabled,omitempty"`
+	Idempotent  bool                  `toml:"idempotent,omitempty"`
+	Env         map[string]string     `toml:"env,omitempty"`
+	Params      map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -124,6 +139,7 @@ func (d orderDecode) normalized() Order {
 		Enabled:     d.Enabled,
 		Idempotent:  d.Idempotent,
 		Env:         d.Env,
+		Params:      d.Params,
 		skipAliases: d.SkipAliases,
 	}
 }
@@ -201,6 +217,11 @@ func Validate(a Order) error {
 			return fmt.Errorf("order %q: invalid env key %q: must not contain '='", a.Name, key)
 		}
 	}
+	for name := range a.Params {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("order %q: param name is required", a.Name)
+		}
+	}
 	// Scope, if set, must be a known value. Empty defaults to rig-scoped.
 	switch a.Scope {
 	case "", "city", "rig":
@@ -235,10 +256,50 @@ func Validate(a Order) error {
 		}
 	case "manual":
 		// No additional fields required.
+	case "webhook":
+		// Webhook-dispatched orders declare the named args they accept so the
+		// receiver can validate required params before dispatch. An order with
+		// no [order.params] could never receive webhook args meaningfully.
+		if len(a.Params) == 0 {
+			return fmt.Errorf("order %q: webhook trigger requires a non-empty [order.params]", a.Name)
+		}
 	case "":
 		return fmt.Errorf("order %q: trigger is required", a.Name)
 	default:
 		return fmt.Errorf("order %q: unknown trigger type %q", a.Name, a.Trigger)
 	}
 	return nil
+}
+
+// MissingRequiredParams returns the names of declared-required params that are
+// absent from vars, sorted. It returns nil when every required param is present.
+//
+// A required param is "missing" when its key is absent OR its value is empty:
+// webhook arg extraction renders a template whose payload path does not resolve
+// to the empty string and still inserts the key, so a presence-only check would
+// fire an order with an empty required value. Treating empty-as-absent makes
+// `required = true` mean required-and-non-empty for both webhook dispatch and
+// `gc order run --var key=` (an explicitly-empty value is not a supplied value).
+func (a *Order) MissingRequiredParams(vars map[string]string) []string {
+	var missing []string
+	for name, p := range a.Params {
+		if !p.Required {
+			continue
+		}
+		if strings.TrimSpace(vars[name]) == "" {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// ValidateRequiredParams returns an error naming any declared-required params
+// absent from the dispatch vars. A nil return means dispatch may proceed.
+func ValidateRequiredParams(a Order, vars map[string]string) error {
+	missing := a.MissingRequiredParams(vars)
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("order %q: missing required param(s): %s", a.ScopedName(), strings.Join(missing, ", "))
 }

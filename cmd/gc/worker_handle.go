@@ -392,8 +392,8 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if bead, _, err := session.ResolveSessionBeadByExactID(store, target); err == nil {
-			return factory.SessionByLoadedBead(bead)
+		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+			return factory.SessionByRecord(info, pr)
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
 			return factory.SessionByID(id)

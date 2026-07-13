@@ -271,7 +271,17 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 	return nil
 }
 
-// Close sets a bead's status to "closed": script close <id>
+// Close sets a bead's status to "closed": script close <id>.
+//
+// This delegate stays bare (no --force). The exec: wrapper scripts
+// (contrib/beads-scripts/gc-beads-k8s, gc-beads-br) are the canonical place
+// that injects --force for bd's cross-actor close guard
+// (gastownhall/beads#3734): they run under the pod/controller actor with
+// BEADS_ACTOR stripped while closing agent-owned beads, mirroring the SDK
+// BdStore, which always force-closes. Do not add --force here — the wrappers
+// read the bead id as their first positional argument, so a leading --force
+// would break them. A new exec: wrapper that closes agent-owned beads must
+// inject --force itself.
 func (s *Store) Close(id string) error {
 	_, err := s.run(nil, "close", id)
 	if err != nil {

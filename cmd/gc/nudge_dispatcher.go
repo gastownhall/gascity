@@ -115,12 +115,12 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // the per-session `gc nudge poll` processes own delivery in that case.
 // (Event-capable providers never reach this: nudgeDispatchTick routes their
 // passes through the nudge event dispatcher's worker instead.)
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
 	if cfg == nil || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	return deliverPendingQueuedNudges(cityPath, cfg, store, sp, sessionBeads, "", func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
-		return tryDeliverQueuedNudgesByPoller(target, store, sp, defaultNudgePollQuiescence, obs)
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 	})
 }
 
@@ -129,7 +129,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 // each matching open session bead to a nudgeTarget — restricted to
 // sessionFilter when set — observe it, and hand running matches to deliver.
 // Returns how many targets delivered at least one item.
-func deliverPendingQueuedNudges(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
@@ -167,10 +167,18 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, store beads.S
 		return 0, nil
 	}
 
+	// The dispatcher receives the nudges-class store (store) PLUS the session-class
+	// store (sessStore) the caller resolved from the WORK store — the controller
+	// threads cr.sessionsBeadStore().Store, whose fallback is the work store, NOT
+	// the nudges store. The session observe below and the queue-delivery path's
+	// session ops route through sessStore; the queue record/dead-letter stays on
+	// store. Identity today; corrects the pre-existing controller-side class mix
+	// (deriving sessStore from the nudges base would mis-resolve session beads once
+	// nudges relocates independently of sessions).
 	delivered := 0
 	var firstErr error
-	for _, b := range sessionBeads.Open() {
-		target := resolveNudgeTargetFromSessionBead(cityPath, cfg, b)
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
 			continue
 		}
@@ -193,7 +201,7 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, store beads.S
 		if !matched {
 			continue
 		}
-		obs, err := workerObserveNudgeTarget(target, store, sp)
+		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

@@ -21,10 +21,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     jq \
+    # lsof: TCP-LISTEN / port discovery for Dolt — runtime hard dep (gc doctor), not optional diagnostics.
+    lsof \
     procps \
     python3 \
     sudo \
+    tini \
     tmux \
+    # util-linux: provides flock(1) for the bd/Dolt beads lock — runtime hard dep, not optional diagnostics.
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -44,14 +45,6 @@ type Deps struct {
 	Resolver              AgentResolver
 	CityPath              string
 	DirectSessionResolver DirectSessionResolver
-	// ControlDispatcherRuntimeMissing reports whether the named control-
-	// dispatcher agent's session is currently asleep with reason
-	// runtime-missing. When set and it returns true for a rig-local
-	// dispatcher, ControlDispatcherBinding falls back to the city-level
-	// dispatcher (#3454). Session beads are city-scoped, so the rig-scoped
-	// routing store cannot answer this — the cmd layer injects a city-store-
-	// backed implementation. Nil disables the fallback.
-	ControlDispatcherRuntimeMissing func(qualifiedName string) bool
 }
 
 // GraphRouteBinding captures how a graph.v2 step is routed to an agent.
@@ -64,11 +57,6 @@ type GraphRouteBinding struct {
 	DirectSessionID string
 	RigContext      string
 	MetadataOnly    bool
-	// ControlFallbackFrom records the unhealthy rig-local control-dispatcher
-	// this binding replaced when the rig→city fallback fired (#3454). Empty in
-	// the normal path. ApplyGraphControlRouteBinding stamps it onto control
-	// steps as gc.control_dispatcher_fallback for operator observability.
-	ControlFallbackFrom string
 }
 
 type graphStepTarget struct {
@@ -136,6 +124,13 @@ func graphBindingRigContext(binding GraphRouteBinding) string {
 		return rigContext
 	}
 	return GraphRouteRigContext(binding.QualifiedName)
+}
+
+func graphBindingHasExecutionContext(binding GraphRouteBinding) bool {
+	return strings.TrimSpace(binding.QualifiedName) != "" ||
+		strings.TrimSpace(binding.SessionName) != "" ||
+		strings.TrimSpace(binding.DirectSessionID) != "" ||
+		strings.TrimSpace(binding.RigContext) != ""
 }
 
 func graphDirectSessionRigContext(target, rigContext string, bead beads.Bead) string {
@@ -211,7 +206,7 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	step.Assignee = binding.SessionName
 }
 
-// ApplyGraphControlRouteBinding routes control steps to the singleton
+// ApplyGraphControlRouteBinding routes control steps to the store-scoped
 // control-dispatcher config queue. Direct session assignment is reserved for
 // already-existing concrete session owners, not future on-demand sessions.
 func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
@@ -219,14 +214,9 @@ func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteB
 	// current binding when a control step is re-decorated (#2843).
 	delete(step.Metadata, beadmeta.SessionNameMetadataKey)
 	delete(step.Metadata, beadmeta.SessionIDMetadataKey)
-	// Record (or clear, on re-decoration) the rig→city control-dispatcher
-	// fallback so operators can detect silent rig-local dispatcher decay with
-	// `bd list --has-metadata-key gc.control_dispatcher_fallback` (#3454).
-	if binding.ControlFallbackFrom != "" {
-		step.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey] = binding.ControlFallbackFrom + "->" + binding.QualifiedName
-	} else {
-		delete(step.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
-	}
+	// Clear the retired rig→city fallback marker when an existing recipe is
+	// re-decorated. Route identity now always matches the graph store scope.
+	delete(step.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
 	if binding.QualifiedName != "" {
 		step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	} else {
@@ -277,41 +267,15 @@ func WorkflowExecutionRoute(bead beads.Bead) string {
 }
 
 // ControlDispatcherBinding resolves the graph routing binding for the control
-// dispatcher agent.
-//
-// When routing is rig-scoped and the resolved rig-local dispatcher is detected
-// unhealthy (asleep with reason runtime-missing, via
-// deps.ControlDispatcherRuntimeMissing), it falls back to the city-level
-// dispatcher resolved with an empty rig context (#3454). A rig-local dispatcher
-// can sit runtime-missing for weeks, silently stranding every molecule's
-// auto-injected workflow-finalize step pinned to its dead session; the
-// city-level dispatcher is the healthy fallback. The fallback binding records
-// the replaced dispatcher in ControlFallbackFrom for observability.
+// dispatcher in the graph's store scope. Runtime health does not change route
+// identity: desired-state reconciliation starts or recovers the configured
+// dispatcher for that scope.
 func ControlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
-	binding, err := resolveControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
-	if err != nil {
-		return binding, err
-	}
-	// Only rig-scoped routes can decay to an unhealthy rig-local dispatcher;
-	// the city-level route (empty rig context) is already the fallback target.
-	if rigContext == "" || deps.ControlDispatcherRuntimeMissing == nil {
-		return binding, nil
-	}
-	if !deps.ControlDispatcherRuntimeMissing(binding.QualifiedName) {
-		return binding, nil
-	}
-	cityBinding, cityErr := resolveControlDispatcherBinding(store, cityName, cfg, "", deps)
-	if cityErr != nil || cityBinding.QualifiedName == binding.QualifiedName {
-		// No distinct city-level dispatcher to fall back to: keep the original
-		// binding rather than mis-route (the decay stays localized, not worse).
-		return binding, nil
-	}
-	cityBinding.ControlFallbackFrom = binding.QualifiedName
-	return cityBinding, nil
+	return resolveControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
 }
 
 // resolveControlDispatcherBinding resolves the control-dispatcher binding for a
-// rig context without the health fallback (the raw resolution).
+// graph store scope.
 func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
 	if cfg == nil {
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher route requires config")
@@ -324,19 +288,20 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	// match. Since 9fa6b7fec the dispatcher ships bound (core.control-dispatcher),
 	// so AgentMatchesIdentity rejects the bare-name fallback for it and the
 	// per-rig fleet makes the bare-name scan ambiguous — both break a
-	// Resolver-based lookup. PreferredDeterministicControlDispatcher prefers the
-	// city-level singleton (Dir == "") across every scope, keeping the stamped
-	// route on the one session that actually runs (max_active_sessions=1) and
-	// curing the stranded-control-bead.
-	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+	// Resolver-based lookup. ControlDispatcherForScope selects the configured
+	// dispatcher whose scope matches the graph store.
+	if agentCfg, ok := config.ControlDispatcherForScope(cfg, rigContext); ok {
 		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 	}
 	// Fallback for configs without a deterministic dispatcher (e.g. a plain
 	// control-dispatcher agent carrying no convoy-control StartCommand): defer
 	// to the name-based resolver path, preserving the rig-context preference.
 	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, config.ControlDispatcherAgentName, rigContext)
-	if !ok {
-		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
+	if !ok || strings.TrimSpace(agentCfg.Dir) != strings.TrimSpace(rigContext) {
+		if strings.TrimSpace(rigContext) != "" {
+			return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent for rig %q not found", strings.TrimSpace(rigContext))
+		}
+		return GraphRouteBinding{}, fmt.Errorf("city control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
 	return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 }
@@ -551,8 +516,19 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 	}
 	routedTo := strings.TrimSpace(defaultRoute.QualifiedName)
 	rootSessionName := strings.TrimSpace(defaultRoute.SessionName)
-	routingRigContext := graphBindingRigContext(defaultRoute)
-	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, routingRigContext, deps)
+	executionRigContext := graphBindingRigContext(defaultRoute)
+	controlRigContext := executionRigContext
+	if storeRigContext, scoped := storeref.ScopeRigContext(rootStoreRef); scoped {
+		controlRigContext = storeRigContext
+		// A graph with no default execution binding (for example a no-pool rig
+		// order whose workers all declare gc.run_target) resolves bare targets in
+		// its owning scope. Otherwise the default binding defines the execution
+		// context, which may intentionally differ from graph ownership.
+		if !graphBindingHasExecutionContext(defaultRoute) {
+			executionRigContext = storeRigContext
+		}
+	}
+	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, controlRigContext, deps)
 	if err != nil {
 		return err
 	}
@@ -614,7 +590,7 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		if IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			continue
 		}
-		binding, err := ResolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolvingSet, routeVars, defaultRoute, routingRigContext, store, cityName, cfg, deps)
+		binding, err := ResolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolvingSet, routeVars, defaultRoute, executionRigContext, store, cityName, cfg, deps)
 		if err != nil {
 			return err
 		}

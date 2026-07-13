@@ -437,6 +437,340 @@ func TestAcceptStartupDialogsFromStreamAcceptsMCPTrustDialog(t *testing.T) {
 	}
 }
 
+func TestContainsExternalImportsDialog(t *testing.T) {
+	t.Parallel()
+
+	if !containsExternalImportsDialog(externalImportsDialogFixture()) {
+		t.Error("containsExternalImportsDialog should match the external imports modal")
+	}
+	if containsExternalImportsDialog(mcpTrustDialogFixture()) {
+		t.Error("containsExternalImportsDialog should not match the MCP trust dialog")
+	}
+	if containsExternalImportsDialog("Do you trust the contents of this directory?") {
+		t.Error("containsExternalImportsDialog should not match the workspace trust dialog")
+	}
+	if containsExternalImportsDialog("› Implement {feature}") {
+		t.Error("containsExternalImportsDialog should not match a ready prompt")
+	}
+}
+
+func TestParseExternalImportPaths(t *testing.T) {
+	t.Parallel()
+
+	got := parseExternalImportPaths(externalImportsDialogFixture())
+	want := []string{"/data/projects/gascity/AGENTS.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseExternalImportPaths = %v, want %v", got, want)
+	}
+
+	if got := parseExternalImportPaths(mcpTrustDialogFixture()); len(got) != 0 {
+		t.Fatalf("parseExternalImportPaths on unrelated modal = %v, want none", got)
+	}
+
+	multi := "External imports:\n" +
+		"  /data/projects/gascity/AGENTS.md\n" +
+		"  /data/projects/gascity/docs/CLAUDE.md\n" +
+		"Important: only use files you trust\n"
+	if got, want := parseExternalImportPaths(multi),
+		[]string{"/data/projects/gascity/AGENTS.md", "/data/projects/gascity/docs/CLAUDE.md"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseExternalImportPaths(multi) = %v, want %v", got, want)
+	}
+}
+
+func TestPathWithinTrustRoot(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		importPath string
+		trustRoot  string
+		want       bool
+	}{
+		{"repo-root file inside root", "/data/projects/gascity/AGENTS.md", "/data/projects/gascity", true},
+		{"nested file inside root", "/data/projects/gascity/docs/CLAUDE.md", "/data/projects/gascity", true},
+		{"import equals root", "/data/projects/gascity", "/data/projects/gascity", true},
+		{"parent-directory file is not trusted", "/data/projects/secrets.md", "/data/projects/gascity", false},
+		{"grandparent file is not trusted", "/data/secrets.md", "/data/projects/gascity", false},
+		{"sibling prefix is not trusted", "/data/projects/gascity-evil/CLAUDE.md", "/data/projects/gascity", false},
+		{"unrelated third-party path", "/home/attacker/repo/CLAUDE.md", "/data/projects/gascity", false},
+		{"dot-dot traversal is cleaned then rejected", "/data/projects/gascity/../secrets.md", "/data/projects/gascity", false},
+		{"relative import path rejected", "relative/CLAUDE.md", "/data/projects/gascity", false},
+		{"tilde import path rejected", "~/secrets/CLAUDE.md", "/data/projects/gascity", false},
+		{"empty root rejects", "/data/projects/gascity/AGENTS.md", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := pathWithinTrustRoot(tc.importPath, tc.trustRoot); got != tc.want {
+				t.Fatalf("pathWithinTrustRoot(%q, %q) = %v, want %v", tc.importPath, tc.trustRoot, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExternalImportsTrusted(t *testing.T) {
+	t.Parallel()
+
+	if !externalImportsTrusted(externalImportsDialogFixture(), trustedImportRootFixture) {
+		t.Error("first-party import within an enclosing repo should be trusted")
+	}
+	if externalImportsTrusted(externalImportsDialogFixture(), "/tmp/other/wt") {
+		t.Error("import outside the trust root must not be trusted")
+	}
+	if externalImportsTrusted(externalImportsDialogFixture(), "") {
+		t.Error("empty trust root must trust nothing")
+	}
+	// A modal with no parseable "External imports:" list is unverifiable and
+	// must fail closed even when a trust root is supplied.
+	if externalImportsTrusted("Allow external CLAUDE.md ... allow external imports", trustedImportRootFixture) {
+		t.Error("unparseable import list must not be trusted")
+	}
+	// If any listed import escapes the trust root, the whole modal is untrusted.
+	mixed := "Allow external CLAUDE.md file imports?\nallow external imports\n" +
+		"External imports:\n" +
+		"  /data/projects/gascity/AGENTS.md\n" +
+		"  /home/attacker/evil.md\n"
+	if externalImportsTrusted(mixed, trustedImportRootFixture) {
+		t.Error("a single untrusted import must make the modal untrusted")
+	}
+	// An in-root import that points at repository metadata or runtime state
+	// (.git, .gc) is not a first-party instruction file and must fail closed,
+	// even though it resolves inside the trust root.
+	for _, runtimePath := range []string{
+		"/data/projects/gascity/.git/config",
+		"/data/projects/gascity/.gc/worktrees/other/CLAUDE.md",
+	} {
+		modal := "Allow external CLAUDE.md file imports?\nallow external imports\n" +
+			"External imports:\n  " + runtimePath + "\n"
+		if externalImportsTrusted(modal, trustedImportRootFixture) {
+			t.Errorf("import of repository runtime path %q must not be trusted", runtimePath)
+		}
+	}
+}
+
+func TestImportPathFirstParty(t *testing.T) {
+	t.Parallel()
+
+	const root = "/data/projects/gascity"
+	cases := []struct {
+		name       string
+		importPath string
+		want       bool
+	}{
+		{"repo-root AGENTS.md is first-party", root + "/AGENTS.md", true},
+		{"repo-root CLAUDE.md is first-party", root + "/CLAUDE.md", true},
+		{"nested instruction file is first-party", root + "/docs/CLAUDE.md", true},
+		{"git config is refused", root + "/.git/config", false},
+		{"nested git metadata is refused", root + "/.git/hooks/pre-commit", false},
+		{"gc runtime state is refused", root + "/.gc/worktrees/other/CLAUDE.md", false},
+		{"hidden tool cache is refused", root + "/.claude/settings.json", false},
+		{"hidden file at root is refused", root + "/.env", false},
+		{"path outside the root is refused", "/data/projects/secrets.md", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := importPathFirstParty(tc.importPath, root); got != tc.want {
+				t.Fatalf("importPathFirstParty(%q, %q) = %v, want %v", tc.importPath, root, got, tc.want)
+			}
+		})
+	}
+}
+
+// trustedImportRootFixture is the repository root that contains the external
+// import in externalImportsDialogFixture (/data/projects/gascity/AGENTS.md), so
+// the import is first-party and auto-acceptance is allowed.
+const trustedImportRootFixture = "/data/projects/gascity"
+
+func TestAcceptStartupDialogsAcceptsExternalImportsDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return externalImportsDialogFixture(), nil
+			}
+			return "› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+		WithTrustedImportRoot(trustedImportRootFixture),
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsLeavesUntrustedExternalImportsDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = 200 * time.Millisecond
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) { return externalImportsDialogFixture(), nil },
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+		// A third-party worktree unrelated to the imported path: the modal must
+		// be left unaccepted rather than pressing Enter on external files.
+		WithTrustedImportRoot("/tmp/some-third-party-repo/wt"),
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none (untrusted external import must not be accepted)", sent)
+	}
+}
+
+func TestAcceptStartupDialogsLeavesExternalImportsWithoutTrustRoot(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = 200 * time.Millisecond
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) { return externalImportsDialogFixture(), nil },
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none (no trust root configured)", sent)
+	}
+}
+
+func TestAcceptStartupDialogsHandlesTrustThenExternalImportsThenMCP(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			switch len(sent) {
+			case 0:
+				return "Do you trust the contents of this directory?", nil
+			case 1:
+				return externalImportsDialogFixture(), nil
+			case 2:
+				return mcpTrustDialogFixture(), nil
+			default:
+				return "› Implement {feature}", nil
+			}
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+		WithTrustedImportRoot(trustedImportRootFixture),
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter,Enter,Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamAcceptsExternalImportsDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- externalImportsDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+		WithTrustedImportRoot(trustedImportRootFixture),
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamLeavesUntrustedExternalImportsDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- externalImportsDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		200*time.Millisecond,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+		// A third-party worktree unrelated to the imported path.
+		WithTrustedImportRoot("/tmp/some-third-party-repo/wt"),
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none (untrusted external import must not be accepted)", sent)
+	}
+}
+
+// TestAcceptStartupDialogsFromStreamHandlesTrustThenExternalImportsThenMCP
+// mirrors the poll-path ordering test on the stream path: workspace-trust yields
+// to the external-imports phase (via post-trust snapshots) and then to MCP trust.
+// It guards the containsExternalImportsDialog entry in
+// containsPostTrustStartupDialog so a future edit cannot silently drop the
+// post-trust stream handoff into the new phase.
+func TestAcceptStartupDialogsFromStreamHandlesTrustThenExternalImportsThenMCP(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 4)
+	snapshots <- "Do you trust the contents of this directory?"
+	snapshots <- externalImportsDialogFixture()
+	snapshots <- mcpTrustDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+		WithTrustedImportRoot(trustedImportRootFixture),
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter,Enter,Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
 func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 2)
@@ -867,6 +1201,17 @@ func mcpTrustDialogFixture() string {
 		"❯ 1. Use this MCP server\n" +
 		"  2. Use this and all future MCP servers in this project\n" +
 		"  3. Continue without using this MCP server\n" +
+		"Enter to confirm · Esc to cancel"
+}
+
+func externalImportsDialogFixture() string {
+	return "Allow external CLAUDE.md file imports?\n" +
+		"This project's CLAUDE.md imports files outside the current working directory. Never allow this for third-party repositories.\n" +
+		"External imports:\n" +
+		"  /data/projects/gascity/AGENTS.md\n" +
+		"Important: Only use Claude Code with files you trust...\n" +
+		"❯ 1. Yes, allow external imports\n" +
+		"  2. No, disable external imports\n" +
 		"Enter to confirm · Esc to cancel"
 }
 
