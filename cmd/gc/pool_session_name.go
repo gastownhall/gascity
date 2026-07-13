@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -374,29 +375,60 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 // Release order:
 //
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
-//     offers it for this snapshot shape (in_progress with a non-empty
-//     assignee — the verb's contract). On BdStore this currently rides raw
-//     `bd sql`; when bd grows a native conditional-release verb it slots in
-//     inside BdStore.ReleaseIfCurrent (feature-detect the verb, fall back to
-//     `bd sql` on unsupported) and this caller needs no change.
+//     offers it for this snapshot shape (in_progress with a non-empty assignee
+//     — the verb's contract) AND the bead carries no active continuation-group
+//     routing vector (see beadHasActiveContinuationGroup). On BdStore this
+//     currently rides raw `bd sql`; when bd grows a native conditional-release
+//     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
+//     verb, fall back to `bd sql` on unsupported) and this caller needs no
+//     change.
 //  2. Otherwise the tightest conditional path the store layer offers:
 //     beads.UpdateOpts has no conditional fields, so re-verify the snapshot
 //     with a live read immediately before the unconditional write and re-read
 //     after it, logging loudly when a concurrent claim raced the release. The
 //     residual recheck->write window cannot be closed without a store-level
 //     conditional write; it is shrunk and made observable instead of silent.
+//     This single Update also clears the affinity metadata alongside
+//     status/assignee, so it is the correct path for continuation-group beads:
+//     the group is never exposed on an open, unassigned bead.
 func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
-		if !released {
-			return false
+	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
+	// only status/assignee, so clearing the group would need a second write, and
+	// that gap would expose the routing vector on a claimable bead. The recheck
+	// fallback clears status, assignee, and affinity metadata in one Update.
+	if !beadHasActiveContinuationGroup(wb) {
+		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
+			if !released {
+				return false
+			}
+			clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
+			return true
 		}
-		clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
-		return true
 	}
 	return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
+}
+
+// beadHasActiveContinuationGroup reports whether wb still advertises the active
+// continuation-group routing vector (gc.continuation_group). Such beads must
+// skip the two-write CAS release path: ReleaseIfCurrent swaps only
+// status/assignee, so the follow-up metadata clear rides a separate write, and
+// in that gap the bead is open and unassigned while gc.continuation_group is
+// still set. A concurrent `gc hook --claim` can then vacuum the bead (or its
+// {root, group} siblings) onto a new session via the stale group —
+// preassignHookContinuationGroup / hookListContinuationWithBdStore route on
+// gc.continuation_group + gc.root_bead_id. Routing these beads through
+// releasePoolAssignmentWithRecheck clears status, assignee, and the affinity
+// metadata in a single Update, so the group is never visible on a claimable
+// bead. gc.session_affinity is an advisory marker no routing path reads (see the
+// beadmeta.SessionAffinityMetadataKeys doc), so it needs no such guard and the
+// CAS path still clears it. Lift this once bd's native conditional-release verb
+// can clear the metadata in the same guarded write (BdStore.ReleaseIfCurrent
+// SEAM).
+func beadHasActiveContinuationGroup(wb beads.Bead) bool {
+	return strings.TrimSpace(wb.Metadata[beadmeta.ContinuationGroupMetadataKey]) != ""
 }
 
 // releasePoolAssignmentIfCurrent attempts the store's atomic conditional

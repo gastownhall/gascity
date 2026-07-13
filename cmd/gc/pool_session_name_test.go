@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -2189,14 +2190,27 @@ type releaseProbeCall struct {
 
 func newConditionalReleaseProbeStore(t *testing.T) (*conditionalReleaseProbeStore, beads.Bead) {
 	t.Helper()
+	return newConditionalReleaseProbeStoreWithMetadata(t, nil)
+}
+
+// newConditionalReleaseProbeStoreWithMetadata builds the orphan-release probe
+// store with extra metadata merged onto the default routed/affinity fixture, so
+// a test can add routing vectors (e.g. gc.continuation_group) without
+// duplicating the setup. A nil extra map reproduces the default fixture exactly.
+func newConditionalReleaseProbeStoreWithMetadata(t *testing.T, extra map[string]string) (*conditionalReleaseProbeStore, beads.Bead) {
+	t.Helper()
 	mem := beads.NewMemStore()
+	metadata := map[string]string{
+		"gc.routed_to":        "worker",
+		"gc.session_affinity": "require",
+	}
+	for k, v := range extra {
+		metadata[k] = v
+	}
 	work, err := mem.Create(beads.Bead{
 		Title:    "orphaned pool work",
 		Assignee: "worker-dead",
-		Metadata: map[string]string{
-			"gc.routed_to":        "worker",
-			"gc.session_affinity": "require",
-		},
+		Metadata: metadata,
 	})
 	if err != nil {
 		t.Fatalf("Create work bead: %v", err)
@@ -2298,6 +2312,56 @@ func TestReleaseOrphanedPoolAssignments_UsesConditionalReleaseWhenSupported(t *t
 	}
 	if got.Metadata["gc.session_affinity"] != "" {
 		t.Fatalf("gc.session_affinity = %q, want cleared after conditional release", got.Metadata["gc.session_affinity"])
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ContinuationGroupBeadBypassesCASWindow(t *testing.T) {
+	// A bead carrying the active continuation-group routing vector must NOT take
+	// the two-write CAS release path: ReleaseIfCurrent swaps only status/assignee,
+	// so a follow-up metadata clear would briefly expose an open, unassigned bead
+	// whose gc.continuation_group is still set, letting a concurrent
+	// `gc hook --claim` vacuum it (or its {root, group} siblings) onto a new
+	// session via the stale group. The release must instead take the recheck
+	// fallback, which clears status, assignee, and the group in a single Update —
+	// so the group is never visible on a claimable bead. This is the regression
+	// pin for the CAS release-then-clear ordering window.
+	store, work := newConditionalReleaseProbeStoreWithMetadata(t, map[string]string{
+		"gc.root_bead_id":       "root-1",
+		"gc.continuation_group": "grp-1",
+	})
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+	if len(store.releaseCalls) != 0 {
+		t.Fatalf("ReleaseIfCurrent calls = %v, want none: a continuation-group bead must bypass the CAS fast path", store.releaseCalls)
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped Update calls = %+v, want exactly one atomic release write", store.assignmentUpdates)
+	}
+	// The single release write must clear the assignment AND the continuation
+	// group together, leaving no open/unassigned/group-still-set window.
+	update := store.assignmentUpdates[0]
+	if update.Assignee == nil || *update.Assignee != "" || update.Status == nil || *update.Status != "open" {
+		t.Fatalf("release update = %+v, want assignee=\"\" and status=open", update)
+	}
+	if v, ok := update.Metadata[beadmeta.ContinuationGroupMetadataKey]; !ok || v != "" {
+		t.Fatalf("release update metadata[%s] = %q (present=%v), want cleared in the same write", beadmeta.ContinuationGroupMetadataKey, v, ok)
+	}
+
+	final, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if final.Status != "open" || final.Assignee != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", final.Status, final.Assignee)
+	}
+	if strings.TrimSpace(final.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" {
+		t.Fatalf("gc.continuation_group = %q, want cleared after release", final.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	}
+	if strings.TrimSpace(final.Metadata["gc.session_affinity"]) != "" {
+		t.Fatalf("gc.session_affinity = %q, want cleared after release", final.Metadata["gc.session_affinity"])
 	}
 }
 

@@ -1101,11 +1101,14 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
 //
-// SEAM (bd conditional-release verb): today this rides raw `bd sql`, which
-// several backends reject — the sqlite backend refuses raw DB access, and
-// embedded dolt takes the releaseIfCurrentViaEmbeddedDoltSQL fallback, both
-// ultimately surfacing ErrConditionalReleaseUnsupported. When bd ships its
-// native issueops CAS release verb, consume it HERE as the first attempt:
+// SEAM (bd conditional-release verb): today this rides raw `bd sql`. The
+// sqlite backend refuses raw DB access, so that rejection — and embedded dolt
+// WITHOUT a configured dolt directory — surface ErrConditionalReleaseUnsupported
+// (the latter via the releaseIfCurrentViaEmbeddedDoltSQL fallback). Embedded
+// dolt WITH a configured directory instead services the CAS directly through
+// that fallback, returning real rows-affected rather than reporting
+// unsupported. When bd ships its native issueops CAS release verb, consume it
+// HERE as the first attempt:
 // probe by invoking the verb and fall back to this `bd sql` path when bd
 // reports the command unknown (older pinned bd). Callers already treat
 // ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
