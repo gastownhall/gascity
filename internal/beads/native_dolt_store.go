@@ -1295,43 +1295,51 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 		var beads []Bead
 		seen := make(map[string]bool)
 		now := time.Now().UTC()
-	statusLoop:
-		for _, status := range nativeDoltOpenReadyStatuses {
-			filter := beadslib.WorkFilter{Status: status}
-			if q.TierMode == TierBoth || q.TierMode == TierWisps {
-				filter.IncludeEphemeral = true
+		// One GetReadyWork call covers every open-class backing status via
+		// WorkFilter.Statuses. The previous one-call-per-status loop re-paid
+		// the deferred-parents pre-query, the wisp arm, and the transaction
+		// round trips seven times per Ready() (sr-5rz: ~30-70ms per call on
+		// a live server-mode store). The backing Limit stays 0 because the
+		// gc-side post-filter below (tier, excluded types/labels, defer)
+		// discards rows the store cannot, so a server-side limit could
+		// under-fill the result.
+		filter := beadslib.WorkFilter{Statuses: nativeDoltOpenReadyStatuses}
+		if q.TierMode == TierBoth || q.TierMode == TierWisps {
+			filter.IncludeEphemeral = true
+		}
+		if q.Assignee != "" {
+			filter.Assignee = &q.Assignee
+		}
+		issues, err := storage.GetReadyWork(ctx, filter)
+		if err != nil {
+			return err
+		}
+		for _, issue := range issues {
+			// The StatusDeferred branch exists so an expired time-bound
+			// deferral (defer_until in the past) can resurface. An issue
+			// with no defer_until at all was never time-bound — it's bd
+			// defer's status-based indefinite deferral — and must stay
+			// hidden. mapBdStatus collapses status to "open" and
+			// IsDeferred only inspects DeferUntil, so both would
+			// otherwise look identical to an ordinary open bead once
+			// beadFromNativeIssue erases the raw status. The per-status
+			// loop keyed this on the filter status it was querying for;
+			// with the whole set in one call the row's own raw status is
+			// the equivalent discriminator.
+			if issue.Status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+				continue
 			}
-			if q.Assignee != "" {
-				filter.Assignee = &q.Assignee
-			}
-			issues, err := storage.GetReadyWork(ctx, filter)
+			bead, err := beadFromNativeIssue(issue)
 			if err != nil {
 				return err
 			}
-			for _, issue := range issues {
-				// The StatusDeferred branch exists so an expired time-bound
-				// deferral (defer_until in the past) can resurface. An issue
-				// with no defer_until at all was never time-bound — it's bd
-				// defer's status-based indefinite deferral — and must stay
-				// hidden. mapBdStatus collapses status to "open" and
-				// IsDeferred only inspects DeferUntil, so both would
-				// otherwise look identical to an ordinary open bead once
-				// beadFromNativeIssue erases the raw status.
-				if status == beadslib.StatusDeferred && issue.DeferUntil == nil {
-					continue
-				}
-				bead, err := beadFromNativeIssue(issue)
-				if err != nil {
-					return err
-				}
-				if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
-					continue
-				}
-				seen[bead.ID] = true
-				beads = append(beads, bead)
-				if q.Limit > 0 && len(beads) >= q.Limit {
-					break statusLoop
-				}
+			if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
+				continue
+			}
+			seen[bead.ID] = true
+			beads = append(beads, bead)
+			if q.Limit > 0 && len(beads) >= q.Limit {
+				break
 			}
 		}
 		out = beads
