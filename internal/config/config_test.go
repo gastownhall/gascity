@@ -3477,6 +3477,29 @@ func TestDaemonPatrolIntervalInvalid(t *testing.T) {
 	}
 }
 
+func TestDaemonSessionPatrolIntervalDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if got := d.SessionPatrolIntervalDuration(); got != 0 {
+		t.Errorf("SessionPatrolIntervalDuration() = %v, want 0 (disabled by default)", got)
+	}
+}
+
+func TestDaemonSessionPatrolIntervalCustom(t *testing.T) {
+	d := DaemonConfig{SessionPatrolInterval: "30m"}
+	if got := d.SessionPatrolIntervalDuration(); got != 30*time.Minute {
+		t.Errorf("SessionPatrolIntervalDuration() = %v, want 30m", got)
+	}
+}
+
+func TestDaemonSessionPatrolIntervalInvalid(t *testing.T) {
+	for _, v := range []string{"not-a-duration", "-5m"} {
+		d := DaemonConfig{SessionPatrolInterval: v}
+		if got := d.SessionPatrolIntervalDuration(); got != 0 {
+			t.Errorf("SessionPatrolIntervalDuration() with %q = %v, want 0 (disabled)", v, got)
+		}
+	}
+}
+
 func TestParseDaemonConfig(t *testing.T) {
 	data := []byte(`
 [workspace]
