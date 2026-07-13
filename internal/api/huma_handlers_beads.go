@@ -265,6 +265,13 @@ func resolveBeadListPage(all []beads.Bead, seek *beads.SeekBoundary, limit int, 
 		}
 		return page, total, hasMore
 	}
+	// Full-scan path: `all` is the COMPLETE un-seeked set read in one shot, so
+	// `end < len(all)` is the honest has-more. The bounded branch's
+	// partial→force-resume is intentionally NOT mirrored here: a full-scan
+	// request re-reads every rig un-seeked, so a degraded rig reproduces the
+	// same withheld rows on the next request and a resume cursor cannot recover
+	// them — unlike bounded mode, where each page is an independent per-rig
+	// bounded read that can recover on a later page (gascity#3253).
 	total = len(all)
 	start := 0
 	if seek != nil {
@@ -282,6 +289,14 @@ func resolveBeadListPage(all []beads.Bead, seek *beads.SeekBoundary, limit int, 
 // mintNextCursor returns the keyset continuation cursor for a truncated page:
 // the (created_at, id) boundary of the last row served. An exhausted or empty
 // page mints nothing, which the client reads as walk-complete.
+//
+// The resume key is (created_at, id) while the fan-out's identity key is
+// (rig, id): this assumes (created_at, id) is globally unique across the merged
+// rigs. That holds for distinct-store rigs; the only collision is the
+// documented legacy file-mode aliasing of the city and rig stores, where twins
+// would make the page boundary position-dependent (benign today — a true
+// duplicate). A future globally-non-unique ID scheme would need a wider resume
+// key here.
 func mintNextCursor(page []beads.Bead, hasMore bool) string {
 	if !hasMore || len(page) == 0 {
 		return ""
