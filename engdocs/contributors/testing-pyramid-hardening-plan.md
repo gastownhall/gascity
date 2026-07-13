@@ -833,13 +833,13 @@ or shard planner.
 **Verification:** the linked design's script/policy tests plus a dry-run
 planner fixture with cold, warm, missing, and outlier samples.
 
-**Owner/status:** `ga-80po0c`; blocked. The linked design names `ga-nakct`,
-which is not present in the current Gas City store. Create and assign a live
-timing/planner child bead under the implementation epic and record it in both
-documents before scheduling this task.
+**Owner/status:** `ga-80po0c.4`; in progress. This live child owns the shared
+timing-storage, historical-planner, and PR-summary milestone. Its first slice
+repairs ownership in both plans; later implementation slices remain bounded by
+the linked design's trust and protected-write requirements.
 
-**Dependencies:** P0.1 and an assigned timing/planner child bead.
-**Estimate:** owned by the linked design after ownership repair.
+**Dependencies:** P0.1. **Estimate:** owned by the linked design through
+`ga-80po0c.4`.
 
 #### P0.3 — Establish a checked architecture ledger
 
@@ -1661,8 +1661,8 @@ evidence.
 
 **Owner/status:** `ga-80po0c`; blocked. Create assigned child beads for the
 protected-check migration and exact-SHA release-policy slice, then record them
-in the linked design and here. The missing `ga-nakct` reference is not live
-ownership.
+in the linked design and here. The live timing/planner owner `ga-80po0c.4` does
+not own either of these separate administration and release-policy slices.
 
 **Dependencies:** P0.2 target met, E7, and assigned protected-check/release
 child beads. **Estimate:** shared milestone plus a small-medium release-policy
@@ -1753,9 +1753,11 @@ This plan is a companion, not a replacement, for:
 
 - [Two-minute CI on Blacksmith](../design/two-minute-ci-blacksmith.md), which
   owns timing storage, runnable-unit planning, sharding, runner images, path
-  gating, and CI summary topology after its missing tracker is replaced with an
-  assigned child under `ga-80po0c`. This audit owns the architecture and
-  truthfulness of those runnable units.
+  gating, and CI summary topology under implementation epic `ga-80po0c`.
+  Assigned child `ga-80po0c.4` owns only the timing-storage, historical-planner,
+  and PR timing-summary milestone; remaining design slices require their own
+  live children. This audit owns the architecture and truthfulness of those
+  runnable units.
 - [Worker API hardening Task 4](worker-api-hardening-plan.md#task-4-add-structured-worker-operation-events-and-reduce-polling),
   whose Pending status is stale: structured Worker operation events landed in
   `c86f102bc`. W5 can migrate Worker waits now and does not invent a second
