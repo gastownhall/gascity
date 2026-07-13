@@ -187,6 +187,43 @@ mode = "on_demand"
 	}
 }
 
+// TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent is a regression
+// guard for #4184 problem 2: min_active_sessions=0 + max_active_sessions=0
+// is documented (TestValidateAgentsPoolMaxZeroIsValid) as the intentional
+// way to disable an agent's pool — it is not a pool. The lint rule must not
+// re-flag it as "pool-controlled" the same way it flags a real pool
+// (e.g. min=0/max=3 in TestLintRejectsNamedSessionBackedByPoolControlledAgent
+// above).
+func TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "disabled-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 0
+max_active_sessions = 0
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on an explicitly disabled pool agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the documented max=0 disable form as pool-controlled:\n%s", stderr.String())
+	}
+}
+
 func TestLintPromptDiscoverySkipsIgnoredDirs(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "skip-dirs", "worker", "prompts/worker.template.md")
