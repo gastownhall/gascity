@@ -1233,6 +1233,10 @@
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
           "default": "30s"
         },
+        "session_patrol_interval": {
+          "type": "string",
+          "description": "SessionPatrolInterval stretches the patrol-driven session-management\nphases (death detection, corpse sweeps, bead-driven session reconcile)\nto this interval while the session provider streams session events\n(runtime.SessionEventProvider): events poke targeted reconciles in\nreal time, so the patrol re-scan is demoted to a safety net. Ignored\n— session phases run on every patrol tick, today's behavior — when\nempty (the default), when the provider has no event stream (tmux),\nwhile the stream is not established, or when the value is not longer\nthan patrol_interval. Event pokes, slings, and config reloads always\nrun the session phases regardless. Duration string (e.g., \"5m\", \"30m\")."
+        },
         "max_restarts": {
           "type": "integer",
           "description": "MaxRestarts is the maximum number of agent restarts within RestartWindow before\nthe agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5.",

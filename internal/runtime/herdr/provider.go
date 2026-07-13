@@ -127,6 +127,15 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if strayPane != "" && strayPane != info.PaneID {
 		_ = p.c.closePane(ctx, strayPane)
 	}
+	// Mirror the session's identity keys from cfg.Env into the metadata
+	// sidecar now, before the slow startup delivery below. tmux exposes
+	// identity instantly (env injected at session creation, readable via
+	// GetMeta); herdr's GetMeta reads the sidecar, which callers stamp only
+	// after Start returns — leaving the agent alive-but-anonymous for the
+	// whole delivery wait (up to startupNudgeIdleTimeout). Any reconcile
+	// poked into that window judged the live runtime as belonging to no
+	// session and rolled back the pending create (live-verified churn).
+	p.stampIdentityMeta(name, cfg.Env)
 	// Post-launch steps mirror tmux's ordering: wait for readiness, run
 	// session_setup (Step 5.5), then deliver the startup nudge (Step 6).
 	//
@@ -432,6 +441,25 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // ── metadata sidecar (herdr has no per-session KV) ───────────────────────────
+
+// identityMetaKeys are the session-identity keys the reconciler probes via
+// GetMeta to bind a live runtime to its session bead (session id, instance
+// token, runtime epoch). Start mirrors them from cfg.Env into the sidecar so
+// the binding is readable from the moment the agent exists.
+var identityMetaKeys = []string{"GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH"}
+
+// stampIdentityMeta copies the identity keys present in env into the sidecar,
+// best-effort: a failed write only means GetMeta stays empty until a caller
+// stamps the key itself — exactly the pre-stamp status quo.
+func (p *Provider) stampIdentityMeta(name string, env map[string]string) {
+	for _, key := range identityMetaKeys {
+		if v := env[key]; v != "" {
+			if err := p.SetMeta(name, key, v); err != nil {
+				fmt.Fprintf(os.Stderr, "herdr: stamping %s for %q: %v\n", key, name, err) //nolint:errcheck // best-effort diagnostic
+			}
+		}
+	}
+}
 
 // SetMeta writes a per-session metadata value to the sidecar store (herdr has
 // no per-session KV).
