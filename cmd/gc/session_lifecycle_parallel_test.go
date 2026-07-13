@@ -41,6 +41,14 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+// Tx overrides the promoted *beads.MemStore.Tx so callbacks observe the
+// injected batch failure. Without this override, the embedded MemStore.Tx
+// passes the raw *MemStore (not s) into fn, silently bypassing failBatch
+// for any write routed through store.Tx(...).
+func (s *failingMetadataBatchStore) Tx(_ string, fn func(beads.Tx) error) error {
+	return fn(s)
+}
+
 type failNthMetadataBatchStore struct {
 	*beads.MemStore
 	failOn int
@@ -3121,6 +3129,117 @@ func TestAsyncStartSessionStillCurrent_RollbackPendingCreateStillWorksWhenNotAct
 	}
 	if asyncStartSessionStillCurrentInfo(prepared, current) {
 		t.Fatal("pcc cleared while state still creating must be treated as rollback (stale)")
+	}
+}
+
+// TestRollbackPendingCreateUsesSingleTransactionForAllWrites pins ga-igcny0.1.1:
+// the last_woke_at clear, the conditional session_name clear, and the
+// failed-create terminal close must land inside exactly one store.Tx call,
+// not as three independent direct writes that could observably split under
+// a real transactional backend.
+func TestRollbackPendingCreateUsesSingleTransactionForAllWrites(t *testing.T) {
+	store := newTxSpyStore()
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":          "worker",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"last_woke_at":          now.Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
+	batch := rollbackPendingCreate(info, sessionFrontDoor(store), now, ioDiscard{})
+
+	if store.txCalls != 1 {
+		t.Fatalf("txCalls = %d, want 1", store.txCalls)
+	}
+	if store.directSetMetadataBatch != 0 {
+		t.Fatalf("directSetMetadataBatch = %d, want 0 (all metadata writes must happen inside the Tx)", store.directSetMetadataBatch)
+	}
+	if store.directSetMetadata != 0 {
+		t.Fatalf("directSetMetadata = %d, want 0 (last_woke_at/session_name clears must happen inside the Tx, not via a direct single-key write)", store.directSetMetadata)
+	}
+	if store.directClose != 0 {
+		t.Fatalf("directClose = %d, want 0 (close must happen inside the Tx)", store.directClose)
+	}
+	if store.directUpdate != 0 {
+		t.Fatalf("directUpdate = %d, want 0", store.directUpdate)
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status = %q, want closed", got.Status)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
+		t.Fatalf("state = %q, want %q", got.Metadata["state"], sessionpkg.StateFailedCreate)
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared", got.Metadata["last_woke_at"])
+	}
+	if got.Metadata["session_name"] != "" {
+		t.Fatalf("session_name = %q, want cleared", got.Metadata["session_name"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+
+	if batch["last_woke_at"] != "" {
+		t.Fatalf("returned batch last_woke_at = %q, want cleared", batch["last_woke_at"])
+	}
+	if batch["session_name"] != "" {
+		t.Fatalf("returned batch session_name = %q, want cleared", batch["session_name"])
+	}
+}
+
+// TestRollbackPendingCreateIsNoopOnAlreadyClosedBead pins ga-igcny0.1.1: once
+// closeFailedCreateBeadInTx is folded directly into rollbackPendingCreate's
+// own Tx, the implicit already-closed guard closeBead used to provide is no
+// longer reached through — so rollbackPendingCreate must carry its own
+// upfront guard, or a retried rollback against a terminal bead would still
+// clear last_woke_at/session_name on every tick.
+func TestRollbackPendingCreateIsNoopOnAlreadyClosedBead(t *testing.T) {
+	store := newTxSpyStore()
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	wokeAt := now.Format(time.RFC3339)
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name_explicit": "true",
+			"last_woke_at":          wokeAt,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MemStore.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	info := sessionpkg.Info{ID: b.ID, SessionNameExplicit: b.Metadata["session_name_explicit"]}
+	rollbackPendingCreate(info, sessionFrontDoor(store), now, ioDiscard{})
+
+	if store.txCalls != 0 {
+		t.Fatalf("txCalls = %d, want 0 (already-closed bead must be a no-op)", store.txCalls)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["last_woke_at"] != wokeAt {
+		t.Fatalf("last_woke_at = %q, want unchanged %q (guard must fire before any writes)", got.Metadata["last_woke_at"], wokeAt)
 	}
 }
 

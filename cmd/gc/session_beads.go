@@ -409,11 +409,6 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable during reopen: %v\n", sessionName, identity, err) //nolint:errcheck
 			return nil
 		}
-		if err := sessionFrontDoor(store).SetStatusOpen(bead.ID); err != nil {
-			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
-			return nil
-		}
-		bead.Status = "open"
 		pendingCreateClaim := ""
 		if state != "active" {
 			pendingCreateClaim = "true"
@@ -466,17 +461,30 @@ func reopenClosedConfiguredNamedSessionBead(
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
-		if setMetaBatch(sessionFrontDoor(store), bead.ID, batch, stderr) == nil {
-			// S19 Stage 3 shadow: record the legacy priming-marker clears so the
-			// converge comparator can attribute this owned-key delta (no-op unless
-			// the shadow harness is enabled).
-			recordLegacyCompareWrites(bead.ID, "syncSessionBeads.reclaim", batch)
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string, len(batch))
+		// The status flip and the terminal metadata batch land inside one
+		// Tx: a bead that comes back "open" must also carry the reopen
+		// metadata, never one without the other (ga-igcny0.1.1).
+		open := "open"
+		txErr := store.Tx("gc: reopen configured named session "+bead.ID, func(tx beads.Tx) error {
+			if err := tx.Update(bead.ID, beads.UpdateOpts{Status: &open}); err != nil {
+				return err
 			}
-			for k, v := range batch {
-				bead.Metadata[k] = v
-			}
+			return tx.SetMetadataBatch(bead.ID, batch)
+		})
+		if txErr != nil {
+			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, txErr) //nolint:errcheck
+			return nil
+		}
+		// S19 Stage 3 shadow: record the legacy priming-marker clears so the
+		// converge comparator can attribute this owned-key delta (no-op unless
+		// the shadow harness is enabled).
+		recordLegacyCompareWrites(bead.ID, "syncSessionBeads.reclaim", batch)
+		bead.Status = "open"
+		if bead.Metadata == nil {
+			bead.Metadata = make(map[string]string, len(batch))
+		}
+		for k, v := range batch {
+			bead.Metadata[k] = v
 		}
 		reopened = bead
 		return nil
@@ -2365,16 +2373,30 @@ func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, 
 	return nil
 }
 
-func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
+// closeFailedCreateBeadInTx performs the failed-create terminal metadata
+// batch and Close as a single Tx-callback step. Shared by closeFailedCreateBead
+// and rollbackPendingCreate so the latter can fold this close into its own
+// larger transaction instead of nesting a second store.Tx call.
+func closeFailedCreateBeadInTx(tx beads.Tx, id string, now time.Time) error {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	patch["sleep_intent"] = ""
-	if setMetaBatch(sessFront, id, patch, stderr) != nil {
-		return false
+	if err := tx.SetMetadataBatch(id, patch); err != nil {
+		return err
 	}
-	if err := sessFront.CloseWithoutReason(id); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
+	return tx.Close(id)
+}
+
+func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
+	// The terminal metadata batch and the Close land inside one Tx: a bead
+	// that reports closed must also carry its failed-create terminal state,
+	// never one without the other (ga-igcny0.1.1).
+	txErr := sessFront.Store().Tx("gc: close failed-create session "+id, func(tx beads.Tx) error {
+		return closeFailedCreateBeadInTx(tx, id, now)
+	})
+	if txErr != nil {
+		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, txErr) //nolint:errcheck
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
@@ -2945,11 +2967,17 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	if reason == string(session.StateFailedCreate) {
 		return closeFailedCreateBead(sessionFrontDoor(store), id, now, stderr)
 	}
-	if setMetaBatch(sessionFrontDoor(store), id, session.ClosePatch(now, reason), stderr) != nil {
-		return false
-	}
-	if err := sessionFrontDoor(store).CloseWithoutReason(id); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
+	// The terminal metadata batch and the Close land inside one Tx: a bead
+	// that reports closed must also carry its terminal state, never one
+	// without the other (ga-igcny0.1.1).
+	txErr := store.Tx("gc: close session "+id, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(id, session.ClosePatch(now, reason)); err != nil {
+			return err
+		}
+		return tx.Close(id)
+	})
+	if txErr != nil {
+		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, txErr) //nolint:errcheck
 		return false
 	}
 	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;

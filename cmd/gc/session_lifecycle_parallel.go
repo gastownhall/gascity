@@ -2454,13 +2454,37 @@ func rollbackPendingCreate(info sessionpkg.Info, sessFront *sessionpkg.Store, no
 	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
 		return nil
 	}
-	batch := clearPendingStartInFlightLease(info.ID, sessFront, stderr)
-	if strings.TrimSpace(info.SessionNameExplicit) == "true" {
-		if setMeta(sessFront, info.ID, "session_name", "", stderr) == nil {
-			batch = mergeMetadataPatch(batch, map[string]string{"session_name": ""})
-		}
+	store := sessFront.Store()
+	// Idempotence: mirrors closeBead's already-closed guard. Once the Tx
+	// below folds the failed-create close into the same transaction as the
+	// metadata clears, that guard is no longer reached through a closeBead
+	// call — so it must be checked explicitly here, gating the clears too,
+	// or a retried rollback against a terminal bead would keep clearing
+	// last_woke_at/session_name on every tick (ga-igcny0.1.1).
+	if snapshot, err := store.Get(info.ID); err == nil && snapshot.Status == "closed" {
+		return nil
 	}
-	closeBead(sessFront.Store().Store, info.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+
+	clearSessionName := strings.TrimSpace(info.SessionNameExplicit) == "true"
+
+	// The in-flight-lease clear, the conditional session_name clear, and the
+	// failed-create terminal close land inside one Tx: this is one logical
+	// rollback transition, not three independent writes (ga-igcny0.1.1).
+	batch := map[string]string{"last_woke_at": ""}
+	if clearSessionName {
+		batch["session_name"] = ""
+	}
+	txErr := store.Tx("gc: rollback pending-create session "+info.ID, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(info.ID, batch); err != nil {
+			return err
+		}
+		return closeFailedCreateBeadInTx(tx, info.ID, now)
+	})
+	if txErr != nil {
+		fmt.Fprintf(stderr, "session beads: rolling back pending-create session %s: %v\n", info.ID, txErr) //nolint:errcheck
+		return nil
+	}
+	cancelStateAssignedToRetiredSessionBead(store.Store, info.ID, now, stderr)
 	return batch
 }
 
