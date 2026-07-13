@@ -1,0 +1,62 @@
+version = 1
+
+# Every field below is pinned by resourcecensus.bootstrapPolicy. Changing this
+# manifest alone fails; an intentional policy change updates the Go policy,
+# this file, and the generated TESTING.md table under council review.
+
+# These broad rows retain the audit's point-in-time source needles. They do
+# not classify tests. The AST baselines below ignore comments and strings;
+# reported_* preserves the historical regex totals for comparison.
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+baseline_calls = 490
+baseline_files = 135
+reported_calls = 495
+reported_files = 135
+owner_bead = "ga-80po0c.2"
+invariant = "tracked test source totals remain visible as audit evidence"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+migration_target = "P0.4a"
+expires = "2026-10-01"
+
+[[audit_baseline]]
+scope = "all"
+resource = "fixed_sleep"
+baseline_calls = 443
+baseline_files = 156
+reported_calls = 447
+reported_files = 157
+owner_bead = "ga-80po0c.2"
+invariant = "tracked test source totals remain visible as audit evidence"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+migration_target = "P0.4a"
+expires = "2026-10-01"
+
+# Debt rows ratchet source call sites only. They are not test-size entries and
+# do not exempt or reclassify any test.
+[[debt]]
+scope = "untagged"
+resource = "subprocess"
+baseline_calls = 374
+baseline_files = 97
+reported_calls = 380
+reported_files = 98
+owner_bead = "ga-80po0c.2"
+invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each process-owning test removes or replaces its source call site"
+migration_target = "D1/D2/D5/D6/E6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+baseline_calls = 291
+baseline_files = 113
+reported_calls = 295
+reported_files = 114
+owner_bead = "ga-80po0c.2"
+invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal"
+migration_target = "W1-W5"
+expires = "2026-10-01"

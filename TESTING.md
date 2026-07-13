@@ -1,5 +1,62 @@
 # Gas City Testing Philosophy
 
+## Checked source-level resource ratchets
+
+`test/test-resources.toml` is the P0.4a source call-site ratchet. It scans
+tracked `*_test.go` files through parsed Go syntax and import identity, freezes
+four subprocess and fixed-sleep call/file totals, rejects growth, and requires
+a baseline reduction whenever source debt falls. The Go-owned
+`bootstrapPolicy` pins every row's ceiling, historical totals, owner,
+invariant, resource owner, migration, and expiry. Ordinary source growth fails
+against that ceiling, and TOML-only normalization or metadata edits fail
+against the policy before the live census is compared.
+
+Changing `bootstrapPolicy` together with the TOML and generated table is an
+explicit policy change that requires the same staged-diff council review as
+other test-infrastructure changes. The guard makes ordinary drift visible; it
+does not claim that self-modifying source can be cryptographically forbidden.
+
+This bootstrap does **not** classify a test as Small, Medium, or Large, infer
+runtime ownership through helper calls, or claim to be a complete inventory of
+test resources. The next source-resource scope is owned by `ga-80po0c.2.3`.
+E1 separately owns Large journey and provider entries.
+
+The scanner recognizes direct calls to `os/exec.Command{,Context}` and
+`time.Sleep`, including import aliases and parenthesized call expressions.
+Import matches use lexical object identity, so local shadows do not count.
+Targeted dot imports of `os/exec` or `time` are rejected with file and import
+context because their calls cannot be attributed safely; blank imports remain
+harmless. Explicit constraints follow Go's leading-header rules: a pre-package
+`//go:build` line is effective, while a legacy `// +build` line must live in a
+leading `//` comment block separated from the package clause by a blank line.
+Misplaced and directive-like comments do not tag a file. An untagged scope
+means the source file has neither an effective explicit constraint nor a
+recognized `_GOOS`, `_GOARCH`, or `_GOOS_GOARCH` filename suffix. Implicit
+filename constraints use the portion before the first dot, matching Go's
+filename semantics. The code-owned platform set mirrors the Go standard
+library's [`internal/syslist.KnownOS` and `KnownArch`](https://go.dev/src/internal/syslist/syslist.go):
+the past, present, and future values Go owns for filename matching. Scanning
+does not invoke the Go tool or network.
+
+Run the focused check with:
+
+```bash
+go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$'
+```
+
+The historical regex totals remain visible as point-in-time audit evidence.
+They can differ because comments and strings matched, while the AST census
+counts only recognized calls.
+
+<!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
+| Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
+| --- | --- | --- | --- | --- | --- | --- |
+| Audit baseline | all tracked test source | fixed_sleep: 443 calls / 156 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 490 calls / 135 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 291 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 374 calls / 97 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+<!-- END CHECKED TEST RESOURCE LEDGER -->
+
 ## Three tiers, clear boundaries
 
 ### 1. Unit tests (`*_test.go` next to the code)
