@@ -417,24 +417,9 @@ func TestRunDetailStreamUnsupportedRun422(t *testing.T) {
 	}
 }
 
-// TestRunDetailStreamUnknownRun404 confirms a missing run 404s once the tailer
-// is warm, before any stream body.
-func TestRunDetailStreamUnknownRun404(t *testing.T) {
-	dir := t.TempDir()
-	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"), runDetailRootEvent())
-	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
-	p.Start(t.Context())
-	defer p.Stop()
-
-	// Warm the tailer first so a missing run is a true 404, not a warming 503.
-	_ = getRunSummary(t, p, "alpha")
-
-	rec := httptest.NewRecorder()
-	p.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/city/alpha/runs/missing/detail/stream", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
+// A missing run once the tailer is warm answers 503 for the unknown-run grace
+// window and 404 after it expires, before any stream body — covered by
+// TestRunDetailStreamUnknownRunWarmingGrace in rundetail_grace_test.go.
 
 // TestRunDetailStreamHeartbeat proves a heartbeat comment frame is emitted after
 // the (shortened) heartbeat interval when no data change fires.

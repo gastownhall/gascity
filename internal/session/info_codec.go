@@ -10,7 +10,7 @@ import (
 
 // infoKeySpec is one metadata key's codec: how a raw metadata value becomes
 // Info fields. The SAME closure drives both directions of the metadata⇄Info
-// codec — projection (InfoFromPersistedBead) and fold (Info.ApplyPatch) — so a
+// codec — projection (infoFromPersistedBead) and fold (Info.ApplyPatch) — so a
 // fold is a re-projection of that one key by construction, and the two can no
 // longer drift apart.
 //
@@ -28,7 +28,7 @@ type infoKeySpec struct {
 // infoKeyCodec is the single source of truth for the metadata-derived half of
 // the Info projection. Ordering is irrelevant for correctness EXCEPT for two
 // documented dependencies (invariant I6):
-//   - the bead-level prologue (ID, Closed, …) in InfoFromPersistedBead runs
+//   - the bead-level prologue (ID, Closed, …) in infoFromPersistedBead runs
 //     before this table, because session_name reads info.ID and state reads
 //     info.Closed;
 //   - provider is listed before transport, so both raw mirrors are in scope
@@ -101,6 +101,9 @@ var infoKeyCodec = []infoKeySpec{
 		i.ManualSession = strings.TrimSpace(v) == "true"
 		i.ManualSessionMetadata = v
 	}},
+	{"pool_alias_conflict", func(i *Info, v string) { i.PoolAliasConflict = v }},
+	{"pool_alias_conflict_count", func(i *Info, v string) { i.PoolAliasConflictCount = v }},
+	{"pool_alias_conflict_at", func(i *Info, v string) { i.PoolAliasConflictAt = v }},
 
 	// Canonical-identity record mirrors (verbatim). The typed record is derived
 	// on demand via Info.CanonicalIdentity(); these keep the raw values so the
@@ -108,6 +111,15 @@ var infoKeyCodec = []infoKeySpec{
 	// create/adoption but read by no decision path yet.
 	{CanonicalInstanceNameMetadata, func(i *Info, v string) { i.CanonicalInstanceNameMetadata = v }},
 	{CanonicalPoolSlotMetadata, func(i *Info, v string) { i.CanonicalPoolSlotMetadata = v }},
+
+	// Priming-marker mirrors (verbatim). The S19 Stage 3 shadow harness snapshots
+	// these compared keys off Info at tick start/end (the reconciler loop carries
+	// no raw beads), so each priming key is a projected Info field. Write-only in
+	// Stage 2: stamped by CommitStartedPatch / cleared at the started_config_hash
+	// clear sites, read by no decision path yet.
+	{PrimedAtMetadataKey, func(i *Info, v string) { i.PrimedAtMetadata = v }},
+	{PrimingAttemptedAtMetadataKey, func(i *Info, v string) { i.PrimingAttemptedAtMetadata = v }},
+	{PromptHashMetadataKey, func(i *Info, v string) { i.PromptHashMetadata = v }},
 
 	{MCPIdentityMetadataKey, func(i *Info, v string) { i.MCPIdentity = v }},
 	{MCPServersSnapshotMetadataKey, func(i *Info, v string) { i.MCPServersSnapshot = v }},
@@ -123,6 +135,9 @@ var infoKeyCodec = []infoKeySpec{
 	{beadmeta.TriggerBeadStoreRefMetadataKey, func(i *Info, v string) { i.TriggerBeadStoreRef = v }},
 	{beadmeta.BrainParentSIDMetadataKey, func(i *Info, v string) { i.BrainParentSID = v }},
 	{beadmeta.PackMetadataKey, func(i *Info, v string) { i.Pack = v }},
+	{beadmeta.PackWorkspaceMetadataKey, func(i *Info, v string) { i.PackWorkspace = v }},
+	{beadmeta.WorkDirMetadataKey, func(i *Info, v string) { i.WorkDirCanonical = v }},
+	{beadmeta.WorkerDirMetadataKey, func(i *Info, v string) { i.WorkerDir = v }},
 
 	// state / bookkeeping cluster
 	{"pending_create_claim", func(i *Info, v string) {
@@ -136,9 +151,12 @@ var infoKeyCodec = []infoKeySpec{
 	}},
 	{"continuity_eligible", func(i *Info, v string) { i.ContinuityEligible = v }},
 	{"last_woke_at", func(i *Info, v string) { i.LastWokeAt = v }},
+	{"awake_started_at", func(i *Info, v string) { i.AwakeStartedAt = v }},
+	{"usage_compute_emitted_at", func(i *Info, v string) { i.UsageComputeEmittedAt = v }},
 	{"state_reason", func(i *Info, v string) { i.StateReason = v }},
 	{"creation_complete_at", func(i *Info, v string) { i.CreationCompleteAt = v }},
 	{"continuation_reset_pending", func(i *Info, v string) { i.ContinuationResetPending = v }},
+	{SessionCircuitStateMetadataKey, func(i *Info, v string) { i.SessionCircuitState = v }},
 	{ResetCommittedAtKey, func(i *Info, v string) { i.ResetCommittedAt = v }},
 	{"generation", func(i *Info, v string) { i.Generation = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
@@ -157,17 +175,34 @@ var infoKeyCodec = []infoKeySpec{
 	{"started_provision_hash", func(i *Info, v string) { i.StartedProvisionHash = v }},
 	{"started_launch_hash", func(i *Info, v string) { i.StartedLaunchHash = v }},
 	{"started_live_hash", func(i *Info, v string) { i.StartedLiveHash = v }},
+	{"live_hash", func(i *Info, v string) { i.LiveHash = v }},
+	{"startup_dialog_verified", func(i *Info, v string) { i.StartupDialogVerified = v }},
 	{"config_drift_deferred_at", func(i *Info, v string) { i.ConfigDriftDeferredAt = v }},
 	{"config_drift_deferred_key", func(i *Info, v string) { i.ConfigDriftDeferredKey = v }},
 	{"attached_config_drift_deferred_at", func(i *Info, v string) { i.AttachedConfigDriftDeferredAt = v }},
 	{"attached_config_drift_deferred_key", func(i *Info, v string) { i.AttachedConfigDriftDeferredKey = v }},
 	{"stranded_event_emitted_at", func(i *Info, v string) { i.StrandedEventEmittedAt = v }},
+	{"unknown_state_first_seen", func(i *Info, v string) { i.UnknownStateFirstSeen = v }},
+	{"unknown_state_value", func(i *Info, v string) { i.UnknownStateValue = v }},
+	{"unknown_state_escalated_at", func(i *Info, v string) { i.UnknownStateEscalatedAt = v }},
 	{"session_name_explicit", func(i *Info, v string) { i.SessionNameExplicit = v }},
 	{"wake_request", func(i *Info, v string) { i.WakeRequest = v }},
 	{"restart_requested", func(i *Info, v string) { i.RestartRequested = v }},
 	{"session_id_flag", func(i *Info, v string) { i.SessionIDFlag = v }},
 	{"template_overrides", func(i *Info, v string) { i.TemplateOverrides = v }},
 	{"provider_kind", func(i *Info, v string) { i.ProviderKind = v }},
+	{"builtin_ancestor", func(i *Info, v string) { i.BuiltinAncestor = v }},
+
+	// sleep-policy cluster (raw mirrors). Single-field string setters; the
+	// cmd/gc sleep helpers read these projected fields (W6). Byte-identical to
+	// the inline literals they mirror on the store.
+	{"sleep_policy_fingerprint", func(i *Info, v string) { i.SleepPolicyFingerprint = v }},
+	{"requested_sleep_after_idle", func(i *Info, v string) { i.RequestedSleepAfterIdle = v }},
+	{"effective_sleep_after_idle", func(i *Info, v string) { i.EffectiveSleepAfterIdle = v }},
+	{"sleep_policy_source", func(i *Info, v string) { i.SleepPolicySource = v }},
+	{"sleep_capability", func(i *Info, v string) { i.SleepCapability = v }},
+	{"sleep_policy_adjustment_reason", func(i *Info, v string) { i.SleepPolicyAdjustmentReason = v }},
+	{"config_wake_suppressed", func(i *Info, v string) { i.ConfigWakeSuppressedMetadata = v }},
 
 	// wake_attempts: int + raw mirror. The total form (explicit = 0 on parse
 	// failure) matches ApplyPatch and, on a fresh Info, agrees with the old

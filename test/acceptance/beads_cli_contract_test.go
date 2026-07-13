@@ -1,4 +1,4 @@
-//go:build acceptance_a
+//go:build acceptance_bd_contract
 
 // Beads CLI contract acceptance test.
 //

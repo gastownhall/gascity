@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -322,6 +323,101 @@ provider = "file"
 	}
 	if !slicesContains(got, "worker\tworker (asleep)") {
 		t.Errorf("session alias description missing from %v", got)
+	}
+}
+
+// TestCompletionSessionsSortedCreatedDesc pins the created-desc ordering the CLI
+// session listers restore after loadSessionBeadSnapshot (which loads unsorted).
+// completion.go and cmd_session.go share sortSessionsCreatedDesc; without it
+// `gc <cmd> <TAB>` candidates would surface in store-native order. It reproduces
+// beads.SortCreatedDesc: CreatedAt descending, ties broken by ID descending.
+func TestCompletionSessionsSortedCreatedDesc(t *testing.T) {
+	base := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	// Deliberately fed in a NON-created-desc order (as the unsorted snapshot loader
+	// would), including a CreatedAt tie between "tie-a" and "tie-b".
+	sessions := []session.Info{
+		{ID: "oldest", CreatedAt: base},
+		{ID: "tie-a", CreatedAt: base.Add(time.Minute)},
+		{ID: "newest", CreatedAt: base.Add(2 * time.Minute)},
+		{ID: "tie-b", CreatedAt: base.Add(time.Minute)},
+	}
+
+	sortSessionsCreatedDesc(sessions)
+
+	got := make([]string, len(sessions))
+	for i, s := range sessions {
+		got[i] = s.ID
+	}
+	// newest first; the CreatedAt tie breaks by ID descending ("tie-b" > "tie-a").
+	want := []string{"newest", "tie-b", "tie-a", "oldest"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("created-desc order = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestLoadSessionsForCompletion_ReturnsNewestFirst is the END-TO-END wiring pin
+// for the created-desc order: it drives loadSessionsForCompletion itself, not just
+// the comparator. Beads are seeded oldest-first (the unsorted snapshot loader's
+// store-native order is insertion order), so the lister MUST flip them to
+// newest-first. Removing the sortSessionsCreatedDesc call at the completion.go
+// call site regresses this to store order and fails here — the comparator unit
+// test alone would stay green.
+func TestLoadSessionsForCompletion_ReturnsNewestFirst(t *testing.T) {
+	cityPath := t.TempDir()
+	writeCompletionCity(t, cityPath, `[workspace]
+name = "sessions-city"
+
+[session]
+provider = "fake"
+
+[beads]
+provider = "file"
+`)
+	isolateCompletionContext(t, cityPath)
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
+	}
+	mkSession := func(name string) beads.Bead {
+		created, cerr := store.Create(beads.Bead{
+			Title:  name,
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":        name,
+				"session_name": "sessions-city--" + name,
+				"state":        "asleep",
+				"template":     "codex",
+			},
+		})
+		if cerr != nil {
+			t.Fatalf("store.Create(%q): %v", name, cerr)
+		}
+		return created
+	}
+	// Insertion order == store-native order == created-asc. Create older first.
+	older := mkSession("older")
+	newer := mkSession("newer")
+
+	got := loadSessionsForCompletion()
+
+	posOlder, posNewer := -1, -1
+	for i, sinfo := range got {
+		switch sinfo.ID {
+		case older.ID:
+			posOlder = i
+		case newer.ID:
+			posNewer = i
+		}
+	}
+	if posOlder < 0 || posNewer < 0 {
+		t.Fatalf("expected both sessions in completion list, got %+v", got)
+	}
+	if posNewer > posOlder {
+		t.Errorf("completion order not newest-first: newer %q at %d after older %q at %d (%+v)",
+			newer.ID, posNewer, older.ID, posOlder, got)
 	}
 }
 

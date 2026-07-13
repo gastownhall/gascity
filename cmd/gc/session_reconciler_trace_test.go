@@ -17,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
@@ -548,6 +550,90 @@ func TestRecordControllerOperationIsAlwaysOnBaseline(t *testing.T) {
 	}
 }
 
+// TestReconcileTraceResultsObservePostTickValues pins that the RESULTS trace
+// recorder observes POST-tick values after the row reshape (Blocker 3 drift):
+// the reconciler's WriteBackReconcileInfos folds its post-tick Info snapshot onto
+// the carrier, and recordReconcileTraceResults reads that carrier. A dedup-retired
+// loser must be traced under its retired session_name="" (RetireNamedSessionPatch
+// clears session_name), not its pre-retire name. If the writeback is dropped or the
+// recorder reads the pre-tick input, the loser is traced under its pre-retire name
+// and this pin fails.
+func TestReconcileTraceResultsObservePostTickValues(t *testing.T) {
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor"}},
+	}
+	cityName := config.EffectiveCityName(cfg, "")
+	spec, ok := session.FindNamedSessionSpec(cfg, cityName, "mayor")
+	if !ok {
+		t.Fatal("named spec for mayor not resolvable; fixture cfg no longer resolves it")
+	}
+	store := beads.NewMemStore()
+	mk := func(gen, sessName string) string {
+		b, err := store.Create(beads.Bead{
+			Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template": "mayor", "configured_named_session": "true",
+				"configured_named_identity": "mayor", "generation": gen, "session_name": sessName,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		return b.ID
+	}
+	_ = mk("5", spec.SessionName) // winner (canonical name + higher gen)
+	loserName := spec.SessionName + "-stale"
+	loserID := mk("3", loserName)
+
+	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	snap := newSessionBeadSnapshot(all)
+
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, cityName, io.Discard)
+	defer tracer.Close() //nolint:errcheck
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), cfg)
+
+	reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(), cityDir, snap.OpenForReconcile(), snap, nil, map[string]bool{},
+		cfg, runtime.NewFake(), beads.SessionStore{Store: store}, nil, nil, nil, nil,
+		newDrainTracker(), nil, nil, nil, false, nil, cityName, nil, clock.Real{},
+		events.Discard, 0, 0, io.Discard, io.Discard, cycle,
+	)
+
+	// Production flow: after the reconciler's writeback, the RESULTS recorder reads
+	// the post-tick carrier (sessionBeads.OpenInfos()).
+	cr := &CityRuntime{cfg: cfg}
+	cr.recordReconcileTraceResults(cycle, snap.OpenInfos(), func(TraceSiteCode, string, time.Time, map[string]any) {})
+
+	// Find the RESULTS record for the loser bead (by id-derived post-tick lookup:
+	// the retired loser's session_name is now "", so assert NO result record still
+	// carries the pre-retire loser name).
+	sawPreRetireName := false
+	for _, rec := range cycle.records {
+		if rec.RecordType != TraceRecordSessionResult {
+			continue
+		}
+		if rec.SessionName == loserName {
+			sawPreRetireName = true
+		}
+	}
+	if sawPreRetireName {
+		t.Fatalf("RESULTS trace recorded the retired loser under its PRE-retire name %q — the post-tick writeback/observation regressed (loser id %s)", loserName, loserID)
+	}
+	// And the store confirms the retire actually happened (so the pin isn't vacuous).
+	got, err := store.Get(loserID)
+	if err != nil {
+		t.Fatalf("get loser: %v", err)
+	}
+	if got.Metadata["session_name"] != "" || got.Metadata["state"] != "archived" {
+		t.Fatalf("loser was not retired (session_name=%q state=%q); fixture no longer exercises the dedup retire", got.Metadata["session_name"], got.Metadata["state"])
+	}
+}
+
 func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	cityDir := t.TempDir()
 	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
@@ -560,7 +646,8 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(),
 		cityDir,
-		nil,
+		nil, // rows []session.ReconcileSession
+		nil, // snapshot *sessionBeadSnapshot
 		nil,
 		nil,
 		&config.City{},

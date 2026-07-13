@@ -95,7 +95,7 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
-	return errors.Join(
+	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
@@ -148,6 +148,21 @@ func (o *providerDrainOps) isDriftRestart(sessionName string) (bool, error) {
 
 func (o *providerDrainOps) clearDriftRestart(sessionName string) error {
 	return o.sp.RemoveMeta(sessionName, "GC_DRIFT_RESTART")
+}
+
+func joinDrainAckMutationErrors(errs ...error) error {
+	var joined []error
+	for _, err := range errs {
+		if err == nil || drainAckMissingSessionBeadError(err) {
+			continue
+		}
+		joined = append(joined, err)
+	}
+	return errors.Join(joined...)
+}
+
+func drainAckMissingSessionBeadError(err error) bool {
+	return runtime.IsSessionGone(err) || errors.Is(err, beads.ErrNotFound)
 }
 
 // newDrainOps creates a drainOps from a runtime.Provider.

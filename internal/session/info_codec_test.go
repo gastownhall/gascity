@@ -12,7 +12,11 @@ import (
 )
 
 // infoFromPersistedBeadFrozen is a verbatim copy of the pre-S09b struct-literal
-// projection of InfoFromPersistedBead. It is the INDEPENDENT oracle for the
+// projection of infoFromPersistedBead, carrying THIS tree's full key set (the
+// ~19 keys beyond the original commit: pool_alias_conflict*, PackWorkspace /
+// WorkDirCanonical / WorkerDir, awake_started_at, usage_compute_emitted_at,
+// SessionCircuitState, live_hash, startup_dialog_verified, builtin_ancestor,
+// and the 7-key sleep-policy cluster). It is the INDEPENDENT oracle for the
 // table-driven codec: TestInfoCodecProjectionParity asserts the new table loop
 // reproduces this frozen reference byte-for-byte. It must NOT be refactored to
 // call the table — its whole value is being written a different way. If a
@@ -64,13 +68,20 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		DependencyOnlyMetadata:  b.Metadata["dependency_only"],
 		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
 		ManualSessionMetadata:   b.Metadata["manual_session"],
+		PoolAliasConflict:       b.Metadata["pool_alias_conflict"],
+		PoolAliasConflictCount:  b.Metadata["pool_alias_conflict_count"],
+		PoolAliasConflictAt:     b.Metadata["pool_alias_conflict_at"],
 		Labels:                  b.Labels,
 
 		// Canonical-identity record mirrors (verbatim). S19 Stage 2 (write-only).
 		CanonicalInstanceNameMetadata: b.Metadata[CanonicalInstanceNameMetadata],
 		CanonicalPoolSlotMetadata:     b.Metadata[CanonicalPoolSlotMetadata],
-		MCPIdentity:                   b.Metadata[MCPIdentityMetadataKey],
-		MCPServersSnapshot:            b.Metadata[MCPServersSnapshotMetadataKey],
+		// Priming-marker mirrors (verbatim). S19 Stage 2 (write-only).
+		PrimedAtMetadata:           b.Metadata[PrimedAtMetadataKey],
+		PrimingAttemptedAtMetadata: b.Metadata[PrimingAttemptedAtMetadataKey],
+		PromptHashMetadata:         b.Metadata[PromptHashMetadataKey],
+		MCPIdentity:                b.Metadata[MCPIdentityMetadataKey],
+		MCPServersSnapshot:         b.Metadata[MCPServersSnapshotMetadataKey],
 
 		ProviderTerminalError: b.Metadata["provider_terminal_error"],
 		HealthState:           b.Metadata["session_health"],
@@ -81,6 +92,9 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		TriggerBeadStoreRef: b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey],
 		BrainParentSID:      b.Metadata[beadmeta.BrainParentSIDMetadataKey],
 		Pack:                b.Metadata[beadmeta.PackMetadataKey],
+		PackWorkspace:       b.Metadata[beadmeta.PackWorkspaceMetadataKey],
+		WorkDirCanonical:    b.Metadata[beadmeta.WorkDirMetadataKey],
+		WorkerDir:           b.Metadata[beadmeta.WorkerDirMetadataKey],
 
 		MetadataState:              b.Metadata["state"],
 		SessionNameMetadata:        b.Metadata["session_name"],
@@ -92,9 +106,12 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ContinuityEligible:         b.Metadata["continuity_eligible"],
 		TransportMetadata:          b.Metadata["transport"],
 		LastWokeAt:                 b.Metadata["last_woke_at"],
+		AwakeStartedAt:             b.Metadata["awake_started_at"],
+		UsageComputeEmittedAt:      b.Metadata["usage_compute_emitted_at"],
 		StateReason:                b.Metadata["state_reason"],
 		CreationCompleteAt:         b.Metadata["creation_complete_at"],
 		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],
+		SessionCircuitState:        b.Metadata[SessionCircuitStateMetadataKey],
 		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
 		Generation:                 b.Metadata["generation"],
 		StartedConfigHash:          b.Metadata["started_config_hash"],
@@ -112,11 +129,16 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		StartedProvisionHash:           b.Metadata["started_provision_hash"],
 		StartedLaunchHash:              b.Metadata["started_launch_hash"],
 		StartedLiveHash:                b.Metadata["started_live_hash"],
+		LiveHash:                       b.Metadata["live_hash"],
+		StartupDialogVerified:          b.Metadata["startup_dialog_verified"],
 		ConfigDriftDeferredAt:          b.Metadata["config_drift_deferred_at"],
 		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
 		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
 		AttachedConfigDriftDeferredKey: b.Metadata["attached_config_drift_deferred_key"],
 		StrandedEventEmittedAt:         b.Metadata["stranded_event_emitted_at"],
+		UnknownStateFirstSeen:          b.Metadata["unknown_state_first_seen"],
+		UnknownStateValue:              b.Metadata["unknown_state_value"],
+		UnknownStateEscalatedAt:        b.Metadata["unknown_state_escalated_at"],
 		SessionNameExplicit:            b.Metadata["session_name_explicit"],
 		WakeRequest:                    b.Metadata["wake_request"],
 		RestartRequested:               b.Metadata["restart_requested"],
@@ -124,6 +146,15 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
 		ProviderKind:                   b.Metadata["provider_kind"],
+		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
+
+		SleepPolicyFingerprint:       b.Metadata["sleep_policy_fingerprint"],
+		RequestedSleepAfterIdle:      b.Metadata["requested_sleep_after_idle"],
+		EffectiveSleepAfterIdle:      b.Metadata["effective_sleep_after_idle"],
+		SleepPolicySource:            b.Metadata["sleep_policy_source"],
+		SleepCapability:              b.Metadata["sleep_capability"],
+		SleepPolicyAdjustmentReason:  b.Metadata["sleep_policy_adjustment_reason"],
+		ConfigWakeSuppressedMetadata: b.Metadata["config_wake_suppressed"],
 	}
 	if n, err := strconv.Atoi(b.Metadata["wake_attempts"]); err == nil {
 		info.WakeAttempts = n
@@ -137,7 +168,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 }
 
 // TestInfoCodecProjectionParity (T2) is the independent projection oracle: the
-// new table-driven InfoFromPersistedBead must equal the frozen pre-S09b
+// new table-driven infoFromPersistedBead must equal the frozen pre-S09b
 // struct-literal projection byte-for-byte, over the diverse oracle base beads
 // (populated/closed/no-name/acp/sparse) plus per-key edge fixtures that reach
 // the parsed/coupled branches (Atoi failure, RFC3339 garbage, alias
@@ -172,7 +203,7 @@ func TestInfoCodecProjectionParity(t *testing.T) {
 	}
 
 	for _, b := range beadsToCheck {
-		got := InfoFromPersistedBead(b)
+		got := infoFromPersistedBead(b)
 		want := infoFromPersistedBeadFrozen(b)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("bead=%s: table projection diverged from frozen reference\n got=%+v\nwant=%+v", b.ID, got, want)
@@ -217,7 +248,7 @@ func TestInfoCodecKeysMatchProjectedList(t *testing.T) {
 // projection must equal projecting the same bead with that key deleted.
 func TestInfoCodecEmptyStringClears(t *testing.T) {
 	base := oracleBaseBeads()[0] // fully-populated open bead
-	baseInfo := InfoFromPersistedBead(base)
+	baseInfo := infoFromPersistedBead(base)
 	for i := range infoKeyCodec {
 		key := infoKeyCodec[i].key
 		cleared := baseInfo.ApplyPatch(MetadataPatch{key: ""})
@@ -231,7 +262,7 @@ func TestInfoCodecEmptyStringClears(t *testing.T) {
 		}
 		deleted := base
 		deleted.Metadata = deletedMeta
-		want := InfoFromPersistedBead(deleted)
+		want := infoFromPersistedBead(deleted)
 
 		if !reflect.DeepEqual(cleared, want) {
 			t.Errorf("key=%q: empty-string clear diverged from key-deleted projection\n got=%+v\nwant=%+v", key, cleared, want)
@@ -326,7 +357,7 @@ func TestInfoCodecFieldsDisjoint(t *testing.T) {
 // E-5 convergence property against a future reorder.
 func TestInfoCodecProviderTransportOrderConverges(t *testing.T) {
 	base := oracleBaseBeads()[3] // acp base: provider fallback is live
-	baseInfo := InfoFromPersistedBead(base)
+	baseInfo := infoFromPersistedBead(base)
 
 	quadrants := []struct{ provider, transport string }{
 		{"gemini", "tmux"},
@@ -349,7 +380,7 @@ func TestInfoCodecProviderTransportOrderConverges(t *testing.T) {
 		wantMeta["transport"] = q.transport
 		wantBead := base
 		wantBead.Metadata = wantMeta
-		want := InfoFromPersistedBead(wantBead)
+		want := infoFromPersistedBead(wantBead)
 
 		if fwd.Transport != want.Transport {
 			t.Errorf("provider=%q transport=%q: fwd Transport=%q, want %q", q.provider, q.transport, fwd.Transport, want.Transport)

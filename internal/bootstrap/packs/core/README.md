@@ -68,7 +68,7 @@ older than the retention window are pruned on each run.
 
 ## `cascade-nudge-on-blocker-close`
 
-**Why.** When a blocker bead closes (linked via `bd dep <dependent> --blocks
+**Why.** When a blocker bead closes (linked via `gc bd dep <dependent> --blocks
 <blocker>`), the assignee of each dependent has no event-driven signal that
 work can resume — they poll, get nudged by hand, or miss the unblock. This
 order removes that class of "the blocker closed but my agent didn't notice"
@@ -112,6 +112,7 @@ Entries older than the retention window are pruned on each run.
 
 ## Dependencies
 
-Both nudge scripts use only `bd`, `gc`, and `jq` — already required by the
-other core-pack scripts. `jq` is a hard dependency and the scripts fail
-loud at startup if it is missing.
+Both nudge scripts use only `gc`, `bd`, and `jq` — already required by the
+other core-pack scripts. `gc bd` routes the request, then delegates to the
+underlying `bd` binary. `jq` is a hard dependency and the scripts fail loud
+at startup if it is missing.

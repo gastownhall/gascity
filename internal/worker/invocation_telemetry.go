@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/pricing"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -115,11 +114,11 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	h.invTelemetryMu.Lock()
 	defer h.invTelemetryMu.Unlock()
 
-	info, b, err := h.manager.GetWithBead(id)
+	info, pr, err := sessionRecordViaManager(h.manager, id)
 	if err != nil {
 		return
 	}
-	transcriptProvider := strings.TrimSpace(b.Metadata["provider_kind"])
+	transcriptProvider := strings.TrimSpace(info.ProviderKind)
 	if transcriptProvider == "" {
 		transcriptProvider = strings.TrimSpace(info.Provider)
 	}
@@ -132,7 +131,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if !ok {
 		return
 	}
-	path := spec.discover(h, id, b)
+	path := spec.discover(h, id, info.CreatedAt, pr.Metadata)
 	if path == "" {
 		return
 	}
@@ -140,7 +139,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if err != nil || len(usages) == 0 {
 		return
 	}
-	cursor := strings.TrimSpace(b.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor])
+	cursor := strings.TrimSpace(pr.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor])
 	pending := usagesAfterCursor(usages, cursor)
 	if len(pending) == 0 {
 		return
@@ -178,7 +177,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
 		if emitFacts {
-			h.recordModelUsageFact(modelUsageFact(u, b, id, info.SessionName, providerFamily, cost, priced, now))
+			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now))
 		}
 	}
 	// Best-effort: a failed cursor write means the next prompt op may
@@ -204,13 +203,18 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
 // had no entry for the (family, model) pair; cost is then left zero and must be
 // read as "not measured", never as a free invocation.
-func modelUsageFact(u sessionlog.TailUsage, bead beads.Bead, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
-	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionID)
+func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
+	// beadID and sessionID are the session bead id and the run-id fallback — the
+	// same fields the retired ResolveRunID(bead.Metadata, bead.ID, sessionID) read
+	// from the raw bead. At the sole production call site they are equal (the
+	// handle's currentSessionID == the session bead id); the params stay distinct
+	// so the run-chain precedence contract is preserved verbatim.
+	runID := beadmeta.ResolveRunID(meta, beadID, sessionID)
 	// The run STEP: the session's current work bead's gc.step_id, stamped at the claim
 	// hook (gc.active_work_bead). Read from the SAME session-bead snapshot as runID so
 	// StepID always names a step under this RunID. Empty when the session isn't on a
 	// formula work bead (ad-hoc/manual/idle) — run-level attribution, matching events.
-	stepID := strings.TrimSpace(bead.Metadata[beadmeta.ActiveWorkBeadMetadataKey])
+	stepID := strings.TrimSpace(meta[beadmeta.ActiveWorkBeadMetadataKey])
 	reqID := usageIdentity(u)
 	if !priced {
 		cost = 0
@@ -244,7 +248,7 @@ func modelUsageFact(u sessionlog.TailUsage, bead beads.Bead, sessionID, worker, 
 // session-keyed with an ambiguity-guarded same-workdir fallback. All errors
 // are swallowed so telemetry never affects operations.
 type invocationUsageSpec struct {
-	discover func(h *SessionHandle, id string, b beads.Bead) string
+	discover func(h *SessionHandle, id string, createdAt time.Time, meta map[string]string) string
 	extract  func(a SessionLogAdapter, path string) ([]sessionlog.TailUsage, error)
 }
 
@@ -298,7 +302,7 @@ func InvocationUsageFamily(provider string) (family string, supported bool) {
 // discoverInvocationTranscriptViaManager resolves the transcript through
 // Manager.TranscriptPath — safe for families whose route there is cheap
 // (claude keyed lookup). Errors are swallowed.
-func discoverInvocationTranscriptViaManager(h *SessionHandle, id string, _ beads.Bead) string {
+func discoverInvocationTranscriptViaManager(h *SessionHandle, id string, _ time.Time, _ map[string]string) string {
 	path, err := h.manager.TranscriptPath(id, h.adapter.SearchPaths)
 	if err != nil {
 		return ""
@@ -319,15 +323,15 @@ func discoverInvocationTranscriptViaManager(h *SessionHandle, id string, _ beads
 // creation time for directly-created sessions. Ambiguous or out-of-window
 // rollouts yield "" — telemetry silently records nothing rather than
 // misattributing.
-func discoverCodexInvocationTranscript(h *SessionHandle, _ string, b beads.Bead) string {
-	anchor := b.CreatedAt
-	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(b.Metadata["last_woke_at"])); err == nil {
+func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt time.Time, meta map[string]string) string {
+	anchor := createdAt
+	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
 		anchor = woke
 	}
-	workDir := contract.WorkerDirFromMetadata(b.Metadata)
-	if sessionKey := strings.TrimSpace(b.Metadata["session_key"]); sessionKey != "" {
+	workDir := contract.WorkerDirFromMetadata(meta)
+	if sessionKey := strings.TrimSpace(meta["session_key"]); sessionKey != "" {
 		return sessionlog.FindCodexSessionFileByID(
-			h.adapter.SearchPaths, workDir, sessionKey, b.CreatedAt, anchor)
+			h.adapter.SearchPaths, workDir, sessionKey, createdAt, anchor)
 	}
 	return sessionlog.FindCodexSessionFileNear(
 		h.adapter.SearchPaths,

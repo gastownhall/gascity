@@ -927,7 +927,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	}
 	if result.DryRun {
 		if jsonOutput {
-			return writeSlingJSONResult(result, jsonStdout, stderr)
+			return writeSlingJSONResult(result, "", jsonStdout, stderr)
 		}
 		// For batch dry-run, look up the container bead for display.
 		// DoSling sets ContainerType on the result only when it actually
@@ -954,8 +954,21 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	if result.NudgeAgent != nil {
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, humanStdout, stderr)
 	}
+	// Success only (never dry-run or error): surface a dashboard deep link
+	// when one resolves. Resolution failure degrades silently to no link.
+	dashboardURL, dashboardRunsList := slingDashboardURLHook(deps.CityPath, result)
 	if jsonOutput {
-		return writeSlingJSONResult(result, jsonStdout, stderr)
+		return writeSlingJSONResult(result, dashboardURL, jsonStdout, stderr)
+	}
+	if dashboardURL != "" {
+		// Runs-list landings lag the dashboard's cache-reconcile cycle by
+		// up to a couple of minutes, so set that expectation inline;
+		// run-detail links render immediately and stay bare.
+		suffix := ""
+		if dashboardRunsList {
+			suffix = " (new work can take a minute or two to appear)"
+		}
+		fmt.Fprintf(humanStdout, "Dashboard: %s%s\n", dashboardURL, suffix) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
@@ -982,6 +995,7 @@ type slingJSONResult struct {
 	Routed        bool                   `json:"routed"`
 	Queued        bool                   `json:"queued"`
 	DryRun        bool                   `json:"dry_run"`
+	DashboardURL  string                 `json:"dashboard_url,omitempty"`
 	Warnings      []string               `json:"warnings,omitempty"`
 	Batch         *slingJSONBatchSummary `json:"batch,omitempty"`
 }
@@ -995,8 +1009,9 @@ type slingJSONBatchSummary struct {
 	Idempotent    int    `json:"idempotent"`
 }
 
-func writeSlingJSONResult(result sling.SlingResult, stdout, stderr io.Writer) int {
+func writeSlingJSONResult(result sling.SlingResult, dashboardURL string, stdout, stderr io.Writer) int {
 	payload := slingJSONFromResult(result)
+	payload.DashboardURL = dashboardURL
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

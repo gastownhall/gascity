@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/dashboardbff"
@@ -144,6 +145,68 @@ func TestDashboardCityResolverCitiesEmpty(t *testing.T) {
 	if got := res.Cities(); len(got) != 0 {
 		t.Errorf("Cities() = %+v, want empty", got)
 	}
+}
+
+// TestAttachDashboardInstallsDashboardBase guards the sling dashboard_url
+// wiring: for loopback and explicit-host binds attachDashboard must install
+// the listener's browser-reachable link base on the mux, or per-city handlers
+// can never mint dashboard deep links even though the dashboard is served.
+// For wildcard binds it must install NO base: the loopback literal the
+// samplers dial is browser-reachable only on the supervisor host, so a remote
+// /v0 sling caller would receive a dashboard_url pointing at its own machine.
+// Wildcard responses omit dashboard_url instead (silent degradation).
+func TestAttachDashboardInstallsDashboardBase(t *testing.T) {
+	cases := map[string]struct {
+		bind string
+		want string // "" means no link base installed
+	}{
+		"loopback v4":         {"127.0.0.1", "http://127.0.0.1:8372"},
+		"empty bind default":  {"", "http://127.0.0.1:8372"},
+		"localhost":           {"localhost", "http://127.0.0.1:8372"},
+		"loopback v6":         {"::1", "http://[::1]:8372"},
+		"explicit lan":        {"192.168.1.5", "http://192.168.1.5:8372"},
+		"wildcard v4":         {"0.0.0.0", ""},
+		"wildcard v6":         {"::", ""},
+		"wildcard v6 bracket": {"[::]", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GC_SUPERVISOR_DASHBOARD", "")
+			mux := newTestSupervisorMuxForDashboard()
+			plane, err := attachDashboard(mux, fakeDashResolver{}, false, tc.bind, 8372)
+			if err != nil {
+				t.Fatalf("attachDashboard: %v", err)
+			}
+			if plane == nil {
+				t.Fatal("attachDashboard returned nil plane with dashboard enabled")
+			}
+			if got := mux.DashboardBaseURL(); got != tc.want {
+				t.Fatalf("DashboardBaseURL for bind %q = %q, want %q", tc.bind, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAttachDashboardDisabledLeavesNoDashboardBase pins the standalone shape:
+// with the dashboard disabled the mux must report no link base, so sling
+// responses omit dashboard_url instead of minting dead links.
+func TestAttachDashboardDisabledLeavesNoDashboardBase(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_DASHBOARD", "0")
+	mux := newTestSupervisorMuxForDashboard()
+	plane, err := attachDashboard(mux, fakeDashResolver{}, false, "127.0.0.1", 8372)
+	if err != nil {
+		t.Fatalf("attachDashboard: %v", err)
+	}
+	if plane != nil {
+		t.Fatal("attachDashboard returned a plane with the dashboard disabled")
+	}
+	if got := mux.DashboardBaseURL(); got != "" {
+		t.Fatalf("DashboardBaseURL = %q, want empty when the dashboard is disabled", got)
+	}
+}
+
+func newTestSupervisorMuxForDashboard() *api.SupervisorMux {
+	return api.NewSupervisorMux(fakeDashResolver{}, nil, false, "vtest", "btest", time.Now())
 }
 
 func TestDashboardEnabledToggle(t *testing.T) {

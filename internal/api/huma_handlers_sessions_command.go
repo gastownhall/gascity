@@ -416,21 +416,32 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, apierr.ValidationFailed.Msg("at least one of 'title' or 'alias' is required")
 	}
 
-	b, err := store.Get(id)
+	// Validate through the session front door: the codec stays confined inside
+	// Store.Get. A present-but-non-session bead yields ErrSessionNotFound → the
+	// existing "not a session" 400; an absent id stays on the beads.ErrNotFound
+	// chain → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
 		return nil, humaStoreError(err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+	// Preserve the empty-type heal RepairEmptyType performed on the raw bead.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	updateFn := func() error {
 		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
+		// agent_name off the persisted Info from the front door — the
+		// controller-managed-alias gate; the codec projection of the persisted
+		// agent_name field, with no raw bead in the handler's hands.
+		if strings.TrimSpace(info.AgentName) != "" {
 			return nil, apierr.Forbidden.Msg("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
@@ -445,7 +456,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -472,6 +483,12 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
+	// WI-6 residual: raw-validation lane NOT converted to the session front door,
+	// because the raw bead is read downstream — b.Metadata feeds legacySessionKind
+	// and resolveProviderForSessionOptions below (provider/options resolution reads
+	// the raw metadata map, not projected Info fields). Converting needs an
+	// Info/PersistedResponse-fed provider-options resolution; deferred to the
+	// front-door flip (WI-7). The 400/404 contract matches the converted siblings.
 	b, err := store.Get(id)
 	if err != nil {
 		return nil, humaStoreError(err)
@@ -524,7 +541,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	s.state.Poke()
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -866,30 +883,31 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		return nil, humaResolveError(err)
 	}
 
-	b, err := store.Get(id)
+	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
+		if errors.Is(err, session.ErrNotSessionBead) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
+		if state, conflict := session.WakeConflictState(err); conflict {
+			return nil, apierr.SessionConflict.Msg("session " + id + " is " + state)
+		}
+		// Route every remaining store error through humaStoreError: the fused
+		// Get error keeps its original 404 "not_found: "/500 "internal: " mapping,
+		// and a mid-wake write error keeps the "internal: " prefix. (Delta vs the
+		// pre-fusion handler: a mid-wake write ErrNotFound now maps 404 instead of
+		// 500 — a safe-direction, near-unreachable shift, mirrored in the REST
+		// handler's writeStoreError.)
 		return nil, humaStoreError(err)
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
-	}
-	session.RepairEmptyType(store.Store, &b)
-	if b.Status == "closed" {
-		return nil, apierr.SessionConflict.Msg("session " + id + " is closed")
-	}
-
-	nudgeIDs, err := session.WakeSession(store.Store, b, time.Now().UTC())
-	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
 	}
 	// Nudge withdrawal reads the nudges class, so it sources the typed
 	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), res.NudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// RAW SessionNameMetadata (not Info.SessionName, which falls back to
-	// sessionNameFor(ID)) to preserve the skip-when-unset behavior.
-	sessionName := session.InfoFromPersistedBead(b).SessionNameMetadata
+	// sessionNameFor(ID)) to preserve the skip-when-unset behavior. res.Info is
+	// the typed WakeResult projection (WI-4), so no raw bead is cracked here.
+	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
@@ -925,21 +943,28 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 	}
 
 	// Huma validates Body.Title (minLength:1); no handler guard needed.
-	b, err := store.Get(id)
+	// Validate through the session front door (mirrors humaHandleSessionPatch):
+	// nothing downstream reads the raw bead — rename operates by id. Present-but-
+	// non-session → the existing "not a session" 400; absent → beads.ErrNotFound
+	// → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
 		return nil, humaStoreError(err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	if err := mgr.Rename(id, input.Body.Title); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

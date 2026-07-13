@@ -351,21 +351,25 @@ func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) 
 	if !sessFront.Backed() {
 		return
 	}
-	sessions, err := sessFront.Store().ListByLabel("gc:session", 0)
+	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
+	// lister is byte-identical to the former ListByLabel("gc:session") + closed-skip
+	// sweep: it keeps damaged gc:session-labeled beads with a non-"session" type (which
+	// the narrowing Store.List would drop) and reads each row's classifier through the
+	// typed twin (sessionMetadataStateInfo) + the Info.SleepReason mirror.
+	sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
 		return
 	}
-	for _, s := range sessions {
-		state := sessionMetadataState(s)
-		if state != "active" {
+	for _, info := range sessions {
+		if sessionMetadataStateInfo(info) != "active" {
 			continue
 		}
-		if strings.TrimSpace(s.Metadata["sleep_reason"]) != "" {
+		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(s.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort warning
+		if err := sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
+			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }

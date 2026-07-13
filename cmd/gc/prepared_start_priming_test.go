@@ -6,6 +6,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestPreparedStartPromptDelivered pins the S19 B0 trap: prepared.promptDelivered
@@ -57,7 +58,7 @@ func TestPreparedStartPromptDelivered(t *testing.T) {
 				t.Fatalf("Create(session): %v", err)
 			}
 			candidate := startCandidate{
-				session: &session,
+				info: sessiontest.SeedBead(t, session),
 				tp: TemplateParams{
 					TemplateName: "worker",
 					SessionName:  "worker",
@@ -65,7 +66,7 @@ func TestPreparedStartPromptDelivered(t *testing.T) {
 					Prompt:       tc.prompt,
 				},
 			}
-			prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+			prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 			if err != nil {
 				t.Fatalf("buildPreparedStart: %v", err)
 			}

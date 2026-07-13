@@ -264,7 +264,7 @@ func (s *partialPrimeSessionStore) List(query beads.ListQuery) ([]beads.Bead, er
 	return rows, nil
 }
 
-func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.T) {
+func TestSessionReadModelInfosFallsBackAfterPartialCachePrime(t *testing.T) {
 	t.Parallel()
 
 	backing := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
@@ -295,16 +295,21 @@ func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.
 		t.Fatalf("Prime: %v", err)
 	}
 
-	rows, err := listSessionBeadsForReadModel(cache)
-	var partial *beads.PartialResultError
-	if !errors.As(err, &partial) {
-		t.Fatalf("listSessionBeadsForReadModel error = %v, want *PartialResultError", err)
+	// A partial prime makes the cache peek miss, so the typed feed falls through
+	// to the direct union (the backing label leg runs) and folds the partial into
+	// the partial-error envelope while still serving the survivor.
+	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: cache}))
+	if err != nil {
+		t.Fatalf("sessionReadModelInfos error = %v, want nil (partial folded into the envelope)", err)
+	}
+	if len(partialErrors) != 1 {
+		t.Fatalf("partialErrors = %v, want exactly one folded partial error", partialErrors)
 	}
 	if backing.labelListCalls != 1 {
 		t.Fatalf("label List calls = %d, want 1 backing fallback after partial prime", backing.labelListCalls)
 	}
-	if len(rows) != 1 || rows[0].ID != survivor.ID {
-		t.Fatalf("rows = %+v, want partial survivor %s", rows, survivor.ID)
+	if len(infos) != 1 || infos[0].ID != survivor.ID {
+		t.Fatalf("infos = %+v, want partial survivor %s", infos, survivor.ID)
 	}
 }
 

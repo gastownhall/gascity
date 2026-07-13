@@ -94,6 +94,7 @@ function agent(overrides: Partial<AgentResponse> & { sessionPresent?: boolean })
     state: 'asleep',
     running: false,
     suspended: false,
+    pack_derived: false,
     ...rest,
     ...sessionField,
   };

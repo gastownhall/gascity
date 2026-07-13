@@ -474,6 +474,16 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	}
 }
 
+func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) {
+	err := joinDrainAckMutationErrors(
+		fmt.Errorf("setting metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+		fmt.Errorf("removing metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+	)
+	if err != nil {
+		t.Fatalf("joinDrainAckMutationErrors(...) = %v, want nil for missing session bead", err)
+	}
+}
+
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
 	old := drainAckPokeController
 	drainAckPokeController = func(string) error { return nil }

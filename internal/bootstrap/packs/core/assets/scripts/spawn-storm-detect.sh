@@ -33,7 +33,7 @@ fi
 
 # Step 1: Find beads that were recently reset to pool.
 # Look for open beads that have been updated (recovery resets them to open + unassigned).
-OPEN_BEADS=$(bd list --status=open --assignee="" --json --limit=0 2>/dev/null) || exit 0
+OPEN_BEADS=$(gc bd list --status=open --assignee="" --json --limit=0 2>/dev/null) || exit 0
 if [ -z "$OPEN_BEADS" ] || [ "$OPEN_BEADS" = "[]" ]; then
     exit 0
 fi
@@ -54,7 +54,7 @@ while IFS= read -r bead_id; do
     COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$NEW" '.[$id] = $n')
 
     if [ "$NEW" -ge "$THRESHOLD" ]; then
-        TITLE_JSON=$(bd show "$bead_id" --json 2>/dev/null || true)
+        TITLE_JSON=$(gc bd show "$bead_id" --json 2>/dev/null || true)
         TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
         gc mail send mayor/ \
             -s "SPAWN_STORM: bead $bead_id reset ${NEW}x" \
@@ -62,7 +62,7 @@ while IFS= read -r bead_id; do
 This likely indicates a polecat crash loop on this specific work.
 
 Recommended actions:
-- Inspect the bead: bd show $bead_id --json
+- Inspect the bead: gc bd show $bead_id --json
 - Check rejection history: metadata.rejection_reason
 - Consider quarantining the bead or investigating the root cause." \
             2>/dev/null || true
@@ -72,11 +72,11 @@ done <<< "$RESET_IDS"
 
 # Step 4: Prune closed beads from ledger.
 # Only check beads actually tracked in the ledger (avoids expensive full scan
-# of all closed beads via bd list --status=closed --limit=0).
+# of all closed beads via gc bd list --status=closed --limit=0).
 TRACKED_IDS=$(echo "$COUNTS" | jq -r 'keys[]' 2>/dev/null) || true
 while IFS= read -r tid; do
     [ -z "$tid" ] && continue
-    if BEAD_OUTPUT=$(bd show "$tid" --json 2>&1); then
+    if BEAD_OUTPUT=$(gc bd show "$tid" --json 2>&1); then
         BEAD_STATUS=$(echo "$BEAD_OUTPUT" | jq -r 'if type == "array" then (.[0].status // "deleted") elif type == "object" and ((.error // "") | test("not found|no issue found"; "i")) then "deleted" else "unknown" end' 2>/dev/null || echo "unknown")
     elif echo "$BEAD_OUTPUT" | grep -qiE 'not found|no issue found'; then
         BEAD_STATUS="deleted"

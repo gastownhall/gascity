@@ -431,11 +431,11 @@ func (h *SessionHandle) currentSessionID() string {
 }
 
 func (h *SessionHandle) startCommand(id string) (string, error) {
-	info, b, err := h.manager.GetWithBead(id)
+	info, pr, err := sessionRecordViaManager(h.manager, id)
 	if err != nil {
 		return "", err
 	}
-	if firstProviderSessionStart(info.State, b.Metadata) &&
+	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
 		command := strings.TrimSpace(info.Command)

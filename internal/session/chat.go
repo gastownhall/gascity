@@ -1010,7 +1010,11 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		return "", err
 	}
 	if len(sameWorkDirSessions) > 1 {
-		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirSessions); path != "" {
+		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
+		for _, s := range sameWorkDirSessions {
+			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
+		}
+		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
 			return path, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same

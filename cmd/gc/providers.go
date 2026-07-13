@@ -225,11 +225,15 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	// closes the gap on both the CLI and controller provider-construction paths.
 	// Identity to the opened store today (resolveClassStore is pure identity).
 	sessStore := cliSessionStore(store, ctx.cfg, ctx.cityPath)
-	all, err := sessStore.ListByLabel(sessionBeadLabel, 0)
+	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
+	// lister is byte-identical to the retired newSessionBeadSnapshot(ListByLabel(
+	// gc:session)) set: same gc:session label scope, same closed exclusion, same
+	// no-narrowing (a damaged non-"session"-typed labeled bead is still surfaced).
+	infos, err := session.NewStore(beads.SessionStore{Store: sessStore}).ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		return nil
 	}
-	return newSessionBeadSnapshot(all)
+	return newSessionBeadSnapshotFromInfos(infos)
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) runtime.Provider {
@@ -536,8 +540,10 @@ func configuredACPRouteNames(snapshot *sessionBeadSnapshot, cityName string, cfg
 		}
 		sessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
 		if snapshot != nil {
-			if snapName := snapshot.FindSessionNameByNamedIdentity(named.QualifiedName()); snapName != "" {
-				sessionName = snapName
+			if info, ok := snapshot.FindInfoByNamedIdentity(named.QualifiedName()); ok {
+				if snapName := strings.TrimSpace(info.SessionNameMetadata); snapName != "" {
+					sessionName = snapName
+				}
 			}
 		}
 		if sessionName == "" || seen[sessionName] {

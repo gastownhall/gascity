@@ -23,7 +23,8 @@ type RigGetInput struct {
 // RigCreateInput is the Huma input for POST /v0/city/{cityName}/rigs.
 type RigCreateInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Name          string `json:"name" doc:"Rig name." minLength:"1"`
 		Path          string `json:"path" doc:"Filesystem path." minLength:"1"`
 		Prefix        string `json:"prefix,omitempty" doc:"Session name prefix."`

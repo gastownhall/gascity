@@ -57,7 +57,7 @@ fi
 
 Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
+WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -75,7 +75,7 @@ cd "$WORKTREE_PATH"
 ```
 Record immediately so restarts and witness recovery can find it:
 ```bash
-bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
+gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
 ```
 
 **3. Ensure clean working state:**
@@ -138,13 +138,13 @@ done
 WORKTREE_PATH=$(pwd)
 cd ..
 git worktree remove "$WORKTREE_PATH" --force
-bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 
 **4. Close the bead:**
 ```bash
-bd update "$WORK_BEAD_ID" --notes "Committed directly to {{base_branch}}: <brief summary>"
-bd close "$WORK_BEAD_ID"
+gc bd update "$WORK_BEAD_ID" --notes "Committed directly to {{base_branch}}: <brief summary>"
+gc bd close "$WORK_BEAD_ID"
 ```
 
 **5. Signal reconciler and exit.**

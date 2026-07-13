@@ -3525,11 +3525,11 @@ func TestDoSling_Reassign_DryRunSkipsClear(t *testing.T) {
 	}
 }
 
-// TestClearHumanAssignee_RigStore: clearHumanAssignee clears the assignee on
+// TestReopenForReassign_RigStore: reopenForReassign clears the assignee on
 // a rig-prefixed bead whose record lives in a source-workflow (rig) store
 // rather than the city primary store. Direct unit test of the multi-store
 // fallback added for gastownhall/gascity#3408.
-func TestClearHumanAssignee_RigStore(t *testing.T) {
+func TestReopenForReassign_RigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
@@ -3542,8 +3542,8 @@ func TestClearHumanAssignee_RigStore(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	if err := clearHumanAssignee(bead.ID, deps); err != nil {
-		t.Fatalf("clearHumanAssignee: %v", err)
+	if err := reopenForReassign(bead.ID, deps); err != nil {
+		t.Fatalf("reopenForReassign: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)
 	if err != nil {
@@ -3554,13 +3554,13 @@ func TestClearHumanAssignee_RigStore(t *testing.T) {
 	}
 }
 
-// TestClearHumanAssignee_PrimaryStoreReadError: a non-ErrNotFound failure from
+// TestReopenForReassign_PrimaryStoreReadError: a non-ErrNotFound failure from
 // the city primary store must abort the clear with a contextual error rather
 // than falling through to the source-workflow sweep. A real read failure under
 // --force --reassign would otherwise be treated like a miss, so routing could
 // proceed with the human assignee uncleared (or a same-ID bead cleared in a
 // different store). Regression for the gastownhall/gascity#3408 review.
-func TestClearHumanAssignee_PrimaryStoreReadError(t *testing.T) {
+func TestReopenForReassign_PrimaryStoreReadError(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
 	if err != nil {
@@ -3574,9 +3574,9 @@ func TestClearHumanAssignee_PrimaryStoreReadError(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	err = clearHumanAssignee(bead.ID, deps)
+	err = reopenForReassign(bead.ID, deps)
 	if err == nil {
-		t.Fatal("clearHumanAssignee error = nil, want primary read failure")
+		t.Fatal("reopenForReassign error = nil, want primary read failure")
 	}
 	if !strings.Contains(err.Error(), "backend unavailable") {
 		t.Fatalf("error = %q, want wrapped primary read failure", err)
@@ -3596,12 +3596,12 @@ func TestClearHumanAssignee_PrimaryStoreReadError(t *testing.T) {
 	}
 }
 
-// TestClearHumanAssignee_SourceStoreReadError: a non-ErrNotFound failure while
+// TestReopenForReassign_SourceStoreReadError: a non-ErrNotFound failure while
 // reading a source-workflow store during the rig-store sweep aborts the clear
 // with a store-ref-qualified error instead of silently skipping the store,
 // which would leave the bead human-assigned and pool-invisible (the #3408
 // symptom) under partial store failure.
-func TestClearHumanAssignee_SourceStoreReadError(t *testing.T) {
+func TestReopenForReassign_SourceStoreReadError(t *testing.T) {
 	deps := SlingDeps{
 		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
@@ -3610,9 +3610,9 @@ func TestClearHumanAssignee_SourceStoreReadError(t *testing.T) {
 			}, nil
 		},
 	}
-	err := clearHumanAssignee("gc-123", deps)
+	err := reopenForReassign("gc-123", deps)
 	if err == nil {
-		t.Fatal("clearHumanAssignee error = nil, want source-store read failure")
+		t.Fatal("reopenForReassign error = nil, want source-store read failure")
 	}
 	if !strings.Contains(err.Error(), "rig store unreadable") {
 		t.Fatalf("error = %q, want wrapped source-store read failure", err)
@@ -3622,23 +3622,23 @@ func TestClearHumanAssignee_SourceStoreReadError(t *testing.T) {
 	}
 }
 
-// TestClearHumanAssignee_SourceStoreListError: a failure from the
+// TestReopenForReassign_SourceStoreListError: a failure from the
 // SourceWorkflowStores lister itself — the callback returning an error before
 // any store can be scanned, distinct from a per-store Get failure — aborts the
 // clear with a bead-qualified error instead of silently no-op'ing. This is the
 // fail-loud guard for the #3408 --reassign contract: if the source-workflow
 // stores cannot even be listed after a primary-store miss, routing must not
 // proceed as though the bead were absent everywhere and leave it human-assigned.
-func TestClearHumanAssignee_SourceStoreListError(t *testing.T) {
+func TestReopenForReassign_SourceStoreListError(t *testing.T) {
 	deps := SlingDeps{
 		Store: beads.NewMemStore(), // bead is absent here (ErrNotFound), so the sweep runs
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return nil, fmt.Errorf("stores unavailable")
 		},
 	}
-	err := clearHumanAssignee("gc-456", deps)
+	err := reopenForReassign("gc-456", deps)
 	if err == nil {
-		t.Fatal("clearHumanAssignee error = nil, want source-workflow store listing failure")
+		t.Fatal("reopenForReassign error = nil, want source-workflow store listing failure")
 	}
 	if !strings.Contains(err.Error(), "listing source-workflow stores") {
 		t.Fatalf("error = %q, want wrapped source-workflow store listing failure", err)
@@ -3651,11 +3651,11 @@ func TestClearHumanAssignee_SourceStoreListError(t *testing.T) {
 	}
 }
 
-// TestClearHumanAssignee_NilPrimaryStore: with no city primary store, the clear
+// TestReopenForReassign_NilPrimaryStore: with no city primary store, the clear
 // still sweeps the source-workflow stores and clears the assignee where the
 // bead lives, matching the multi-store behavior of sourceWorkflowRootByID. A
 // nil deps.Store must not skip available rig stores.
-func TestClearHumanAssignee_NilPrimaryStore(t *testing.T) {
+func TestReopenForReassign_NilPrimaryStore(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "human"})
 	if err != nil {
@@ -3667,8 +3667,8 @@ func TestClearHumanAssignee_NilPrimaryStore(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	if err := clearHumanAssignee(bead.ID, deps); err != nil {
-		t.Fatalf("clearHumanAssignee: %v", err)
+	if err := reopenForReassign(bead.ID, deps); err != nil {
+		t.Fatalf("reopenForReassign: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)
 	if err != nil {
@@ -3682,7 +3682,7 @@ func TestClearHumanAssignee_NilPrimaryStore(t *testing.T) {
 // TestDoSling_Reassign_ClearsHumanAssignee_RigStore: --reassign clears a human
 // assignee on a rig-prefixed bead whose record lives in the rig store, not the
 // city primary store. Regression for gastownhall/gascity#3408 — the clear
-// previously no-op'd because clearHumanAssignee only consulted deps.Store, so
+// previously no-op'd because reopenForReassign only consulted deps.Store, so
 // the bead stayed routed+human-assigned and invisible to the pool scaler.
 func TestDoSling_Reassign_ClearsHumanAssignee_RigStore(t *testing.T) {
 	runner := newFakeRunner()

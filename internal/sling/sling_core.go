@@ -147,13 +147,16 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
-	// Reassign: clear any existing human assignee before routing so the
-	// target pool/agent can claim the bead. Without this, beads claimed
-	// by `bd update --claim` stay invisible to the pool's claim filter
-	// even after sling sets gc.routed_to. See gastownhall/gascity#1007.
+	// Reassign: make the bead claimable by the target pool/agent before
+	// routing — clear any existing assignee and reopen it if a prior actor
+	// left it in_progress. Without this, a bead claimed by `bd update --claim`
+	// (status=in_progress, assignee=<actor>) stays invisible to the pool's
+	// claim filter even after sling sets gc.routed_to: clearing the assignee
+	// alone is not enough because IsReadyCandidate requires status=open. See
+	// gastownhall/gascity#1007 (assignee) and #3231 (status).
 	if opts.Reassign && !opts.DryRun {
-		if err := clearHumanAssignee(opts.BeadOrFormula, deps); err != nil {
-			return result, fmt.Errorf("clearing assignee for %s: %w", opts.BeadOrFormula, err)
+		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
+			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
 		}
 	}
 
@@ -1426,28 +1429,30 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
 }
 
-// clearHumanAssignee unsets the bead's assignee if non-empty. It checks the
-// city primary store (deps.Store) first; if the bead is not there it sweeps
-// the source-workflow stores (deps.SourceWorkflowStores) so rig-prefixed beads
-// — whose record lives in a rig store, not deps.Store — still get cleared.
-// No-op when the assignee is already empty, no store is available, or the bead
-// is absent from every store. Errors on a real primary-store read failure, a
-// store-Update failure, or a SourceWorkflowStores listing/read failure. See
-// SlingOpts.Reassign, #1007, and #3408.
-func clearHumanAssignee(beadID string, deps SlingDeps) error {
+// reopenForReassign makes a bead claimable by a target pool before routing:
+// it clears any assignee and reopens the bead if a prior actor left it
+// in_progress. It checks the city primary store (deps.Store) first; if the
+// bead is not there it sweeps the source-workflow stores
+// (deps.SourceWorkflowStores) so rig-prefixed beads — whose record lives in a
+// rig store, not deps.Store — are still reopened. No-op when the bead is
+// already open and unassigned, no store is available, or the bead is absent
+// from every store. Errors on a real primary-store read failure, a store-Update
+// failure, or a SourceWorkflowStores listing/read failure. See
+// SlingOpts.Reassign, #1007, #3408 (assignee), and #3231 (status).
+func reopenForReassign(beadID string, deps SlingDeps) error {
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {
-			return clearAssigneeInStore(deps.Store, beadID, b)
+			return reopenForReassignInStore(deps.Store, beadID, b)
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
-			return fmt.Errorf("reading %s from primary store to clear assignee: %w", beadID, err)
+			return fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
 		}
 		// ErrNotFound: the record is not in the city primary store. For
 		// rig-prefixed beads it lives in a rig store, so fall through to the
 		// source-workflow sweep below.
 	}
-	// Sweep the source-workflow stores and clear the bead in whichever one
+	// Sweep the source-workflow stores and reopen the bead in whichever one
 	// holds it. Mirrors the multi-store pattern in sourceWorkflowRootByID,
 	// which likewise consults the workflow stores when deps.Store lacks (or
 	// omits) the bead.
@@ -1456,7 +1461,7 @@ func clearHumanAssignee(beadID string, deps SlingDeps) error {
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		return fmt.Errorf("listing source-workflow stores to clear assignee for %s: %w", beadID, err)
+		return fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
 	}
 	for _, info := range stores {
 		if info.Store == nil {
@@ -1467,19 +1472,32 @@ func clearHumanAssignee(beadID string, deps SlingDeps) error {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("reading %s from store %q to clear assignee: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+			return fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return clearAssigneeInStore(info.Store, beadID, b)
+		return reopenForReassignInStore(info.Store, beadID, b)
 	}
 	return nil
 }
 
-// clearAssigneeInStore unsets the assignee on b in store, returning nil when
-// the assignee is already empty so no spurious store write occurs.
-func clearAssigneeInStore(store beads.Store, beadID string, b beads.Bead) error {
-	if strings.TrimSpace(b.Assignee) == "" {
+// reopenForReassignInStore clears b's assignee and resets an in_progress
+// status back to open in a single update, returning nil without writing when
+// the bead is already open and unassigned so no spurious store write occurs.
+// The status reset is what makes a bead that an order or human previously
+// claimed (status=in_progress) claimable again — IsReadyCandidate requires
+// status=open, so clearing the assignee alone leaves it routed-but-unclaimable
+// (gastownhall/gascity#3231).
+func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) error {
+	var update beads.UpdateOpts
+	if strings.TrimSpace(b.Assignee) != "" {
+		empty := ""
+		update.Assignee = &empty
+	}
+	if b.Status == "in_progress" {
+		open := "open"
+		update.Status = &open
+	}
+	if update.Assignee == nil && update.Status == nil {
 		return nil
 	}
-	empty := ""
-	return store.Update(beadID, beads.UpdateOpts{Assignee: &empty})
+	return store.Update(beadID, update)
 }

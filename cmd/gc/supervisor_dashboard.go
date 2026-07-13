@@ -67,6 +67,19 @@ func attachDashboard(mux *api.SupervisorMux, resolver api.CityResolver, readOnly
 	}
 	plane := dashboardbff.New(dashboardDeps(resolver, readOnly, bind, port, mux.LoopbackTransport()))
 	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
+	// Install the listener's link base alongside the SPA so per-city handlers
+	// can mint dashboard deep links (the sling response's dashboard_url).
+	// Standalone controller processes never call attachDashboard, so their
+	// /v0 responses omit the link instead of pointing at a dead origin.
+	// Wildcard binds also skip the base: dashboardLoopbackBaseURL would yield
+	// a loopback literal that is browser-reachable only on the supervisor
+	// host, so a remote /v0 caller would receive a dashboard_url pointing at
+	// its own machine. Omitting the link is the decided degradation — do NOT
+	// derive a base from request Host headers, which are spoofable.
+	if !wildcardBind(bind) {
+		base := dashboardLoopbackBaseURL(bind, port)
+		mux.WithDashboardBase(func() string { return base })
+	}
 	return plane, nil
 }
 
@@ -95,10 +108,26 @@ func dashboardDeps(resolver api.CityResolver, readOnly bool, bind string, port i
 	}
 }
 
+// wildcardBind reports whether bind is a wildcard listener address (every
+// spelling dashboardLoopbackBaseURL normalizes as wildcard; the empty string
+// is NOT one — it means the config default, which BindOrDefault resolves to
+// loopback). Wildcard binds have no single browser-reachable origin, so
+// attachDashboard skips the dashboard link base for them.
+func wildcardBind(bind string) bool {
+	switch bind {
+	case "0.0.0.0", "::", "[::]":
+		return true
+	}
+	return false
+}
+
 // dashboardLoopbackBaseURL builds the base URL the host-side samplers use to
 // read the supervisor's own /v0 API in-process. The supervisor may bind a
 // wildcard or non-loopback address, but the self-read must always dial
 // loopback, so wildcard/localhost binds are normalized to a loopback literal.
+// This is the samplers' self-read address, not necessarily a browser-reachable
+// origin — for wildcard binds attachDashboard must not reuse it as the
+// dashboard link base.
 func dashboardLoopbackBaseURL(bind string, port int) string {
 	host := bind
 	switch bind {

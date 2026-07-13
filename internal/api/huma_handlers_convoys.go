@@ -211,38 +211,48 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 // humaHandleConvoyCreate is the Huma-typed handler for POST /v0/convoys.
 // Title required via struct tag on ConvoyCreateInput.
 func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateInput) (*IndexOutput[beads.Bead], error) {
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		return nil, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
-	}
-
-	// Pre-validate all items exist before creating the convoy.
-	for _, itemID := range input.Body.Items {
-		if _, err := store.Get(itemID); err != nil {
-			return nil, storeError(err)
-		}
-	}
-
-	convoy, err := store.Create(beads.Bead{
-		Title: input.Body.Title,
-		Type:  "convoy",
-	})
-	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
-	}
-
-	// Link child items to convoy one at a time. On first failure, roll
-	// back previously-created tracks deps and THEN delete the new convoy.
-	applied := make([]string, 0, len(input.Body.Items))
-	for _, itemID := range input.Body.Items {
-		if err := convoycore.TrackItem(store, convoy.ID, itemID); err != nil {
-			rollbackConvoyTracks(store, convoy.ID, applied, "convoy.create")
-			if delErr := store.Delete(convoy.ID); delErr != nil {
-				log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", convoy.ID, delErr)
+	// Idempotency: create at most once per Idempotency-Key. Item validation,
+	// the convoy bead create, and the link loop (with its rollback) all live in
+	// the closure so a failed create releases the reservation for retry.
+	convoy, err := withIdempotency(s, "/v0/convoys", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			return nil, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
-		}
-		applied = append(applied, itemID)
+
+			// Pre-validate all items exist before creating the convoy.
+			for _, itemID := range input.Body.Items {
+				if _, err := store.Get(itemID); err != nil {
+					return beads.Bead{}, storeError(err)
+				}
+			}
+
+			created, err := store.Create(beads.Bead{
+				Title: input.Body.Title,
+				Type:  "convoy",
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
+			}
+
+			// Link child items to convoy one at a time. On first failure, roll
+			// back previously-created tracks deps and THEN delete the new convoy.
+			applied := make([]string, 0, len(input.Body.Items))
+			for _, itemID := range input.Body.Items {
+				if err := convoycore.TrackItem(store, created.ID, itemID); err != nil {
+					rollbackConvoyTracks(store, created.ID, applied, "convoy.create")
+					if delErr := store.Delete(created.ID); delErr != nil {
+						log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", created.ID, delErr)
+					}
+					return beads.Bead{}, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
+				}
+				applied = append(applied, itemID)
+			}
+			return created, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
 	return &IndexOutput[beads.Bead]{

@@ -263,6 +263,63 @@ func TestStatusListStoreWithTimeoutKillsBdChildOnTimeout(t *testing.T) {
 	t.Fatalf("bd child process %s survived statusListStoreWithTimeout's timeout", childPid)
 }
 
+// TestStatusSessionSnapshotBoundsSlowScopedStoreResolution proves the
+// scoped-store *resolution* itself (not just the read through it) is bounded
+// by statusStoreReadTimeout. ScopedStoreLike resolves the bd env / managed-
+// dolt connection state synchronously, and that work can block on a mutex the
+// reconcile loop holds without honoring the request ctx (gc-08qgn: /status
+// hung ~20s-2min dragging the supervisor loop). A resolution that ignores ctx
+// must still not hang the handler past its own read budget.
+func TestStatusSessionSnapshotBoundsSlowScopedStoreResolution(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	// Block for far longer than statusStoreReadTimeout WITHOUT honoring ctx,
+	// mirroring a ctx-blind mutex acquire in the real env/store resolution.
+	state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		time.Sleep(3 * time.Second)
+		return nil, nil
+	}
+	s := &Server{state: state}
+
+	start := time.Now()
+	snapshot := s.statusSessionSnapshot(context.Background())
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("statusSessionSnapshot blocked %s on scoped-store resolution; want bounded by statusStoreReadTimeout", elapsed)
+	}
+	joined := strings.Join(snapshot.partialErrors, "; ")
+	if !strings.Contains(joined, "timed out") {
+		t.Fatalf("partialErrors = %v, want a timed-out entry when resolution exceeds the budget", snapshot.partialErrors)
+	}
+}
+
+// TestStatusListStoreWithTimeoutBoundsSlowScopedStoreResolution is the
+// per-rig work-count analog of the above: a slow, ctx-blind ScopedStoreLike
+// resolution must not hang statusListStoreWithTimeout past its read budget.
+func TestStatusListStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	state := newFakeState(t)
+	state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		time.Sleep(3 * time.Second)
+		return nil, nil
+	}
+
+	start := time.Now()
+	_, err := statusListStoreWithTimeout(context.Background(), state, beads.NewMemStore(), beads.ListQuery{AllowScan: true})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("statusListStoreWithTimeout blocked %s on scoped-store resolution; want bounded by statusStoreReadTimeout", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("statusListStoreWithTimeout error = %v, want a timed-out error when resolution exceeds the budget", err)
+	}
+}
+
 func writeExecutableScopedTest(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

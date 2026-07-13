@@ -1004,7 +1004,13 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
-	out, err := s.runner(s.dir, "bd", "show", "--json", id)
+	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
+	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
+	// "invalid connection"/"i/o timeout" transport error. The runner performs a
+	// single recover-and-retry per call; the wrapper's outer attempts give the
+	// rebind enough total time to complete under CI load, matching every other
+	// BdStore read/write path (ga-gellq1).
+	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -1094,6 +1100,19 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
+//
+// SEAM (bd conditional-release verb): today this rides raw `bd sql`. The
+// sqlite backend refuses raw DB access, so that rejection — and embedded dolt
+// WITHOUT a configured dolt directory — surface ErrConditionalReleaseUnsupported
+// (the latter via the releaseIfCurrentViaEmbeddedDoltSQL fallback). Embedded
+// dolt WITH a configured directory instead services the CAS directly through
+// that fallback, returning real rows-affected rather than reporting
+// unsupported. When bd ships its native issueops CAS release verb, consume it
+// HERE as the first attempt:
+// probe by invoking the verb and fall back to this `bd sql` path when bd
+// reports the command unknown (older pinned bd). Callers already treat
+// ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
+// (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
@@ -1878,7 +1897,24 @@ func isBdTransientWriteError(err error) bool {
 	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
 		strings.Contains(msg, "this transaction conflicts with a committed transaction") ||
 		strings.Contains(msg, "failed to prepare catalog") ||
+		isBdSqliteBusyError(msg) ||
 		isBdAmbiguousWriteError(err)
+}
+
+// isBdSqliteBusyError reports whether msg carries an explicit sqlite
+// busy/locked result-code marker ("database is locked (5) (SQLITE_BUSY)"
+// and friends) — the sqlite analog of a Dolt serialization failure: the
+// write lost a lock race without applying, so it is safe to retry. Only
+// the unambiguous SQLITE_BUSY / SQLITE_LOCKED code markers match. bd's
+// sqlite driver (modernc.org/sqlite) always appends the code marker, so
+// this loses no real coverage, while bare "database is locked" phrasings
+// stay excluded on purpose: Dolt's embedded mode emits "database is
+// locked by another dolt process" for a persistent lock-file condition
+// that a bounded retry cannot clear and must keep failing fast.
+func isBdSqliteBusyError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "sqlite_busy") ||
+		strings.Contains(lower, "sqlite_locked")
 }
 
 func isBdAmbiguousWriteError(err error) bool {
@@ -2528,7 +2564,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -2570,7 +2606,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil

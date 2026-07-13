@@ -446,39 +446,46 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		return snapshot
 	}
 
-	// A throwaway, ctx-bound clone of store when it's bd-CLI-backed: on
-	// timeout below, canceling reqCtx kills an in-flight bd child instead
-	// of abandoning it to run past this function's return (gascity
-	// ga-cdmx6x). ScopedStoreLike answers (nil, nil) for non-bd-CLI
-	// backends, which have no subprocess to leak — those keep reading
-	// through store directly, unchanged.
+	// reqCtx bounds the scoped-store read below; defer cancel() fires on
+	// every return path (including the time.After timeout), killing an
+	// in-flight bd child instead of leaking it past this function's budget
+	// (gascity ga-cdmx6x).
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	readStore := store
-	if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
-		snapshot.partialErrors = []string{fmt.Sprintf("sessions: resolving scoped store: %v", err)}
-		return snapshot
-	} else if scoped != nil {
-		readStore = scoped
-	}
 
 	type snapshotResult struct {
-		rows          []beads.Bead
+		infos         []session.Info
 		partialErrors []string
 		err           error
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		rows, partialErrors, err := sessionReadModelRows(readStore)
-		done <- snapshotResult{rows: rows, partialErrors: partialErrors, err: err}
+		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
+		// ScopedStoreLike hands back a bd-CLI-backed clone reqCtx can cancel,
+		// or (nil, nil) for non-bd backends (native/file/mem) — those read
+		// through store unchanged. Its resolution (bd env / managed-dolt
+		// connection state) is synchronous and can block on a mutex the
+		// reconcile loop holds without honoring reqCtx; kept before the select
+		// it hung the whole handler past its read budget, dragging the
+		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
+		// as the read bounds it.
+		readStore := store
+		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
+			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+			return
+		} else if scoped != nil {
+			readStore = scoped
+		}
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
-	var rows []beads.Bead
+	var infos []session.Info
 	var partialErrors []string
 	var err error
 	select {
 	case result := <-done:
-		rows = result.rows
+		infos = result.infos
 		partialErrors = result.partialErrors
 		err = result.err
 	case <-time.After(statusStoreReadTimeout):
@@ -494,16 +501,16 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
 
-	seenSessionName := make(map[string]bool, len(rows))
-	for _, b := range rows {
-		if b.Status == "closed" {
+	seenSessionName := make(map[string]bool, len(infos))
+	for _, sessInfo := range infos {
+		if sessInfo.Closed {
 			continue
 		}
 		info := statusSessionInfo{
-			sessionName: strings.TrimSpace(b.Metadata["session_name"]),
-			agentName:   strings.TrimSpace(b.Metadata["agent_name"]),
-			template:    strings.TrimSpace(b.Metadata["template"]),
-			state:       statusSessionState(b),
+			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
+			agentName:   strings.TrimSpace(sessInfo.AgentName),
+			template:    strings.TrimSpace(sessInfo.Template),
+			state:       statusSessionStateInfo(sessInfo),
 		}
 		if info.sessionName == "" {
 			continue
@@ -643,18 +650,23 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	readStore := store
-	if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
-		return nil, fmt.Errorf("resolving scoped store: %w", err)
-	} else if scoped != nil {
-		readStore = scoped
-	}
 	type listResult struct {
 		rows []beads.Bead
 		err  error
 	}
 	done := make(chan listResult, 1)
 	go func() {
+		// Resolve the ctx-bound scoped store INSIDE the timed goroutine so a
+		// slow, ctx-blind resolution (a store mutex held by the reconcile
+		// loop) is bounded by the same time.After as the list instead of
+		// hanging the handler synchronously (gc-08qgn).
+		readStore := store
+		if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
+			done <- listResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+			return
+		} else if scoped != nil {
+			readStore = scoped
+		}
 		rows, err := readStore.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()
@@ -736,8 +748,11 @@ func statusSessionQualifiedName(cityName, sessTmpl string, info statusSessionInf
 	return agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 }
 
-func statusSessionState(b beads.Bead) session.State {
-	state := session.State(strings.TrimSpace(b.Metadata["state"]))
+// statusSessionStateInfo maps the raw persisted state metadata (Info.MetadataState,
+// not the closed-blanked Info.State) onto the display state the status snapshot
+// reports, folding the awake/drained aliases exactly as the retired bead form did.
+func statusSessionStateInfo(info session.Info) session.State {
+	state := session.State(strings.TrimSpace(info.MetadataState))
 	switch state {
 	case "awake":
 		return session.StateActive

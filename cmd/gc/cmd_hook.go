@@ -115,12 +115,31 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
-	// Forward the provider hook stdin so wrapped commands like
-	// `nudge drain --inject` still receive the UserPromptSubmit JSON
-	// (carrying transcript_path) they need for context-pressure injection.
-	// readHookStdin already bounds the read with an io.LimitReader and the
-	// hard timeout below bounds any block, so forwarding is safe.
-	cmd.Stdin = stdin
+	// Read the provider's hook stdin FULLY into a buffer before running the
+	// wrapped command, then hand it that buffer. Forwarding the live stdin
+	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
+	// the timeout — before consuming the payload, so gc hook run returned and
+	// closed the pipe under the provider's in-flight write. Codex surfaced that
+	// fleet-wide as "UserPromptSubmit hook (failed): failed to write hook stdin:
+	// Broken pipe (os error 32)", silently killing nudge-drain and mail-check
+	// injection on every prompt submit. Buffering up front guarantees the
+	// provider's write always completes regardless of the wrapped command. The
+	// 1<<20 bound matches readHookStdin, so `nudge drain --inject` still sees the
+	// same UserPromptSubmit JSON (carrying transcript_path) for context
+	// injection.
+	//
+	// drainHookStdin skips an interactive/inherited terminal (a char-device
+	// stdin never EOFs, so a manual gc hook run must not drain it) and bounds the
+	// pipe drain by ctx: os.Stdin carries no read deadline, so a provider pipe
+	// that writes < 1 MiB and never closes (no EOF) would otherwise block this
+	// read forever — before cmd.Run() and past the hard timeout — freezing the
+	// prompt-submit hot path. Bounding it keeps the "gc hook run is always
+	// bounded by the timeout" invariant enforced in code rather than assumed of
+	// every present and future provider. On the deadline drainHookStdin returns
+	// with ctx already expired, so cmd.Run() sees the canceled context and never
+	// spawns the child: gc hook run fails open to the timeout exit code in the
+	// timeout branch below instead of hanging before it spawns.
+	cmd.Stdin = bytes.NewReader(drainHookStdin(ctx, stdin))
 	// Buffer child stdout instead of streaming it straight to the provider so
 	// a wedged command cannot leak partial injectable output before the
 	// fail-open timeout path runs. The buffer is flushed only on a clean or
@@ -153,6 +172,45 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 	}
 	fmt.Fprintf(stderr, "gc hook run: %v\n", err) //nolint:errcheck
 	return 1
+}
+
+// drainHookStdin reads up to 1 MiB of the provider's hook stdin, bounded by ctx.
+// A normal provider write-then-close returns the full payload well before the
+// timeout; a pipe that writes less than the limit and stays open (no EOF) is
+// abandoned when ctx's hard timeout fires, so gc hook run cannot wedge before it
+// even spawns the child. The read runs in a goroutine that can outlive a
+// timed-out call: that is safe because gc hook run is a short-lived process
+// which exits right after, and the buffered channel keeps the goroutine from
+// blocking on send if it later unblocks. A partial buffer still lets the wrapped
+// command run.
+//
+// An interactive or inherited terminal is skipped entirely, matching
+// readHookStdin: a char-device stdin never reaches EOF on its own, so draining
+// it would only unblock when ctx's hard timeout fired, handing the child an
+// empty reader after gc hook run had already burned its whole budget — a manual
+// `gc hook run -- <cmd>` would then time out without ever running <cmd>. Provider
+// hooks always arrive on a pipe, which this guard leaves buffered and
+// timeout-bounded.
+func drainHookStdin(ctx context.Context, stdin io.Reader) []byte {
+	if stdin == nil {
+		return nil
+	}
+	if f, ok := stdin.(*os.File); ok {
+		if st, err := f.Stat(); err != nil || st.Mode()&os.ModeCharDevice != 0 {
+			return nil
+		}
+	}
+	done := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(io.LimitReader(stdin, 1<<20)) //nolint:errcheck // best-effort; a partial read still lets the wrapped command run
+		done <- data
+	}()
+	select {
+	case data := <-done:
+		return data
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 type hookCommandOptions struct {

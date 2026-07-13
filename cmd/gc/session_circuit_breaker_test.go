@@ -717,7 +717,7 @@ func TestComputeNamedSessionProgressSignatures(t *testing.T) {
 		{ID: "wb-2", Assignee: "session-a", Status: "in_progress"},
 		{ID: "wb-3", Assignee: "worker-1", Status: "open"}, // ignored: not named
 	}
-	got := computeNamedSessionProgressSignatures(sessionBeads, work)
+	got := computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work)
 	if _, ok := got["rig-a/session-a"]; !ok {
 		t.Fatalf("expected signature for session-a, got keys=%v", got)
 	}
@@ -730,7 +730,7 @@ func TestComputeNamedSessionProgressSignatures(t *testing.T) {
 		{ID: "wb-1", Assignee: "rig-a/session-a", Status: "closed"},
 		{ID: "wb-2", Assignee: "session-a", Status: "in_progress"},
 	}
-	got2 := computeNamedSessionProgressSignatures(sessionBeads, work2)
+	got2 := computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work2)
 	if got["rig-a/session-a"] == got2["rig-a/session-a"] {
 		t.Fatalf("signature should change when assignee bead status changes")
 	}
@@ -760,7 +760,7 @@ func TestComputeNamedSessionProgressSignaturesSkipsAmbiguousBareKeys(t *testing.
 		{ID: "wb-alias", Assignee: "shared-alias", Status: "in_progress"},
 	}
 
-	got := computeNamedSessionProgressSignatures(sessionBeads, work)
+	got := computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work)
 	if got["rig-a/session"] != "" {
 		t.Fatalf("rig-a signature = %q, want empty for ambiguous bare keys", got["rig-a/session"])
 	}
@@ -769,7 +769,7 @@ func TestComputeNamedSessionProgressSignaturesSkipsAmbiguousBareKeys(t *testing.
 	}
 
 	work = append(work, beads.Bead{ID: "wb-exact", Assignee: "rig-a/session", Status: "closed"})
-	got = computeNamedSessionProgressSignatures(sessionBeads, work)
+	got = computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work)
 	if got["rig-a/session"] == "" {
 		t.Fatal("exact identity assignment should still contribute a signature")
 	}

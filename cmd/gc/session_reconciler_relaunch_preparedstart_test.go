@@ -38,8 +38,10 @@ func setupLaunchDriftResumeEnv(t *testing.T) (*reconcilerTestEnv, TemplateParams
 	env.markSessionActive(&session)
 
 	// Desired (current) config and an old baseline that differs only in the
-	// launch half (Command) → provision hash matches, launch hash differs.
-	agentCfg := sessionCoreConfigForHash(tp, session)
+	// launch half (Command) → provision hash matches, launch hash differs. The
+	// config is derived from the typed Info (sessionCoreConfigForHashInfo), the
+	// sole drift-hash form on the store-domain-objects branch.
+	agentCfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
 	oldCfg := agentCfg
 	oldCfg.Command = "stale-" + agentCfg.Command
 	env.setSessionMetadata(&session, map[string]string{
@@ -96,7 +98,7 @@ func TestReconcileSessionBeads_LaunchDriftRelaunchResumesTrackedConversation(t *
 
 // TestReconcileSessionBeads_LaunchDriftRebaselineNoReDrift proves the rebaseline
 // uses buildPreparedStart's pre-rewrite fingerprints, so the very next tick's
-// drift comparison (which uses the hash-form sessionCoreConfigForHash) sees no
+// drift comparison (which uses the hash-form sessionCoreConfigForHashInfo) sees no
 // Core drift and does NOT relaunch again — no drift loop. Guards against the
 // class of bug where the executed config (carrying the --resume rewrite / env)
 // leaks into the persisted baseline and never matches the next comparison.
@@ -113,11 +115,11 @@ func TestReconcileSessionBeads_LaunchDriftRebaselineNoReDrift(t *testing.T) {
 
 	// The rebaselined started_config_hash equals what the next tick's drift
 	// comparison recomputes for the unchanged config (invariant 1).
-	wantCore := runtime.CoreFingerprint(sessionCoreConfigForHash(tp, b))
+	wantCore := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID)))
 	if got := b.Metadata["started_config_hash"]; got != wantCore {
 		t.Errorf("started_config_hash = %q, want next-tick comparison hash %q", got, wantCore)
 	}
-	wantLaunch := runtime.LaunchFingerprint(sessionCoreConfigForHash(tp, b))
+	wantLaunch := runtime.LaunchFingerprint(sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID)))
 	if got := b.Metadata["started_launch_hash"]; got != wantLaunch {
 		t.Errorf("started_launch_hash = %q, want %q", got, wantLaunch)
 	}
@@ -163,7 +165,9 @@ func TestReconcileSessionBeads_LaunchDriftRebaselineNoReDrift(t *testing.T) {
 // reconcile because the reconcile's start-pending fall-through restarts the
 // session in the same tick, which re-stamps the metadata and masks the transient
 // reset state the bug lives in. The fix is observable only at the fallback
-// boundary, before that restart.
+// boundary, before that restart. On the typed contract the function operates on
+// the session's front-door store (not a raw bead), so the clear is asserted on
+// the store — the single source of truth — plus the returned abort residue fold.
 func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.T) {
 	// newDriftEnv builds a launch-only-drift ("Command" changed, provision half
 	// unchanged) worker session on a resume-capable provider. priorSessionKey is
@@ -190,7 +194,7 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 		}
 		session := env.createSessionBead("worker", "worker")
 		env.markSessionActive(&session)
-		agentCfg := sessionCoreConfigForHash(tp, session)
+		agentCfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
 		oldCfg := agentCfg
 		oldCfg.Command = "stale-" + agentCfg.Command
 		md := map[string]string{
@@ -211,32 +215,34 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 			runtime.ProvisionFingerprint(oldCfg), runtime.LaunchFingerprint(oldCfg)
 	}
 
-	callRelaunch := func(env *reconcilerTestEnv, tp TemplateParams, session *beads.Bead, storedHash, currentHash, storedProvision, storedLaunch string) bool {
-		relaunched, _ := relaunchAgentForLaunchDrift(
-			context.Background(), env.sp, sessionFrontDoor(env.store), session, "worker",
+	// callRelaunch invokes the function under test on the typed contract: the
+	// session is read through the front door (env.sessionInfo) into the Info the
+	// signature now takes, and buildPreparedStart is fed the env's store/cfg so its
+	// mint/clear side effects land on the store the assertions read back. Returns
+	// the relaunched verdict and the abort residue fold.
+	callRelaunch := func(env *reconcilerTestEnv, tp TemplateParams, session *beads.Bead, storedHash, currentHash, storedProvision, storedLaunch string) (bool, map[string]string) {
+		return relaunchAgentForLaunchDrift(
+			context.Background(), env.sp, sessionFrontDoor(env.store), env.sessionInfo(session.ID), "worker",
 			tp, "", env.cfg, env.store, storedHash, currentHash, storedProvision, storedLaunch,
 			[]string{"Command"}, env.rec, nil, &env.stdout, &env.stderr,
 		)
-		return relaunched
 	}
 
 	// assertSpeculativeKeyCleared verifies the fallback wiped the minted key and
-	// the stale baseline on BOTH the raw bead and the store, so the downstream
-	// reset cannot preserve a phantom resume.
-	assertSpeculativeKeyCleared := func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
+	// the stale baseline on the store, so the downstream reset cannot preserve a
+	// phantom resume, and that the abort residue fold carries the cleared
+	// started_config_hash onto the reconciler's snapshot (#127 same-tick gate).
+	assertSpeculativeKeyCleared := func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead, fold map[string]string) {
 		t.Helper()
-		if got := strings.TrimSpace(session.Metadata["session_key"]); got != "" {
-			t.Errorf("raw bead session_key = %q, want cleared (no phantom resume)", got)
-		}
-		if got := strings.TrimSpace(session.Metadata["started_config_hash"]); got != "" {
-			t.Errorf("raw bead started_config_hash = %q, want cleared (fresh restart)", got)
-		}
 		b, _ := env.store.Get(session.ID)
 		if got := strings.TrimSpace(b.Metadata["session_key"]); got != "" {
 			t.Errorf("stored session_key = %q, want cleared (no phantom resume)", got)
 		}
 		if got := strings.TrimSpace(b.Metadata["started_config_hash"]); got != "" {
 			t.Errorf("stored started_config_hash = %q, want cleared (fresh restart)", got)
+		}
+		if got, present := fold["started_config_hash"]; !present || strings.TrimSpace(got) != "" {
+			t.Errorf("abort fold started_config_hash = %q (present=%v), want cleared \"\"", got, present)
 		}
 	}
 
@@ -249,16 +255,17 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 	// proves the guard, not a failing relaunch, prevents the phantom.
 	t.Run("no prior key is refused before relaunch on the success path", func(t *testing.T) {
 		env, tp, session, storedHash, currentHash, storedProvision, storedLaunch := newDriftEnv(t, "", false)
-		if got := strings.TrimSpace(session.Metadata["session_key"]); got != "" {
+		if got := strings.TrimSpace(env.sessionInfo(session.ID).SessionKey); got != "" {
 			t.Fatalf("precondition: session_key = %q, want empty", got)
 		}
-		if relaunched := callRelaunch(env, tp, &session, storedHash, currentHash, storedProvision, storedLaunch); relaunched {
+		relaunched, fold := callRelaunch(env, tp, &session, storedHash, currentHash, storedProvision, storedLaunch)
+		if relaunched {
 			t.Fatalf("relaunched = true, want false (no prior key → full restart); stderr=%s", env.stderr.String())
 		}
 		if got := env.sp.CountCalls("Relaunch", "worker"); got != 0 {
 			t.Errorf("Relaunch calls = %d, want 0 (must not --resume a speculative key); stderr=%s", got, env.stderr.String())
 		}
-		assertSpeculativeKeyCleared(t, env, &session)
+		assertSpeculativeKeyCleared(t, env, &session, fold)
 	})
 
 	// Non-gating coverage for the anti-skew fallback, which shares the
@@ -269,14 +276,15 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 	t.Run("anti-skew abort clears speculative key", func(t *testing.T) {
 		env, tp, session, storedHash, currentHash, storedProvision, _ := newDriftEnv(t, "", false)
 		// prepared.launchHash == storedLaunchHash → launch-unchanged skew → abort.
-		preparedLaunch := runtime.LaunchFingerprint(sessionCoreConfigForHash(tp, session))
-		if relaunched := callRelaunch(env, tp, &session, storedHash, currentHash, storedProvision, preparedLaunch); relaunched {
+		preparedLaunch := runtime.LaunchFingerprint(sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID)))
+		relaunched, fold := callRelaunch(env, tp, &session, storedHash, currentHash, storedProvision, preparedLaunch)
+		if relaunched {
 			t.Fatalf("relaunched = true, want false (anti-skew → full restart); stderr=%s", env.stderr.String())
 		}
 		if got := env.sp.CountCalls("Relaunch", "worker"); got != 0 {
 			t.Errorf("Relaunch calls = %d, want 0 (anti-skew aborts before Relaunch); stderr=%s", got, env.stderr.String())
 		}
-		assertSpeculativeKeyCleared(t, env, &session)
+		assertSpeculativeKeyCleared(t, env, &session, fold)
 	})
 
 	// A real resume key that predated preparation names an actual prior
@@ -285,11 +293,12 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 	t.Run("real prior resume key is preserved when relaunch fails", func(t *testing.T) {
 		const priorKey = "warm-conversation"
 		env, tp, session, storedHash, currentHash, storedProvision, storedLaunch := newDriftEnv(t, priorKey, true)
-		if relaunched := callRelaunch(env, tp, &session, storedHash, currentHash, storedProvision, storedLaunch); relaunched {
+		relaunched, _ := callRelaunch(env, tp, &session, storedHash, currentHash, storedProvision, storedLaunch)
+		if relaunched {
 			t.Fatalf("relaunched = true, want false; stderr=%s", env.stderr.String())
 		}
-		if got := strings.TrimSpace(session.Metadata["session_key"]); got != priorKey {
-			t.Errorf("raw bead session_key = %q, want preserved %q", got, priorKey)
+		if got := strings.TrimSpace(env.sessionInfo(session.ID).SessionKey); got != priorKey {
+			t.Errorf("stored session_key = %q, want preserved %q", got, priorKey)
 		}
 	})
 }

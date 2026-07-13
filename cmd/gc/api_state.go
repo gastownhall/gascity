@@ -362,7 +362,19 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			if err != nil {
 				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+			// Reopen hook for the native read-path reconnect (see the matching
+			// comment in main.go openStoreResultAtForCity): re-resolve the CURRENT
+			// managed Dolt env on every reconnect so the controller's reconcile
+			// scan / Get recovers a managed-Dolt hard-kill/rebind instead of
+			// dialing the dead port for the whole retry budget.
+			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, cs.cityPath, cfg, scopeRoot)
+				if rerr != nil {
+					return nil, fmt.Errorf("re-resolve native rig store env %s: %w", scopeRoot, rerr)
+				}
+				return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
 		},
 	})
 	if err != nil {

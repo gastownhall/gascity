@@ -117,6 +117,7 @@ type SupervisorMux struct {
 	allowAnyHost   bool
 	writeAuth      *citywriteauth.Verifier
 	readAuth       *citywriteauth.Verifier
+	dashboardBase  func() string
 	server         *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
@@ -294,6 +295,36 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 	return sm
 }
 
+// WithDashboardBase records where the embedded dashboard is served so
+// per-city handlers can mint dashboard deep links (e.g. the sling response's
+// dashboard_url). The provider returns the browser-reachable base URL of THIS
+// listener (scheme://host:port; a trailing slash is tolerated), or "" when no
+// link should be emitted. Leave unset on API-only processes — the standalone
+// controller's [api] port serves /v0 without the SPA — so responses omit
+// dashboard links. Callers must also leave it unset on wildcard binds
+// (0.0.0.0, ::): there is no single static origin that is browser-reachable
+// for every /v0 caller, and deriving one from request Host headers would
+// trust a spoofable value, so responses omit dashboard_url instead. Must be
+// called before Serve. Passing nil is a no-op.
+func (sm *SupervisorMux) WithDashboardBase(provider func() string) *SupervisorMux {
+	if provider == nil {
+		return sm
+	}
+	sm.dashboardBase = provider
+	return sm
+}
+
+// DashboardBaseURL returns the dashboard base URL installed via
+// WithDashboardBase, or "" when none is set. Exposed so wiring tests can
+// assert the dashboard-attach path installed a link base without reaching
+// into unexported state.
+func (sm *SupervisorMux) DashboardBaseURL() string {
+	if sm.dashboardBase == nil {
+		return ""
+	}
+	return sm.dashboardBase()
+}
+
 // WithWriteAuth installs the write-auth verifier so city-scoped mutations are
 // gated on a signed grant, and rebuilds the internal http.Server handler. A nil
 // verifier leaves write-auth disabled. Must be called before Serve.
@@ -424,6 +455,11 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	if sm.readOnly {
 		srv = NewReadOnly(state)
 	}
+	// Thread the dashboard link base (if the dashboard is mounted on this
+	// process) into the per-city handler host. WithDashboardBase runs before
+	// Serve, and per-city servers are built lazily per request, so every
+	// cached server observes the final provider.
+	srv.dashboardBase = sm.dashboardBase
 
 	sm.cacheMu.Lock()
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}
