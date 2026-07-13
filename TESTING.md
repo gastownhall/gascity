@@ -395,22 +395,69 @@ if !strings.HasPrefix(ops[0], "ensure-ready") {
 | Does the session provider start a session correctly? | Conformance |
 | Does `gc stop` shut down beads after agents? | Coordination |
 
-**The overtesting line:** don't re-verify contracts that conformance tests
-already cover. Coordination tests check call ordering and argument plumbing,
-not that individual operations produce correct results.
+**The overtesting line:** don't re-verify contracts that an executable
+constructor-bound conformance proof already covers. Coordination tests check
+call ordering and argument plumbing, not that individual operations produce
+correct results.
 
 ### Conformance testing
 
-Every provider interface has a conformance test suite that validates the
-contract against all implementations. These live in `*test/conformance.go`
-packages and are imported by each implementation's test file:
+Provider interfaces may expose shared conformance suites in
+`*test/conformance.go` packages. Suite availability does not prove that every
+implementation or production constructor executes the suite: each consumer
+must bind its exact constructor without a pre-run skip. The table names the
+shared suites and their current named consumers; the runtime ledger below is
+the constructor-specific source of truth.
 
-| Interface | Conformance suite | Implementations tested |
+| Interface | Conformance suite | Current named consumers |
 |---|---|---|
 | `beads.Store` | `internal/beads/beadstest/conformance.go` | MemStore, FileStore, BdStore |
-| `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | Fake, tmux, subprocess, exec, k8s |
+| `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | See the checked runtime ledger below |
 | `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec |
 | `events.Recorder` | `internal/events/eventstest/conformance.go` | FileRecorder, exec |
+
+Builtin runtime production compositions are source-bound to `cmd/gc`'s
+registry, their constructor-specific contract dispositions, and the table
+below. The auto composition lives outside that registry and is bound to the
+exact production function and `runtime/auto.New` result it returns. The known
+`runtime.NewFake` and `runtime.NewFailFake` rows are explicitly
+classified as reusable doubles; automatic discovery of newly exported reusable
+doubles is deferred to `ga-80po0c.1.1` and is not claimed by this slice. A waiver
+is a visible contract gap, not evidence that conformance passes.
+
+The hybrid row deliberately chooses `cmd/gc.newHybridProvider` as its
+construction boundary because that is the wrapper returned directly by the
+runtime registry. This ledger does not recursively claim the wrapper's internal
+tmux, K8s, or hybrid constructors.
+
+This first ledger slice records only owned, expiring waivers and explicit
+not-applicable dispositions. `ga-80po0c.1.2` owns structural binding of the
+existing Fake/subprocess conformance evidence to these exact production
+constructors and the resulting proof-row upgrades. E1 (`ga-80po0c.6`)
+separately owns the Large provider/E2E manifest and its required lane/cadence
+execution; it does not own these constructor bindings.
+
+<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->
+This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.
+
+| Provider path | Roles | Port | Constructor | Discovery | Contract | Status |
+|---|---|---|---|---|---|---|
+| `runtime.builtin.acp` | production_provider | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw ACP provider, not the NewSeamBacked production composition |
+| `runtime.builtin.acp` | production_provider | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition |
+| `runtime.builtin.exec` | production_provider | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw exec provider, not the production seam-backed prefix composition |
+| `runtime.builtin.exec` | production_provider | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.fail` | production_provider, reusable_double | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
+| `runtime.builtin.fake` | production_provider, reusable_double | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: existing full conformance is not yet structurally bound to runtime.NewFake; exact proof binding is deferred to ga-80po0c.1.2 |
+| `runtime.builtin.herdr` | production_provider | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips in short mode or when the herdr executable is absent |
+| `runtime.builtin.hybrid` | production_provider | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
+| `runtime.builtin.k8s` | production_provider | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the actual K8s production composition has no full shared runtime contract |
+| `runtime.builtin.ssh` | production_provider | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production SSH composition has no full shared runtime contract |
+| `runtime.builtin.subprocess` | production_provider | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: NewSeamBacked exact production-constructor proof binding is deferred to ga-80po0c.1.2 |
+| `runtime.builtin.subprocess` | production_provider | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: NewSeamBackedWithDir exact production-constructor proof binding is deferred to ga-80po0c.1.2 |
+| `runtime.builtin.t3bridge` | production_provider | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.tmux` | production_provider | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.composition.auto` | production_provider | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production auto base/ACP composition has no full shared runtime contract |
+<!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 
 Conformance tests verify the behavioral contract (create/read/update/delete,
 error handling, concurrency). They deliberately don't test lifecycle ordering
@@ -428,7 +475,7 @@ test coverage. This table is the checklist for new provider implementations.
 
 | Seam | Implementations | Lifecycle deps | Coordination tested? |
 |---|---|---|---|
-| **Runtime** (`runtime.Provider`) | tmux, exec, k8s, fake | None (stateless start/stop) | Via lifecycle start order test |
+| **Runtime** (`runtime.Provider`) | See checked runtime ledger above | None (stateless start/stop) | Via lifecycle start order test |
 | **Beads** (`beads.Store`) | MemStore, FileStore, BdStore | ensure-ready → init → hooks | `TestLifecycleCoordination_*` |
 | **Mail** (`mail.Provider`) | beadmail, exec | Depends on beads store | No — not a lifecycle seam; conformance sufficient |
 | **Events** (`events.Recorder`) | FileRecorder, exec | None (append-only) | No — stateless append, conformance sufficient |
