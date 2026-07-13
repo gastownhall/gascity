@@ -13,7 +13,7 @@ import (
 
 const moduleImportPath = "github.com/gastownhall/gascity"
 
-// SymbolRef identifies a Go function by import path and declared name.
+// SymbolRef identifies a Go declaration by import path and declared name.
 type SymbolRef struct {
 	ImportPath string
 	Name       string
@@ -58,6 +58,8 @@ const (
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
 	RuntimeBuiltinCatalog = "runtime.builtin"
+	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
+	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -98,10 +100,12 @@ type ContractClaim struct {
 
 // Entry connects one provider construction path to its required contracts.
 type Entry struct {
-	ID           string
-	Roles        []Role
-	Port         Port
-	Constructors []SymbolRef
+	ID             string
+	Roles          []Role
+	Port           Port
+	Constructors   []SymbolRef
+	DoubleType     *SymbolRef
+	DoubleBoundary string
 
 	// Production providers have exactly one catalog or source binding.
 	Catalog *CatalogRef
@@ -114,16 +118,16 @@ type Entry struct {
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
 	return []Entry{
-		builtin(
-			"fake", "exact:fake", []Role{RoleReusableDouble},
+		reusableBuiltin(
+			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
 			waivedRuntime(
 				repoSymbol("internal/runtime", "NewFake"),
 				"ga-80po0c.1.2",
 				"existing full conformance is not yet structurally bound to runtime.NewFake; exact proof binding is deferred to ga-80po0c.1.2",
 			),
 		),
-		builtin(
-			"fail", "exact:fail", []Role{RoleReusableDouble},
+		reusableBuiltin(
+			"fail", "exact:fail", repoSymbol("internal/runtime", "Fake"),
 			notApplicableRuntime(
 				repoSymbol("internal/runtime", "NewFailFake"),
 				"intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable",
@@ -257,6 +261,13 @@ func builtin(id, key string, extraRoles []Role, claims ...ContractClaim) Entry {
 	}
 }
 
+func reusableBuiltin(id, key string, doubleType SymbolRef, claims ...ContractClaim) Entry {
+	entry := builtin(id, key, []Role{RoleReusableDouble}, claims...)
+	entry.DoubleType = &doubleType
+	entry.DoubleBoundary = runtimeDoubleBoundaryPath
+	return entry
+}
+
 func waivedRuntime(constructor SymbolRef, owner, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
@@ -323,6 +334,22 @@ func Validate(entries []Entry, now time.Time) error {
 		}
 		if len(roles) == 0 {
 			problems = append(problems, prefix+" requires at least one role")
+		}
+		switch {
+		case roles[RoleReusableDouble]:
+			if entry.DoubleType == nil {
+				problems = append(problems, prefix+" reusable_double role requires a double type")
+			} else if err := validateSymbolRef(*entry.DoubleType); err != nil {
+				problems = append(problems, fmt.Sprintf("%s double type: %v", prefix, err))
+			}
+			boundary := pathpkg.Clean(strings.TrimSpace(entry.DoubleBoundary))
+			if boundary == "." || strings.HasPrefix(boundary, "../") || strings.HasPrefix(boundary, "/") {
+				problems = append(problems, prefix+" reusable_double role requires a repository-relative double boundary")
+			}
+		case entry.DoubleType != nil:
+			problems = append(problems, prefix+" double type requires role reusable_double")
+		case strings.TrimSpace(entry.DoubleBoundary) != "":
+			problems = append(problems, prefix+" double boundary requires role reusable_double")
 		}
 		if (entry.Catalog != nil || entry.Source != nil) && !roles[RoleProductionProvider] {
 			problems = append(problems, prefix+" discovery binding requires role production_provider")
@@ -518,8 +545,8 @@ func RenderMarkdown(entries []Entry) string {
 	out.WriteString(MarkdownStart)
 	out.WriteString("\n")
 	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.\n\n")
-	out.WriteString("| Provider path | Roles | Port | Constructor | Discovery | Contract | Status |\n")
-	out.WriteString("|---|---|---|---|---|---|---|\n")
+	out.WriteString("| Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |\n")
+	out.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, entry := range entries {
 		claims := append([]ContractClaim(nil), entry.Claims...)
 		sort.Slice(claims, func(i, j int) bool {
@@ -529,9 +556,10 @@ func RenderMarkdown(entries []Entry) string {
 			return claims[i].Contract < claims[j].Contract
 		})
 		for _, claim := range claims {
-			fmt.Fprintf(&out, "| `%s` | %s | `%s` | `%s` | %s | `%s` | %s |\n",
+			fmt.Fprintf(&out, "| `%s` | %s | %s | `%s` | `%s` | %s | `%s` | %s |\n",
 				markdownCell(entry.ID),
 				markdownCell(renderRoles(entry.Roles)),
+				renderDoubleType(entry),
 				markdownCell(string(entry.Port)),
 				markdownCell(renderSymbolRef(claim.Constructor)),
 				markdownCell(renderDiscovery(entry)),
@@ -542,6 +570,13 @@ func RenderMarkdown(entries []Entry) string {
 	}
 	out.WriteString(MarkdownEnd)
 	return out.String()
+}
+
+func renderDoubleType(entry Entry) string {
+	if entry.DoubleType == nil {
+		return "—"
+	}
+	return "`" + markdownCell(renderSymbolRef(*entry.DoubleType)) + "`"
 }
 
 func symbolRefLess(left, right SymbolRef) bool {
@@ -561,13 +596,20 @@ func renderRoles(roles []Role) string {
 }
 
 func renderDiscovery(entry Entry) string {
+	var bindings []string
 	if entry.Catalog != nil {
-		return entry.Catalog.Name + "/" + entry.Catalog.Key
+		bindings = append(bindings, entry.Catalog.Name+"/"+entry.Catalog.Key)
 	}
 	if entry.Source != nil {
-		return fmt.Sprintf("source: %s#%s — %s", entry.Source.File, entry.Source.Function, entry.Source.Reason)
+		bindings = append(bindings, fmt.Sprintf("source: %s#%s — %s", entry.Source.File, entry.Source.Function, entry.Source.Reason))
 	}
-	return "invalid: no discovery binding"
+	if hasRole(entry.Roles, RoleReusableDouble) && strings.TrimSpace(entry.DoubleBoundary) != "" {
+		bindings = append(bindings, "reusable: "+entry.DoubleBoundary)
+	}
+	if len(bindings) == 0 {
+		return "invalid: no discovery binding"
+	}
+	return strings.Join(bindings, "; ")
 }
 
 func renderClaim(claim ContractClaim) string {
