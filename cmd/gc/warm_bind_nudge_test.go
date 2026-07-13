@@ -153,7 +153,8 @@ func TestDeliverWarmBindClaimNudge_NoopGuards(t *testing.T) {
 		"empty claim text": func() (*runtime.Fake, *beads.Bead, warmClaimTriggerProbe, string) {
 			return runtime.NewFake(), warmBindPoolSession(), alwaysUnclaimed, "   "
 		},
-		"nil probe": func() (*runtime.Fake, *beads.Bead, warmClaimTriggerProbe, string) {
+		"nil probe": func() (*runtime.Fake, *beads.Bead, warmClaimTriggerProbe, string) { //nolint:unparam // the nil probe IS the case under test
+
 			return runtime.NewFake(), warmBindPoolSession(), nil, warmClaimText
 		},
 	}

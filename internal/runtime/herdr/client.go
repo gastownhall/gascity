@@ -138,6 +138,8 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 // read → `herdr agent read <name> --source <source> [--lines n]`. Use
 // "visible" for the current screen (the liveness/fingerprint snapshot);
 // "recent"/"recent-unwrapped" are scrollback only.
+//
+//nolint:unparam // source documents herdr's read API; every current caller snapshots the visible screen
 func (c *client) read(ctx context.Context, name, source string, lines int) (string, error) {
 	args := []string{"agent", "read", name, "--source", source}
 	if lines > 0 {

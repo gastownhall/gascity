@@ -39,7 +39,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 	// leftovers.
 	herdrSession := fmt.Sprintf("gctest-nudge-dispatch-%d", time.Now().UnixNano())
 	cityPath := t.TempDir()
-	p := herdr.New(herdrSession, t.TempDir(), cityPath)
+	p := herdr.New(herdrSession, t.TempDir(), cityPath, 0)
 	_ = p.TeardownServer() // clear any leftover server from a crashed prior run
 	t.Cleanup(func() { _ = p.TeardownServer() })
 	if err := p.ConfigureServer(); err != nil {

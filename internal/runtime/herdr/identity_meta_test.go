@@ -8,7 +8,7 @@ import "testing"
 // readable the moment the agent exists — not after the (up to a minute)
 // startup delivery completes. An empty or missing env key stays unstamped.
 func TestStampIdentityMeta(t *testing.T) {
-	p := New("gctest-identity-meta", t.TempDir(), t.TempDir())
+	p := New("gctest-identity-meta", t.TempDir(), t.TempDir(), 0)
 	p.stampIdentityMeta("canary", map[string]string{
 		"GC_SESSION_ID":     "gm-abc123",
 		"GC_INSTANCE_TOKEN": "tok-1",

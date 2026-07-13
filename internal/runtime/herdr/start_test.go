@@ -92,9 +92,9 @@ func logIndex(lines []string, substr string) int {
 
 // newFakeStartProvider builds a Provider whose client shells out to the fake
 // herdr CLI instead of a real one.
-func newFakeStartProvider(t *testing.T, f *fakeHerdr, cityRoot string) *Provider {
+func newFakeStartProvider(t *testing.T, f *fakeHerdr) *Provider {
 	t.Helper()
-	p := New("teststart", t.TempDir(), cityRoot, 0)
+	p := New("teststart", t.TempDir(), "/city/root", 0)
 	p.c.bin = f.bin
 	return p
 }
@@ -110,7 +110,7 @@ func TestStartRunsPreStartBeforeAgentLaunch(t *testing.T) {
 	work := filepath.Join(t.TempDir(), "per-bead-worktree") // does not exist yet
 	marker := filepath.Join(t.TempDir(), "prestart-ran")
 	f := newFakeHerdr(t, marker)
-	p := newFakeStartProvider(t, f, "/city/root")
+	p := newFakeStartProvider(t, f)
 
 	cfg := runtime.Config{
 		WorkDir: work,
@@ -149,7 +149,7 @@ func TestStartRunsPreStartBeforeAgentLaunch(t *testing.T) {
 func TestStartFailsWhenPreStartFails(t *testing.T) {
 	work := t.TempDir()
 	f := newFakeHerdr(t, filepath.Join(work, "unused-probe"))
-	p := newFakeStartProvider(t, f, "/city/root")
+	p := newFakeStartProvider(t, f)
 
 	cfg := runtime.Config{
 		WorkDir:  work,
@@ -181,7 +181,7 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 	}
 	staged := filepath.Join(work, "notes.txt")
 	f := newFakeHerdr(t, staged)
-	p := newFakeStartProvider(t, f, "/city/root")
+	p := newFakeStartProvider(t, f)
 
 	cfg := runtime.Config{
 		WorkDir:   work,
@@ -211,7 +211,7 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 func TestStartFailsOnAbsentWorkDir(t *testing.T) {
 	work := filepath.Join(t.TempDir(), "never-created")
 	f := newFakeHerdr(t, work)
-	p := newFakeStartProvider(t, f, "/city/root")
+	p := newFakeStartProvider(t, f)
 
 	err := p.start(context.Background(), "gastown__worker", runtime.Config{WorkDir: work})
 	if err == nil {
@@ -232,7 +232,7 @@ func TestStartFailsOnAbsentWorkDir(t *testing.T) {
 func TestStartRunsSessionSetupAfterLaunch(t *testing.T) {
 	work := t.TempDir()
 	f := newFakeHerdr(t, filepath.Join(work, "unused-probe"))
-	p := newFakeStartProvider(t, f, "/city/root")
+	p := newFakeStartProvider(t, f)
 	sessionEnvOut := filepath.Join(t.TempDir(), "gc-session-value")
 
 	cfg := runtime.Config{
@@ -258,11 +258,11 @@ func TestStartRunsSessionSetupAfterLaunch(t *testing.T) {
 	if startIdx < 0 || setupIdx < 0 || scriptIdx < 0 {
 		t.Fatalf("missing expected log entries; log:\n%s", strings.Join(lines, "\n"))
 	}
-	if !(startIdx < setupIdx && setupIdx < scriptIdx) {
+	if startIdx >= setupIdx || setupIdx >= scriptIdx {
 		t.Errorf("session_setup must run after launch, script after commands; log:\n%s", strings.Join(lines, "\n"))
 	}
 	// The readiness wait precedes setup, mirroring tmux's ready→setup→nudge.
-	if !(waitIdx >= 0 && waitIdx < setupIdx) {
+	if waitIdx < 0 || waitIdx >= setupIdx {
 		t.Errorf("expected an idle wait before session_setup; log:\n%s", strings.Join(lines, "\n"))
 	}
 }

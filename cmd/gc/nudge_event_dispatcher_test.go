@@ -23,12 +23,12 @@ func (w testLogWriter) Write(p []byte) (int, error) {
 
 func testWriter(t *testing.T) testLogWriter { return testLogWriter{t: t} }
 
-// eventedFake wraps runtime.Fake with a contract-faithful session-event
+// nudgeEventedFake wraps runtime.Fake with a contract-faithful session-event
 // stream: every subscription leads with a resync frame, events fan out to all
 // live subscriptions, and canceling the subscribe ctx closes the channel.
 // A dynamicBusy override models PR-B's "working is continuously active"
 // tracker semantics without racing the Fake's Activity map.
-type eventedFake struct {
+type nudgeEventedFake struct {
 	*runtime.Fake
 
 	mu           sync.Mutex
@@ -37,12 +37,12 @@ type eventedFake struct {
 	stamps       map[string]time.Time
 }
 
-func newEventedFake() *eventedFake {
-	return &eventedFake{Fake: runtime.NewFake(), busySessions: map[string]bool{}, stamps: map[string]time.Time{}}
+func newNudgeEventedFake() *nudgeEventedFake {
+	return &nudgeEventedFake{Fake: runtime.NewFake(), busySessions: map[string]bool{}, stamps: map[string]time.Time{}}
 }
 
 //nolint:unparam // signature fixed by runtime.SessionEventProvider
-func (f *eventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+func (f *nudgeEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
 	ch := make(chan runtime.SessionEvent, 32)
 	ch <- runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()}
 	f.mu.Lock()
@@ -63,7 +63,7 @@ func (f *eventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtim
 	return ch, nil
 }
 
-func (f *eventedFake) emit(ev runtime.SessionEvent) {
+func (f *nudgeEventedFake) emit(ev runtime.SessionEvent) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, sub := range f.subs {
@@ -77,7 +77,7 @@ func (f *eventedFake) emit(ev runtime.SessionEvent) {
 // setBusy marks a session as continuously active: GetLastActivity returns
 // the current time on every call, exactly like the herdr activity tracker
 // reports a session whose agent status sits at working.
-func (f *eventedFake) setBusy(name string, busy bool) {
+func (f *nudgeEventedFake) setBusy(name string, busy bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.busySessions[name] = busy
@@ -86,13 +86,13 @@ func (f *eventedFake) setBusy(name string, busy bool) {
 // setStamp freezes a synchronized activity stamp for a session, shadowing the
 // embedded Fake's Activity map so tests can mutate it mid-flight without
 // racing the Fake's own locking.
-func (f *eventedFake) setStamp(name string, ts time.Time) {
+func (f *nudgeEventedFake) setStamp(name string, ts time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stamps[name] = ts
 }
 
-func (f *eventedFake) GetLastActivity(name string) (time.Time, error) {
+func (f *nudgeEventedFake) GetLastActivity(name string) (time.Time, error) {
 	f.mu.Lock()
 	busy := f.busySessions[name]
 	stamp, hasStamp := f.stamps[name]
@@ -151,7 +151,7 @@ func queueStateSnapshot(t *testing.T, cityPath string) nudgequeue.State {
 	return state
 }
 
-func waitForDeliveredNudge(t *testing.T, cityPath string, fake *eventedFake) bool {
+func waitForDeliveredNudge(t *testing.T, cityPath string, fake *nudgeEventedFake) bool {
 	t.Helper()
 	stop := time.Now().Add(5 * time.Second)
 	for time.Now().Before(stop) {
@@ -164,7 +164,7 @@ func waitForDeliveredNudge(t *testing.T, cityPath string, fake *eventedFake) boo
 	return false
 }
 
-func countFakeCalls(fake *eventedFake, method string) int {
+func countFakeCalls(fake *nudgeEventedFake, method string) int {
 	n := 0
 	for _, call := range fake.SnapshotCalls() {
 		if call.Method == method {
@@ -175,7 +175,7 @@ func countFakeCalls(fake *eventedFake, method string) int {
 }
 
 func TestNudgeEventDispatcherDeliversOnIdleEvent(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, _, info := newNudgeDispatcherFixture(t, fake)
 
 	// The agent has been idle well past the quiescence window.
@@ -192,7 +192,7 @@ func TestNudgeEventDispatcherDeliversOnIdleEvent(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, _, info := newNudgeDispatcherFixture(t, fake)
 
 	// The idle transition was just observed: the activity stamp is fresh, so
@@ -211,7 +211,7 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, _, info := newNudgeDispatcherFixture(t, fake)
 
 	// A working agent reports continuously fresh activity (tracker semantics),
@@ -246,7 +246,7 @@ func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherDeliversWhenStampLagsEvent(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, _, info := newNudgeDispatcherFixture(t, fake)
 
 	// Live-observed herdr timing: the idle EVENT reaches the dispatcher
@@ -273,7 +273,7 @@ func TestNudgeEventDispatcherDeliversWhenStampLagsEvent(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, _, info := newNudgeDispatcherFixture(t, fake)
 
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
@@ -291,7 +291,7 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherKickAllDeliversAlreadyIdle(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, d, info := newNudgeDispatcherFixture(t, fake)
 
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
@@ -309,7 +309,7 @@ func TestNudgeEventDispatcherKickAllDeliversAlreadyIdle(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	_, _, info := newNudgeDispatcherFixture(t, fake)
 
 	// Session setup and the settled leading resync account for a baseline of
@@ -325,7 +325,7 @@ func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
 }
 
 func TestNudgeEventDispatcherIgnoresNonIdleStatuses(t *testing.T) {
-	fake := newEventedFake()
+	fake := newNudgeEventedFake()
 	dir, _, info := newNudgeDispatcherFixture(t, fake)
 
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
@@ -366,7 +366,7 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 		t.Fatal("streaming() = true for a provider without an event stream")
 	}
 
-	evented := newEventedFake()
+	evented := newNudgeEventedFake()
 	d.update(evented, &config.City{}, true)
 	if !d.active() {
 		t.Fatal("active() = false after swapping in an event-capable provider")
@@ -425,7 +425,7 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 		sessionName: "gc-worker",
 	}
 
-	maybeStartNudgePoller(target, newEventedFake())
+	maybeStartNudgePoller(target, newNudgeEventedFake())
 	if spawns != 0 {
 		t.Fatalf("spawns = %d, want 0 for an event-capable provider", spawns)
 	}
@@ -449,7 +449,7 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 	if providerRetiresNudgePollers(runtime.NewFake()) {
 		t.Fatal("plain provider must not retire pollers")
 	}
-	if !providerRetiresNudgePollers(newEventedFake()) {
+	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
 		t.Fatal("event-capable provider must retire pollers")
 	}
 }
