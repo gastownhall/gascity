@@ -1997,11 +1997,32 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	limit := query.Limit
-	if query.Sort != SortDefault || query.TierMode == TierWisps {
+	// Created-order sorts push down to the backing search (IssueFilter.SortBy
+	// drives sqlbuild.OrderBy), so the caller's limit survives and the store
+	// pages instead of materializing + hydrating the full corpus (sr-dp9o:
+	// the dispatcher's RecentRunsAll(2048) was scanning ~22k closed
+	// order-tracking wisps per call with the limit stripped). Non-mappable
+	// sorts and the wisp tier (whose gc-side post-filter can discard rows)
+	// still fetch unbounded and sort client-side in ApplyListQuery.
+	var sortBy string
+	var sortDesc bool
+	switch query.Sort {
+	case SortCreatedDesc:
+		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
+	case SortCreatedAsc:
+		sortBy, sortDesc = "created", true // flip the DESC default
+	default:
+		if query.Sort != SortDefault {
+			limit = 0
+		}
+	}
+	if query.TierMode == TierWisps {
 		limit = 0
 	}
 	filter := beadslib.IssueFilter{
 		Limit:               limit,
+		SortBy:              sortBy,
+		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
 		IncludeDependencies: true,

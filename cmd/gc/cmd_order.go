@@ -1747,10 +1747,18 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 	return orders.Order{}, false
 }
 
+// bdCursorRecentRunsLimit bounds the cursor read to the newest tracking beads.
+// The seq:<n> cursor is forward-only — every new run records a seq >= all
+// prior runs — so the max always lives among the newest runs; an unbounded
+// IncludeClosed list scales with the whole retained tracking corpus instead
+// (sr-dp9o). 256 is a wide margin over any realistic same-instant run burst.
+const bdCursorRecentRunsLimit = 256
+
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
 		Label:         "order:" + orderName,
 		IncludeClosed: true,
+		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
 		TierMode:      beads.TierBoth,
 	})
