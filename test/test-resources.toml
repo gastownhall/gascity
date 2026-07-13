@@ -60,3 +60,42 @@ invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must 
 resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal"
 migration_target = "W1-W5"
 expires = "2026-10-01"
+
+[[debt]]
+scope = "cmd/gc+untagged"
+resource = "environment"
+baseline_calls = 4092
+baseline_files = 180
+reported_calls = 3960
+reported_files = 184
+owner_bead = "ga-80po0c.2.3"
+invariant = "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "cmd/gc callers restore or eliminate every recognized process-environment mutation"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "cmd/gc+untagged"
+resource = "cwd"
+baseline_calls = 208
+baseline_files = 40
+reported_calls = 98
+reported_files = 13
+owner_bead = "ga-80po0c.2.3"
+invariant = "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "cmd/gc callers restore or eliminate every recognized cwd mutation"
+migration_target = "D5/D6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "cmd/gc+untagged"
+resource = "slow_process_gate"
+baseline_calls = 77
+baseline_files = 26
+reported_calls = 78
+reported_files = 27
+owner_bead = "ga-80po0c.2.3"
+invariant = "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
+resource_owner = "the helper definition and every marked caller retain an explicit process-suite migration owner"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"

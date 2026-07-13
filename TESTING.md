@@ -4,8 +4,9 @@
 
 `test/test-resources.toml` is the P0.4a source call-site ratchet. It scans
 tracked `*_test.go` files through parsed Go syntax and import identity, freezes
-four subprocess and fixed-sleep call/file totals, rejects growth, and requires
-a baseline reduction whenever source debt falls. The Go-owned
+seven process, sleep, environment, CWD, and slow-process call/file totals,
+rejects growth, and requires a baseline reduction whenever source debt falls.
+The Go-owned
 `bootstrapPolicy` pins every row's ceiling, historical totals, owner,
 invariant, resource owner, migration, and expiry. Ordinary source growth fails
 against that ceiling, and TOML-only normalization or metadata edits fail
@@ -17,18 +18,30 @@ other test-infrastructure changes. The guard makes ordinary drift visible; it
 does not claim that self-modifying source can be cryptographically forbidden.
 
 This bootstrap does **not** classify a test as Small, Medium, or Large, infer
-runtime ownership through helper calls, or claim to be a complete inventory of
-test resources. The next source-resource scope is owned by `ga-80po0c.2.3`.
-E1 separately owns Large journey and provider entries.
+resources recursively through arbitrary helper calls, or claim to be a complete
+inventory of test resources. `ga-80po0c.2.1` owns exact Medium identities,
+package `TestMain` inheritance, and resource lists. `ga-80po0c.2.2` owns the
+listener, tmux, Dolt, and shared-host catalogs. E1 separately owns Large
+journey and provider entries.
 
 The scanner recognizes direct calls to `os/exec.Command{,Context}` and
-`time.Sleep`, including import aliases and parenthesized call expressions.
-Import matches use lexical object identity, so local shadows do not count.
-Targeted dot imports of `os/exec` or `time` are rejected with file and import
-context because their calls cannot be attributed safely; blank imports remain
-harmless. Explicit constraints follow Go's leading-header rules: a pre-package
-`//go:build` line is effective, while a legacy `// +build` line must live in a
-leading `//` comment block separated from the package clause by a blank line.
+`time.Sleep`; `os.Setenv`, `os.Unsetenv`, `os.Clearenv`, and `os.Chdir`; and
+`Setenv` or `Chdir` on function parameters typed exactly as `*testing.T` or
+`testing.TB`. It also recognizes the receiverless
+`skipSlowCmdGCTest(*testing.T, string)` definition and its same-package calls.
+An unresolved cross-file call counts only when that directory and package own
+the canonical helper. Import, parameter, and same-file helper matches use
+lexical object identity; top-level sibling declarations are indexed by
+directory and package so cross-file shadows do not masquerade as resources.
+Local shadows and wrong signatures do not count. Parenthesized call
+expressions retain the same ownership.
+
+Targeted dot imports of `os/exec`, `time`, `os`, or `testing` are rejected with
+file and import context because their resources cannot be attributed safely;
+blank imports remain harmless. Explicit constraints follow Go's leading-header
+rules: a pre-package `//go:build` line is effective, while a legacy
+`// +build` line must live in a leading `//` comment block separated from the
+package clause by a blank line.
 Misplaced and directive-like comments do not tag a file. An untagged scope
 means the source file has neither an effective explicit constraint nor a
 recognized `_GOOS`, `_GOARCH`, or `_GOOS_GOARCH` filename suffix. Implicit
@@ -36,7 +49,8 @@ filename constraints use the portion before the first dot, matching Go's
 filename semantics. The code-owned platform set mirrors the Go standard
 library's [`internal/syslist.KnownOS` and `KnownArch`](https://go.dev/src/internal/syslist/syslist.go):
 the past, present, and future values Go owns for filename matching. Scanning
-does not invoke the Go tool or network.
+does not invoke the Go tool or network. The `cmd/gc+untagged` scope additionally
+requires the source path to be beneath `cmd/gc/`.
 
 Run the focused check with:
 
@@ -45,14 +59,19 @@ go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedge
 ```
 
 The historical regex totals remain visible as point-in-time audit evidence.
-They can differ because comments and strings matched, while the AST census
-counts only recognized calls.
+They can be higher because comments and strings matched, or lower where the old
+needle covered only `t.Setenv` or direct `os.Chdir` and the AST census now
+recognizes the full families above. Historical `cmd/gc` needles also included
+build-tagged files; the live `cmd/gc+untagged` ratchets do not.
 
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 443 calls / 156 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | subprocess: 490 calls / 135 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | cwd: 208 calls / 40 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment: 4092 calls / 180 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 77 calls / 26 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 291 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | subprocess: 374 calls / 97 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 <!-- END CHECKED TEST RESOURCE LEDGER -->

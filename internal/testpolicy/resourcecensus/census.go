@@ -32,11 +32,20 @@ const (
 	ResourceSubprocess Resource = "subprocess"
 	// ResourceFixedSleep counts direct time.Sleep calls.
 	ResourceFixedSleep Resource = "fixed_sleep"
+	// ResourceEnvironment counts recognized process-environment mutations.
+	ResourceEnvironment Resource = "environment"
+	// ResourceCWD counts recognized process working-directory mutations.
+	ResourceCWD Resource = "cwd"
+	// ResourceSlowProcessGate counts the cmd/gc slow-process helper and calls.
+	ResourceSlowProcessGate Resource = "slow_process_gate"
 )
 
 var knownResources = map[Resource]struct{}{
-	ResourceSubprocess: {},
-	ResourceFixedSleep: {},
+	ResourceSubprocess:      {},
+	ResourceFixedSleep:      {},
+	ResourceEnvironment:     {},
+	ResourceCWD:             {},
+	ResourceSlowProcessGate: {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -47,6 +56,8 @@ const (
 	ScopeAll Scope = "all"
 	// ScopeUntagged excludes explicitly and implicitly constrained files.
 	ScopeUntagged Scope = "untagged"
+	// ScopeCmdGCUntagged selects untagged test files beneath cmd/gc.
+	ScopeCmdGCUntagged Scope = "cmd/gc+untagged"
 )
 
 type baselineKey struct {
@@ -133,6 +144,45 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "W1-W5",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceEnvironment,
+			BaselineCalls:   4092,
+			BaselineFiles:   180,
+			ReportedCalls:   3960,
+			ReportedFiles:   184,
+			OwnerBead:       "ga-80po0c.2.3",
+			Invariant:       "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "cmd/gc callers restore or eliminate every recognized process-environment mutation",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceCWD,
+			BaselineCalls:   208,
+			BaselineFiles:   40,
+			ReportedCalls:   98,
+			ReportedFiles:   13,
+			OwnerBead:       "ga-80po0c.2.3",
+			Invariant:       "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "cmd/gc callers restore or eliminate every recognized cwd mutation",
+			MigrationTarget: "D5/D6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceSlowProcessGate,
+			BaselineCalls:   77,
+			BaselineFiles:   26,
+			ReportedCalls:   78,
+			ReportedFiles:   27,
+			OwnerBead:       "ga-80po0c.2.3",
+			Invariant:       "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "the helper definition and every marked caller retain an explicit process-suite migration owner",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
 	},
 }
 
@@ -175,17 +225,20 @@ func scopeContains(scope Scope, occurrence Occurrence) bool {
 		return true
 	case ScopeUntagged:
 		return !occurrence.Tagged
+	case ScopeCmdGCUntagged:
+		return !occurrence.Tagged && strings.HasPrefix(occurrence.Path, "cmd/gc/")
 	default:
 		return false
 	}
 }
 
-// ScanRepository scans the repository's tracked Go test files.
+// ScanRepository scans the repository's tracked Go test files. Tracked sibling
+// Go source supplies package-level declaration context but is never counted.
 func ScanRepository(root string) (Census, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*_test.go")
+	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
-		return Census{}, fmt.Errorf("listing tracked Go tests: %w", err)
+		return Census{}, fmt.Errorf("listing tracked Go source: %w", err)
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -197,16 +250,17 @@ func ScanRepository(root string) (Census, error) {
 	return scanFiles(os.DirFS(root), files)
 }
 
-// ScanFS scans every *_test.go file in sourceFS. It is intended for hermetic
-// policy fixtures; repository checks use ScanRepository so untracked files do
-// not perturb the checked baseline.
+// ScanFS scans every *_test.go file in sourceFS. Sibling Go source supplies
+// package-level declaration context but is never counted. ScanFS is intended
+// for hermetic policy fixtures; repository checks use ScanRepository so
+// untracked files do not perturb the checked baseline.
 func ScanFS(sourceFS fs.FS) (Census, error) {
 	var files []string
 	err := fs.WalkDir(sourceFS, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !entry.IsDir() && strings.HasSuffix(name, "_test.go") {
+		if !entry.IsDir() && strings.HasSuffix(name, ".go") {
 			files = append(files, filepath.ToSlash(name))
 		}
 		return nil
@@ -218,12 +272,25 @@ func ScanFS(sourceFS fs.FS) (Census, error) {
 }
 
 type parsedFile struct {
-	name   string
-	tagged bool
+	name        string
+	directory   string
+	packageName string
+	tagged      bool
+	file        *ast.File
+	calls       []*ast.CallExpr
+	bindings    bindingInfo
 }
 
 type bindingInfo struct {
-	uses map[*ast.Ident]types.Object
+	defs                       map[*ast.Ident]types.Object
+	uses                       map[*ast.Ident]types.Object
+	packageDeclarations        map[string]struct{}
+	unresolvedImportQualifiers map[string]struct{}
+}
+
+type packageKey struct {
+	directory   string
+	packageName string
 }
 
 type emptyPackageImporter struct {
@@ -271,17 +338,29 @@ var knownGOARCH = map[string]struct{}{
 
 func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 	sort.Strings(names)
-	census := Census{}
+	fileSet := token.NewFileSet()
 	importer := newEmptyPackageImporter()
-	for index, name := range names {
+	var sources []parsedFile
+	packageDeclarations := make(map[packageKey]map[string]struct{})
+	for _, name := range names {
 		data, err := fs.ReadFile(sourceFS, name)
 		if err != nil {
 			return Census{}, fmt.Errorf("reading %s: %w", name, err)
 		}
-		fileSet := token.NewFileSet()
 		file, err := parser.ParseFile(fileSet, name, data, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			return Census{}, fmt.Errorf("parsing %s: %w", name, err)
+		}
+		normalized := filepath.ToSlash(name)
+		key := packageKey{directory: path.Dir(normalized), packageName: file.Name.Name}
+		declarations := packageDeclarations[key]
+		if declarations == nil {
+			declarations = make(map[string]struct{})
+			packageDeclarations[key] = declarations
+		}
+		recordPackageDeclarations(file, declarations)
+		if !strings.HasSuffix(name, "_test.go") {
+			continue
 		}
 		tagged, err := parsedBuildConstraint(data)
 		if err != nil {
@@ -290,30 +369,120 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		if err := validateImports(file); err != nil {
 			return Census{}, fmt.Errorf("scanning imports in %s: %w", name, err)
 		}
-		source := parsedFile{
-			name:   filepath.ToSlash(name),
-			tagged: tagged || hasImplicitPlatformConstraint(name),
-		}
 		candidates := resourceCandidateCalls(file)
-		if len(candidates) == 0 {
+		scanned := len(candidates) > 0 || hasSlowHelperDeclarationCandidate(file)
+		if !scanned {
 			continue
 		}
-		bindings := resolveBindings(fileSet, file, importer, fmt.Sprintf("resourcecensus.local/file%d", index))
-		for _, call := range candidates {
-			matched, err := isImportedCall(call, bindings, "os/exec", "Command", "CommandContext")
+		sources = append(sources, parsedFile{
+			name:        normalized,
+			directory:   key.directory,
+			packageName: key.packageName,
+			tagged:      tagged || hasImplicitPlatformConstraint(name),
+			file:        file,
+			calls:       candidates,
+		})
+	}
+
+	for index := range sources {
+		source := &sources[index]
+		bindings := resolveBindings(fileSet, source.file, importer, fmt.Sprintf("resourcecensus.local/file%d", index))
+		bindings.packageDeclarations = packageDeclarations[source.groupKey()]
+		bindings.unresolvedImportQualifiers = unresolvedDefaultImportQualifiers(source.file)
+		source.bindings = bindings
+	}
+
+	slowHelpers := make(map[packageKey]types.Object)
+	for _, source := range sources {
+		for _, declaration := range source.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			matched, err := isSlowHelperDeclaration(function, source.bindings)
 			if err != nil {
-				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", name, err)
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: %w", source.name, err)
+			}
+			if !matched {
+				continue
+			}
+			key := source.groupKey()
+			if _, exists := slowHelpers[key]; exists {
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: package %s has multiple canonical declarations", source.name, source.packageName)
+			}
+			object := source.bindings.defs[function.Name]
+			if object == nil {
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: declaration has no lexical binding", source.name)
+			}
+			slowHelpers[key] = object
+		}
+	}
+
+	census := Census{}
+	for _, source := range sources {
+		testingObjects, err := testingParameterObjects(source.file, source.bindings)
+		if err != nil {
+			return Census{}, fmt.Errorf("scanning testing parameters in %s: %w", source.name, err)
+		}
+		for _, declaration := range source.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			matched, err := isSlowHelperDeclaration(function, source.bindings)
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, ResourceSlowProcessGate)
+			}
+		}
+
+		for _, call := range source.calls {
+			matched, err := isImportedCall(call, source.bindings, "os/exec", "Command", "CommandContext")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
 				census.add(source, ResourceSubprocess)
-				continue
 			}
-			matched, err = isImportedCall(call, bindings, "time", "Sleep")
+			matched, err = isImportedCall(call, source.bindings, "time", "Sleep")
 			if err != nil {
-				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", name, err)
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
 				census.add(source, ResourceFixedSleep)
+			}
+			matched, err = isImportedCall(call, source.bindings, "os", "Setenv", "Unsetenv", "Clearenv")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, ResourceEnvironment)
+			}
+			matched, err = isImportedCall(call, source.bindings, "os", "Chdir")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, ResourceCWD)
+			}
+			matched, err = isTestingCall(call, source.bindings, testingObjects, "Setenv")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, ResourceEnvironment)
+			}
+			matched, err = isTestingCall(call, source.bindings, testingObjects, "Chdir")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, ResourceCWD)
+			}
+			if isSlowHelperCall(call, source.bindings, slowHelpers[source.groupKey()]) {
+				census.add(source, ResourceSlowProcessGate)
 			}
 		}
 	}
@@ -326,6 +495,10 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		return left.Resource < right.Resource
 	})
 	return census, nil
+}
+
+func (p parsedFile) groupKey() packageKey {
+	return packageKey{directory: p.directory, packageName: p.packageName}
 }
 
 func (c *Census) add(source parsedFile, resource Resource) {
@@ -450,7 +623,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "os/exec" || importPath == "time" {
+			if importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "testing" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -465,13 +638,16 @@ func resourceCandidateCalls(file *ast.File) []*ast.CallExpr {
 		if !ok {
 			return true
 		}
-		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		switch selector.Sel.Name {
-		case "Command", "CommandContext", "Sleep":
-			calls = append(calls, call)
+		switch function := unparen(call.Fun).(type) {
+		case *ast.SelectorExpr:
+			switch function.Sel.Name {
+			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir":
+				calls = append(calls, call)
+			}
+		case *ast.Ident:
+			if function.Name == "skipSlowCmdGCTest" {
+				calls = append(calls, call)
+			}
 		}
 		return true
 	})
@@ -479,15 +655,226 @@ func resourceCandidateCalls(file *ast.File) []*ast.CallExpr {
 }
 
 func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Importer, packagePath string) bindingInfo {
-	info := bindingInfo{uses: make(map[*ast.Ident]types.Object)}
+	info := bindingInfo{
+		defs: make(map[*ast.Ident]types.Object),
+		uses: make(map[*ast.Ident]types.Object),
+	}
 	config := types.Config{
 		Importer:                 importer,
 		DisableUnusedImportCheck: true,
 		IgnoreFuncBodies:         false,
 		Error:                    func(error) {},
 	}
-	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{Uses: info.uses})
+	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{Defs: info.defs, Uses: info.uses})
 	return info
+}
+
+func recordPackageDeclarations(file *ast.File, declarations map[string]struct{}) {
+	for _, declaration := range file.Decls {
+		switch declaration := declaration.(type) {
+		case *ast.FuncDecl:
+			if declaration.Recv == nil {
+				declarations[declaration.Name.Name] = struct{}{}
+			}
+		case *ast.GenDecl:
+			for _, spec := range declaration.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					declarations[spec.Name.Name] = struct{}{}
+				case *ast.ValueSpec:
+					for _, name := range spec.Names {
+						declarations[name.Name] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+}
+
+// unresolvedDefaultImportQualifiers returns common versioned-import package
+// names that the hermetic path.Base importer cannot derive.
+func unresolvedDefaultImportQualifiers(file *ast.File) map[string]struct{} {
+	qualifiers := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		if spec.Name != nil {
+			continue
+		}
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		base := path.Base(importPath)
+		if isVersionSegment(base) {
+			qualifier := path.Base(path.Dir(importPath))
+			if token.IsIdentifier(qualifier) {
+				qualifiers[qualifier] = struct{}{}
+			}
+			continue
+		}
+		if index := strings.LastIndex(base, ".v"); index > 0 && isVersionSegment(base[index+1:]) {
+			qualifier := base[:index]
+			if token.IsIdentifier(qualifier) {
+				qualifiers[qualifier] = struct{}{}
+			}
+		}
+	}
+	return qualifiers
+}
+
+func isVersionSegment(value string) bool {
+	if len(value) < 2 || value[0] != 'v' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func hasSlowHelperDeclarationCandidate(file *ast.File) bool {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "skipSlowCmdGCTest" {
+			return true
+		}
+	}
+	return false
+}
+
+func testingParameterObjects(file *ast.File, bindings bindingInfo) (map[types.Object]bool, error) {
+	objects := make(map[types.Object]bool)
+	var inspectErr error
+	ast.Inspect(file, func(node ast.Node) bool {
+		if inspectErr != nil {
+			return false
+		}
+		var function *ast.FuncType
+		switch node := node.(type) {
+		case *ast.FuncDecl:
+			function = node.Type
+		case *ast.FuncLit:
+			function = node.Type
+		default:
+			return true
+		}
+		if function.Params == nil {
+			return true
+		}
+		for _, field := range function.Params.List {
+			matched, err := isTestingParameterType(field.Type, bindings)
+			if err != nil {
+				inspectErr = err
+				return false
+			}
+			if !matched {
+				continue
+			}
+			for _, name := range field.Names {
+				object := bindings.defs[name]
+				if object == nil {
+					inspectErr = fmt.Errorf("testing parameter %q has no lexical binding", name.Name)
+					return false
+				}
+				objects[object] = true
+			}
+		}
+		return true
+	})
+	return objects, inspectErr
+}
+
+func isTestingParameterType(expression ast.Expr, bindings bindingInfo) (bool, error) {
+	expression = unparen(expression)
+	if pointer, ok := expression.(*ast.StarExpr); ok {
+		return isImportedType(pointer.X, bindings, "testing", "T")
+	}
+	return isImportedType(expression, bindings, "testing", "TB")
+}
+
+func isImportedType(expression ast.Expr, bindings bindingInfo, importPath, typeName string) (bool, error) {
+	selector, ok := unparen(expression).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != typeName {
+		return false, nil
+	}
+	identifier, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	return isImportedQualifier(identifier, bindings, importPath)
+}
+
+func isTestingCall(call *ast.CallExpr, bindings bindingInfo, testingObjects map[types.Object]bool, method string) (bool, error) {
+	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != method {
+		return false, nil
+	}
+	identifier, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	object := bindings.uses[identifier]
+	if object == nil {
+		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+			return false, nil
+		}
+		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+			return false, nil
+		}
+		return false, fmt.Errorf("testing resource receiver %q has no lexical binding", identifier.Name)
+	}
+	return testingObjects[object], nil
+}
+
+func isSlowHelperDeclaration(function *ast.FuncDecl, bindings bindingInfo) (bool, error) {
+	if function.Recv != nil || function.Name.Name != "skipSlowCmdGCTest" || function.Type.Params == nil {
+		return false, nil
+	}
+	if functionParameterCount(function.Type.Results) != 0 || functionParameterCount(function.Type.Params) != 2 || len(function.Type.Params.List) != 2 {
+		return false, nil
+	}
+	firstType := unparen(function.Type.Params.List[0].Type)
+	pointer, ok := firstType.(*ast.StarExpr)
+	if !ok {
+		return false, nil
+	}
+	first, err := isImportedType(pointer.X, bindings, "testing", "T")
+	if err != nil || !first {
+		return false, err
+	}
+	second, ok := unparen(function.Type.Params.List[1].Type).(*ast.Ident)
+	if !ok || bindings.uses[second] != types.Universe.Lookup("string") {
+		return false, nil
+	}
+	return true, nil
+}
+
+func functionParameterCount(fields *ast.FieldList) int {
+	if fields == nil {
+		return 0
+	}
+	count := 0
+	for _, field := range fields.List {
+		if len(field.Names) == 0 {
+			count++
+		} else {
+			count += len(field.Names)
+		}
+	}
+	return count
+}
+
+func isSlowHelperCall(call *ast.CallExpr, bindings bindingInfo, ownership types.Object) bool {
+	if ownership == nil || len(call.Args) != 2 {
+		return false
+	}
+	identifier, ok := unparen(call.Fun).(*ast.Ident)
+	if !ok || identifier.Name != "skipSlowCmdGCTest" {
+		return false
+	}
+	object := bindings.uses[identifier]
+	return object == nil || object == ownership
 }
 
 func isImportedCall(call *ast.CallExpr, bindings bindingInfo, importPath string, names ...string) (bool, error) {
@@ -509,8 +896,18 @@ func isImportedCall(call *ast.CallExpr, bindings bindingInfo, importPath string,
 	if !matchedName {
 		return false, nil
 	}
+	return isImportedQualifier(identifier, bindings, importPath)
+}
+
+func isImportedQualifier(identifier *ast.Ident, bindings bindingInfo, importPath string) (bool, error) {
 	binding, ok := bindings.uses[identifier]
 	if !ok || binding == nil {
+		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+			return false, nil
+		}
+		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+			return false, nil
+		}
 		return false, fmt.Errorf("resource candidate qualifier %q has no lexical binding", identifier.Name)
 	}
 	packageName, ok := binding.(*types.PkgName)
@@ -704,7 +1101,7 @@ func validateBaseline(prefix string, row Baseline, census Census) []string {
 }
 
 func knownScope(scope Scope) bool {
-	return scope == ScopeAll || scope == ScopeUntagged
+	return scope == ScopeAll || scope == ScopeUntagged || scope == ScopeCmdGCUntagged
 }
 
 func validateOwnership(prefix string, row Baseline, now time.Time) []string {
@@ -784,6 +1181,8 @@ func renderedSourceScope(scope Scope) string {
 		return "all tracked test source"
 	case ScopeUntagged:
 		return "all untagged test source"
+	case ScopeCmdGCUntagged:
+		return "`cmd/gc` untagged test source"
 	default:
 		return string(scope)
 	}

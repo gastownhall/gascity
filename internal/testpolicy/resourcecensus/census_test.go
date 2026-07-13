@@ -1,6 +1,7 @@
 package resourcecensus
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -95,6 +96,351 @@ func TestLocalNamesAreNotStdlibCalls() {
 	assertCount(t, got, ScopeUntagged, ResourceSubprocess, 2, 1)
 	assertCount(t, got, ScopeAll, ResourceFixedSleep, 3, 3)
 	assertCount(t, got, ScopeUntagged, ResourceFixedSleep, 1, 1)
+}
+
+func TestScanCountsCmdGCProcessGlobalsByLexicalOwnership(t *testing.T) {
+	t.Parallel()
+
+	const resources = `package main
+
+import (
+	operating "os"
+	testpkg "testing"
+)
+
+type localOS struct{}
+func (localOS) Setenv(string, string) {}
+func (localOS) Unsetenv(string) {}
+func (localOS) Clearenv() {}
+func (localOS) Chdir(string) {}
+
+type localTesting struct{}
+func (localTesting) Setenv(string, string) {}
+func (localTesting) Chdir(string) {}
+
+func skipSlowCmdGCTest(t *testpkg.T, reason string) {}
+
+func TestResources(t *testpkg.T) {
+	((t)).Setenv("KEY", "value")
+	t.Chdir("testing-dir")
+	((operating).Setenv)("DIRECT", "value")
+	operating.Unsetenv("DIRECT")
+	operating.Clearenv()
+	operating.Chdir("elsewhere")
+	((skipSlowCmdGCTest))(t, "process-backed")
+	func(inner *testpkg.T) {
+		inner.Setenv("INNER", "value")
+		inner.Chdir("inner-dir")
+	}(t)
+	func(tb testpkg.TB) {
+		tb.Setenv("TB", "value")
+		tb.Chdir("tb-dir")
+	}(t)
+	func(value testpkg.T) {
+		value.Setenv("VALUE", "does not count")
+		value.Chdir("does-not-count")
+	}(testpkg.T{})
+	func(pointer *testpkg.TB) {
+		pointer.Setenv("POINTER", "does not count")
+		pointer.Chdir("does-not-count")
+	}(nil)
+	{
+		operating := localOS{}
+		operating.Setenv("SHADOW", "value")
+		operating.Unsetenv("SHADOW")
+		operating.Clearenv()
+		operating.Chdir("shadow-dir")
+		t := localTesting{}
+		t.Setenv("SHADOW", "value")
+		t.Chdir("shadow-dir")
+		skipSlowCmdGCTest := func(*testpkg.T, string) {}
+		skipSlowCmdGCTest(nil, "shadow")
+	}
+	_ = "os.Setenv and t.Chdir in strings do not count"
+}
+	`
+	taggedResources := strings.Replace(resources, "func skipSlowCmdGCTest(t *testpkg.T, reason string) {}\n\n", "", 1)
+	files := fstest.MapFS{
+		"cmd/gc/resources_test.go": &fstest.MapFile{Data: []byte(resources)},
+		"cmd/gc/tagged_test.go":    &fstest.MapFile{Data: []byte("//go:build integration\n\n" + taggedResources)},
+		"other/resources_test.go":  &fstest.MapFile{Data: []byte(strings.Replace(resources, "package main", "package other", 1))},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+
+	assertCount(t, got, ScopeAll, ResourceEnvironment, 18, 3)
+	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 12, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceEnvironment, 6, 1)
+	assertCount(t, got, ScopeAll, ResourceCWD, 12, 3)
+	assertCount(t, got, ScopeUntagged, ResourceCWD, 8, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceCWD, 4, 1)
+	assertCount(t, got, ScopeAll, ResourceSlowProcessGate, 5, 3)
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 4, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceSlowProcessGate, 2, 1)
+}
+
+func TestScanRecognizesOnlyExactTestingParameterTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		parameter string
+		want      int
+	}{
+		{name: "pointer testing T", parameter: "*testpkg.T", want: 1},
+		{name: "testing TB", parameter: "testpkg.TB", want: 1},
+		{name: "testing T value", parameter: "testpkg.T", want: 0},
+		{name: "pointer testing TB", parameter: "*testpkg.TB", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf(`package sample
+import testpkg "testing"
+func exercise(t %s) {
+	t.Setenv("KEY", "value")
+	t.Chdir("work")
+}
+`, tt.parameter)
+			got, err := ScanFS(fstest.MapFS{
+				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+			})
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			assertCount(t, got, ScopeUntagged, ResourceEnvironment, tt.want, tt.want)
+			assertCount(t, got, ScopeUntagged, ResourceCWD, tt.want, tt.want)
+		})
+	}
+}
+
+func TestScanCountsEachDirectOSProcessGlobalMutation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		call     string
+		resource Resource
+	}{
+		{name: "setenv", call: `operating.Setenv("KEY", "value")`, resource: ResourceEnvironment},
+		{name: "unsetenv", call: `operating.Unsetenv("KEY")`, resource: ResourceEnvironment},
+		{name: "clearenv", call: `operating.Clearenv()`, resource: ResourceEnvironment},
+		{name: "chdir", call: `operating.Chdir("work")`, resource: ResourceCWD},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf(`package sample
+import operating "os"
+func exercise() { %s }
+`, tt.call)
+			got, err := ScanFS(fstest.MapFS{
+				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+			})
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			assertCount(t, got, ScopeUntagged, tt.resource, 1, 1)
+		})
+	}
+}
+
+func TestScanResolvesProcessGlobalShadowsFromSiblingSource(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"sample/shadow.go": &fstest.MapFile{Data: []byte(`package sample
+import "os"
+type localProcess struct{}
+func (localProcess) Setenv(string, string) {}
+func (localProcess) Chdir(string) {}
+var process localProcess
+func productionMutationIsContextOnly() { os.Setenv("KEY", "value") }
+`)},
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+func TestResources() {
+	process.Setenv("KEY", "value")
+	process.Chdir("work")
+}
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	if len(got.Occurrences) != 0 {
+		t.Fatalf("cross-file local receivers counted as resources: %+v", got.Occurrences)
+	}
+}
+
+func TestScanAllowsVersionedDefaultImportWhosePackageNameDiffersFromPathBase(t *testing.T) {
+	t.Parallel()
+
+	for _, importPath := range []string{"example.test/process/v2", "gopkg.in/process.v2"} {
+		importPath := importPath
+		t.Run(importPath, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf(`package sample
+import %q
+func TestResources() {
+	process.Setenv("KEY", "value")
+	process.Chdir("work")
+}
+	`, importPath)
+			got, err := ScanFS(fstest.MapFS{
+				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+			})
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			if len(got.Occurrences) != 0 {
+				t.Fatalf("non-target default import counted as resources: %+v", got.Occurrences)
+			}
+		})
+	}
+}
+
+func TestScanSlowHelperUsesLexicalObjectsAndCrossFileOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"owned/helper_test.go": &fstest.MapFile{Data: []byte(`package owned
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+func TestSameFile(t *testing.T) { skipSlowCmdGCTest(t, "same file") }
+`)},
+		"owned/cross_file_test.go": &fstest.MapFile{Data: []byte(`package owned
+import "testing"
+func TestCrossFile(t *testing.T) { skipSlowCmdGCTest(t, "cross file") }
+`)},
+		"owned/shadow_test.go": &fstest.MapFile{Data: []byte(`package owned
+import "testing"
+func TestShadows(t *testing.T) {
+	skipSlowCmdGCTest := func(*testing.T, string) {}
+	skipSlowCmdGCTest(t, "local variable")
+	func(skipSlowCmdGCTest func(*testing.T, string)) {
+		skipSlowCmdGCTest(t, "parameter")
+	}(skipSlowCmdGCTest)
+}
+`)},
+		"wrong/helper_test.go": &fstest.MapFile{Data: []byte(`package wrong
+func skipSlowCmdGCTest() {}
+`)},
+		"wrong/cross_file_test.go": &fstest.MapFile{Data: []byte(`package wrong
+func TestWrongSignature() { skipSlowCmdGCTest() }
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 3, 2)
+}
+
+func TestSlowHelperOwnershipRequiresDirectoryAndPackage(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"owned/helper_test.go": &fstest.MapFile{Data: []byte(`package shared
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+		"elsewhere/call_test.go": &fstest.MapFile{Data: []byte(`package shared
+import "testing"
+func TestDifferentDirectory(t *testing.T) { skipSlowCmdGCTest(t, "not owned") }
+`)},
+		"owned/external_test.go": &fstest.MapFile{Data: []byte(`package shared_test
+import "testing"
+func TestDifferentPackage(t *testing.T) { skipSlowCmdGCTest(t, "not owned") }
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 1, 1)
+}
+
+func TestSlowHelperRequiresReceiverlessExactSignature(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"receiver/helper_test.go": &fstest.MapFile{Data: []byte(`package receiver
+import "testing"
+type helper struct{}
+func (helper) skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+		"wrong_type/helper_test.go": &fstest.MapFile{Data: []byte(`package wrongtype
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason int) {}
+func TestWrongType(t *testing.T) { skipSlowCmdGCTest(t, 1) }
+`)},
+		"wrong_first/helper_test.go": &fstest.MapFile{Data: []byte(`package wrongfirst
+type localT struct{}
+func skipSlowCmdGCTest(t *localT, reason string) {}
+func TestWrongFirstType() { skipSlowCmdGCTest(nil, "not owned") }
+`)},
+		"result/helper_test.go": &fstest.MapFile{Data: []byte(`package result
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) bool { return false }
+func TestResult(t *testing.T) { skipSlowCmdGCTest(t, "not owned") }
+`)},
+		"arity/helper_test.go": &fstest.MapFile{Data: []byte(`package arity
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+func TestWrongArity(t *testing.T) { skipSlowCmdGCTest(t) }
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 1, 1)
+}
+
+func TestScanDoesNotCountUnownedSlowHelperName(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"sample/sample_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "testing"
+func TestUnresolvedName(t *testing.T) {
+	skipSlowCmdGCTest(t, "there is no package helper")
+}
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 0, 0)
+}
+
+func TestScanRejectsMultipleCanonicalSlowHelpersPerPackage(t *testing.T) {
+	t.Parallel()
+
+	_, err := ScanFS(fstest.MapFS{
+		"sample/first_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+		"sample/second_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+	})
+	requireErrorContains(t, err, "package sample has multiple canonical declarations")
+}
+
+func TestCmdGCUntaggedScopeRequiresExactPathSegment(t *testing.T) {
+	t.Parallel()
+
+	census := Census{Occurrences: []Occurrence{
+		{Path: "cmd/gc/owned_test.go", Resource: ResourceEnvironment},
+		{Path: "cmd/gc-extra/not_owned_test.go", Resource: ResourceEnvironment},
+		{Path: "cmd/gc/tagged_test.go", Tagged: true, Resource: ResourceEnvironment},
+	}}
+	assertCount(t, census, ScopeCmdGCUntagged, ResourceEnvironment, 1, 1)
 }
 
 func TestScanTreatsImplicitPlatformFilenameConstraintsAsTagged(t *testing.T) {
@@ -210,7 +556,15 @@ func TestScanFailsClosedWhenCandidateQualifierBindingIsMissing(t *testing.T) {
 
 	_, err := ScanFS(fstest.MapFS{
 		"sample/unresolved_test.go": &fstest.MapFile{Data: []byte(`package sample
-func TestResource() { missing.Command("worker") }
+import (
+	"example.test/process/v2"
+	"fmt"
+)
+func TestResource() {
+	_ = fmt.Sprint
+	process.Setenv("KEY", "value")
+	missing.Command("worker")
+}
 `)},
 	})
 	requireErrorContains(t, err, `resource candidate qualifier "missing" has no lexical binding`)
@@ -325,6 +679,24 @@ import . "time"
 func TestResource() { Sleep(1) }
 `,
 		},
+		{
+			name:       "os",
+			path:       "sample/dot_os_test.go",
+			importPath: "os",
+			source: `package sample
+import . "os"
+func TestResource() { Setenv("KEY", "value") }
+`,
+		},
+		{
+			name:       "testing",
+			path:       "sample/dot_testing_test.go",
+			importPath: "testing",
+			source: `package sample
+import . "testing"
+func TestResource(t *T) { t.Setenv("KEY", "value") }
+`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -343,7 +715,9 @@ func TestScanAllowsBlankImportsOfTargetedPackages(t *testing.T) {
 	files := fstest.MapFS{
 		"sample/blank_import_test.go": &fstest.MapFile{Data: []byte(`package sample
 import (
+	_ "os"
 	_ "os/exec"
+	_ "testing"
 	_ "time"
 )
 func TestResource() {}
@@ -353,8 +727,9 @@ func TestResource() {}
 	if err != nil {
 		t.Fatalf("ScanFS: %v", err)
 	}
-	assertCount(t, got, ScopeAll, ResourceSubprocess, 0, 0)
-	assertCount(t, got, ScopeAll, ResourceFixedSleep, 0, 0)
+	if len(got.Occurrences) != 0 {
+		t.Fatalf("blank imports produced resource occurrences: %+v", got.Occurrences)
+	}
 }
 
 func TestScanMatchesGoLeadingBuildHeaderPlacement(t *testing.T) {
@@ -606,6 +981,44 @@ func TestValidateAllowsHistoricalNeedleToDifferFromASTCensus(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNarrowerHistoricalCmdGCNeedle(t *testing.T) {
+	t.Parallel()
+
+	census := Census{Occurrences: []Occurrence{
+		{Path: "cmd/gc/a_test.go", Resource: ResourceEnvironment},
+		{Path: "cmd/gc/b_test.go", Resource: ResourceEnvironment},
+	}}
+	policy := validLedger(census)
+	row := findRow(t, policy.Debt, ScopeCmdGCUntagged, ResourceEnvironment)
+	row.ReportedCalls = 1
+	row.ReportedFiles = 1
+	ledger := cloneLedger(policy)
+
+	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+		t.Fatalf("Validate rejected narrower historical cmd/gc source needle: %v", err)
+	}
+}
+
+func TestValidateRejectsCoordinatedCmdGCCensusAndManifestGrowth(t *testing.T) {
+	t.Parallel()
+
+	policy := validLedger(Census{})
+	ledger := cloneLedger(policy)
+	row := findRow(t, ledger.Debt, ScopeCmdGCUntagged, ResourceEnvironment)
+	row.BaselineCalls = 1
+	row.BaselineFiles = 1
+	census := Census{Occurrences: []Occurrence{{
+		Path:     "cmd/gc/new_test.go",
+		Resource: ResourceEnvironment,
+	}}}
+
+	err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+	requireErrorContains(t, err, "baseline_calls = 1, bootstrap policy requires 0")
+	if strings.Contains(err.Error(), "source resource census") {
+		t.Fatalf("live census was compared before cmd/gc policy drift was rejected: %v", err)
+	}
+}
+
 func TestValidateRejectsBootstrapPolicyDriftBeforeLiveCensus(t *testing.T) {
 	t.Parallel()
 
@@ -711,6 +1124,16 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 	t.Parallel()
 
+	removeDebt := func(scope Scope, resource Resource) func(*Ledger) {
+		return func(ledger *Ledger) {
+			for index, row := range ledger.Debt {
+				if row.Scope == scope && row.Resource == resource {
+					ledger.Debt = append(ledger.Debt[:index], ledger.Debt[index+1:]...)
+					return
+				}
+			}
+		}
+	}
 	tests := []struct {
 		name   string
 		mutate func(*Ledger)
@@ -729,6 +1152,21 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 				ledger.Debt = ledger.Debt[1:]
 			},
 			want: `missing required debt baseline: scope=untagged resource=subprocess`,
+		},
+		{
+			name:   "missing cmd gc environment row",
+			mutate: removeDebt(ScopeCmdGCUntagged, ResourceEnvironment),
+			want:   `missing required debt baseline: scope=cmd/gc+untagged resource=environment`,
+		},
+		{
+			name:   "missing cmd gc cwd row",
+			mutate: removeDebt(ScopeCmdGCUntagged, ResourceCWD),
+			want:   `missing required debt baseline: scope=cmd/gc+untagged resource=cwd`,
+		},
+		{
+			name:   "missing cmd gc slow-process row",
+			mutate: removeDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate),
+			want:   `missing required debt baseline: scope=cmd/gc+untagged resource=slow_process_gate`,
 		},
 		{
 			name: "unexpected audit row",
@@ -822,6 +1260,7 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 		},
 		Debt: []Baseline{
 			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD, 2, 1),
 		},
 	}
 	got := RenderMarkdown(ledger)
@@ -829,6 +1268,7 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 4 calls / 2 files | P0.4 | source census only; does not classify tests; audit owner | P0.4a | 2026-10-01 |
+| Source debt ratchet | ` + "`cmd/gc`" + ` untagged test source | cwd: 2 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D5/D6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | subprocess: 3 calls / 2 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
 <!-- END CHECKED TEST RESOURCE LEDGER -->`
 	if got != want {
@@ -891,6 +1331,9 @@ func validLedger(census Census) Ledger {
 	allSleep := census.Count(ScopeAll, ResourceFixedSleep)
 	untaggedSubprocess := census.Count(ScopeUntagged, ResourceSubprocess)
 	untaggedSleep := census.Count(ScopeUntagged, ResourceFixedSleep)
+	cmdGCEnvironment := census.Count(ScopeCmdGCUntagged, ResourceEnvironment)
+	cmdGCCWD := census.Count(ScopeCmdGCUntagged, ResourceCWD)
+	cmdGCSlowProcessGate := census.Count(ScopeCmdGCUntagged, ResourceSlowProcessGate)
 	return Ledger{
 		Version: 1,
 		AuditBaseline: []Baseline{
@@ -900,6 +1343,9 @@ func validLedger(census Census) Ledger {
 		Debt: []Baseline{
 			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
 			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD, cmdGCCWD.Calls, cmdGCCWD.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate, cmdGCSlowProcessGate.Calls, cmdGCSlowProcessGate.Files),
 		},
 	}
 }
@@ -919,6 +1365,10 @@ func validAudit(scope Scope, resource Resource, calls, files int) Baseline {
 }
 
 func validDebt(scope Scope, resource Resource, calls, files int) Baseline {
+	migration := "D1/D2"
+	if scope == ScopeCmdGCUntagged {
+		migration = "D5/D6"
+	}
 	return Baseline{
 		Scope:           scope,
 		Resource:        resource,
@@ -927,7 +1377,7 @@ func validDebt(scope Scope, resource Resource, calls, files int) Baseline {
 		OwnerBead:       "P0.4",
 		Invariant:       "existing debt cannot grow",
 		ResourceOwner:   "owning test cleanup",
-		MigrationTarget: "D1/D2",
+		MigrationTarget: migration,
 		Expires:         "2026-10-01",
 	}
 }
