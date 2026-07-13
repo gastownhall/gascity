@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
@@ -392,4 +393,106 @@ func TestSessionEventPumpParentCancelDeactivates(t *testing.T) {
 		cancel()
 		waitStreaming(t, pump, false)
 	})
+}
+
+func stretchTestRuntime(t *testing.T, stretch string, pump *sessionEventPump) *CityRuntime {
+	t.Helper()
+	return &CityRuntime{
+		cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: stretch,
+			},
+		},
+		sessionEvents: pump,
+	}
+}
+
+func streamingPump(t *testing.T) (*sessionEventPump, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	pump.restart(&eventedFake{Fake: runtime.NewFake()})
+	if !pump.streaming() {
+		t.Fatal("test pump failed to stream")
+	}
+	return pump, cancel
+}
+
+func TestSessionPhasesDueNonPatrolTriggersAlwaysRun(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now // just ran
+	for _, trigger := range []string{"poke", "startup-poke"} {
+		if !cr.sessionPhasesDue(trigger, false, now) {
+			t.Errorf("sessionPhasesDue(%q) = false, want true", trigger)
+		}
+	}
+}
+
+func TestSessionPhasesDuePatrolWithoutStretchRuns(t *testing.T) {
+	cr := stretchTestRuntime(t, "", nil)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("sessionPhasesDue(patrol) = false with stretching unset, want true")
+	}
+}
+
+func TestSessionPhasesDuePatrolStretchSkipsWithinWindow(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	if !cr.sessionPhasesDue("patrol", false, now) {
+		t.Fatal("first patrol tick must run the session phases")
+	}
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+		t.Error("patrol tick inside the stretch window ran the session phases")
+	}
+	if !cr.sessionPhasesDue("patrol", false, now.Add(11*time.Minute)) {
+		t.Error("patrol tick past the stretch window skipped the session phases")
+	}
+}
+
+func TestSessionPhasesDuePatrolStretchIgnoredWithoutStream(t *testing.T) {
+	cr := stretchTestRuntime(t, "10m", nil) // no pump wired
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("stretch honored without a session-event stream")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idle := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	idle.restart(runtime.NewFake()) // provider without a stream
+	cr = stretchTestRuntime(t, "10m", idle)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("stretch honored while the pump is not streaming")
+	}
+}
+
+func TestSessionPhasesDueStretchNotLongerThanPatrolIgnored(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	for _, stretch := range []string{"30s", "10s"} {
+		cr := stretchTestRuntime(t, stretch, pump)
+		cr.sessionPhasesLast = time.Now()
+		if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+			t.Errorf("stretch %q (not longer than patrol) skipped the session phases", stretch)
+		}
+	}
+}
+
+func TestSessionPhasesDueConfigPendingRuns(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now
+	if !cr.sessionPhasesDue("patrol", true, now) {
+		t.Error("pending config change did not force the session phases")
+	}
 }
