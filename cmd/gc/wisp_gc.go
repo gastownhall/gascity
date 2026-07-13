@@ -578,19 +578,17 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
-	// deleteWorkflowBead removes every dependency attached to each closure
-	// member before deleting the bead. Only use the closure deleter for roots
-	// whose full ownership tree is safe to collect.
+	// The closure is deleted as one batch: a store that supports
+	// beads.CascadeDeleter (the sqlite/Dolt graph store) removes the whole
+	// ownership tree with a single `bd delete … --cascade --force`, letting
+	// ON DELETE CASCADE drop the edges; other stores fall back to per-bead
+	// deletion. Only use the closure deleter for roots whose full ownership
+	// tree is safe to collect.
 	ids, err := collectExpiredBeadClosure(store, rootID)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if err := deleteWorkflowBead(store, id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return deleteWorkflowBeadsCascade(store, ids)
 }
 
 func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, error) {

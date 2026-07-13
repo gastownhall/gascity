@@ -1421,6 +1421,28 @@ func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
 	return deleted, errs
 }
 
+// deleteWorkflowBeadsCascade removes ids using the store's batched cascade
+// delete when the backend implements beads.CascadeDeleter (one
+// `bd delete … --cascade --force` per chunk, with edges dropped by the schema's
+// ON DELETE CASCADE), and otherwise deletes each bead individually. On the
+// sqlite/Dolt graph store this collapses an O(subprocess-per-edge) closure
+// teardown into O(chunks), which keeps a large wisp-GC purge from blocking the
+// controller tick for minutes.
+func deleteWorkflowBeadsCascade(store beads.Store, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if cd, ok := store.(beads.CascadeDeleter); ok {
+		return cd.DeleteCascade(ids)
+	}
+	for _, id := range ids {
+		if err := deleteWorkflowBead(store, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func deleteWorkflowBead(store beads.Store, id string) error {
 	downDeps, err := store.DepList(id, "down")
 	if err != nil {

@@ -2137,6 +2137,35 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
+// bdDeleteCascadeChunk bounds how many ids ride on a single `bd delete`
+// invocation so a large closure stays within command-line argument limits.
+const bdDeleteCascadeChunk = 256
+
+// DeleteCascade removes the given beads with batched `bd delete … --cascade
+// --force` calls. The backing schema's ON DELETE CASCADE drops each bead's
+// dependency, label, and event rows, so callers need not remove edges first,
+// and --force tolerates ids that are already gone. Ids are chunked to respect
+// command-line limits. DeleteCascade is the batched counterpart to Delete that
+// lets the wisp GC tear down a molecule closure with a handful of subprocesses
+// instead of one per bead and edge. It satisfies CascadeDeleter.
+func (s *BdStore) DeleteCascade(ids []string) error {
+	for start := 0; start < len(ids); start += bdDeleteCascadeChunk {
+		end := start + bdDeleteCascadeChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := make([]string, 0, len(chunk)+3)
+		args = append(args, "delete")
+		args = append(args, chunk...)
+		args = append(args, "--cascade", "--force")
+		if err := s.runBDTransientWrite(args...); err != nil {
+			return fmt.Errorf("batch cascade delete of %d bead(s): %w", len(chunk), err)
+		}
+	}
+	return nil
+}
+
 // List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {

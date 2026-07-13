@@ -926,6 +926,92 @@ func (c *CachingStore) Delete(id string) error {
 	return nil
 }
 
+// DeleteCascade forwards the batched cascade-delete capability to the backing
+// store when it implements CascadeDeleter, then evicts the removed beads from
+// the cache in one pass: it installs a deletion fence per id, drops their
+// outgoing deps (via tombstoneLocked/evictLocked), and clears stale incoming
+// edges from surviving beads so the cache mirrors the backend's ON DELETE
+// CASCADE. This lets the wisp GC tear down a molecule closure with a single
+// backing call instead of an O(subprocess-per-edge) loop. When the backing
+// store lacks CascadeDeleter, DeleteCascade falls back to per-bead Delete,
+// which keeps the identical cache bookkeeping. It satisfies CascadeDeleter.
+func (c *CachingStore) DeleteCascade(ids []string) error {
+	cd, ok := c.backing.(CascadeDeleter)
+	if !ok {
+		for _, id := range ids {
+			if err := c.Delete(id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Snapshot bead.deleted payloads from the cache (in-memory; no backing
+	// reads). A bead absent from the cache is still evicted but emits no event,
+	// matching Delete's best-effort snapshot behavior.
+	deleted := make(map[string]struct{}, len(ids))
+	c.mu.RLock()
+	events := make([]Bead, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		deleted[id] = struct{}{}
+		if b, ok := c.beads[id]; ok {
+			events = append(events, cloneBead(b))
+		}
+	}
+	c.mu.RUnlock()
+
+	if err := cd.DeleteCascade(ids); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	for id := range deleted {
+		seq := c.noteLocalMutationLocked(id)
+		c.tombstoneLocked(id, seq)
+		c.clearDependentReadyProjectionsLocked(id)
+	}
+	// The backend's ON DELETE CASCADE also removed dependency rows where a
+	// deleted bead was the target. Mirror that in the cache: drop incoming edges
+	// from surviving beads so no phantom dep to a deleted bead lingers.
+	for issueID, deps := range c.deps {
+		if _, gone := deleted[issueID]; gone {
+			continue
+		}
+		kept := deps[:0]
+		changed := false
+		for _, d := range deps {
+			if _, gone := deleted[d.DependsOnID]; gone {
+				changed = true
+				continue
+			}
+			kept = append(kept, d)
+		}
+		if !changed {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(c.deps, issueID)
+		} else {
+			c.deps[issueID] = kept
+		}
+		c.clearReadyProjectionLocked(issueID)
+	}
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+	c.mu.Unlock()
+
+	for _, b := range events {
+		c.notifyChange("bead.deleted", b)
+	}
+	return nil
+}
+
 func (c *CachingStore) snapshotBeadBeforeDelete(id string) (Bead, bool) {
 	deleted, err := c.backing.Get(id)
 	if err != nil {
