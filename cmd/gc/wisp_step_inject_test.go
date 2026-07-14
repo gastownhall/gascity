@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -241,6 +242,56 @@ func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
 	}
 	if b.ID != step.ID {
 		t.Errorf("got bead ID %q, want wisp step %q", b.ID, step.ID)
+	}
+}
+
+// TestResolveActiveWispStep_AttachedMoleculeIDBridge covers the attached (v1)
+// formula shape: only the source work bead is assigned to the agent and
+// in-progress, and it carries a molecule_id pointing at a molecule root that is
+// NOT assigned to the agent. resolveActiveMolecule can't see the root (it filters
+// by assignee), so resolution must follow the molecule_id bridge to the root and
+// return its in-progress step child — not the source work bead.
+func TestResolveActiveWispStep_AttachedMoleculeIDBridge(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Molecule root — NOT assigned to the agent (attached formulas leave the
+	// root unrouted).
+	root := mustCreateInProgress(t, store, beads.Bead{
+		Title: "Formula: mol-attached-work",
+		Type:  "molecule",
+	})
+
+	// In-progress step child under the root.
+	step := mustCreateInProgress(t, store, beads.Bead{
+		Title:       "Step 1: attached implement",
+		Description: "Write the attached implementation",
+		Type:        "step",
+		Assignee:    "alice",
+		ParentID:    root.ID,
+	})
+
+	// Source work bead — the only agent-assigned in-progress bead — bridges to
+	// the root via molecule_id. It has a description, so the legacy path would
+	// (incorrectly) return it if the bridge is not followed.
+	source := mustCreateInProgress(t, store, beads.Bead{
+		Title:       "Source work bead",
+		Description: "Do the attached work",
+		Type:        "task",
+		Assignee:    "alice",
+	})
+	if err := store.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
+		t.Fatalf("SetMetadata(molecule_id): %v", err)
+	}
+
+	b, err := resolveActiveWispStep(store, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b == nil {
+		t.Fatal("expected bridged step bead, got nil")
+	}
+	if b.ID != step.ID {
+		t.Errorf("got bead ID %q (type %q), want bridged step %q (not source work bead %q)", b.ID, b.Type, step.ID, source.ID)
 	}
 }
 
