@@ -42,6 +42,8 @@ const (
 	ResourceSlowProcessGate Resource = "slow_process_gate"
 	// ResourceHTTPTestServer counts loopback servers opened by net/http/httptest.
 	ResourceHTTPTestServer Resource = "http_test_server"
+	// ResourceNetListen counts direct listeners opened by net.Listen.
+	ResourceNetListen Resource = "net_listen"
 )
 
 var knownResources = map[Resource]struct{}{
@@ -51,6 +53,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceCWD:             {},
 	ResourceSlowProcessGate: {},
 	ResourceHTTPTestServer:  {},
+	ResourceNetListen:       {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -203,6 +206,19 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListen,
+			BaselineCalls:   92,
+			BaselineFiles:   34,
+			ReportedCalls:   92,
+			ReportedFiles:   34,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
 	},
 	Medium: []MediumOwner{
 		{
@@ -293,6 +309,19 @@ var bootstrapPolicy = Ledger{
 			OwnerBead:       "ga-80po0c.2.2",
 			Invariant:       "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListen,
+			BaselineCalls:   92,
+			BaselineFiles:   34,
+			ReportedCalls:   92,
+			ReportedFiles:   34,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
@@ -566,7 +595,14 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 
 		for _, candidate := range source.calls {
 			call := candidate.call
-			matched, err := isImportedCall(call, source.bindings, "net/http/httptest", "NewServer", "NewTLSServer", "NewUnstartedServer")
+			matched, err := isImportedCall(call, source.bindings, "net", "Listen")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, candidate.owner, candidate.runnable, ResourceNetListen)
+			}
+			matched, err = isImportedCall(call, source.bindings, "net/http/httptest", "NewServer", "NewTLSServer", "NewUnstartedServer")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
@@ -764,7 +800,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "testing" || importPath == "net/http/httptest" {
+			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "testing" || importPath == "net/http/httptest" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -795,7 +831,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 		switch function := unparen(call.Fun).(type) {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
-			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "NewServer", "NewTLSServer", "NewUnstartedServer":
+			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "NewServer", "NewTLSServer", "NewUnstartedServer":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:

@@ -170,6 +170,74 @@ func TestTaggedHTTPTestServer(t *testing.T) {
 	}
 }
 
+func TestScanCountsNetListenByImportIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+
+type localNet struct{}
+func (localNet) Listen(string, string) (any, error) { return nil, nil }
+
+func TestNetListen(t *testing.T) {
+	_, _ = ((sockets.Listen))("tcp", "127.0.0.1:0")
+	t.Run("nested", func(t *testing.T) {
+		_, _ = (((sockets)).Listen)("unix", "socket")
+	})
+
+	local := localNet{}
+	_, _ = local.Listen("tcp", "local shadow")
+	_, _ = foreign.Listen("tcp", "foreign package")
+	lc := sockets.ListenConfig{}
+	_, _ = lc.Listen(t.Context(), "tcp", "listen config method")
+	_, _ = sockets.ListenTCP("tcp", nil)
+	_ = "sockets.Listen(\"tcp\", \"string literal\")"
+	// sockets.Listen("tcp", "comment")
+}
+
+func helper() {
+	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedNetListen(t *testing.T) {
+	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localNet struct{}
+func (localNet) Listen(string, string) (any, error) { return nil, nil }
+var sockets localNet
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_, _ = sockets.Listen("tcp", "cross-file shadow")
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceNetListen, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListen, 3, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListen, "TestNetListen", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListen, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListen, "TestTaggedNetListen", true, true)
+}
+
 func TestScanCountsCmdGCProcessGlobalsByLexicalOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -770,6 +838,15 @@ func TestResource(t *T) { t.Setenv("KEY", "value") }
 `,
 		},
 		{
+			name:       "net",
+			path:       "sample/dot_net_test.go",
+			importPath: "net",
+			source: `package sample
+import . "net"
+func TestResource() { _, _ = Listen("tcp", "127.0.0.1:0") }
+`,
+		},
+		{
 			name:       "net http httptest",
 			path:       "sample/dot_httptest_test.go",
 			importPath: "net/http/httptest",
@@ -796,6 +873,7 @@ func TestScanAllowsBlankImportsOfTargetedPackages(t *testing.T) {
 	files := fstest.MapFS{
 		"sample/blank_import_test.go": &fstest.MapFile{Data: []byte(`package sample
 import (
+	_ "net"
 	_ "net/http/httptest"
 	_ "os"
 	_ "os/exec"
@@ -1210,6 +1288,20 @@ func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
 		row := findRow(t, rows, ScopeUntagged, ResourceHTTPTestServer)
 		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
 			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListen)
+		if row.BaselineCalls != 92 || row.BaselineFiles != 34 {
+			t.Fatalf("net.Listen baseline = %d/%d, want 92/34", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
