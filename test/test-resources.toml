@@ -139,6 +139,19 @@ resource_owner = "each owning test closes its Unix datagram listener and removes
 migration_target = "P0.4c"
 expires = "2026-10-01"
 
+[[debt]]
+scope = "untagged"
+resource = "syscall_listen"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
@@ -257,5 +270,18 @@ reported_files = 2
 owner_bead = "ga-80po0c.2.2"
 invariant = "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "syscall_listen"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
 expires = "2026-10-01"

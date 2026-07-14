@@ -46,6 +46,8 @@ const (
 	ResourceNetListen Resource = "net_listen"
 	// ResourceNetListenUnixgram counts direct Unix datagram listeners opened by net.ListenUnixgram.
 	ResourceNetListenUnixgram Resource = "net_listen_unixgram"
+	// ResourceSyscallListen counts direct calls that put sockets into listening state through syscall.Listen.
+	ResourceSyscallListen Resource = "syscall_listen"
 )
 
 var knownResources = map[Resource]struct{}{
@@ -57,6 +59,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceHTTPTestServer:    {},
 	ResourceNetListen:         {},
 	ResourceNetListenUnixgram: {},
+	ResourceSyscallListen:     {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -235,6 +238,19 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSyscallListen,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
 	},
 	Medium: []MediumOwner{
 		{
@@ -351,6 +367,19 @@ var bootstrapPolicy = Ledger{
 			OwnerBead:       "ga-80po0c.2.2",
 			Invariant:       "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSyscallListen,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
@@ -638,6 +667,13 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 			if matched {
 				census.add(source, candidate.owner, candidate.runnable, ResourceNetListenUnixgram)
 			}
+			matched, err = isImportedCall(call, source.bindings, "syscall", "Listen")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, candidate.owner, candidate.runnable, ResourceSyscallListen)
+			}
 			matched, err = isImportedCall(call, source.bindings, "net/http/httptest", "NewServer", "NewTLSServer", "NewUnstartedServer")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
@@ -836,7 +872,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "testing" || importPath == "net/http/httptest" {
+			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
