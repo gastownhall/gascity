@@ -98,6 +98,78 @@ func TestLocalNamesAreNotStdlibCalls() {
 	assertCount(t, got, ScopeUntagged, ResourceFixedSleep, 1, 1)
 }
 
+func TestScanCountsHTTPTestServerConstructorsByImportIdentity(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/httptest"
+	servers "net/http/httptest"
+	"testing"
+)
+
+type localServers struct{}
+func (localServers) NewServer(any) {}
+func (localServers) NewTLSServer(any) {}
+func (localServers) NewUnstartedServer(any) {}
+
+func TestHTTPTestServers(t *testing.T) {
+	_ = ((servers.NewServer))(nil)
+	_ = (((servers)).NewTLSServer)(nil)
+	t.Run("nested", func(t *testing.T) {
+		_ = ((servers.NewUnstartedServer))(nil)
+	})
+
+	local := localServers{}
+	local.NewServer(nil)
+	local.NewTLSServer(nil)
+	local.NewUnstartedServer(nil)
+	foreign.NewServer(nil)
+	foreign.NewTLSServer(nil)
+	foreign.NewUnstartedServer(nil)
+	_ = "servers.NewServer(nil); servers.NewTLSServer(nil); servers.NewUnstartedServer(nil)"
+	// servers.NewServer(nil)
+	// servers.NewTLSServer(nil)
+	// servers.NewUnstartedServer(nil)
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	"net/http/httptest"
+	"testing"
+)
+func TestTaggedHTTPTestServer(t *testing.T) {
+	_ = httptest.NewServer(nil)
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceHTTPTestServer, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceHTTPTestServer, 3, 1)
+
+	for _, occurrence := range got.Occurrences {
+		if occurrence.Resource != ResourceHTTPTestServer {
+			continue
+		}
+		wantOwner := "TestHTTPTestServers"
+		wantTagged := false
+		if occurrence.Path == "sample/tagged_test.go" {
+			wantOwner = "TestTaggedHTTPTestServer"
+			wantTagged = true
+		}
+		if occurrence.PackageDir != "sample" || occurrence.PackageName != "sample" || occurrence.Owner != wantOwner || !occurrence.Runnable || occurrence.Tagged != wantTagged {
+			t.Errorf("HTTP test server occurrence = %+v, want package sample/sample owner=%s runnable=true tagged=%t", occurrence, wantOwner, wantTagged)
+		}
+	}
+}
+
 func TestScanCountsCmdGCProcessGlobalsByLexicalOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -697,6 +769,15 @@ import . "testing"
 func TestResource(t *T) { t.Setenv("KEY", "value") }
 `,
 		},
+		{
+			name:       "net http httptest",
+			path:       "sample/dot_httptest_test.go",
+			importPath: "net/http/httptest",
+			source: `package sample
+import . "net/http/httptest"
+func TestResource() { _ = NewServer(nil) }
+`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -715,6 +796,7 @@ func TestScanAllowsBlankImportsOfTargetedPackages(t *testing.T) {
 	files := fstest.MapFS{
 		"sample/blank_import_test.go": &fstest.MapFile{Data: []byte(`package sample
 import (
+	_ "net/http/httptest"
 	_ "os"
 	_ "os/exec"
 	_ "testing"
@@ -1118,6 +1200,17 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-80po0c.2"`)
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before code-owned policy drift was rejected: %v", err)
+	}
+}
+
+func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceHTTPTestServer)
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
 	}
 }
 

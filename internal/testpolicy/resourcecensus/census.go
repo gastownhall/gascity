@@ -40,6 +40,8 @@ const (
 	ResourceCWD Resource = "cwd"
 	// ResourceSlowProcessGate counts the cmd/gc slow-process helper and calls.
 	ResourceSlowProcessGate Resource = "slow_process_gate"
+	// ResourceHTTPTestServer counts loopback servers opened by net/http/httptest.
+	ResourceHTTPTestServer Resource = "http_test_server"
 )
 
 var knownResources = map[Resource]struct{}{
@@ -48,6 +50,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceEnvironment:     {},
 	ResourceCWD:             {},
 	ResourceSlowProcessGate: {},
+	ResourceHTTPTestServer:  {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -187,6 +190,19 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "D5/D6/E6",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceHTTPTestServer,
+			BaselineCalls:   255,
+			BaselineFiles:   56,
+			ReportedCalls:   255,
+			ReportedFiles:   56,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its loopback server and removes duplicate server-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
 	},
 	Medium: []MediumOwner{
 		{
@@ -265,6 +281,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each non-Medium marked caller retains an explicit process-suite migration owner",
 			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceHTTPTestServer,
+			BaselineCalls:   255,
+			BaselineFiles:   56,
+			ReportedCalls:   255,
+			ReportedFiles:   56,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -537,7 +566,14 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 
 		for _, candidate := range source.calls {
 			call := candidate.call
-			matched, err := isImportedCall(call, source.bindings, "os/exec", "Command", "CommandContext")
+			matched, err := isImportedCall(call, source.bindings, "net/http/httptest", "NewServer", "NewTLSServer", "NewUnstartedServer")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, candidate.owner, candidate.runnable, ResourceHTTPTestServer)
+			}
+			matched, err = isImportedCall(call, source.bindings, "os/exec", "Command", "CommandContext")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
@@ -728,7 +764,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "testing" {
+			if importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "testing" || importPath == "net/http/httptest" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -759,7 +795,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 		switch function := unparen(call.Fun).(type) {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
-			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir":
+			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "NewServer", "NewTLSServer", "NewUnstartedServer":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:

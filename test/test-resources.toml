@@ -100,6 +100,19 @@ resource_owner = "the helper definition and every marked caller retain an explic
 migration_target = "D5/D6/E6"
 expires = "2026-10-01"
 
+[[debt]]
+scope = "untagged"
+resource = "http_test_server"
+baseline_calls = 255
+baseline_files = 56
+reported_calls = 255
+reported_files = 56
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
@@ -180,4 +193,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "each non-Medium marked caller retains an explicit process-suite migration owner"
 migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "http_test_server"
+baseline_calls = 255
+baseline_files = 56
+reported_calls = 255
+reported_files = 56
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
 expires = "2026-10-01"
