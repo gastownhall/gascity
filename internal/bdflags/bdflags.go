@@ -3,7 +3,7 @@
 // and the gc lint check that validates bd invocations embedded in prompt
 // templates, so the two call sites cannot drift apart from each other.
 //
-// Sourced from bd <sub> --help output (2026-07-05, bd v1.1.0).
+// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0).
 package bdflags
 
 import "sort"
@@ -37,7 +37,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--id": true, "-l": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
-		"--title": true, "-t": true, "--type": true, "--waits-for": true,
+		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
 	},
 	"update": {

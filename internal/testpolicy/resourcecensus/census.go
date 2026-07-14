@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -67,9 +69,11 @@ type baselineKey struct {
 
 // Ledger is the checked source-level test-resource inventory.
 type Ledger struct {
-	Version       int        `toml:"version"`
-	AuditBaseline []Baseline `toml:"audit_baseline"`
-	Debt          []Baseline `toml:"debt"`
+	Version       int           `toml:"version"`
+	AuditBaseline []Baseline    `toml:"audit_baseline"`
+	Debt          []Baseline    `toml:"debt"`
+	Medium        []MediumOwner `toml:"medium"`
+	SmallDebt     []Baseline    `toml:"small_debt"`
 }
 
 // Baseline pins one source-census signal and its migration ownership.
@@ -88,7 +92,7 @@ type Baseline struct {
 }
 
 var bootstrapPolicy = Ledger{
-	Version: 1,
+	Version: 2,
 	AuditBaseline: []Baseline{
 		{
 			Scope:           ScopeAll,
@@ -106,8 +110,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   443,
-			BaselineFiles:   156,
+			BaselineCalls:   436,
+			BaselineFiles:   153,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -121,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   375,
-			BaselineFiles:   98,
+			BaselineCalls:   374,
+			BaselineFiles:   97,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -134,8 +138,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   291,
-			BaselineFiles:   113,
+			BaselineCalls:   284,
+			BaselineFiles:   110,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -184,18 +188,103 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 	},
+	Medium: []MediumOwner{
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestMain",
+			Resources:       []Resource{ResourceEnvironment},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner",
+			ResourceOwner:   "only environment calls lexically inside TestMain leave Small debt",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+	},
+	SmallDebt: []Baseline{
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSubprocess,
+			BaselineCalls:   374,
+			BaselineFiles:   97,
+			ReportedCalls:   374,
+			ReportedFiles:   97,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners remove or replace each process call site",
+			MigrationTarget: "D1/D2/D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceFixedSleep,
+			BaselineCalls:   284,
+			BaselineFiles:   110,
+			ReportedCalls:   284,
+			ReportedFiles:   110,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners replace elapsed wall time with lifecycle signals",
+			MigrationTarget: "W1-W5",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceEnvironment,
+			BaselineCalls:   4086,
+			BaselineFiles:   180,
+			ReportedCalls:   4086,
+			ReportedFiles:   180,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners restore or eliminate every process-environment mutation",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceCWD,
+			BaselineCalls:   208,
+			BaselineFiles:   40,
+			ReportedCalls:   208,
+			ReportedFiles:   40,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners restore or eliminate every cwd mutation",
+			MigrationTarget: "D5/D6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceSlowProcessGate,
+			BaselineCalls:   77,
+			BaselineFiles:   26,
+			ReportedCalls:   77,
+			ReportedFiles:   26,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each non-Medium marked caller retains an explicit process-suite migration owner",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+	},
 }
 
 // Occurrence is one syntax-owned resource use.
 type Occurrence struct {
-	Path     string
-	Tagged   bool
-	Resource Resource
+	Path        string
+	PackageDir  string
+	PackageName string
+	Owner       string
+	Runnable    bool
+	Tagged      bool
+	Resource    Resource
 }
 
 // Census is a deterministic collection of resource occurrences.
 type Census struct {
 	Occurrences []Occurrence
+	Runnables   []RunnableOwner
 }
 
 // Count is the call-site and unique-file count for a scope/resource pair.
@@ -277,7 +366,7 @@ type parsedFile struct {
 	packageName string
 	tagged      bool
 	file        *ast.File
-	calls       []*ast.CallExpr
+	calls       []resourceCall
 	bindings    bindingInfo
 }
 
@@ -291,6 +380,12 @@ type bindingInfo struct {
 type packageKey struct {
 	directory   string
 	packageName string
+}
+
+type resourceCall struct {
+	call     *ast.CallExpr
+	owner    string
+	runnable bool
 }
 
 type emptyPackageImporter struct {
@@ -341,6 +436,7 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 	fileSet := token.NewFileSet()
 	importer := newEmptyPackageImporter()
 	var sources []parsedFile
+	var runnables []RunnableOwner
 	packageDeclarations := make(map[packageKey]map[string]struct{})
 	for _, name := range names {
 		data, err := fs.ReadFile(sourceFS, name)
@@ -369,6 +465,7 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		if err := validateImports(file); err != nil {
 			return Census{}, fmt.Errorf("scanning imports in %s: %w", name, err)
 		}
+		runnables = append(runnables, runnableOwners(file, key.directory, key.packageName)...)
 		candidates := resourceCandidateCalls(file)
 		scanned := len(candidates) > 0 || hasSlowHelperDeclarationCandidate(file)
 		if !scanned {
@@ -418,7 +515,7 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		}
 	}
 
-	census := Census{}
+	census := Census{Runnables: uniqueSortedRunnables(runnables)}
 	for _, source := range sources {
 		testingObjects, err := testingParameterObjects(source.file, source.bindings)
 		if err != nil {
@@ -434,55 +531,56 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 				return Census{}, fmt.Errorf("scanning slow-process helper in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceSlowProcessGate)
+				census.add(source, function.Name.Name, false, ResourceSlowProcessGate)
 			}
 		}
 
-		for _, call := range source.calls {
+		for _, candidate := range source.calls {
+			call := candidate.call
 			matched, err := isImportedCall(call, source.bindings, "os/exec", "Command", "CommandContext")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceSubprocess)
+				census.add(source, candidate.owner, candidate.runnable, ResourceSubprocess)
 			}
 			matched, err = isImportedCall(call, source.bindings, "time", "Sleep")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceFixedSleep)
+				census.add(source, candidate.owner, candidate.runnable, ResourceFixedSleep)
 			}
 			matched, err = isImportedCall(call, source.bindings, "os", "Setenv", "Unsetenv", "Clearenv")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceEnvironment)
+				census.add(source, candidate.owner, candidate.runnable, ResourceEnvironment)
 			}
 			matched, err = isImportedCall(call, source.bindings, "os", "Chdir")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceCWD)
+				census.add(source, candidate.owner, candidate.runnable, ResourceCWD)
 			}
 			matched, err = isTestingCall(call, source.bindings, testingObjects, "Setenv")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceEnvironment)
+				census.add(source, candidate.owner, candidate.runnable, ResourceEnvironment)
 			}
 			matched, err = isTestingCall(call, source.bindings, testingObjects, "Chdir")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceCWD)
+				census.add(source, candidate.owner, candidate.runnable, ResourceCWD)
 			}
 			if isSlowHelperCall(call, source.bindings, slowHelpers[source.groupKey()]) {
-				census.add(source, ResourceSlowProcessGate)
+				census.add(source, candidate.owner, candidate.runnable, ResourceSlowProcessGate)
 			}
 		}
 	}
@@ -491,6 +589,9 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		left, right := census.Occurrences[i], census.Occurrences[j]
 		if left.Path != right.Path {
 			return left.Path < right.Path
+		}
+		if left.Owner != right.Owner {
+			return left.Owner < right.Owner
 		}
 		return left.Resource < right.Resource
 	})
@@ -501,11 +602,15 @@ func (p parsedFile) groupKey() packageKey {
 	return packageKey{directory: p.directory, packageName: p.packageName}
 }
 
-func (c *Census) add(source parsedFile, resource Resource) {
+func (c *Census) add(source parsedFile, owner string, runnable bool, resource Resource) {
 	c.Occurrences = append(c.Occurrences, Occurrence{
-		Path:     source.name,
-		Tagged:   source.tagged,
-		Resource: resource,
+		Path:        source.name,
+		PackageDir:  source.directory,
+		PackageName: source.packageName,
+		Owner:       owner,
+		Runnable:    runnable,
+		Tagged:      source.tagged,
+		Resource:    resource,
 	})
 }
 
@@ -631,9 +736,22 @@ func validateImports(file *ast.File) error {
 	return nil
 }
 
-func resourceCandidateCalls(file *ast.File) []*ast.CallExpr {
-	var calls []*ast.CallExpr
-	ast.Inspect(file, func(node ast.Node) bool {
+func resourceCandidateCalls(file *ast.File) []resourceCall {
+	aliases := testingImportAliases(file)
+	var calls []resourceCall
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok {
+			calls = appendResourceCandidateCalls(calls, function.Body, function.Name.Name, isRunnableOwner(function, aliases))
+			continue
+		}
+		calls = appendResourceCandidateCalls(calls, declaration, "", false)
+	}
+	return calls
+}
+
+func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner string, runnable bool) []resourceCall {
+	ast.Inspect(node, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -642,16 +760,112 @@ func resourceCandidateCalls(file *ast.File) []*ast.CallExpr {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
 			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir":
-				calls = append(calls, call)
+				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:
 			if function.Name == "skipSlowCmdGCTest" {
-				calls = append(calls, call)
+				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		}
 		return true
 	})
 	return calls
+}
+
+func runnableOwners(file *ast.File, packageDir, packageName string) []RunnableOwner {
+	aliases := testingImportAliases(file)
+	var owners []RunnableOwner
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || !isRunnableOwner(function, aliases) {
+			continue
+		}
+		owners = append(owners, RunnableOwner{PackageDir: packageDir, PackageName: packageName, Owner: function.Name.Name})
+	}
+	return owners
+}
+
+func testingImportAliases(file *ast.File) map[string]struct{} {
+	aliases := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || importPath != "testing" {
+			continue
+		}
+		if spec.Name == nil {
+			aliases["testing"] = struct{}{}
+			continue
+		}
+		if spec.Name.Name != "." && spec.Name.Name != "_" {
+			aliases[spec.Name.Name] = struct{}{}
+		}
+	}
+	return aliases
+}
+
+func isRunnableOwner(function *ast.FuncDecl, testingAliases map[string]struct{}) bool {
+	if function.Recv != nil || function.Type.TypeParams != nil || function.Type.Params == nil || functionParameterCount(function.Type.Params) != 1 || functionParameterCount(function.Type.Results) != 0 {
+		return false
+	}
+	wantType := ""
+	switch {
+	case function.Name.Name == "TestMain":
+		wantType = "M"
+	case goTestName(function.Name.Name, "Test"):
+		wantType = "T"
+	case goTestName(function.Name.Name, "Benchmark"):
+		wantType = "B"
+	case goTestName(function.Name.Name, "Fuzz"):
+		wantType = "F"
+	default:
+		return false
+	}
+	field := function.Type.Params.List[0]
+	pointer, ok := unparen(field.Type).(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := unparen(pointer.X).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != wantType {
+		return false
+	}
+	qualifier, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, ok = testingAliases[qualifier.Name]
+	return ok
+}
+
+func goTestName(name, prefix string) bool {
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	if len(name) == len(prefix) {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(name[len(prefix):])
+	return !unicode.IsLower(next)
+}
+
+func uniqueSortedRunnables(runnables []RunnableOwner) []RunnableOwner {
+	sort.Slice(runnables, func(i, j int) bool {
+		left, right := runnables[i], runnables[j]
+		if left.PackageDir != right.PackageDir {
+			return left.PackageDir < right.PackageDir
+		}
+		if left.PackageName != right.PackageName {
+			return left.PackageName < right.PackageName
+		}
+		return left.Owner < right.Owner
+	})
+	result := runnables[:0]
+	for _, runnable := range runnables {
+		if len(result) == 0 || result[len(result)-1] != runnable {
+			result = append(result, runnable)
+		}
+	}
+	return result
 }
 
 func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Importer, packagePath string) bindingInfo {
@@ -968,6 +1182,9 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 		sort.Strings(problems)
 		return errors.New(strings.Join(problems, "\n"))
 	}
+	if err := validateMediumOwners(ledger.Medium, census, now); err != nil {
+		return err
+	}
 
 	var problems []string
 	for _, baseline := range ledger.AuditBaseline {
@@ -978,6 +1195,9 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 		prefix := fmt.Sprintf("debt baseline scope=%s resource=%s", debt.Scope, debt.Resource)
 		problems = append(problems, validateBaseline(prefix, debt, census)...)
 	}
+	for _, debt := range ledger.SmallDebt {
+		problems = append(problems, validateSmallBaseline(debt, census, ledger.Medium)...)
+	}
 	if len(problems) == 0 {
 		return nil
 	}
@@ -987,14 +1207,16 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 
 func validateManifestAgainstPolicy(policy, ledger Ledger, now time.Time) []string {
 	var problems []string
-	if policy.Version != 1 {
-		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 1", policy.Version))
+	if policy.Version != 2 {
+		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 2", policy.Version))
 	}
 	if ledger.Version != policy.Version {
 		problems = append(problems, fmt.Sprintf("ledger version = %d, bootstrap policy requires %d", ledger.Version, policy.Version))
 	}
 	problems = append(problems, validateRowsAgainstPolicy("audit", policy.AuditBaseline, ledger.AuditBaseline, now)...)
 	problems = append(problems, validateRowsAgainstPolicy("debt", policy.Debt, ledger.Debt, now)...)
+	problems = append(problems, validateMediumRowsAgainstPolicy(policy.Medium, ledger.Medium, now)...)
+	problems = append(problems, validateRowsAgainstPolicy("small debt", policy.SmallDebt, ledger.SmallDebt, now)...)
 	return problems
 }
 
@@ -1105,22 +1327,26 @@ func knownScope(scope Scope) bool {
 }
 
 func validateOwnership(prefix string, row Baseline, now time.Time) []string {
+	return validateOwnershipFields(prefix, row.OwnerBead, row.Invariant, row.ResourceOwner, row.MigrationTarget, row.Expires, now)
+}
+
+func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string, now time.Time) []string {
 	var problems []string
 	for name, value := range map[string]string{
-		"owner_bead":       row.OwnerBead,
-		"invariant":        row.Invariant,
-		"resource_owner":   row.ResourceOwner,
-		"migration_target": row.MigrationTarget,
+		"owner_bead":       owner,
+		"invariant":        invariant,
+		"resource_owner":   resourceOwner,
+		"migration_target": migration,
 	} {
 		if strings.TrimSpace(value) == "" {
 			problems = append(problems, fmt.Sprintf("%s: %s is required", prefix, name))
 		}
 	}
-	expiry, err := time.Parse("2006-01-02", row.Expires)
+	expiry, err := time.Parse("2006-01-02", expiryText)
 	if err != nil {
-		problems = append(problems, fmt.Sprintf("%s: expiry %q must use YYYY-MM-DD", prefix, row.Expires))
+		problems = append(problems, fmt.Sprintf("%s: expiry %q must use YYYY-MM-DD", prefix, expiryText))
 	} else if expiry.Before(day(now)) {
-		problems = append(problems, fmt.Sprintf("%s: expired %s", prefix, row.Expires))
+		problems = append(problems, fmt.Sprintf("%s: expired %s", prefix, expiryText))
 	}
 	return problems
 }
@@ -1156,6 +1382,22 @@ func RenderMarkdown(ledger Ledger) string {
 		}
 	}
 	appendRows("Audit baseline", ledger.AuditBaseline)
+	for _, medium := range ledger.Medium {
+		resources := make([]string, 0, len(medium.Resources))
+		for _, resource := range medium.Resources {
+			resources = append(resources, string(resource))
+		}
+		rows = append(rows, row{
+			kind:      "Medium owner",
+			scope:     fmt.Sprintf("`%s` package `%s`", medium.PackageDir, medium.PackageName),
+			baseline:  medium.Owner + ": " + strings.Join(resources, ", "),
+			owner:     medium.OwnerBead,
+			invariant: medium.Invariant + "; " + medium.ResourceOwner,
+			migration: medium.MigrationTarget,
+			expiry:    medium.Expires,
+		})
+	}
+	appendRows("Small debt ratchet", ledger.SmallDebt)
 	appendRows("Source debt ratchet", ledger.Debt)
 	sort.Slice(rows, func(i, j int) bool {
 		left := rows[i].kind + "\x00" + rows[i].scope + "\x00" + rows[i].baseline

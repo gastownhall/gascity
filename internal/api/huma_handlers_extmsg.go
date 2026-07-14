@@ -89,7 +89,10 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 				return nil, apierr.Internal.Msg(handleErr.Error())
 			}
 		}
-		go s.extmsgNotifyInboundMembers(s.backgroundCtx(), *input.Body.Message)
+		message := *input.Body.Message
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyInboundMembers(ctx, message)
+		})
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
 			out.Body = *result
@@ -167,7 +170,10 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 			notifyConversation = result.Receipt.Conversation
 		}
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
-		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID, "")
+		text, sessionID := input.Body.Text, input.Body.SessionID
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyMembers(ctx, notifyConversation, sourceDisplay, "agent", text, sessionID, "")
+		})
 	}
 	out := &ExtMsgOutboundOutput{}
 	if result != nil {

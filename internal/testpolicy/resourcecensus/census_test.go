@@ -1230,7 +1230,7 @@ func TestParseLedgerRejectsUndeclaredFields(t *testing.T) {
 	requireErrorContains(t, err, "unknown ledger field: mystery")
 }
 
-func TestParseLedgerRejectsClassificationFields(t *testing.T) {
+func TestParseLedgerRejectsUndeclaredClassificationFields(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1238,8 +1238,8 @@ func TestParseLedgerRejectsClassificationFields(t *testing.T) {
 		data string
 		want string
 	}{
-		{"medium rows", "version = 1\n[[medium]]\npackage = 'sample'\n", "unknown ledger field: medium"},
-		{"small debt rows", "version = 1\n[[small_debt]]\nscope = 'untagged'\n", "unknown ledger field: small_debt"},
+		{"medium field", "version = 2\n[[medium]]\npackage_dir = 'sample'\nmystery = true\n", "unknown ledger field: medium.mystery"},
+		{"small debt field", "version = 2\n[[small_debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: small_debt.intended_size"},
 		{"size field", "version = 1\n[[debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: debt.intended_size"},
 	}
 	for _, tt := range tests {
@@ -1254,7 +1254,7 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 	t.Parallel()
 
 	ledger := Ledger{
-		Version: 1,
+		Version: 2,
 		AuditBaseline: []Baseline{
 			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
 		},
@@ -1262,12 +1262,20 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
 			validDebt(ScopeCmdGCUntagged, ResourceCWD, 2, 1),
 		},
+		Medium: []MediumOwner{
+			validMediumOwner("sample", "sample", "TestOwned", ResourceSubprocess),
+		},
+		SmallDebt: []Baseline{
+			validDebt(ScopeUntagged, ResourceFixedSleep, 1, 1),
+		},
 	}
 	got := RenderMarkdown(ledger)
 	want := `<!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 4 calls / 2 files | P0.4 | source census only; does not classify tests; audit owner | P0.4a | 2026-10-01 |
+| Medium owner | ` + "`sample`" + ` package ` + "`sample`" + ` | TestOwned: subprocess | ga-test | exact runnable owner; lexical declaration | P0.4b | 2026-10-01 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 1 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
 | Source debt ratchet | ` + "`cmd/gc`" + ` untagged test source | cwd: 2 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D5/D6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | subprocess: 3 calls / 2 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
 <!-- END CHECKED TEST RESOURCE LEDGER -->`
@@ -1335,12 +1343,19 @@ func validLedger(census Census) Ledger {
 	cmdGCCWD := census.Count(ScopeCmdGCUntagged, ResourceCWD)
 	cmdGCSlowProcessGate := census.Count(ScopeCmdGCUntagged, ResourceSlowProcessGate)
 	return Ledger{
-		Version: 1,
+		Version: 2,
 		AuditBaseline: []Baseline{
 			validAudit(ScopeAll, ResourceSubprocess, allSubprocess.Calls, allSubprocess.Files),
 			validAudit(ScopeAll, ResourceFixedSleep, allSleep.Calls, allSleep.Files),
 		},
 		Debt: []Baseline{
+			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
+			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD, cmdGCCWD.Calls, cmdGCCWD.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate, cmdGCSlowProcessGate.Calls, cmdGCSlowProcessGate.Files),
+		},
+		SmallDebt: []Baseline{
 			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
 			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
 			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
@@ -1386,6 +1401,11 @@ func cloneLedger(source Ledger) Ledger {
 	clone := source
 	clone.AuditBaseline = append([]Baseline(nil), source.AuditBaseline...)
 	clone.Debt = append([]Baseline(nil), source.Debt...)
+	clone.SmallDebt = append([]Baseline(nil), source.SmallDebt...)
+	clone.Medium = append([]MediumOwner(nil), source.Medium...)
+	for index := range clone.Medium {
+		clone.Medium[index].Resources = append([]Resource(nil), source.Medium[index].Resources...)
+	}
 	return clone
 }
 

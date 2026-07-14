@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 # Every field below is pinned by resourcecensus.bootstrapPolicy. Changing this
 # manifest alone fails; an intentional policy change updates the Go policy,
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 443
-baseline_files = 156
+baseline_calls = 436
+baseline_files = 153
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 375
-baseline_files = 98
+baseline_calls = 374
+baseline_files = 97
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 291
-baseline_files = 113
+baseline_calls = 284
+baseline_files = 110
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -97,5 +97,87 @@ reported_files = 27
 owner_bead = "ga-80po0c.2.3"
 invariant = "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "the helper definition and every marked caller retain an explicit process-suite migration owner"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+# Exact Medium owners are keyed by source directory, package clause, and
+# top-level Go test identity. Only matching resources lexically inside that
+# declaration leave the Small-debt census; helper bodies and sibling tests do
+# not inherit a source exemption.
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestMain"
+resources = ["environment"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "cmd/gc TestMain is the checked package-level Medium owner"
+resource_owner = "only environment calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+# Small-debt rows apply the exact Medium filter while the source-debt rows
+# above retain the raw anti-growth census.
+[[small_debt]]
+scope = "untagged"
+resource = "subprocess"
+baseline_calls = 374
+baseline_files = 97
+reported_calls = 374
+reported_files = 97
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners remove or replace each process call site"
+migration_target = "D1/D2/D5/D6/E6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+baseline_calls = 284
+baseline_files = 110
+reported_calls = 284
+reported_files = 110
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals"
+migration_target = "W1-W5"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "cmd/gc+untagged"
+resource = "environment"
+baseline_calls = 4086
+baseline_files = 180
+reported_calls = 4086
+reported_files = 180
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners restore or eliminate every process-environment mutation"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "cmd/gc+untagged"
+resource = "cwd"
+baseline_calls = 208
+baseline_files = 40
+reported_calls = 208
+reported_files = 40
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners restore or eliminate every cwd mutation"
+migration_target = "D5/D6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "cmd/gc+untagged"
+resource = "slow_process_gate"
+baseline_calls = 77
+baseline_files = 26
+reported_calls = 77
+reported_files = 26
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
+resource_owner = "each non-Medium marked caller retains an explicit process-suite migration owner"
 migration_target = "D5/D6/E6"
 expires = "2026-10-01"

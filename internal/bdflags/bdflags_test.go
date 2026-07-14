@@ -66,6 +66,15 @@ func TestGlobalFlagsPresentOnEverySubcommand(t *testing.T) {
 	}
 }
 
+func TestCreateStatusFlagsConsumeValues(t *testing.T) {
+	value := ValueFlags("create")
+	for _, flag := range []string{"-s", "--status"} {
+		if !value[flag] {
+			t.Errorf("ValueFlags(create)[%q] = false, want true", flag)
+		}
+	}
+}
+
 func TestUpdateFlagSets(t *testing.T) {
 	value := ValueFlags("update")
 	for _, f := range []string{"--assignee", "-a", "--status", "-s", "--priority", "-p", "--set-metadata", "--unset-metadata", "--parent", "--type", "-t"} {
