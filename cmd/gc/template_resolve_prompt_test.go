@@ -203,6 +203,9 @@ func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
 	cityPath := t.TempDir()
 	fakeFS := fsys.NewFake()
 	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
 	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
 		t.Fatalf("write prompt template: %v", err)
 	}
@@ -254,6 +257,9 @@ func TestResolveTemplateExplicitControlDispatcherKeepsStartupPrompt(t *testing.T
 	cityPath := t.TempDir()
 	fakeFS := fsys.NewFake()
 	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
 	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
 		t.Fatalf("write prompt template: %v", err)
 	}

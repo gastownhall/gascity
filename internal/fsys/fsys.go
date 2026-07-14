@@ -10,12 +10,16 @@ import (
 	"os"
 )
 
-// FS abstracts the filesystem operations used by CLI commands.
+// FS abstracts the filesystem operations used by CLI commands. Implementations
+// share the portable namespace contract in internal/fsys/fsystest.
 type FS interface {
-	// MkdirAll creates a directory path and all parents that do not exist.
+	// MkdirAll creates a directory path and all parents that do not exist. It
+	// returns an error when the path or one of its ancestors is a file.
 	MkdirAll(path string, perm os.FileMode) error
 
-	// WriteFile writes data to the named file, creating it if necessary.
+	// WriteFile writes data to the named file, creating it if necessary. The
+	// parent directory must exist, directories cannot be overwritten, and the
+	// mode of an existing file is preserved.
 	WriteFile(name string, data []byte, perm os.FileMode) error
 
 	// ReadFile reads the named file and returns its contents.
@@ -29,16 +33,18 @@ type FS interface {
 	// the mode's ModeSymlink bit before touching the path.
 	Lstat(name string) (os.FileInfo, error)
 
-	// ReadDir reads the named directory and returns its entries.
+	// ReadDir reads the named directory and returns its entries. Missing paths
+	// and non-directory paths return errors.
 	ReadDir(name string) ([]os.DirEntry, error)
 
-	// Rename renames (moves) oldpath to newpath.
+	// Rename renames (moves) oldpath to newpath. The destination parent must
+	// exist, and moving a directory moves its complete subtree.
 	Rename(oldpath, newpath string) error
 
 	// Remove removes the named file or empty directory.
 	Remove(name string) error
 
-	// Chmod changes the mode of the named file or directory.
+	// Chmod changes the mode of an existing file or directory.
 	Chmod(name string, mode os.FileMode) error
 }
 

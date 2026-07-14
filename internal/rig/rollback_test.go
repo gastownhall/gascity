@@ -68,6 +68,7 @@ func TestSnapshotRestoreRemovesFileCreatedAfterSnapshot(t *testing.T) {
 
 func TestRestoreSnapshotsUsesAtomicWrite(t *testing.T) {
 	fs := fsys.NewFake()
+	fs.Dirs["/city"] = true
 	snap := FileSnapshot{Path: "/city/city.toml", Data: []byte("updated = true\n"), Exists: true}
 	if err := RestoreSnapshots(fs, []FileSnapshot{snap}); err != nil {
 		t.Fatalf("RestoreSnapshots: %v", err)
