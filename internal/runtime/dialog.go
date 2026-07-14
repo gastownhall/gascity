@@ -1036,12 +1036,32 @@ func ContainsProviderRateLimitScreen(content string) bool {
 		strings.Contains(content, "Stop")
 }
 
+// spendLimitModalWindowLines bounds how many consecutive lines the Claude
+// spend-limit modal's anchor tokens may span. The modal renders "Usage credit
+// balance", "Adjust monthly spend limit", and "Wait for limit to reset" on
+// adjacent lines inside one bordered box; a small window tolerates a border or
+// blank line between them while still rejecting the same tokens scattered across
+// unrelated scrollback.
+const spendLimitModalWindowLines = 6
+
+// containsClaudeSpendLimitModal reports whether pane content shows Claude's
+// spend-limit modal (which is a rate-limit, not a crash).
+//
+// It requires the modal's three anchor tokens to co-occur within one on-screen
+// block rather than matching each token anywhere in the buffer. Whole-buffer
+// strings.Contains for each token independently lets the tokens land on
+// unrelated scrollback lines — e.g. a pane displaying billing notes or these
+// very test fixtures — and misclassify a genuinely crashed session as
+// rate-limited. That suppresses the session's SessionCrashed event and, because
+// the rate-limit quarantine re-detects the same scrollback every reconcile
+// cycle, masks the real crash indefinitely with no self-heal. "Wait for limit
+// to reset" is always present in the real modal and is the reliable anchor, so
+// the loose "Resets " arm is dropped as too weak.
 func containsClaudeSpendLimitModal(content string) bool {
-	hasLimitAction := strings.Contains(content, "Adjust monthly spend limit")
-	hasCreditBalance := strings.Contains(content, "Usage credit balance")
-	hasResetOption := strings.Contains(content, "Wait for limit to reset") ||
-		strings.Contains(content, "Resets ")
-	return hasLimitAction && hasCreditBalance && hasResetOption
+	return linesContainAllWithin(content, spendLimitModalWindowLines,
+		"Usage credit balance",
+		"Adjust monthly spend limit",
+		"Wait for limit to reset")
 }
 
 // ProviderTerminalErrorReason classifies high-confidence provider errors that
@@ -1076,6 +1096,33 @@ func lineContainsAll(content string, subs ...string) bool {
 		all := true
 		for _, sub := range subs {
 			if !strings.Contains(line, sub) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+// linesContainAllWithin reports whether some window of at most maxSpan
+// consecutive lines in content jointly contains every substring in subs. Like
+// lineContainsAll it bounds a loose multi-token match to co-occurring text, but
+// across a small block of adjacent lines (e.g. a modal box) rather than a single
+// line, so the tokens cannot smear across unrelated scrollback lines and wrongly
+// classify the pane.
+func linesContainAllWithin(content string, maxSpan int, subs ...string) bool {
+	if maxSpan < 1 || len(subs) == 0 {
+		return false
+	}
+	lines := strings.Split(content, "\n")
+	for start := range lines {
+		window := strings.Join(lines[start:min(start+maxSpan, len(lines))], "\n")
+		all := true
+		for _, sub := range subs {
+			if !strings.Contains(window, sub) {
 				all = false
 				break
 			}
