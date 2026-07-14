@@ -46,6 +46,8 @@ const (
 	ResourceNetListen Resource = "net_listen"
 	// ResourceNetListenUnixgram counts direct Unix datagram listeners opened by net.ListenUnixgram.
 	ResourceNetListenUnixgram Resource = "net_listen_unixgram"
+	// ResourceNetListenConfig counts direct listeners opened through net.ListenConfig.Listen.
+	ResourceNetListenConfig Resource = "net_listen_config"
 	// ResourceSyscallListen counts direct calls that put sockets into listening state through syscall.Listen.
 	ResourceSyscallListen Resource = "syscall_listen"
 )
@@ -58,6 +60,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceSlowProcessGate:   {},
 	ResourceHTTPTestServer:    {},
 	ResourceNetListen:         {},
+	ResourceNetListenConfig:   {},
 	ResourceNetListenUnixgram: {},
 	ResourceSyscallListen:     {},
 }
@@ -227,6 +230,19 @@ var bootstrapPolicy = Ledger{
 		},
 		{
 			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenConfig,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its configured listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListenUnixgram,
 			BaselineCalls:   3,
 			BaselineFiles:   2,
@@ -354,6 +370,19 @@ var bootstrapPolicy = Ledger{
 			OwnerBead:       "ga-80po0c.2.2",
 			Invariant:       "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenConfig,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
@@ -489,6 +518,7 @@ type parsedFile struct {
 type bindingInfo struct {
 	defs                       map[*ast.Ident]types.Object
 	uses                       map[*ast.Ident]types.Object
+	expressionTypes            map[ast.Expr]types.TypeAndValue
 	packageDeclarations        map[string]struct{}
 	unresolvedImportQualifiers map[string]struct{}
 }
@@ -517,6 +547,14 @@ func (importer *emptyPackageImporter) Import(importPath string) (*types.Package,
 		return imported, nil
 	}
 	imported := types.NewPackage(importPath, path.Base(importPath))
+	if importPath == "net" {
+		// Seed only the receiver type the census needs so go/types can carry
+		// ListenConfig identity through pointers and aliases without loading
+		// host toolchain export data.
+		name := types.NewTypeName(token.NoPos, imported, "ListenConfig", nil)
+		types.NewNamed(name, types.NewStruct(nil, nil), nil)
+		imported.Scope().Insert(name)
+	}
 	imported.MarkComplete()
 	importer.packages[importPath] = imported
 	return imported, nil
@@ -659,6 +697,13 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 			}
 			if matched {
 				census.add(source, candidate.owner, candidate.runnable, ResourceNetListen)
+			}
+			matched, err = isNetListenConfigCall(call, source.bindings)
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, candidate.owner, candidate.runnable, ResourceNetListenConfig)
 			}
 			matched, err = isImportedCall(call, source.bindings, "net", "ListenUnixgram")
 			if err != nil {
@@ -1014,8 +1059,14 @@ func uniqueSortedRunnables(runnables []RunnableOwner) []RunnableOwner {
 
 func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Importer, packagePath string) bindingInfo {
 	info := bindingInfo{
-		defs: make(map[*ast.Ident]types.Object),
-		uses: make(map[*ast.Ident]types.Object),
+		defs:            make(map[*ast.Ident]types.Object),
+		uses:            make(map[*ast.Ident]types.Object),
+		expressionTypes: make(map[ast.Expr]types.TypeAndValue),
+	}
+	receivers := netListenReceiverExpressions(file)
+	var checkedExpressionTypes map[ast.Expr]types.TypeAndValue
+	if len(receivers) > 0 {
+		checkedExpressionTypes = make(map[ast.Expr]types.TypeAndValue)
 	}
 	config := types.Config{
 		Importer:                 importer,
@@ -1023,8 +1074,45 @@ func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Impo
 		IgnoreFuncBodies:         false,
 		Error:                    func(error) {},
 	}
-	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{Defs: info.defs, Uses: info.uses})
+	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{
+		Defs:  info.defs,
+		Uses:  info.uses,
+		Types: checkedExpressionTypes,
+	})
+	for _, receiver := range receivers {
+		if typeAndValue, ok := checkedExpressionTypes[receiver]; ok {
+			info.expressionTypes[receiver] = typeAndValue
+		}
+	}
 	return info
+}
+
+func netListenReceiverExpressions(file *ast.File) []ast.Expr {
+	hasNetImport := false
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err == nil && importPath == "net" && (spec.Name == nil || spec.Name.Name != "_") {
+			hasNetImport = true
+			break
+		}
+	}
+	if !hasNetImport {
+		return nil
+	}
+
+	var receivers []ast.Expr
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "Listen" {
+			receivers = append(receivers, unparen(selector.X))
+		}
+		return true
+	})
+	return receivers
 }
 
 func recordPackageDeclarations(file *ast.File, declarations map[string]struct{}) {
@@ -1141,6 +1229,71 @@ func testingParameterObjects(file *ast.File, bindings bindingInfo) (map[types.Ob
 		return true
 	})
 	return objects, inspectErr
+}
+
+func isNetListenConfigType(expression ast.Expr, bindings bindingInfo) (bool, error) {
+	if expression == nil {
+		return false, nil
+	}
+	expression = unparen(expression)
+	if pointer, ok := expression.(*ast.StarExpr); ok {
+		expression = pointer.X
+	}
+	return isImportedType(expression, bindings, "net", "ListenConfig")
+}
+
+func isNetListenConfigValue(expression ast.Expr, bindings bindingInfo) (bool, error) {
+	expression = unparen(expression)
+	if address, ok := expression.(*ast.UnaryExpr); ok && address.Op == token.AND {
+		expression = unparen(address.X)
+	}
+	composite, ok := expression.(*ast.CompositeLit)
+	if !ok {
+		return false, nil
+	}
+	return isNetListenConfigType(composite.Type, bindings)
+}
+
+func isNetListenConfigCall(call *ast.CallExpr, bindings bindingInfo) (bool, error) {
+	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Listen" {
+		return false, nil
+	}
+	receiver := unparen(selector.X)
+	if typeAndValue, ok := bindings.expressionTypes[receiver]; ok && typeAndValue.Type != nil {
+		return isNetListenConfigObjectType(typeAndValue.Type), nil
+	}
+	direct, err := isNetListenConfigValue(receiver, bindings)
+	if err != nil || direct {
+		return direct, err
+	}
+	identifier, ok := receiver.(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	object := bindings.uses[identifier]
+	if object == nil {
+		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+			return false, nil
+		}
+		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+			return false, nil
+		}
+		return false, fmt.Errorf("net.ListenConfig receiver %q has no lexical binding", identifier.Name)
+	}
+	return isNetListenConfigObjectType(object.Type()), nil
+}
+
+func isNetListenConfigObjectType(objectType types.Type) bool {
+	objectType = types.Unalias(objectType)
+	if pointer, ok := objectType.(*types.Pointer); ok {
+		objectType = types.Unalias(pointer.Elem())
+	}
+	named, ok := objectType.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Name() == "ListenConfig" && named.Obj().Pkg().Path() == "net"
 }
 
 func isTestingParameterType(expression ast.Expr, bindings bindingInfo) (bool, error) {

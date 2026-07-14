@@ -128,6 +128,19 @@ expires = "2026-10-01"
 
 [[debt]]
 scope = "untagged"
+resource = "net_listen_config"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its configured listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
 resource = "net_listen_unixgram"
 baseline_calls = 3
 baseline_files = 2
@@ -257,6 +270,19 @@ reported_files = 34
 owner_bead = "ga-80po0c.2.2"
 invariant = "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "net_listen_config"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
 expires = "2026-10-01"
 
