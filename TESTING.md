@@ -225,6 +225,42 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
+#### Historical timing summaries
+
+The opt-in timing artifacts produced by `scripts/go-test-observable` can be
+aggregated offline across caller-curated successful `main` push runs:
+
+```bash
+go run ./scripts/test-timing-summary.go /path/to/downloaded-artifacts \
+  >> "$GITHUB_STEP_SUMMARY"
+```
+
+The summarizer recursively reads schema-v1 JSON artifacts, deduplicates
+identical downloads, and rejects conflicting artifacts with the same workflow,
+run, attempt, job, shard, and variant identity. It emits the ten slowest
+top-level tests by observed p95 and the ten highest-variance top-level tests
+for each comparable `(job, variant, runner label, OS, architecture, CPU count)`
+profile. Ephemeral runner names do not split profiles. Package terminal rows
+are shard totals rather than independently scheduled work, and nested subtests
+are diagnostic until the shard manifest explicitly promotes them, so neither
+is ranked. Statistics use successful durations only while retaining failure
+and skip counts. Percentiles use the empirical nearest-rank method, variance
+is population variance in seconds squared, and samples are not trimmed.
+
+Schema v1 does not record the event, ref, or workflow conclusion, so the tool
+cannot prove protected-branch provenance. The caller must supply artifacts
+from successful `main` push runs. An observed p95 with fewer than 20 successful
+samples is diagnostic, not planner-authoritative, and the seven-day artifact
+retention window is not a protected historical timing database. Renamed tests
+remain separate histories.
+
+In schema v1, `commit_sha` is the exact Git revision checked out and tested
+(`GITHUB_SHA`). On `pull_request` runs, GitHub sets it to the synthetic merge
+commit, not the contributor branch head. Consumers must not interpret it as
+source/head identity. A future schema that needs both identities must add
+distinct `tested_sha` and `source_sha` fields; schema v1 must not be
+reinterpreted.
+
 Tier A command acceptance and external-provider compatibility are separate
 gates. `make test-acceptance` uses controlled subprocess and file providers; it
 does not require inference or a `bd` executable. `make test-bd-cli-contract`
