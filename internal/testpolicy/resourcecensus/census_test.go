@@ -238,6 +238,75 @@ func TestSiblingShadow() {
 	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListen, "TestTaggedNetListen", true, true)
 }
 
+func TestScanCountsNetListenUnixgramByImportIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+
+type localNet struct{}
+func (localNet) ListenUnixgram(string, *sockets.UnixAddr) (any, error) { return nil, nil }
+
+func TestNetListenUnixgram(t *testing.T) {
+	_, _ = ((sockets.ListenUnixgram))("unixgram", nil)
+	t.Run("nested", func(t *testing.T) {
+		_, _ = (((sockets)).ListenUnixgram)("unixgram", nil)
+	})
+
+	local := localNet{}
+	_, _ = local.ListenUnixgram("unixgram", nil)
+	_, _ = foreign.ListenUnixgram("unixgram", nil)
+	lc := sockets.ListenConfig{}
+	_, _ = lc.Listen(t.Context(), "unixgram", "listen config method")
+	_, _ = sockets.ListenUnix("unixgram", nil)
+	_, _ = sockets.ListenUDP("udp", nil)
+	_ = "sockets.ListenUnixgram(\"unixgram\", nil)"
+	// sockets.ListenUnixgram("unixgram", nil)
+}
+
+func helper() {
+	_, _ = sockets.ListenUnixgram("unixgram", nil)
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedNetListenUnixgram(t *testing.T) {
+	_, _ = sockets.ListenUnixgram("unixgram", nil)
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localNet struct{}
+func (localNet) ListenUnixgram(string, any) (any, error) { return nil, nil }
+var sockets localNet
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_, _ = sockets.ListenUnixgram("unixgram", nil)
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceNetListenUnixgram, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListenUnixgram, 3, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "TestNetListenUnixgram", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenUnixgram, "TestTaggedNetListenUnixgram", true, true)
+}
+
 func TestScanCountsCmdGCProcessGlobalsByLexicalOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -1302,6 +1371,20 @@ func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
 		}
 		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
 			t.Fatalf("net.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsNetListenUnixgramDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListenUnixgram)
+		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
+			t.Fatalf("net.ListenUnixgram baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.ListenUnixgram owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }

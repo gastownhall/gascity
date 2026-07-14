@@ -44,16 +44,19 @@ const (
 	ResourceHTTPTestServer Resource = "http_test_server"
 	// ResourceNetListen counts direct listeners opened by net.Listen.
 	ResourceNetListen Resource = "net_listen"
+	// ResourceNetListenUnixgram counts direct Unix datagram listeners opened by net.ListenUnixgram.
+	ResourceNetListenUnixgram Resource = "net_listen_unixgram"
 )
 
 var knownResources = map[Resource]struct{}{
-	ResourceSubprocess:      {},
-	ResourceFixedSleep:      {},
-	ResourceEnvironment:     {},
-	ResourceCWD:             {},
-	ResourceSlowProcessGate: {},
-	ResourceHTTPTestServer:  {},
-	ResourceNetListen:       {},
+	ResourceSubprocess:        {},
+	ResourceFixedSleep:        {},
+	ResourceEnvironment:       {},
+	ResourceCWD:               {},
+	ResourceSlowProcessGate:   {},
+	ResourceHTTPTestServer:    {},
+	ResourceNetListen:         {},
+	ResourceNetListenUnixgram: {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -219,6 +222,19 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenUnixgram,
+			BaselineCalls:   3,
+			BaselineFiles:   2,
+			ReportedCalls:   3,
+			ReportedFiles:   2,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
 	},
 	Medium: []MediumOwner{
 		{
@@ -322,6 +338,19 @@ var bootstrapPolicy = Ledger{
 			OwnerBead:       "ga-80po0c.2.2",
 			Invariant:       "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenUnixgram,
+			BaselineCalls:   3,
+			BaselineFiles:   2,
+			ReportedCalls:   3,
+			ReportedFiles:   2,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
@@ -602,6 +631,13 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 			if matched {
 				census.add(source, candidate.owner, candidate.runnable, ResourceNetListen)
 			}
+			matched, err = isImportedCall(call, source.bindings, "net", "ListenUnixgram")
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			if matched {
+				census.add(source, candidate.owner, candidate.runnable, ResourceNetListenUnixgram)
+			}
 			matched, err = isImportedCall(call, source.bindings, "net/http/httptest", "NewServer", "NewTLSServer", "NewUnstartedServer")
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
@@ -831,7 +867,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 		switch function := unparen(call.Fun).(type) {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
-			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "NewServer", "NewTLSServer", "NewUnstartedServer":
+			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenUnixgram", "NewServer", "NewTLSServer", "NewUnstartedServer":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:
