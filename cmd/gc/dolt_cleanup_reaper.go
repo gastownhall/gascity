@@ -59,17 +59,32 @@ type DoltProcInfo struct {
 // (e.g. "active rig dolt server (rig: beads)") and set for deleted-scope
 // reaps (deleted cwd, vanished config); empty for the classic
 // test-config-path allowlist reap where the path itself is the explanation.
+//
+// DataDir is set on a reap classification only when the process's own
+// --data-dir argv value independently passes the same test-config-path
+// allowlist used for --config (see reapDataDir). This is a narrowing gate on
+// top of Action, never a second classification path: DataDir never flips
+// protect to reap or vice versa, it only decides whether the reap stage may
+// additionally remove a data directory once the kill itself is confirmed.
+// Empty DataDir means "reap the process, but do not touch any directory" —
+// the safe default when the --data-dir value cannot be independently
+// verified as test-owned.
 type reapClassification struct {
 	Action     string
 	Reason     string
 	ConfigPath string
+	DataDir    string
 }
 
 // ReapTarget is a single PID slated for SIGTERM+SIGKILL during the reap stage.
-// Reason mirrors reapClassification.Reason for deleted-scope targets.
+// Reason mirrors reapClassification.Reason for deleted-scope targets. DataDir
+// mirrors reapClassification.DataDir: when non-empty, the reap stage removes
+// that directory after (and only after) the kill is confirmed, composing
+// with classifyDoltProcess's verdict rather than re-judging the process.
 type ReapTarget struct {
 	PID            int
 	ConfigPath     string
+	DataDir        string
 	Reason         string
 	RSSBytes       int64
 	StartTimeTicks uint64
@@ -105,6 +120,30 @@ func extractConfigPath(argv []string) string {
 		if strings.HasPrefix(arg, "--config=") {
 			return strings.TrimPrefix(arg, "--config=")
 		}
+	}
+	return ""
+}
+
+// extractDataDirPath pulls the --data-dir <path> argument from a dolt
+// sql-server argv, reusing the generic flag-value parser already shared by
+// the standalone-conflict detector (dolt_standalone_conflict.go) rather than
+// hand-rolling a second parser.
+func extractDataDirPath(argv []string) string {
+	v, _ := argvFlagValue(argv, "--data-dir")
+	return v
+}
+
+// reapDataDir returns argv's --data-dir value when — and only when — that
+// value independently passes the same test-config-path allowlist used for
+// --config (isTestConfigPath). It never consults ConfigPath: a --data-dir
+// value is trusted for removal solely on its own merits, so a reap triggered
+// by a --config allowlist match does not implicitly vouch for an unrelated
+// --data-dir value. Returns "" when --data-dir is absent or not test-owned,
+// which callers treat as "reap the process, but do not remove a directory."
+func reapDataDir(argv []string, homeDir, tempDir string) string {
+	dataDirPath := extractDataDirPath(argv)
+	if dataDirPath != "" && isTestConfigPath(dataDirPath, homeDir, tempDir) {
+		return dataDirPath
 	}
 	return ""
 }
@@ -195,8 +234,13 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //  3. Else reap when the working directory is an unlinked inode (ga-10wmzh):
 //     a cwd readlink ending in " (deleted)" can never revert, so it proves the
 //     scope is gone — this also covers bare servers started without --config.
-//  4. Else protect bare servers (no --config): an unidentified dolt server is
-//     never killed.
+//  4. Else, for a bare server (no --config): reap when --data-dir is present
+//     and itself independently passes the test-config-path allowlist from
+//     step 5 below (e.g. examples/gastown's real-dolt integration test,
+//     which launches `dolt sql-server --data-dir <t.TempDir()>/dolt` with no
+//     --config at all — a confirmed regression exemplar). Otherwise protect:
+//     an unidentified dolt server (no --config and no allowlisted
+//     --data-dir) is never killed.
 //  5. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
 //     os.TempDir()/Test*, known Gas City temp prefixes). The allowlist match
 //     is an ownership signal, so an owned test scope is reaped even if its
@@ -232,18 +276,33 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			Action:     "reap",
 			Reason:     "working directory deleted (scope removed)",
 			ConfigPath: cfgPath,
+			DataDir:    reapDataDir(p.Argv, homeDir, tempDir),
 		}
 	}
 	if cfgPath == "" {
+		dataDirPath := extractDataDirPath(p.Argv)
+		if dataDirPath == "" {
+			return reapClassification{
+				Action: "protect",
+				Reason: "no --config path detected; refusing to kill an unidentified dolt server",
+			}
+		}
+		if isTestConfigPath(dataDirPath, homeDir, tempDir) {
+			// A --data-dir match against the same allowlist used for --config
+			// (step 5 below) is an ownership signal in its own right: a bare
+			// server with no --config but a test-owned --data-dir is a known
+			// regression-test shape and is reaped rather than protected.
+			return reapClassification{Action: "reap", DataDir: dataDirPath}
+		}
 		return reapClassification{
 			Action: "protect",
-			Reason: "no --config path detected; refusing to kill an unidentified dolt server",
+			Reason: fmt.Sprintf("data-dir %q not on test-config-path allowlist; kill manually if not wanted", dataDirPath),
 		}
 	}
 	if isTestConfigPath(cfgPath, homeDir, tempDir) {
 		// A test-config-path match is itself an ownership signal, so an owned
 		// test scope is reaped even when its --config file was already removed.
-		return reapClassification{Action: "reap", ConfigPath: cfgPath}
+		return reapClassification{Action: "reap", ConfigPath: cfgPath, DataDir: reapDataDir(p.Argv, homeDir, tempDir)}
 	}
 	if p.ConfigPathState == procPathStateDeleted {
 		// A non-allowlist --config has vanished while the working directory
@@ -293,6 +352,7 @@ func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir,
 			plan.Reap = append(plan.Reap, ReapTarget{
 				PID:            p.PID,
 				ConfigPath:     c.ConfigPath,
+				DataDir:        c.DataDir,
 				Reason:         c.Reason,
 				RSSBytes:       p.RSSBytes,
 				StartTimeTicks: p.StartTimeTicks,
