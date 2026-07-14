@@ -47,7 +47,7 @@
     --surface-tint: 22% 0.012 75;
     --fg: 92% 0.006 75;
     --fg-muted: 68% 0.014 75;
-    --fg-faint: 59% 0.012 75; /* tertiary labels remain AA at 12px */
+    --fg-faint: 54% 0.012 75;
     --rule: 28% 0.01 75;
     --accent: 72% 0.12 25;
     --ok: 70% 0.085 150;
@@ -62,7 +62,7 @@
       --surface-tint: 22% 0.012 75;
       --fg: 92% 0.006 75;
       --fg-muted: 68% 0.014 75;
-      --fg-faint: 59% 0.012 75;
+      --fg-faint: 54% 0.012 75;
       --rule: 28% 0.01 75;
       --accent: 72% 0.12 25;
       --ok: 70% 0.085 150;

@@ -30,8 +30,8 @@ const AgentsPage = lazy(() => import('./routes/Agents').then((m) => ({ default: 
 const AgentDetailPage = lazy(() =>
   import('./routes/AgentDetail').then((m) => ({ default: m.AgentDetailPage })),
 );
-const CockpitHomePage = lazy(() =>
-  import('./routes/CockpitHome').then((m) => ({ default: m.CockpitHomePage })),
+const AmbientHomePage = lazy(() =>
+  import('./routes/AmbientHome').then((m) => ({ default: m.AmbientHomePage })),
 );
 const BeadsPage = lazy(() => import('./routes/Beads').then((m) => ({ default: m.BeadsPage })));
 const MailPage = lazy(() => import('./routes/Mail').then((m) => ({ default: m.MailPage })));
@@ -139,7 +139,7 @@ function RoutedMain({
         <Routes>
           {/* `/` resolution (PRD §6 / bead 9yj.5):
               DEFAULT_VIEW env → descriptor `defaultRoute: true` →
-              live cockpit home fallback. The resolver runs once per
+              kb3 ambient home fallback. The resolver runs once per
               enabled-set / env change; warnings surface in the
               browser console for premortem #5 visibility. */}
           <Route
@@ -150,7 +150,7 @@ function RoutedMain({
               ) : DefaultViewElement !== null ? (
                 <DefaultViewElement />
               ) : (
-                <CockpitHomePage />
+                <AmbientHomePage />
               )
             }
           />
