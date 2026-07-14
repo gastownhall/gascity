@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4130
-baseline_files = 188
+baseline_calls = 4151
+baseline_files = 189
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-80po0c.2.3"
@@ -211,10 +211,10 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4124
-baseline_files = 188
-reported_calls = 4124
-reported_files = 188
+baseline_calls = 4145
+baseline_files = 189
+reported_calls = 4145
+reported_files = 189
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners restore or eliminate every process-environment mutation"

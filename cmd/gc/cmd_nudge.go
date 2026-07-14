@@ -400,13 +400,15 @@ func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
-	// On every prompt, emit a live clock (operator-local + UTC + epoch) as
-	// UserPromptSubmit hook context. When a nudge also fires we fold the clock
-	// into that nudge's single provider-formatted payload (see the combined
-	// write below); otherwise this deferred fallback emits the clock on its
-	// own. Either way exactly one provider hook context is written per
-	// invocation, so JSON formats (codex/gemini) stay one valid document rather
-	// than two concatenated objects. See clock_inject.go.
+	// On every prompt, emit a live clock (operator-local + UTC + epoch) and
+	// the agent's active formula step (if any) as UserPromptSubmit hook context.
+	// When a nudge also fires we fold everything into that nudge's single
+	// provider-formatted payload (see the combined write below); otherwise this
+	// deferred fallback emits clock+step on their own. Either way exactly one
+	// provider hook context is written per invocation, so JSON formats
+	// (codex/gemini) stay one valid document rather than two concatenated objects.
+	// See clock_inject.go and wisp_step_inject.go.
+	var wispExtra string // set after target resolution; captured by defer closure
 	emittedHookContext := false
 	var injectPrefix string
 	if inject {
@@ -416,8 +418,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// the context-usage guidance (see context_inject.go).
 		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin())
 		defer func() {
-			if !emittedHookContext && injectPrefix != "" {
-				_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix)
+			if !emittedHookContext {
+				line := injectPrefix + wispExtra
+				if line != "" {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line)
+				}
 			}
 		}()
 	}
@@ -443,6 +448,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	if inject {
+		wispExtra = wispStepInjectionContent(target.cityPath)
 	}
 
 	now := time.Now()
@@ -510,10 +518,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	var writeErr error
 	if inject {
-		// Fold the clock into the nudge so a single provider-formatted payload
-		// carries both; this is the one place the combined context is written.
+		// Fold the clock and active formula step into the nudge so a single
+		// provider-formatted payload carries all; this is the one place the
+		// combined context is written.
 		emittedHookContext = true
-		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out)
+		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+wispExtra)
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}
