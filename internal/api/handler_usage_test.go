@@ -110,11 +110,48 @@ func TestHandleUsageIsRegisteredAndReturnsSanitizedAggregate(t *testing.T) {
 	if body.Today.InputTokens != 100 || body.Recent.InputTokens != 100 {
 		t.Fatalf("body = %+v", body)
 	}
+	if len(body.RecentBySession) != 1 || body.RecentBySession[0].SessionID != "session-1" {
+		t.Fatalf("default usage response lost its session breakdown: %+v", body.RecentBySession)
+	}
 	if !body.Available || !body.Recording || body.Source != UsageSourceLocalEstimate {
 		t.Fatalf("availability provenance = %+v", body)
 	}
 	if !body.Partial {
 		t.Fatal("Partial = false, want malformed input surfaced as partial")
+	}
+}
+
+func TestHandleUsageAggregateOnlyOmitsSessionBreakdown(t *testing.T) {
+	state := newFakeState(t)
+	state.usageSink = usage.NewLocalSink(filepath.Join(state.cityPath, ".gc", "usage.jsonl"))
+	writeUsageLog(t, state.cityPath, usageLine(t, usage.Fact{
+		Kind: usage.KindModel, Worker: "private-worker", SessionID: "private-session",
+		InputTokens: 100, At: time.Now().UnixMilli(), IdempotencyKey: "fact-1",
+	})+"\n")
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodGet,
+		cityURL(state, "/usage")+"?aggregate_only=true",
+		nil,
+	)
+	h.ServeHTTP(rec, request)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "private-worker") || strings.Contains(rec.Body.String(), "private-session") {
+		t.Fatalf("aggregate response leaked per-session identity: %s", rec.Body.String())
+	}
+	var body UsageBody
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Today.InputTokens != 100 || body.Recent.InputTokens != 100 {
+		t.Fatalf("aggregate totals = %+v, want input_tokens=100", body)
+	}
+	if len(body.RecentBySession) != 0 {
+		t.Fatalf("recent_by_session = %+v, want empty", body.RecentBySession)
 	}
 }
 

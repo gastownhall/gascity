@@ -51,6 +51,15 @@ type runFoldResult struct {
 	decodeMisses int
 }
 
+const runCensusPartialReason = "run projection is incomplete"
+
+// RunCensusSource serves canonical counts from an incremental per-city
+// projector. The bool is false when the requested city is unknown to the
+// source.
+type RunCensusSource interface {
+	RunCensus(context.Context, string) (runproj.CanonicalRunCensus, bool)
+}
+
 // runFold reads the city event log, folds it into the latest bead snapshot per
 // id, and keeps only run-participating beads. The result is memoized in the
 // Server response cache keyed by the event log's modification time, so repeated
@@ -113,7 +122,9 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	}
 
 	out := &RunsListOutput{}
-	out.Body.StatusCounts = countRunLaneStatuses(censusLanes, byID, startedByRun)
+	out.Body.StatusCounts = runStatusCountsFromProjection(
+		runproj.CountCanonicalRunStatuses(fold.beads, censusLanes),
+	)
 	out.Body.Runs = projected
 
 	// Do not silently hide incompleteness: the projection caps the historical
@@ -132,41 +143,33 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	return out, nil
 }
 
-func countRunStatuses(runs []Run) RunStatusCounts {
-	var counts RunStatusCounts
-	for _, run := range runs {
-		addRunStatus(&counts, run.Status)
+func (s *Server) humaHandleRunsCensus(ctx context.Context, input *RunsCensusInput) (*RunsCensusOutput, error) {
+	if s.runCensusSource == nil {
+		return nil, apierr.ServiceUnavailable.Msg("run census is unavailable")
 	}
-	return counts
+	census, ok := s.runCensusSource.RunCensus(ctx, input.CityName)
+	if !ok {
+		return nil, apierr.ServiceUnavailable.Msg("run census is unavailable")
+	}
+	if !census.Ready {
+		return nil, apierr.ServiceUnavailable.Msg("run census is warming")
+	}
+	out := &RunsCensusOutput{}
+	out.Body.StatusCounts = runStatusCountsFromProjection(census.StatusCounts)
+	out.Body.Partial = census.Partial
+	if census.Partial {
+		// The source may carry local diagnostics. The public typed endpoint exposes
+		// only this closed, operator-safe reason so paths and error prose never leak.
+		out.Body.PartialErrors = []string{runCensusPartialReason}
+	}
+	return out, nil
 }
 
-func countRunLaneStatuses(lanes []runproj.RunLane, byID map[string]beads.Bead, startedByRun map[string]int) RunStatusCounts {
-	var counts RunStatusCounts
-	for _, lane := range lanes {
-		root, rootFound := byID[lane.ID]
-		addRunStatus(&counts, deriveRunStatus(lane, root, rootFound, startedByRun[lane.ID]))
-	}
-	return counts
-}
-
-func addRunStatus(counts *RunStatusCounts, status RunStatus) {
-	switch status {
-	case RunStatusPending:
-		counts.Pending++
-	case RunStatusActive:
-		counts.Active++
-	case RunStatusWaiting:
-		counts.Waiting++
-	case RunStatusCanceling:
-		counts.Canceling++
-	case RunStatusCompleted:
-		counts.Completed++
-	case RunStatusFailed:
-		counts.Failed++
-	case RunStatusCanceled:
-		counts.Canceled++
-	case RunStatusSkipped:
-		counts.Skipped++
+func runStatusCountsFromProjection(counts runproj.CanonicalRunStatusCounts) RunStatusCounts {
+	return RunStatusCounts{
+		Pending: counts.Pending, Active: counts.Active, Waiting: counts.Waiting,
+		Canceling: counts.Canceling, Completed: counts.Completed, Failed: counts.Failed,
+		Canceled: counts.Canceled, Skipped: counts.Skipped,
 	}
 }
 
@@ -382,35 +385,11 @@ func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, started int) Ru
 // indefinitely. Extending run lifecycle (cancellation) grows this function;
 // nothing else interprets run status.
 func deriveRunStatus(lane runproj.RunLane, root beads.Bead, rootFound bool, startedCount int) RunStatus {
-	if rootFound && isClosedStatus(root.Status) {
-		switch strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey]) {
-		case beadmeta.OutcomeFail:
-			return RunStatusFailed
-		case beadmeta.OutcomeSkipped:
-			return RunStatusSkipped
-		case beadmeta.OutcomeCanceled:
-			return RunStatusCanceled
-		}
-		return RunStatusCompleted
+	var rootPtr *beads.Bead
+	if rootFound {
+		rootPtr = &root
 	}
-	// A cancel was requested but the root's terminal close is not yet durably
-	// recorded: on a non-atomic store the gc.cancel_requested marker persisted
-	// while the following root close failed, so cancelRun returned a retryable
-	// 5xx and the operator's retry finishes the wind-down. (On an atomic store a
-	// failed close rolls the marker back, so this state is not reachable there.)
-	// Report canceling meanwhile.
-	if rootFound && strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
-		return RunStatusCanceling
-	}
-	switch lane.Phase {
-	case "blocked":
-		return RunStatusWaiting
-	default: // active/in-flight
-		if startedCount == 0 {
-			return RunStatusPending
-		}
-		return RunStatusActive
-	}
+	return RunStatus(runproj.CanonicalRunStatusForLane(lane, rootPtr, startedCount))
 }
 
 // deriveRunStepStatus maps one run-step (child bead) onto the closed

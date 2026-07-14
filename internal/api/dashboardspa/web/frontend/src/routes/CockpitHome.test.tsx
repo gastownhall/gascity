@@ -9,7 +9,7 @@ import { CockpitHomePage } from './CockpitHome';
 const mocks = vi.hoisted(() => ({
   cityUsage: vi.fn(),
   cityStatus: vi.fn(),
-  listRuns: vi.fn(),
+  runCensus: vi.fn(),
   listSessions: vi.fn(),
   runSummary: vi.fn(),
 }));
@@ -19,7 +19,7 @@ vi.mock('../supervisor/client', () => ({
   supervisorApi: () => ({
     cityUsage: mocks.cityUsage,
     cityStatus: mocks.cityStatus,
-    listRuns: mocks.listRuns,
+    runCensus: mocks.runCensus,
     listSessions: mocks.listSessions,
   }),
 }));
@@ -158,7 +158,7 @@ describe('<CockpitHomePage>', () => {
         warning: false,
       },
     });
-    mocks.listRuns.mockReset().mockResolvedValue({
+    mocks.runCensus.mockReset().mockResolvedValue({
       runs: [],
       status_counts: {
         pending: 2,
@@ -267,7 +267,7 @@ describe('<CockpitHomePage>', () => {
   it('keeps instruments mounted and labels unavailable sources honestly', async () => {
     mocks.cityUsage.mockRejectedValue(new Error('usage down'));
     mocks.cityStatus.mockRejectedValue(new Error('status down'));
-    mocks.listRuns.mockRejectedValue(new Error('runs down'));
+    mocks.runCensus.mockRejectedValue(new Error('runs down'));
     mocks.listSessions.mockRejectedValue(new Error('sessions down'));
     mocks.runSummary.mockReturnValue({
       ...availableRunSummary(),

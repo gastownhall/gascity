@@ -6870,6 +6870,33 @@
         ],
         "type": "object"
       },
+      "RunsCensusOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "partial": {
+            "description": "True when the incremental projection is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Sanitized reasons the census may be incomplete.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status_counts": {
+            "$ref": "#/components/schemas/RunStatusCounts",
+            "description": "Every projected run by canonical lifecycle state."
+          }
+        },
+        "required": [
+          "status_counts"
+        ],
+        "type": "object"
+      },
       "RunsListOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -36634,6 +36661,88 @@
         "summary": "Get v0 city by city name runs"
       }
     },
+    "/v0/city/{cityName}/runs/census": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-runs-census",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsCensusOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name runs census"
+      }
+    },
     "/v0/city/{cityName}/runs/{run_id}": {
       "get": {
         "operationId": "get-v0-city-by-city-name-runs-by-run-id",
@@ -41011,6 +41120,16 @@
               "minLength": 1,
               "pattern": "\\S",
               "type": "string"
+            }
+          },
+          {
+            "description": "Omit the per-session breakdown and return city-level totals only.",
+            "explode": false,
+            "in": "query",
+            "name": "aggregate_only",
+            "schema": {
+              "description": "Omit the per-session breakdown and return city-level totals only.",
+              "type": "boolean"
             }
           }
         ],

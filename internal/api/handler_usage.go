@@ -25,6 +25,7 @@ const (
 // UsageInput is the Huma input for GET /v0/city/{cityName}/usage.
 type UsageInput struct {
 	CityScope
+	AggregateOnly bool `query:"aggregate_only" doc:"Omit the per-session breakdown and return city-level totals only."`
 }
 
 // UsageTotals aggregates usage facts over one time window.
@@ -84,7 +85,7 @@ type UsageOutput struct {
 	Body UsageBody
 }
 
-func (s *Server) humaHandleUsage(_ context.Context, _ *UsageInput) (*UsageOutput, error) {
+func (s *Server) humaHandleUsage(_ context.Context, input *UsageInput) (*UsageOutput, error) {
 	if !usage.IsLocalSink(s.state.UsageSink()) {
 		return &UsageOutput{Body: UsageBody{
 			Source:           UsageSourceUnavailable,
@@ -93,7 +94,7 @@ func (s *Server) humaHandleUsage(_ context.Context, _ *UsageInput) (*UsageOutput
 		}}, nil
 	}
 	if body, ok := cachedResponseWithinAgeAs[UsageBody](s, "usage", usageCacheMaxAge); ok {
-		return &UsageOutput{Body: body}, nil
+		return &UsageOutput{Body: usageResponse(body, input.AggregateOnly)}, nil
 	}
 	path := filepath.Join(s.state.CityPath(), ".gc", "usage.jsonl")
 	facts, report, err := usage.ReadRecentFacts(path, usageReadMaxBytes)
@@ -103,7 +104,14 @@ func (s *Server) humaHandleUsage(_ context.Context, _ *UsageInput) (*UsageOutput
 	}
 	body := buildUsageBody(facts, report, time.Now())
 	s.storeResponse("usage", 0, body)
-	return &UsageOutput{Body: body}, nil
+	return &UsageOutput{Body: usageResponse(body, input.AggregateOnly)}, nil
+}
+
+func usageResponse(body UsageBody, aggregateOnly bool) UsageBody {
+	if aggregateOnly {
+		body.RecentBySession = nil
+	}
+	return body
 }
 
 func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.Time) UsageBody {

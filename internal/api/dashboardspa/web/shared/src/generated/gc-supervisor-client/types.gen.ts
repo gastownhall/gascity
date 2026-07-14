@@ -2928,6 +2928,21 @@ export type RunStepsOutputBody = {
     steps: Array<RunStep> | null;
 };
 
+export type RunsCensusOutputBody = {
+    /**
+     * True when the incremental projection is incomplete.
+     */
+    partial?: boolean;
+    /**
+     * Sanitized reasons the census may be incomplete.
+     */
+    partial_errors?: Array<string> | null;
+    /**
+     * Every projected run by canonical lifecycle state.
+     */
+    status_counts: RunStatusCounts;
+};
+
 export type RunsListOutputBody = {
     /**
      * True when some runs could not be fully projected.
@@ -14492,6 +14507,44 @@ export type GetV0CityByCityNameRunsResponses = {
 
 export type GetV0CityByCityNameRunsResponse = GetV0CityByCityNameRunsResponses[keyof GetV0CityByCityNameRunsResponses];
 
+export type GetV0CityByCityNameRunsCensusData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/census';
+};
+
+export type GetV0CityByCityNameRunsCensusErrors = {
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsCensusError = GetV0CityByCityNameRunsCensusErrors[keyof GetV0CityByCityNameRunsCensusErrors];
+
+export type GetV0CityByCityNameRunsCensusResponses = {
+    /**
+     * OK
+     */
+    200: RunsCensusOutputBody;
+};
+
+export type GetV0CityByCityNameRunsCensusResponse = GetV0CityByCityNameRunsCensusResponses[keyof GetV0CityByCityNameRunsCensusResponses];
+
 export type GetV0CityByCityNameRunsByRunIdData = {
     body?: never;
     path: {
@@ -16182,7 +16235,12 @@ export type GetV0CityByCityNameUsageData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Omit the per-session breakdown and return city-level totals only.
+         */
+        aggregate_only?: boolean;
+    };
     url: '/v0/city/{cityName}/usage';
 };
 

@@ -3005,6 +3005,16 @@ type RunStepsOutputBody struct {
 	Steps *[]RunStep `json:"steps"`
 }
 
+// RunsCensusOutputBody defines model for RunsCensusOutputBody.
+type RunsCensusOutputBody struct {
+	// Partial True when the incremental projection is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Sanitized reasons the census may be incomplete.
+	PartialErrors *[]string       `json:"partial_errors,omitempty"`
+	StatusCounts  RunStatusCounts `json:"status_counts"`
+}
+
 // RunsListOutputBody defines model for RunsListOutputBody.
 type RunsListOutputBody struct {
 	// Partial True when some runs could not be fully projected.
@@ -7566,6 +7576,12 @@ type GetV0CityByCityNameStatusParams struct {
 type PostV0CityByCityNameUnregisterParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+}
+
+// GetV0CityByCityNameUsageParams defines parameters for GetV0CityByCityNameUsage.
+type GetV0CityByCityNameUsageParams struct {
+	// AggregateOnly Omit the per-session breakdown and return city-level totals only.
+	AggregateOnly *bool `form:"aggregate_only,omitempty" json:"aggregate_only,omitempty"`
 }
 
 // GetV0CityByCityNameWaitsParams defines parameters for GetV0CityByCityNameWaits.
@@ -14213,6 +14229,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameRuns request
 	GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameRunsCensus request
+	GetV0CityByCityNameRunsCensus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameRunsByRunId request
 	GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14314,7 +14333,7 @@ type ClientInterface interface {
 	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameUsage request
-	GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameUsage(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameWaitById request
 	GetV0CityByCityNameWaitById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16273,6 +16292,18 @@ func (c *Client) GetV0CityByCityNameRuns(ctx context.Context, cityName string, p
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetV0CityByCityNameRunsCensus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsCensusRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameRunsByRunIdRequest(c.Server, cityName, runId)
 	if err != nil {
@@ -16705,8 +16736,8 @@ func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName)
+func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -24780,6 +24811,40 @@ func NewGetV0CityByCityNameRunsRequest(server string, cityName string, params *G
 	return req, nil
 }
 
+// NewGetV0CityByCityNameRunsCensusRequest generates requests for GetV0CityByCityNameRunsCensus
+func NewGetV0CityByCityNameRunsCensusRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/census", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameRunsByRunIdRequest generates requests for GetV0CityByCityNameRunsByRunId
 func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, runId string) (*http.Request, error) {
 	var err error
@@ -26498,7 +26563,7 @@ func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, pa
 }
 
 // NewGetV0CityByCityNameUsageRequest generates requests for GetV0CityByCityNameUsage
-func NewGetV0CityByCityNameUsageRequest(server string, cityName string) (*http.Request, error) {
+func NewGetV0CityByCityNameUsageRequest(server string, cityName string, params *GetV0CityByCityNameUsageParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -26521,6 +26586,28 @@ func NewGetV0CityByCityNameUsageRequest(server string, cityName string) (*http.R
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.AggregateOnly != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "aggregate_only", *params.AggregateOnly, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -27613,6 +27700,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameRunsWithResponse request
 	GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error)
 
+	// GetV0CityByCityNameRunsCensusWithResponse request
+	GetV0CityByCityNameRunsCensusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsCensusResponse, error)
+
 	// GetV0CityByCityNameRunsByRunIdWithResponse request
 	GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error)
 
@@ -27714,7 +27804,7 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
 
 	// GetV0CityByCityNameUsageWithResponse request
-	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
+	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
 
 	// GetV0CityByCityNameWaitByIdWithResponse request
 	GetV0CityByCityNameWaitByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitByIdResponse, error)
@@ -31156,6 +31246,31 @@ func (r GetV0CityByCityNameRunsResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameRunsCensusResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RunsCensusOutputBody
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsCensusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsCensusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameRunsByRunIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -33564,6 +33679,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameRunsWithResponse(ctx context.Co
 	return ParseGetV0CityByCityNameRunsResponse(rsp)
 }
 
+// GetV0CityByCityNameRunsCensusWithResponse request returning *GetV0CityByCityNameRunsCensusResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsCensusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsCensusResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRunsCensus(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsCensusResponse(rsp)
+}
+
 // GetV0CityByCityNameRunsByRunIdWithResponse request returning *GetV0CityByCityNameRunsByRunIdResponse
 func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
 	rsp, err := c.GetV0CityByCityNameRunsByRunId(ctx, cityName, runId, reqEditors...)
@@ -33881,8 +34005,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx con
 }
 
 // GetV0CityByCityNameUsageWithResponse request returning *GetV0CityByCityNameUsageResponse
-func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
-	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
+	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -41707,6 +41831,53 @@ func ParseGetV0CityByCityNameRunsResponse(rsp *http.Response) (*GetV0CityByCityN
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest RunsListOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsCensusResponse parses an HTTP response from a GetV0CityByCityNameRunsCensusWithResponse call
+func ParseGetV0CityByCityNameRunsCensusResponse(rsp *http.Response) (*GetV0CityByCityNameRunsCensusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsCensusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunsCensusOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

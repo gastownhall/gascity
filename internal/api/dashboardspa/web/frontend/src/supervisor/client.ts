@@ -13,7 +13,7 @@ import {
   getV0CityByCityNameMail,
   getV0CityByCityNameMailThreadById,
   getV0CityByCityNameRigs,
-  getV0CityByCityNameRuns,
+  getV0CityByCityNameRunsCensus,
   getV0CityByCityNameSessionByIdPending,
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
@@ -60,7 +60,7 @@ import type {
   PostV0CityByCityNameMailByIdReadData,
   ReplyMailData,
   RespondSessionResponse,
-  RunsListOutputBody,
+  RunsCensusOutputBody,
   SessionTranscriptGetResponse,
   SessionPendingResponse,
   SessionRespondInputBody,
@@ -91,7 +91,7 @@ export interface SupervisorApi {
   cityHealth(cityName: string): Promise<GetV0CityByCityNameHealthResponse>;
   cityStatus(cityName: string): Promise<GetV0CityByCityNameStatusResponse>;
   cityUsage(cityName: string): Promise<UsageBody>;
-  listRuns(cityName: string): Promise<RunsListOutputBody>;
+  runCensus(cityName: string): Promise<RunsCensusOutputBody>;
   listCities(): Promise<SupervisorCitiesOutputBody>;
   listAgents(cityName: string): Promise<ListBodyAgentResponse>;
   listRigs(cityName: string): Promise<ListBodyRigResponse>;
@@ -223,17 +223,18 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         getV0CityByCityNameUsage({
           client,
           path: { cityName },
+          query: { aggregate_only: true },
         }) as Promise<SupervisorResult<UsageBody>>,
         'gc supervisor usage response was empty',
       );
     },
-    listRuns(cityName) {
-      return unwrapSupervisorResult<RunsListOutputBody>(
-        getV0CityByCityNameRuns({
+    runCensus(cityName) {
+      return unwrapSupervisorResult<RunsCensusOutputBody>(
+        getV0CityByCityNameRunsCensus({
           client,
           path: { cityName },
-        }) as Promise<SupervisorResult<RunsListOutputBody>>,
-        'gc supervisor runs response was empty',
+        }) as Promise<SupervisorResult<RunsCensusOutputBody>>,
+        'gc supervisor run census response was empty',
       );
     },
     listCities() {

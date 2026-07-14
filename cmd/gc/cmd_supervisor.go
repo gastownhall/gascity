@@ -1398,10 +1398,14 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: dashboard: %v\n", dashErr) //nolint:errcheck
 		return 1
 	}
-	if dashboardPlane != nil {
-		dashboardPlane.Start(ctx)
-		defer dashboardPlane.Stop()
+	dashboardMounted := dashboardPlane != nil
+	if dashboardPlane == nil {
+		// The typed run census is available even when the embedded dashboard is
+		// disabled. Keep its incremental plane unmounted in that posture.
+		dashboardPlane = newRunCensusPlane(apiMux, registry)
 	}
+	dashboardPlane.Start(ctx)
+	defer dashboardPlane.Stop()
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1441,13 +1445,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.Shutdown(shutCtx) //nolint:errcheck
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
-	if dashboardPlane != nil {
-		dashTag := ""
-		if readOnly {
-			dashTag = "  [read-only]"
-		}
-		fmt.Fprintf(stdout, "Dashboard:  %s/%s\n", dashboardLoopbackBaseURL(bind, port), dashTag) //nolint:errcheck
-	}
+	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.

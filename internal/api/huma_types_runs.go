@@ -163,6 +163,22 @@ type RunsListOutput struct {
 	}
 }
 
+// RunsCensusInput is the request for the bounded, row-free run census.
+type RunsCensusInput struct {
+	CityScope
+}
+
+// RunsCensusOutput is the response body for GET
+// /v0/city/{cityName}/runs/census. It deliberately contains no run rows or
+// operator-authored prose.
+type RunsCensusOutput struct {
+	Body struct {
+		StatusCounts  RunStatusCounts `json:"status_counts" doc:"Every projected run by canonical lifecycle state."`
+		Partial       bool            `json:"partial,omitempty" doc:"True when the incremental projection is incomplete."`
+		PartialErrors []string        `json:"partial_errors,omitempty" doc:"Sanitized reasons the census may be incomplete."`
+	}
+}
+
 // RunGetInput is the request for GET /v0/city/{cityName}/runs/{run_id}.
 type RunGetInput struct {
 	CityScope

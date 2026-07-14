@@ -173,7 +173,7 @@ describe('supervisor client wrapper', () => {
   it('calls city-scoped usage and canonical runs through the generated SDK', async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
-      if (url.endsWith('/usage')) {
+      if (new URL(url).pathname.endsWith('/usage')) {
         return new Response(
           JSON.stringify({
             available: true,
@@ -189,7 +189,6 @@ describe('supervisor client wrapper', () => {
       }
       return new Response(
         JSON.stringify({
-          runs: [{ run_id: 'run-1', title: 'Run one', status: 'active', scope: {} }],
           status_counts: {
             pending: 0,
             active: 1,
@@ -213,12 +212,12 @@ describe('supervisor client wrapper', () => {
       available: true,
       today: { invocations: 4 },
     });
-    await expect(api.listRuns('test-city')).resolves.toMatchObject({
+    await expect(api.runCensus('test-city')).resolves.toMatchObject({
       status_counts: { active: 1 },
     });
     expect(fetchSpy.mock.calls.map((call) => requestedUrl(call[0]))).toEqual([
-      'http://gc-supervisor.test/v0/city/test-city/usage',
-      'http://gc-supervisor.test/v0/city/test-city/runs',
+      'http://gc-supervisor.test/v0/city/test-city/usage?aggregate_only=true',
+      'http://gc-supervisor.test/v0/city/test-city/runs/census',
     ]);
   });
 
@@ -1182,7 +1181,7 @@ describe('supervisor client wrapper', () => {
       cityHealth: vi.fn(),
       cityStatus: vi.fn(),
       cityUsage: vi.fn(),
-      listRuns: vi.fn(),
+      runCensus: vi.fn(),
       health: vi.fn(),
       listAgents: vi.fn(),
       listRigs: vi.fn(),

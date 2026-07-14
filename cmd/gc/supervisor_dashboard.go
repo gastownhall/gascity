@@ -66,7 +66,7 @@ func attachDashboard(mux *api.SupervisorMux, resolver api.CityResolver, readOnly
 		return nil, err
 	}
 	plane := dashboardbff.New(dashboardDeps(resolver, readOnly, bind, port, mux.LoopbackTransport()))
-	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
+	mux.WithRunCensusSource(plane).WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
 	// Install the listener's link base alongside the SPA so per-city handlers
 	// can mint dashboard deep links (the sling response's dashboard_url).
 	// Standalone controller processes never call attachDashboard, so their
@@ -81,6 +81,30 @@ func attachDashboard(mux *api.SupervisorMux, resolver api.CityResolver, readOnly
 		mux.WithDashboardBase(func() string { return base })
 	}
 	return plane, nil
+}
+
+// newRunCensusPlane creates the unmounted dashboard plane a standalone
+// controller uses as the incremental source for its typed run-census endpoint.
+// Standalone controllers do not serve the dashboard /api plane, but they still
+// need the same warm projector as a full supervisor.
+func newRunCensusPlane(mux *api.SupervisorMux, resolver api.CityResolver) *dashboardbff.Plane {
+	plane := dashboardbff.New(dashboardbff.Deps{
+		Resolver: dashboardCityResolver{resolver},
+		ReadOnly: true,
+	})
+	mux.WithRunCensusSource(plane)
+	return plane
+}
+
+func writeSupervisorDashboardStartup(stdout io.Writer, mounted, readOnly bool, bind string, port int) {
+	if !mounted {
+		return
+	}
+	dashTag := ""
+	if readOnly {
+		dashTag = "  [read-only]"
+	}
+	fmt.Fprintf(stdout, "Dashboard:  %s/%s\n", dashboardLoopbackBaseURL(bind, port), dashTag) //nolint:errcheck
 }
 
 // dashboardDeps builds the plane's dependencies. Extracted so a regression test

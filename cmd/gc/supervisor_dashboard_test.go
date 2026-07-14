@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"testing"
 	"time"
@@ -217,5 +218,19 @@ func TestDashboardEnabledToggle(t *testing.T) {
 	t.Setenv("GC_SUPERVISOR_DASHBOARD", "")
 	if !dashboardEnabled() {
 		t.Error("unset GC_SUPERVISOR_DASHBOARD should default to enabled")
+	}
+}
+
+func TestWriteSupervisorDashboardStartupOnlyAdvertisesMountedDashboard(t *testing.T) {
+	var out bytes.Buffer
+	writeSupervisorDashboardStartup(&out, false, false, "127.0.0.1", 8372)
+	if out.Len() != 0 {
+		t.Fatalf("disabled dashboard output = %q, want empty", out.String())
+	}
+
+	writeSupervisorDashboardStartup(&out, true, true, "127.0.0.1", 8372)
+	want := "Dashboard:  http://127.0.0.1:8372/  [read-only]\n"
+	if out.String() != want {
+		t.Fatalf("mounted dashboard output = %q, want %q", out.String(), want)
 	}
 }

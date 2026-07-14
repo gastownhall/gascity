@@ -1368,8 +1368,12 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
+		cityResolver := &singleCityStateResolver{state: cs}
+		apiMux := api.NewSupervisorMux(cityResolver, nil, readOnly, "controller", commit, time.Now())
 		apiMux.WithAnyHostAllowed()
+		censusPlane := newRunCensusPlane(apiMux, cityResolver)
+		censusPlane.Start(ctx)
+		defer censusPlane.Stop()
 		// Gate city-config mutations on a signed write grant when configured.
 		// Fail closed at boot if write-auth is required but no key is set, or if a
 		// non-loopback + allow_mutations bind has no key and no ack knob (G10).

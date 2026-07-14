@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'rea
 import { Link } from 'react-router-dom';
 import type {
   ListBodySessionResponse,
-  RunsListOutputBody,
+  RunsCensusOutputBody,
   StatusBody,
   UsageBody,
 } from 'gas-city-dashboard-shared/gc-supervisor';
@@ -47,8 +47,8 @@ export function CockpitHomePage() {
   const statusState = useCachedData<StatusBody>(`cockpit:status:${cityKey}`, () =>
     supervisorApi().cityStatus(activeCityOrThrow('cockpit status read')),
   );
-  const runsState = useCachedData<RunsListOutputBody>(`cockpit:runs:${cityKey}`, () =>
-    supervisorApi().listRuns(activeCityOrThrow('cockpit runs read')),
+  const runsState = useCachedData<RunsCensusOutputBody>(`cockpit:runs:${cityKey}`, () =>
+    supervisorApi().runCensus(activeCityOrThrow('cockpit run census read')),
   );
   const sessionsState = useCachedData<ListBodySessionResponse>(`cockpit:sessions:${cityKey}`, () =>
     supervisorApi().listSessions(activeCityOrThrow('cockpit sessions read')),
