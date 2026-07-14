@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -26,6 +27,14 @@ type Store struct {
 	script  string
 	timeout time.Duration
 	env     map[string]string
+
+	// localMu and localStrings back SetLocalString/GetLocalString. Clone-local
+	// data is kept in process only, never routed through the script: unlike
+	// every other operation, it must not depend on script latency, since the
+	// whole point is cheap high-churn writes. It does not survive process
+	// restart, which is an accepted limitation for this delegating store.
+	localMu      sync.Mutex
+	localStrings map[string]map[string]string
 }
 
 // SetEnv sets environment variables passed to the script process.
@@ -468,6 +477,36 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// SetLocalString sets a clone-local string value for a bead. See
+// [beads.Store.SetLocalString]. Kept in an in-process map rather than
+// delegated to the script, so it never pays script-invocation latency and
+// never validates that id refers to an existing bead — see the interface
+// doc comment for why.
+func (s *Store) SetLocalString(id, key, value string) error {
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
+	if value == "" {
+		delete(s.localStrings[id], key)
+		return nil
+	}
+	if s.localStrings == nil {
+		s.localStrings = make(map[string]map[string]string)
+	}
+	if s.localStrings[id] == nil {
+		s.localStrings[id] = make(map[string]string)
+	}
+	s.localStrings[id][key] = value
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// [beads.Store.GetLocalString].
+func (s *Store) GetLocalString(id, key string) (string, error) {
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
+	return s.localStrings[id][key], nil
+}
+
 // Tx executes fn sequentially against the exec store.
 func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
 	if fn == nil {
@@ -478,8 +517,13 @@ func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
 
 // Delete permanently removes a bead by calling the "delete" subcommand.
 func (s *Store) Delete(id string) error {
-	_, err := s.run(nil, "delete", "--force", id)
-	return err
+	if _, err := s.run(nil, "delete", "--force", id); err != nil {
+		return err
+	}
+	s.localMu.Lock()
+	delete(s.localStrings, id)
+	s.localMu.Unlock()
+	return nil
 }
 
 // Ping verifies the store script is accessible by running a list operation.

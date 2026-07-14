@@ -1680,6 +1680,50 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 }
 
+// TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen exercises the
+// real newNativeDoltStoreAt wiring (not the in-memory-only default used by
+// newNativeDoltStoreForTest / the conformance factory): it swaps only the
+// external Dolt-open seam and proves SetLocalString/GetLocalString survive a
+// second open of the same scopeRoot, i.e. clone-local data really lives on
+// disk at <scopeRoot>/.beads/local-strings.json rather than in process memory.
+func TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen(t *testing.T) {
+	scopeRoot := filepath.Join(t.TempDir(), "scope")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() {
+		nativeDoltOpenBestAvailable = oldOpen
+	})
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (first open): %v", err)
+	}
+	if err := store.SetLocalString("gc-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	sidecarPath := filepath.Join(scopeRoot, ".beads", "local-strings.json")
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("expected sidecar file at %s: %v", sidecarPath, err)
+	}
+
+	reopened, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (reopen): %v", err)
+	}
+	got, err := reopened.GetLocalString("gc-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString after reopen: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Fatalf("GetLocalString after reopen = %q, want persisted value", got)
+	}
+}
+
 func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
 	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
