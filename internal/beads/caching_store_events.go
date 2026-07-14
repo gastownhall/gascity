@@ -502,7 +502,7 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 	if hasCacheEventField(fields, "metadata") && !maps.Equal(current.Metadata, patch.Metadata) {
 		return true
 	}
-	if hasCacheEventField(fields, "labels") && !slices.Equal(current.Labels, patch.Labels) {
+	if hasCacheEventField(fields, "labels") && !stringSetEqual(current.Labels, patch.Labels) {
 		return true
 	}
 	if hasCacheEventField(fields, "ephemeral") && current.Ephemeral != patch.Ephemeral {
@@ -707,8 +707,11 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	// Compare them order-insensitively. A backing store that returns these in a
 	// different order than the cache holds (the Dolt gcg rig store does not
 	// guarantee a stable order across scans) would otherwise register as a
-	// change on every reconcile pass — one source of cache-reconcile re-absorb
-	// churn that needlessly re-touched live molecule wisps (ga-ocypq2).
+	// spurious change. For needs and dependencies that misfires on every
+	// reconcile pass — the cache-reconcile re-absorb churn that needlessly
+	// re-touched live molecule wisps (ga-ocypq2). Labels are skipped during
+	// reconcile (skipLabels: true) and so matter only for the skipLabels:false
+	// change checks.
 	if !skipLabels && !stringSetEqual(old.Labels, fresh.Labels) {
 		return true
 	}
