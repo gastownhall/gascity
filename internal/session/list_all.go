@@ -89,16 +89,11 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	// the union concatenates them — sort globally so mixed-shape rows
 	// interleave correctly. Unknown Sort values are left alone for
 	// forward-compat with future sort modes.
-	switch base.Sort {
-	case beads.SortCreatedAsc:
-		sort.SliceStable(out, func(i, j int) bool {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		})
-	case beads.SortCreatedDesc:
-		sort.SliceStable(out, func(i, j int) bool {
-			return out[i].CreatedAt.After(out[j].CreatedAt)
-		})
-	}
+	// beads.SortBeads applies the canonical (created_at, id) total order —
+	// the id tie-break keeps keyset pagination exact when rows share a
+	// timestamp (whole-second times are the norm on bd-backed stores).
+	// SortDefault and unknown Sort values are left alone, same as before.
+	beads.SortBeads(out, base.Sort)
 
 	if base.Limit > 0 && len(out) > base.Limit {
 		out = out[:base.Limit]
@@ -402,16 +397,9 @@ func (s *Store) cachedListUnion(opts ListAllOptions) ([]beads.Bead, bool) {
 	add(typeRows)
 	add(labelRows)
 
-	switch opts.Sort {
-	case beads.SortCreatedAsc:
-		sort.SliceStable(merged, func(i, j int) bool {
-			return merged[i].CreatedAt.Before(merged[j].CreatedAt)
-		})
-	case beads.SortCreatedDesc:
-		sort.SliceStable(merged, func(i, j int) bool {
-			return merged[i].CreatedAt.After(merged[j].CreatedAt)
-		})
-	}
+	// Canonical (created_at, id) total order — see the matching comment on
+	// the union sort above.
+	beads.SortBeads(merged, opts.Sort)
 
 	if opts.Limit > 0 && len(merged) > opts.Limit {
 		merged = merged[:opts.Limit]

@@ -97,7 +97,8 @@ type asyncAcceptedResponse struct {
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
 type SupervisorCityCreateInput struct {
-	Body cityCreateRequest
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           cityCreateRequest
 }
 
 // SupervisorCityCreateOutput is the response for POST /v0/city.
@@ -213,6 +214,12 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 	// completion is signaled via request.result.city.create or request.failed.
 	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate, addMutationCSRFParam, func(op *huma.Operation) {
 		op.DefaultStatus = http.StatusAccepted
+		// Enumerating any error drops Huma's catch-all `default` response, so
+		// list every status this op actually emits: 401/403 from the
+		// write-auth/CSRF middleware, 409 (already initialized / init in
+		// progress / idempotency-in-flight), 501 when the supervisor has no
+		// initializer (the controller-embedded mux). Huma auto-adds 422/500.
+		op.Errors = append(op.Errors, http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict, http.StatusNotImplemented)
 	})
 	// Async unregister: returns 202 after the registry entry is removed
 	// and the supervisor is signaled. request.result.city.unregister or
@@ -358,11 +365,41 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 // started the city runtime. See engdocs/architecture/api-control-plane.md
 // §1-§2 on the object model + typed events; §4 on the event registry.
 func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *SupervisorCityCreateInput) (*SupervisorCityCreateOutput, error) {
-	dir := input.Body.Dir
+	// Idempotency: scaffold at most once per Idempotency-Key (supervisor-scope
+	// cache — there is no per-city Server yet for a city being created). The
+	// cached value is the full accepted body, so a replay returns the ORIGINAL
+	// request_id (the client's correlation handle on /v0/events/stream) and
+	// the original pre-create event cursor — recomputing either on replay
+	// would break result-event correlation.
+	accepted, err := withIdempotency(sm.idem, "/v0/city", input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedResponse, error) {
+			return sm.scaffoldCityOnce(ctx, input.Body)
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	out := &SupervisorCityCreateOutput{
+		Status: http.StatusAccepted,
+	}
+	out.Body = accepted
+	return out, nil
+}
+
+// scaffoldCityOnce performs the one-shot city scaffold+register work behind
+// POST /v0/city and returns the accepted {request_id, event_cursor} body. It is
+// the operation wrapped by the supervisor idempotency cache in
+// humaHandleCityCreate: on the first request for a given Idempotency-Key it
+// resolves the target directory, scaffolds and registers the city, and stores
+// the request_id correlation for the reconciler. On a replay the cache
+// short-circuits before this runs, so it never executes twice for the same key.
+func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRequest) (asyncAcceptedResponse, error) {
+	var zero asyncAcceptedResponse
+	dir := body.Dir
 	if !filepath.IsAbs(dir) {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, apierr.Internal.Msg(fmt.Sprintf("internal: resolving home dir: %v", err))
+			return zero, apierr.Internal.Msg(fmt.Sprintf("internal: resolving home dir: %v", err))
 		}
 		dir = filepath.Join(home, dir)
 	}
@@ -373,49 +410,49 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	// in test configurations that build a SupervisorMux without an
 	// initializer.
 	if cityDirAlreadyInitialized(dir) {
-		return nil, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
+		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
 	}
 
 	if sm.initializer == nil {
-		return nil, apierr.NotImplemented.Msg("city creation is not available in this supervisor (no initializer wired)")
+		return zero, apierr.NotImplemented.Msg("city creation is not available in this supervisor (no initializer wired)")
 	}
 
 	reqID, err := newRequestID()
 	if err != nil {
-		return nil, apierr.Internal.Msg(fmt.Sprintf("generating request ID: %v", err))
+		return zero, apierr.Internal.Msg(fmt.Sprintf("generating request ID: %v", err))
 	}
 	eventCursor, cursorErr := sm.currentSupervisorEventCursor()
 	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+		return zero, apierr.Internal.Msg(cursorErr.Error())
 	}
 	pendingStored := false
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
 		if err := store.StorePendingRequestID(dir, reqID); err != nil {
 			if errors.Is(err, ErrPendingRequestExists) {
-				return nil, apierr.OperationInProgress.Msg("conflict: city initialization already in progress at " + dir)
+				return zero, apierr.OperationInProgress.Msg("conflict: city initialization already in progress at " + dir)
 			}
-			return nil, apierr.Internal.Msg(fmt.Sprintf("storing pending request ID: %v", err))
+			return zero, apierr.Internal.Msg(fmt.Sprintf("storing pending request ID: %v", err))
 		}
 		pendingStored = true
 	}
 
 	result, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:                   dir,
-		Provider:              input.Body.Provider,
-		StartCommand:          input.Body.StartCommand,
-		BootstrapProfile:      input.Body.BootstrapProfile,
+		Provider:              body.Provider,
+		StartCommand:          body.StartCommand,
+		BootstrapProfile:      body.BootstrapProfile,
 		SkipProviderReadiness: true,
 	})
 	postRegisterFailed := false
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
 		sm.clearPendingCityRequestID(dir, pendingStored)
-		return nil, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
+		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
 		sm.clearPendingCityRequestID(dir, pendingStored)
-		return nil, apierr.ValidationFailed.Msg(scaffoldErr.Error())
+		return zero, apierr.ValidationFailed.Msg(scaffoldErr.Error())
 	case errors.Is(scaffoldErr, cityinit.ErrPostRegisterFailure):
 		failureReqID := reqID
 		if consumedReqID, ok := sm.consumePendingCityRequestID(dir, pendingStored); ok {
@@ -425,18 +462,13 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		postRegisterFailed = true
 	case scaffoldErr != nil:
 		sm.clearPendingCityRequestID(dir, pendingStored)
-		return nil, apierr.Internal.Msg(scaffoldErr.Error())
+		return zero, apierr.Internal.Msg(scaffoldErr.Error())
 	}
 
 	if !pendingStored && !postRegisterFailed {
 		emitCityCreateSucceeded(sm.resolver, reqID, result, dir)
 	}
-
-	out := &SupervisorCityCreateOutput{
-		Status: http.StatusAccepted,
-	}
-	out.Body = asyncAcceptedResponse{RequestID: reqID, EventCursor: eventCursor}
-	return out, nil
+	return asyncAcceptedResponse{RequestID: reqID, EventCursor: eventCursor}, nil
 }
 
 func (sm *SupervisorMux) clearPendingCityRequestID(cityPath string, stored bool) {
@@ -724,6 +756,44 @@ func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---
 
+// resolveGlobalStreamCursors builds the per-city cursor map for a global
+// event-stream Watch so that no registered city falls through to Watch(0),
+// which now replays a city's entire retained history across archives.
+//
+// With no resume cursor — a head-start client or the attach-only precheck —
+// every city starts from its latest cursor. With a resume cursor, cities the
+// cursor omits are floored to their latest cursor so a cursor that predates a
+// newly registered city cannot trigger a full-history flood for it. It fails
+// closed on a LatestCursor error rather than letting unresolved cities default
+// to cursor 0. The returned map is always non-nil on success.
+func resolveGlobalStreamCursors(mux *events.Multiplexer, resumeCursor string) (map[string]uint64, error) {
+	resumeCursor = strings.TrimSpace(resumeCursor)
+	if resumeCursor == "" {
+		cursors, err := mux.LatestCursor()
+		if err != nil {
+			return nil, err
+		}
+		if cursors == nil {
+			cursors = make(map[string]uint64)
+		}
+		return cursors, nil
+	}
+	cursors := events.ParseCursor(resumeCursor)
+	if cursors == nil {
+		cursors = make(map[string]uint64)
+	}
+	latest, err := mux.LatestCursor()
+	if err != nil {
+		return nil, err
+	}
+	for city, seq := range latest {
+		if _, ok := cursors[city]; !ok {
+			cursors[city] = seq
+		}
+	}
+	return cursors, nil
+}
+
 // precheckGlobalEventStream validates that the global event stream
 // can actually deliver events before committing 200 headers. Two
 // failure modes both produce 503 Problem Details instead of 200+EOF:
@@ -736,15 +806,24 @@ func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
 //     finds the newly-registered city in the mux.
 //  2. Providers exist but none can attach a watcher right now.
 //
-// The precheck attaches a watcher and closes it immediately — a
-// cheap probe that surfaces per-city watcher failures at the point
-// where we can still return a proper HTTP error.
+// The precheck attaches a watcher at each city's head cursor and closes it
+// immediately — a cheap probe that surfaces per-city watcher failures at the
+// point where we can still return a proper HTTP error. It must not attach with
+// nil cursors: nil defaults every child to Watch(0), which now replays the
+// entire retained history across archives, so a bare probe would gunzip and
+// decode archived batches for every city only to discard them when it closes.
+// Resolving head cursors keeps the probe cheap and fails closed exactly like
+// the streamGlobalEvents head-start path.
 func (sm *SupervisorMux) precheckGlobalEventStream(ctx context.Context, _ *SupervisorEventStreamInput) error {
 	mux := sm.buildMultiplexer()
 	if mux.Len() == 0 {
 		return apierr.ServiceUnavailable.Msg("no_providers: no event providers available")
 	}
-	probe, err := mux.Watch(ctx, nil)
+	cursors, err := resolveGlobalStreamCursors(mux, "")
+	if err != nil {
+		return apierr.ServiceUnavailable.Msg("cursor_failed: " + err.Error())
+	}
+	probe, err := mux.Watch(ctx, cursors)
 	if err != nil {
 		if errors.Is(err, events.ErrNoWatchers) {
 			return apierr.ServiceUnavailable.Msg("no_watchers: event providers are registered but none are watchable")
@@ -765,18 +844,14 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	}
 
 	mux := sm.buildMultiplexer()
-	var cursors map[string]uint64
-	if cursor == "" {
-		var err error
-		cursors, err = mux.LatestCursor()
-		if err != nil {
-			log.Printf("api: supervisor events-stream: latest cursor failed: %v", err)
-		}
-	} else {
-		cursors = events.ParseCursor(cursor)
-	}
-	if cursors == nil {
-		cursors = make(map[string]uint64)
+	// Resolve per-city cursors so no city falls through to Watch(0) full-history
+	// replay: head-start clients start every city from now, and a resume cursor
+	// that omits a registered city floors that city to its latest cursor. Fail
+	// closed on a LatestCursor error — the client can reconnect.
+	cursors, err := resolveGlobalStreamCursors(mux, cursor)
+	if err != nil {
+		log.Printf("api: supervisor events-stream: resolving stream cursors failed, refusing full-history replay: %v", err)
+		return
 	}
 	mw, err := mux.Watch(hctx.Context(), cursors)
 	if err != nil {

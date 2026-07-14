@@ -134,6 +134,11 @@ type SupervisorMux struct {
 	// the State pointer changes (city restarted → new controllerState).
 	cacheMu sync.RWMutex
 	cache   map[string]cachedCityServer
+
+	// idem caches responses for Idempotency-Key replay on supervisor-scope
+	// create endpoints (POST /v0/city). Per-city creates use the per-city
+	// Server's own cache instead.
+	idem *idempotencyCache
 }
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
@@ -156,6 +161,7 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
 		cache:       make(map[string]cachedCityServer),
+		idem:        newIdempotencyCache(30 * time.Minute),
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()

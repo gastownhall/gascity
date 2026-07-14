@@ -180,6 +180,51 @@ func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+
+	t.Run("role without type", func(t *testing.T) {
+		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
+		entry.DoubleType = nil
+		err := Validate([]Entry{entry}, now)
+		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a double type") {
+			t.Fatalf("Validate() error = %v, want missing-double-type error", err)
+		}
+	})
+
+	t.Run("role without boundary", func(t *testing.T) {
+		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
+		entry.DoubleBoundary = ""
+		err := Validate([]Entry{entry}, now)
+		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a repository-relative double boundary") {
+			t.Fatalf("Validate() error = %v, want missing-double-boundary error", err)
+		}
+	})
+
+	t.Run("type without role", func(t *testing.T) {
+		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
+		entry.Roles = []Role{RoleProductionProvider}
+		err := Validate([]Entry{entry}, now)
+		if err == nil || !strings.Contains(err.Error(), "double type requires role reusable_double") {
+			t.Fatalf("Validate() error = %v, want missing-reusable-role error", err)
+		}
+	})
+}
+
+func TestRenderMarkdownShowsReusableOnlyBoundary(t *testing.T) {
+	entry := reusableRuntimeEntry("runtime.double.gated", "unused", "GatedFake", "NewGatedFake")
+	entry.Roles = []Role{RoleReusableDouble}
+	entry.Catalog = nil
+
+	if err := Validate([]Entry{entry}, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("Validate(reusable-only entry): %v", err)
+	}
+	got := RenderMarkdown([]Entry{entry})
+	if !strings.Contains(got, "reusable: internal/runtime/fake.go") || strings.Contains(got, "invalid: no discovery binding") {
+		t.Fatalf("RenderMarkdown(reusable-only entry) = %q, want honest reusable boundary", got)
+	}
+}
+
 func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	claim := ContractClaim{
@@ -302,6 +347,255 @@ func TestCatalogDefersExactConstructorContractsToOwnedFollowups(t *testing.T) {
 		if !got[key] {
 			t.Errorf("ga-80po0c.1.2 waiver row %s is missing", key)
 		}
+	}
+}
+
+func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
+	dir := writeRuntimeDoubleFixture(t, map[string]string{
+		"runtime.go": `package runtime
+type Provider interface { Run() }
+`,
+		"fake.go": `package runtime
+type Fake struct{}
+func (*Fake) Run() {}
+
+type FakeAlias = Fake
+type OtherFake Fake
+type helper struct{}
+
+func NewFake() *Fake { return nil }
+func NewAlias() *FakeAlias { return nil }
+func NewOther() *OtherFake { return nil }
+func NewValue() Fake { return Fake{} }
+func NewPair() (*Fake, error) { return nil, nil }
+func newPrivate() *Fake { return nil }
+func (helper) NewMethod() *Fake { return nil }
+func NewShadow[Fake any]() *Fake { return nil }
+func caller() {
+	type Fake struct{}
+	_ = func() *Fake { return nil }
+}
+
+type GatedFake struct{ *Fake }
+func NewGatedFake() (*GatedFake, error) { return nil, nil }
+func NewGatedValue() GatedFake { return GatedFake{} }
+
+type Support struct{}
+func NewSupport() *Support { return nil }
+`,
+		"constructors.go": `package runtime
+func NewExternalFake() *Fake { return nil }
+`,
+	})
+
+	got, err := DiscoverRuntimeProviderDoubles(dir)
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeProviderDoubles: %v", err)
+	}
+	want := []ReusableDouble{
+		{
+			Type: repoSymbol("internal/runtime", "Fake"),
+			Constructors: []SymbolRef{
+				repoSymbol("internal/runtime", "NewAlias"),
+				repoSymbol("internal/runtime", "NewExternalFake"),
+				repoSymbol("internal/runtime", "NewFake"),
+				repoSymbol("internal/runtime", "NewPair"),
+			},
+		},
+		{
+			Type: repoSymbol("internal/runtime", "GatedFake"),
+			Constructors: []SymbolRef{
+				repoSymbol("internal/runtime", "NewGatedFake"),
+				repoSymbol("internal/runtime", "NewGatedValue"),
+			},
+		},
+	}
+	if gotText, wantText := renderReusableDoubles(got), renderReusableDoubles(want); gotText != wantText {
+		t.Fatalf("doubles = %s, want %s", gotText, wantText)
+	}
+}
+
+func TestDiscoverRuntimeProviderDoublesFailsClosed(t *testing.T) {
+	const provider = `package runtime
+type Provider interface { Run() }
+`
+	const validDouble = `package runtime
+type Fake struct{}
+func (*Fake) Run() {}
+func NewFake() *Fake { return nil }
+`
+
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{
+			name:  "boundary file renamed",
+			files: map[string]string{"runtime.go": provider, "doubles.go": validDouble},
+			want:  "designated runtime double boundary fake.go is missing",
+		},
+		{
+			name:  "boundary package changed",
+			files: map[string]string{"runtime.go": provider, "fake.go": strings.Replace(validDouble, "package runtime", "package other", 1)},
+			want:  "fake.go must declare package runtime",
+		},
+		{
+			name:  "provider declaration missing",
+			files: map[string]string{"runtime.go": "package runtime\n", "fake.go": validDouble},
+			want:  "runtime.Provider must be exactly one declared interface",
+		},
+		{
+			name:  "provider is not an interface",
+			files: map[string]string{"runtime.go": "package runtime\ntype Provider struct{}\n", "fake.go": validDouble},
+			want:  "runtime.Provider must be exactly one declared interface",
+		},
+		{
+			name:  "no exported provider double",
+			files: map[string]string{"runtime.go": provider, "fake.go": "package runtime\ntype Support struct{}\n"},
+			want:  "fake.go declares no exported runtime.Provider double",
+		},
+		{
+			name: "provider double has no constructor",
+			files: map[string]string{
+				"runtime.go": provider,
+				"fake.go":    "package runtime\ntype Fake struct{}\nfunc (*Fake) Run() {}\n",
+			},
+			want: "runtime provider double internal/runtime.Fake has no exported receiverless constructor",
+		},
+		{
+			name: "declaration type error",
+			files: map[string]string{
+				"runtime.go": provider,
+				"fake.go":    validDouble + "\nvar broken MissingType\n",
+			},
+			want: "type-check runtime double boundary",
+		},
+		{
+			name: "generic boundary type",
+			files: map[string]string{
+				"runtime.go": provider,
+				"fake.go": `package runtime
+type GenericFake[T any] struct{}
+func (*GenericFake[T]) Run() {}
+func NewGenericFake[T any]() *GenericFake[T] { return nil }
+`,
+			},
+			want: "generic exported type GenericFake in fake.go cannot be classified as a reusable provider double",
+		},
+		{
+			name: "exported alias exposes untracked provider type",
+			files: map[string]string{
+				"runtime.go": provider,
+				"fake.go": validDouble + `
+type hiddenFake struct{ *Fake }
+type GatedFake = hiddenFake
+func NewGatedFake() *GatedFake { return nil }
+`,
+			},
+			want: "exported provider alias GatedFake in fake.go resolves to an untracked concrete type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRuntimeDoubleFixture(t, tt.files)
+			_, err := DiscoverRuntimeProviderDoubles(dir)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("DiscoverRuntimeProviderDoubles() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompareReusableDoublesChecksConstructorsBothDirections(t *testing.T) {
+	entries := []Entry{
+		reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake"),
+		reusableRuntimeEntry("runtime.removed", "exact:removed", "Fake", "NewRemovedFake"),
+	}
+	discovered := []ReusableDouble{
+		{
+			Type: repoSymbol("internal/runtime", "Fake"),
+			Constructors: []SymbolRef{
+				repoSymbol("internal/runtime", "NewFake"),
+				repoSymbol("internal/runtime", "NewFailFake"),
+			},
+		},
+		{
+			Type:         repoSymbol("internal/runtime", "GatedFake"),
+			Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewGatedFake")},
+		},
+	}
+
+	err := CompareReusableDoubles(entries, discovered)
+	if err == nil {
+		t.Fatal("CompareReusableDoubles() succeeded, want missing and stale errors")
+	}
+	for _, want := range []string{
+		"internal/runtime.NewFailFake is missing from the ledger",
+		"internal/runtime.NewGatedFake is missing from the ledger",
+		"internal/runtime.NewRemovedFake is not discovered for type boundary internal/runtime/fake.go",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("CompareReusableDoubles() error = %v, want containing %q", err, want)
+		}
+	}
+}
+
+func TestCompareReusableDoublesBindsConstructorToDeclaredType(t *testing.T) {
+	entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
+	discovered := []ReusableDouble{{
+		Type:         repoSymbol("internal/runtime", "RenamedFake"),
+		Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+	}}
+
+	err := CompareReusableDoubles([]Entry{entry}, discovered)
+	if err == nil || !strings.Contains(err.Error(), "internal/runtime.NewFake constructs internal/runtime.RenamedFake, ledger declares internal/runtime.Fake") {
+		t.Fatalf("CompareReusableDoubles() error = %v, want declared-type drift", err)
+	}
+}
+
+func TestCompareReusableDoublesRequiresReusableRole(t *testing.T) {
+	entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
+	entry.Roles = []Role{RoleProductionProvider}
+	discovered := []ReusableDouble{{
+		Type:         repoSymbol("internal/runtime", "Fake"),
+		Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+	}}
+
+	err := CompareReusableDoubles([]Entry{entry}, discovered)
+	if err == nil || !strings.Contains(err.Error(), "internal/runtime.NewFake is missing from the ledger") {
+		t.Fatalf("CompareReusableDoubles() error = %v, want reusable-role error", err)
+	}
+}
+
+func TestCompareReusableDoublesRequiresDesignatedBoundary(t *testing.T) {
+	entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
+	entry.DoubleBoundary = "internal/runtime/other.go"
+	discovered := []ReusableDouble{{
+		Type:         repoSymbol("internal/runtime", "Fake"),
+		Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+	}}
+
+	err := CompareReusableDoubles([]Entry{entry}, discovered)
+	if err == nil || !strings.Contains(err.Error(), `reusable double boundary is "internal/runtime/other.go", want "internal/runtime/fake.go"`) {
+		t.Fatalf("CompareReusableDoubles() error = %v, want designated-boundary error", err)
+	}
+}
+
+func TestCompareReusableDoublesRejectsDuplicateOwnership(t *testing.T) {
+	entries := []Entry{
+		reusableRuntimeEntry("runtime.fake.first", "exact:first", "Fake", "NewFake"),
+		reusableRuntimeEntry("runtime.fake.second", "exact:second", "Fake", "NewFake"),
+	}
+	discovered := []ReusableDouble{{
+		Type:         repoSymbol("internal/runtime", "Fake"),
+		Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+	}}
+
+	err := CompareReusableDoubles(entries, discovered)
+	if err == nil || !strings.Contains(err.Error(), `internal/runtime.NewFake is owned by multiple ledger entries: "runtime.fake.first", "runtime.fake.second"`) {
+		t.Fatalf("CompareReusableDoubles() error = %v, want duplicate ownership", err)
 	}
 }
 
@@ -928,6 +1222,13 @@ func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	if err := CompareRuntimeCatalog(entries, discovered); err != nil {
 		t.Fatalf("CompareRuntimeCatalog: %v", err)
 	}
+	doubles, err := DiscoverRuntimeProviderDoubles(filepath.Join(root, "internal/runtime"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeProviderDoubles: %v", err)
+	}
+	if err := CompareReusableDoubles(entries, doubles); err != nil {
+		t.Fatalf("CompareReusableDoubles: %v", err)
+	}
 	if err := ValidateSourceRefs(root, entries); err != nil {
 		t.Fatalf("ValidateSourceRefs: %v", err)
 	}
@@ -944,6 +1245,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	first := Catalog()
 	first[0].Roles[0] = RoleReusableDouble
 	first[0].Constructors[0].Name = "MutatedConstructor"
+	first[0].DoubleType.Name = "MutatedDouble"
 	first[0].Catalog.Name = "mutated.catalog"
 	first[0].Claims[0].Contract = ContractID("mutated.contract")
 	first[0].Claims[0].Waiver.Owner = "mutated-owner"
@@ -955,6 +1257,9 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	}
 	if second[0].Constructors[0].Name != "NewFake" {
 		t.Errorf("Catalog() constructor leaked mutation: %q", second[0].Constructors[0].Name)
+	}
+	if second[0].DoubleType == nil || second[0].DoubleType.Name != "Fake" {
+		t.Errorf("Catalog() double type leaked mutation: %v", second[0].DoubleType)
 	}
 	if second[0].Catalog.Name != RuntimeBuiltinCatalog {
 		t.Errorf("Catalog() catalog leaked mutation: %q", second[0].Catalog.Name)
@@ -999,6 +1304,40 @@ func validRuntimeEntry(id, key string, claim ContractClaim) Entry {
 		Catalog:      &CatalogRef{Name: RuntimeBuiltinCatalog, Key: key},
 		Claims:       []ContractClaim{claim},
 	}
+}
+
+func reusableRuntimeEntry(id, key, typeName, constructorName string) Entry {
+	constructor := repoSymbol("internal/runtime", constructorName)
+	entry := validRuntimeEntry(id, key, ContractClaim{
+		Constructor:         constructor,
+		Contract:            ContractRuntimeProvider,
+		Disposition:         DispositionNotApplicable,
+		NotApplicableReason: "fixture",
+	})
+	entry.Roles = append(entry.Roles, RoleReusableDouble)
+	doubleType := repoSymbol("internal/runtime", typeName)
+	entry.DoubleType = &doubleType
+	entry.DoubleBoundary = runtimeDoubleBoundaryPath
+	return entry
+}
+
+func writeRuntimeDoubleFixture(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, source := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func renderReusableDoubles(doubles []ReusableDouble) string {
+	rows := make([]string, 0, len(doubles))
+	for _, double := range doubles {
+		rows = append(rows, renderSymbolRef(double.Type)+"="+renderSymbolRefs(double.Constructors))
+	}
+	return strings.Join(rows, ";")
 }
 
 func renderRegistrations(registrations []RuntimeRegistration) string {

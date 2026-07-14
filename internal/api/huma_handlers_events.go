@@ -159,20 +159,30 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 // Body validation (Type and Actor required) is enforced by struct tags
 // on EventEmitInput.
 func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
-	ep := s.state.EventProvider()
-	if ep == nil {
-		return nil, apierr.ServiceUnavailable.Msg("events not enabled")
+	// Idempotency: append at most once per Idempotency-Key — the log is
+	// append-only, so a timed-out retry would otherwise double-emit (and
+	// double any projection built over the log). The cached value is just the
+	// status constant; the whole point is skipping the duplicate Record.
+	status, err := withIdempotency(s.idem, "/v0/events", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			ep := s.state.EventProvider()
+			if ep == nil {
+				return "", apierr.ServiceUnavailable.Msg("events not enabled")
+			}
+			ep.Record(events.Event{
+				Type:    input.Body.Type,
+				Actor:   input.Body.Actor,
+				Subject: input.Body.Subject,
+				Message: input.Body.Message,
+			})
+			return "recorded", nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
-	ep.Record(events.Event{
-		Type:    input.Body.Type,
-		Actor:   input.Body.Actor,
-		Subject: input.Body.Subject,
-		Message: input.Body.Message,
-	})
-
 	resp := &EventEmitOutput{}
-	resp.Body.Status = "recorded"
+	resp.Body.Status = status
 	return resp, nil
 }
 
@@ -270,12 +280,17 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 	ep := s.state.EventProvider()
 	afterSeq := input.resolveAfterSeq()
 	if strings.TrimSpace(input.LastEventID) == "" && strings.TrimSpace(input.AfterSeq) == "" {
+		// Head-start (no resume cursor): stream from now. Fail closed on a
+		// LatestSeq error rather than fall through to afterSeq=0, which Watch now
+		// treats as "replay the entire retained history" (across archives) — a
+		// head-start client must not get a full-history flood. The client can
+		// reconnect.
 		seq, err := ep.LatestSeq()
 		if err != nil {
-			log.Printf("api: events-stream: latest seq failed: %v", err)
-		} else {
-			afterSeq = seq
+			log.Printf("api: events-stream: latest seq failed, refusing head-start replay: %v", err)
+			return
 		}
+		afterSeq = seq
 	}
 	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {

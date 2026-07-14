@@ -4639,6 +4639,15 @@ func TestReconcileSessionBeads_SkipsAliveSession(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_RateLimitScreenQuarantinesBeforeHeal(t *testing.T) {
+	assertRateLimitScrollbackQuarantinesBeforeHeal(t, "You've hit your limit, Pro plan\n\n/rate-limit-options")
+}
+
+func TestReconcileSessionBeads_SpendLimitModalQuarantinesBeforeHeal(t *testing.T) {
+	assertRateLimitScrollbackQuarantinesBeforeHeal(t, "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel")
+}
+
+func assertRateLimitScrollbackQuarantinesBeforeHeal(t *testing.T, peekOutput string) {
+	t.Helper()
 	env := newReconcilerTestEnv()
 	rec := events.NewFake()
 	env.rec = rec
@@ -4653,7 +4662,7 @@ func TestReconcileSessionBeads_RateLimitScreenQuarantinesBeforeHeal(t *testing.T
 		t.Fatalf("Start(worker): %v", err)
 	}
 	env.sp.Zombies["worker"] = true
-	env.sp.SetPeekOutput("worker", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	env.sp.SetPeekOutput("worker", peekOutput)
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
 		"state":               "active",

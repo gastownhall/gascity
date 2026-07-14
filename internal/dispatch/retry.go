@@ -102,6 +102,20 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		}
 		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 
+	case "canceled":
+		// The run was canceled: close the eval and its logical bead as canceled
+		// (an explicit terminal non-failure) rather than scheduling another
+		// attempt. The cancellation gate normally closes retry-eval beads before
+		// they reach here; this is the defensive terminal path when an eval does
+		// classify a canceled subject.
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeCanceled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing canceled eval: %w", bead.ID, err)
+		}
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeCanceled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing canceled logical bead: %w", logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "canceled"}, nil
+
 	case "transient":
 		if attempt >= maxAttempts {
 			if onExhausted == beadmeta.DispositionSoftFail {
@@ -278,6 +292,10 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		default:
 			return retryEvalResult{Outcome: "transient", Reason: "unknown_failure_class"}
 		}
+	case beadmeta.OutcomeCanceled:
+		// A canceled attempt subject (its run was canceled via the API) is a
+		// terminal non-failure: do not schedule another attempt.
+		return retryEvalResult{Outcome: "canceled"}
 	case "":
 		return retryEvalResult{Outcome: "transient", Reason: "missing_outcome"}
 	default:
@@ -473,6 +491,9 @@ func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalRe
 	switch result.Outcome {
 	case "pass":
 		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
+		batch[beadmeta.FailureClassMetadataKey] = ""
+	case "canceled":
+		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeCanceled
 		batch[beadmeta.FailureClassMetadataKey] = ""
 	case "transient":
 		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeFail

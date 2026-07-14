@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // runResourcePath is the canonical Run resource URL for one run — the value a
@@ -177,6 +178,133 @@ func (s *Server) humaHandleRunSteps(_ context.Context, input *RunStepsInput) (*R
 	return out, nil
 }
 
+// runCanceledCloseReason is the close_reason stamped on beads wound down by a run
+// cancel, distinguishing an operator cancel from a skip-directive teardown.
+const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+
+// humaHandleRunCancel is the Huma-typed handler for
+// POST /v0/city/{cityName}/runs/{run_id}/cancel. It stamps cancel intent on the
+// run root and synchronously winds the run down — closing the root and its open
+// beads with a canceled outcome so the dispatcher finds no more ready work and
+// the run starves. Registered with a 202 default status: in-flight sessions
+// finish their current step before idling, so the wind-down is accepted, not
+// instantaneous.
+func (s *Server) humaHandleRunCancel(_ context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
+	runID := strings.TrimSpace(input.RunID)
+	res, err := s.cancelRun(runID)
+	if err != nil {
+		// A store read/write failed mid-cancel: do NOT report a cancellation we
+		// could not substantiate. 503 is retryable; the run keeps running.
+		return nil, apierr.ServiceUnavailable.Msgf("run cancel failed: %v", err)
+	}
+	if !res.found {
+		return nil, apierr.RunNotFound.Msgf("run not found: %s", runID)
+	}
+	if res.terminal {
+		return nil, apierr.ConflictWrongState.Msgf("run %s is already terminal; nothing to cancel", runID)
+	}
+	out := &RunCancelOutput{}
+	out.Body.RunID = runID
+	out.Body.Status = res.status
+	out.Body.Closed = res.closed
+	return out, nil
+}
+
+// cancelRunResult is the outcome of a cancelRun wind-down.
+type cancelRunResult struct {
+	found    bool      // a workflow run root with this id exists
+	terminal bool      // every matching root was already terminal (nothing to cancel)
+	closed   int       // beads newly closed by the cancel
+	status   RunStatus // resulting run status
+}
+
+// cancelRun winds down the run rooted at runID across every workflow store,
+// closing each open root and its still-OPEN member beads with a canceled
+// outcome. It reuses the workflow teardown close ordering (descendants before
+// the root, blockers before blocked) so a strict store accepts the batch. The
+// cancel-intent marker is stamped root-only, together with the root's own close:
+// on an atomic store the two commit as one transaction, so a failed close
+// persists neither and never strands an open, half-marked root; on a non-atomic
+// store the marker is durably recorded so the returned 5xx's retry completes the
+// wind-down. Already-terminal runs (and already-closed members) are left
+// untouched — closing a completed member would rewrite its recorded outcome. Any
+// store read/write failure is returned so the caller reports a 5xx rather than a
+// phantom success.
+func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
+	var res cancelRunResult
+	for _, info := range s.workflowStores() {
+		if info.store == nil {
+			continue
+		}
+		roots, err := findWorkflowRoots(info.store, runID)
+		if err != nil {
+			return res, err
+		}
+		for _, root := range roots {
+			res.found = true
+			if isClosedStatus(root.Status) {
+				continue // already terminal — nothing to wind down
+			}
+			n, err := sourceworkflow.CloseWorkflowSubtreeAs(
+				info.store,
+				root.ID,
+				beadmeta.OutcomeCanceled,
+				runCanceledCloseReason,
+				map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+			)
+			if err != nil {
+				return res, err
+			}
+			res.closed += n
+			res.status = RunStatusCanceled
+		}
+	}
+	if res.found && res.status == "" {
+		res.terminal = true
+	}
+	return res, nil
+}
+
+// findWorkflowRoots returns the graph-workflow roots in store that match runID
+// (Get by id + List by kind=workflow/workflow_id). Root membership uses
+// sourceworkflow.IsWorkflowRoot (gc.kind=workflow OR gc.formula_contract=graph.v2)
+// so a graph.v2-only root — one the Run resource lists but that lacks the
+// gc.kind=workflow marker — is still cancellable, not a false 404. A non-NotFound
+// store error is returned so the caller reports a 5xx.
+func findWorkflowRoots(store beads.Store, runID string) ([]beads.Bead, error) {
+	var roots []beads.Bead
+	seen := map[string]bool{}
+	add := func(root beads.Bead) {
+		if !sourceworkflow.IsWorkflowRoot(root) || !matchesWorkflowID(root, runID) {
+			return
+		}
+		if seen[root.ID] {
+			return
+		}
+		seen[root.ID] = true
+		roots = append(roots, root)
+	}
+	if root, err := store.Get(runID); err == nil {
+		add(root)
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, err
+	}
+	list, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: runID,
+		},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range list {
+		add(r)
+	}
+	return roots, nil
+}
+
 // laneToRun maps a projection lane to the canonical Run DTO, reading the run root
 // bead (when present) for start time, target, and terminal outcome. The started
 // member count (used only to split pending from active) is computed just for
@@ -224,8 +352,19 @@ func deriveRunStatus(lane runproj.RunLane, root beads.Bead, rootFound bool, star
 			return RunStatusFailed
 		case beadmeta.OutcomeSkipped:
 			return RunStatusSkipped
+		case beadmeta.OutcomeCanceled:
+			return RunStatusCanceled
 		}
 		return RunStatusCompleted
+	}
+	// A cancel was requested but the root's terminal close is not yet durably
+	// recorded: on a non-atomic store the gc.cancel_requested marker persisted
+	// while the following root close failed, so cancelRun returned a retryable
+	// 5xx and the operator's retry finishes the wind-down. (On an atomic store a
+	// failed close rolls the marker back, so this state is not reachable there.)
+	// Report canceling meanwhile.
+	if rootFound && strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
+		return RunStatusCanceling
 	}
 	switch lane.Phase {
 	case "blocked":
@@ -248,6 +387,8 @@ func deriveRunStepStatus(b beads.Bead) RunStepStatus {
 			return RunStepStatusFailed
 		case beadmeta.OutcomeSkipped:
 			return RunStepStatusSkipped
+		case beadmeta.OutcomeCanceled:
+			return RunStepStatusCanceled
 		}
 		return RunStepStatusCompleted
 	case "in_progress":

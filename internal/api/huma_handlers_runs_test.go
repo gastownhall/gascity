@@ -122,6 +122,10 @@ func TestDeriveRunStatus(t *testing.T) {
 		// F2 regression: a failed run whose lane phase is NOT complete (a lingering
 		// open source bead) must still report failed because the root is closed.
 		{"closed-fail-phase-active", "active", closedRoot("fail"), true, 5, RunStatusFailed},
+		// Cancel: a terminal canceled outcome is a distinct terminal status.
+		{"closed-canceled", "complete", closedRoot("canceled"), true, 3, RunStatusCanceled},
+		// Cancel: an open root carrying the intent marker reports canceling.
+		{"open-cancel-requested", "active", beads.Bead{Status: "open", Metadata: map[string]string{"gc.cancel_requested": "true"}}, true, 2, RunStatusCanceling},
 		// Defensive: a dangling root (filtered upstream in practice) is non-terminal.
 		{"root-missing", "complete", beads.Bead{}, false, 0, RunStatusPending},
 	}
@@ -155,6 +159,7 @@ func TestDeriveRunStepStatus(t *testing.T) {
 		{"closed-pass", step("closed", "pass"), RunStepStatusCompleted},
 		{"closed-fail", step("closed", "fail"), RunStepStatusFailed},
 		{"closed-skipped", step("closed", "skipped"), RunStepStatusSkipped},
+		{"closed-canceled", step("closed", "canceled"), RunStepStatusCanceled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

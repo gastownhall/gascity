@@ -44,6 +44,7 @@ const (
 	BondMetadataKey                      = "gc.bond"
 	BondVarsMetadataKey                  = "gc.bond_vars"
 	BrainParentSIDMetadataKey            = "gc.brain_parent_sid"
+	CancelRequestedMetadataKey           = "gc.cancel_requested"
 	CheckInfraRetryMetadataKey           = "gc.check_infra_retry"
 	CheckModeMetadataKey                 = "gc.check_mode"
 	CheckPathMetadataKey                 = "gc.check_path"
@@ -282,6 +283,7 @@ var KnownMetadataKeys = []string{
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BrainParentSIDMetadataKey,
+	CancelRequestedMetadataKey,
 	CheckInfraRetryMetadataKey,
 	CheckModeMetadataKey,
 	CheckPathMetadataKey,

@@ -51,6 +51,11 @@ func newDiscoveredNamespaceCmd(binding string, entries []config.DiscoveredComman
 		Use:         binding,
 		Short:       fmt.Sprintf("Commands from the %s import", binding),
 		Annotations: map[string]string{docgenSkipAnnotation: "true"},
+		// NoArgs makes an unknown subcommand ("gc <binding> bogus") fail with
+		// "unknown command" and a non-zero exit, matching native command groups.
+		// A bare invocation ("gc <binding>") passes NoArgs and falls through to
+		// RunE, which still prints help and exits 0. See gastownhall/gascity#3966.
+		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return c.Help()
 		},
@@ -76,6 +81,10 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		}
 		next := &cobra.Command{
 			Use: word,
+			// Intermediate namespace nodes reject unknown subcommands too, so a
+			// deep "gc <binding> repo bogus" fails non-zero like a native group
+			// rather than printing help and exiting 0. See gastownhall/gascity#3966.
+			Args: cobra.NoArgs,
 			RunE: func(c *cobra.Command, _ []string) error {
 				return c.Help()
 			},

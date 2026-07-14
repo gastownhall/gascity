@@ -19,6 +19,50 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
+timing_file="${OBSERVABLE_TIMING_FILE:-}"
+timing_variant="${OBSERVABLE_VARIANT:-default}"
+timing_shard_id="${OBSERVABLE_SHARD_ID:-$name}"
+timing_commit_sha="${OBSERVABLE_COMMIT_SHA:-}"
+timing_workflow="${OBSERVABLE_WORKFLOW:-}"
+timing_run_id="${OBSERVABLE_RUN_ID:-}"
+timing_run_attempt="${OBSERVABLE_RUN_ATTEMPT:-}"
+timing_job="${OBSERVABLE_JOB:-}"
+timing_runner_label="${OBSERVABLE_RUNNER_LABEL:-}"
+timing_runner_name="${OBSERVABLE_RUNNER_NAME:-}"
+timing_runner_os="${OBSERVABLE_RUNNER_OS:-}"
+timing_runner_arch="${OBSERVABLE_RUNNER_ARCH:-}"
+timing_runner_cpu_count="${OBSERVABLE_RUNNER_CPU_COUNT:-}"
+
+# Capture metadata at this wrapper boundary, then keep the product test's
+# environment unchanged. OBSERVABLE_TEST_LOG predates timing capture and is
+# intentionally left alone for compatibility.
+unset OBSERVABLE_TIMING_FILE OBSERVABLE_VARIANT OBSERVABLE_SHARD_ID
+unset OBSERVABLE_COMMIT_SHA OBSERVABLE_WORKFLOW OBSERVABLE_RUN_ID
+unset OBSERVABLE_RUN_ATTEMPT OBSERVABLE_JOB OBSERVABLE_RUNNER_LABEL
+unset OBSERVABLE_RUNNER_NAME OBSERVABLE_RUNNER_OS OBSERVABLE_RUNNER_ARCH
+unset OBSERVABLE_RUNNER_CPU_COUNT
+
+if [ -n "$timing_file" ] && ! rm -f "$timing_file"; then
+  echo "observable go test: warning: cannot remove stale timing artifact $timing_file; capture disabled" >&2
+  timing_file=""
+fi
+
+timing_module_path=""
+if [ -n "$timing_file" ]; then
+  if [ -z "$timing_runner_cpu_count" ] && command -v getconf >/dev/null 2>&1; then
+    timing_runner_cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  fi
+  case "$timing_runner_cpu_count" in
+    ''|*[!0-9]*) timing_runner_cpu_count=0 ;;
+  esac
+  if detected_module="$(go list -m -f '{{.Path}}' 2>/dev/null)" && [ -n "$detected_module" ]; then
+    timing_module_path="$detected_module"
+  else
+    echo "observable go test: warning: module path unavailable; timing capture disabled" >&2
+    timing_file=""
+  fi
+fi
+
 if [ -n "${OBSERVABLE_TEST_LOG:-}" ]; then
   log="$OBSERVABLE_TEST_LOG"
   rm -f "$log"
@@ -35,6 +79,11 @@ print_failure_details() {
     return
   fi
   if [ ! -s "$log" ]; then
+    return
+  fi
+
+  if ! jq -e . "$log" >/dev/null 2>&1; then
+    echo "observable go test: raw JSON log is malformed; failure details unavailable" >&2
     return
   fi
 
@@ -61,31 +110,161 @@ print_failure_details() {
   jq -r 'select(.Action == "output" and .Output != null) | .Output' "$log" | tail -n "$failure_lines" >&2
 }
 
-if command -v jq >/dev/null 2>&1; then
-  set +e
-  go test -json "$@" \
-    | tee "$log" \
-    | jq -r '
+write_timing_artifact() {
+  if [ -z "$timing_file" ]; then
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "observable go test: warning: jq not found; timing capture unavailable" >&2
+    return
+  fi
+  if [ ! -s "$log" ]; then
+    echo "observable go test: warning: raw timing log is empty; no artifact written" >&2
+    return
+  fi
+
+  timing_dir="$(dirname "$timing_file")"
+  if [ ! -d "$timing_dir" ]; then
+    echo "observable go test: warning: timing directory does not exist: $timing_dir" >&2
+    return
+  fi
+  if ! timing_tmp="$(mktemp "${timing_file}.tmp.XXXXXX")"; then
+    echo "observable go test: warning: cannot create timing artifact beside $timing_file" >&2
+    return
+  fi
+
+  if ! jq -s -e \
+    --arg module "$timing_module_path" \
+    --arg shard_id "$timing_shard_id" \
+    --arg variant "$timing_variant" \
+    --arg commit_sha "$timing_commit_sha" \
+    --arg workflow "$timing_workflow" \
+    --arg run_id "$timing_run_id" \
+    --arg run_attempt "$timing_run_attempt" \
+    --arg job "$timing_job" \
+    --arg runner_label "$timing_runner_label" \
+    --arg runner_name "$timing_runner_name" \
+    --arg runner_os "$timing_runner_os" \
+    --arg runner_arch "$timing_runner_arch" \
+    --argjson runner_cpu_count "$timing_runner_cpu_count" \
+    '
+      def relative_package($module):
+        if $module == "" then .
+        elif . == $module then "."
+        elif startswith($module + "/") then .[($module | length) + 1:]
+        else .
+        end;
+
+      [.[] | select(.Action == "pass" or .Action == "fail" or .Action == "skip")] as $terminal
+      | if ($terminal | length) == 0 then
+          error("no terminal package or test timing events")
+        elif (($terminal | all(.[];
+          ((.Package | type) == "string" and (.Package | length) > 0) and
+          ((.Elapsed | type) == "number" and .Elapsed >= 0) and
+          (.Test == null or ((.Test | type) == "string" and (.Test | length) > 0))
+        )) | not) then
+          error("terminal timing event has an invalid package, test, or elapsed value")
+        else
+          $terminal
+        end
+      | map(
+          . as $event
+          | ($event.Package | relative_package($module)) as $package_id
+          | if $event.Test == null then
+              {
+                unit_id: $package_id,
+                kind: "package",
+                package: $event.Package,
+                test: "",
+                subtest: "",
+                outcome: $event.Action,
+                duration_seconds: $event.Elapsed
+              }
+            else
+              ($event.Test | split("/")) as $parts
+              | {
+                  unit_id: ($package_id + ":" + $event.Test),
+                  kind: "test",
+                  package: $event.Package,
+                  test: $parts[0],
+                  subtest: ($parts[1:] | join("/")),
+                  outcome: $event.Action,
+                  duration_seconds: $event.Elapsed
+                }
+            end
+        )
+      | sort_by([.unit_id, .kind, .outcome, .duration_seconds]) as $units
+      | {
+          schema: 1,
+          shard_id: $shard_id,
+          variant: $variant,
+          commit_sha: $commit_sha,
+          workflow: $workflow,
+          run_id: $run_id,
+          run_attempt: $run_attempt,
+          job: $job,
+          runner: {
+            label: $runner_label,
+            name: $runner_name,
+            os: $runner_os,
+            arch: $runner_arch,
+            cpu_count: $runner_cpu_count
+          },
+          units: $units
+        }
+    ' "$log" >"$timing_tmp"; then
+    rm -f "$timing_tmp"
+    echo "observable go test: warning: raw timing log is malformed or incomplete; no artifact written" >&2
+    return
+  fi
+
+  if ! mv -f "$timing_tmp" "$timing_file"; then
+    rm -f "$timing_tmp"
+    echo "observable go test: warning: cannot publish timing artifact $timing_file" >&2
+    return
+  fi
+	echo "observable go test: timing=$timing_file" >&2
+}
+
+print_progress() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "observable go test: jq not found; printing raw JSON progress" >&2
+    cat "$log"
+    return
+  fi
+  jq -r '
       select(
         .Action == "run" or
         .Action == "fail" or
         .Action == "skip" or
         (.Action == "pass" and (.Test == null or (.Elapsed // 0) >= 1))
       ) |
-      "\(.Time // "") \(.Action) \(.Test // .Package)"'
-  status=${PIPESTATUS[0]}
-  set -e
-else
-  echo "observable go test: jq not found; printing raw JSON progress" >&2
-  set +e
-  go test -json "$@" | tee "$log"
-  status=${PIPESTATUS[0]}
-  set -e
+      "\(.Time // "") \(.Action) \(.Test // .Package)"' "$log"
+}
+
+# Capture the product process directly so a failed renderer can never close a
+# downstream pipe and replace the product exit with SIGPIPE. Rendering after
+# completion trades live progress for exact, deterministic status ownership.
+set +e
+go test -json "$@" >"$log"
+status=$?
+set -e
+
+if ! print_progress; then
+  echo "observable go test: warning: progress rendering failed; product result is unchanged" >&2
+fi
+
+# Timing is advisory in this capture-only phase. A missing or malformed
+# scratch artifact must not change the product test result in either direction.
+if ! write_timing_artifact; then
+  echo "observable go test: warning: timing capture failed unexpectedly; product result is unchanged" >&2
 fi
 
 if [ "$status" -ne 0 ]; then
   echo "observable go test: FAIL status=$status log=$log" >&2
-  print_failure_details
+  if ! print_failure_details; then
+    echo "observable go test: warning: failure-detail rendering failed; product result is unchanged" >&2
+  fi
 else
   echo "observable go test: PASS log=$log" >&2
 fi

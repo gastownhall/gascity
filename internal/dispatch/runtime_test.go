@@ -861,6 +861,14 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "canceled outcome on an abort_scope member is a terminal non-failure",
+			meta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "canceled",
+			},
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -9638,6 +9646,80 @@ func TestProcessControlClosesControlWhenWorkflowRootMissing(t *testing.T) {
 	traced := traceBuf.String()
 	if !strings.Contains(traced, "close reason=missing_workflow_root") {
 		t.Fatalf("trace missing missing-root close reason; got:\n%s", traced)
+	}
+}
+
+// TestProcessControlClosesControlWhenWorkflowRootCanceled pins the run-cancel
+// gate: a control bead whose workflow root is closed with gc.outcome=canceled is
+// closed as canceled instead of being spawned/continued, so POST /runs/{id}/cancel
+// converges to stopped rather than racing the dispatcher. The gate must record a
+// cancellation, NOT a failure.
+func TestProcessControlClosesControlWhenWorkflowRootCanceled(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "canceled run root",
+		Type:     "molecule",
+		Status:   "open",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	// Close the root as canceled, exactly as run cancel does (outcome + intent).
+	if _, err := store.CloseAll([]string{root.ID}, map[string]string{
+		"gc.outcome":          "canceled",
+		"gc.cancel_requested": "true",
+	}); err != nil {
+		t.Fatalf("close root canceled: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title:  "fanout under canceled root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":           "fanout",
+			"gc.root_bead_id":   root.ID,
+			"gc.root_store_ref": "rig:gascity",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	opts := ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&traceBuf, format, args...)
+			traceBuf.WriteByte('\n')
+		},
+	}
+
+	result, err := ProcessControl(store, control, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "canceled-workflow" {
+		t.Fatalf("result = %+v, want processed canceled-workflow", result)
+	}
+	after := mustGetBead(t, store, control.ID)
+	if after.Status != "closed" {
+		t.Fatalf("status = %q, want closed", after.Status)
+	}
+	if after.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("gc.outcome = %q, want canceled", after.Metadata["gc.outcome"])
+	}
+	// A cancellation must not be recorded as a failure.
+	if got := after.Metadata["gc.failure_reason"]; got != "" {
+		t.Fatalf("gc.failure_reason = %q, want empty (cancellation is not a failure)", got)
+	}
+	if got := after.Metadata["gc.failure_class"]; got != "" {
+		t.Fatalf("gc.failure_class = %q, want empty (cancellation is not a failure)", got)
+	}
+	traced := traceBuf.String()
+	if !strings.Contains(traced, "close reason=root_canceled") {
+		t.Fatalf("trace missing root_canceled close reason; got:\n%s", traced)
 	}
 }
 

@@ -2275,6 +2275,13 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
 		return true
 	}
+	// bd list exposes no compound (created_at, id) seek flag; the boundary is
+	// resolved Go-side (identical tie-break to the in-memory sort), so a
+	// bd-side limit would cut rows before that filter runs — fetch unbounded
+	// and let applyListQuery filter then limit.
+	if serverQuery.SeekAfter != nil {
+		return true
+	}
 	return false
 }
 
@@ -2376,10 +2383,15 @@ func isBdQueryUnsupported(err error) bool {
 }
 
 func canApplyWispsServerLimit(query ListQuery) bool {
+	// SeekAfter: the compound (created_at, id) boundary is resolved Go-side
+	// (identical tie-break to the in-memory sort), not via a bd query flag, so
+	// a bd-side limit would cut rows before that filter runs — same class as
+	// CreatedBefore.
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
-		len(query.Metadata) == 0
+		len(query.Metadata) == 0 &&
+		query.SeekAfter == nil
 }
 
 func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {

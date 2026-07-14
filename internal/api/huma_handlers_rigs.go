@@ -68,7 +68,7 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (*RigCreatedOutput, error) {
 	// Idempotency: create at most once per Idempotency-Key. The cached value is
 	// the rig name; the response body is rebuilt from it on replay.
-	name, err := withIdempotency(s, "/v0/rigs", input.IdempotencyKey, input.Body,
+	name, err := withIdempotency(s.idem, "/v0/rigs", input.IdempotencyKey, input.Body,
 		func() (string, error) {
 			sm, ok := s.state.(StateMutator)
 			if !ok {

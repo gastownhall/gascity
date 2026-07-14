@@ -2054,7 +2054,11 @@ type APIConfig struct {
 	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
-	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field.
+	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
+	// multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,
+	// no config field) additionally binds the gate to the controller's own
+	// city id: every grant must then carry that exact cid claim, failing
+	// closed on a mismatching or missing cid.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	// WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup
 	// error instead of silently disabling the gate, so a config that intends to
@@ -3420,6 +3424,18 @@ func (a *Agent) MouseModeOn() bool {
 // AttachEnabled reports whether the agent supports interactive attachment.
 func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
+}
+
+// EffectiveDefaultSlingFormula returns the default sling formula for
+// this agent, or "" if none is set.
+func (a *Agent) EffectiveDefaultSlingFormula() string {
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
+	}
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
 }
 
 // InjectImplicitAgents adds on-demand agents for each explicitly configured

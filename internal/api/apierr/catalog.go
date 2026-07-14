@@ -39,6 +39,10 @@ var (
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
 	ValidationFailed = Register(ProblemType{Code: "validation-failed", Status: http.StatusUnprocessableEntity, Title: "Validation Failed"})
+	// InvalidCursor is a pagination token the server cannot parse (garbage,
+	// a legacy offset cursor, or the wrong kind for the endpoint). Clients
+	// recover by re-fetching the first page.
+	InvalidCursor = Register(ProblemType{Code: "invalid-cursor", Status: http.StatusBadRequest, Title: "Invalid Cursor"})
 	// WebhookRejected is a well-formed webhook request the receiver declined to
 	// dispatch (unknown/unwired sink, policy) — distinct from validation-failed,
 	// which is huma's schema-validation auto-stamp.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,8 +31,26 @@ import (
 // direct city mutations away with a clear 401; an authority-fronted deployment
 // supplies grants out of band rather than minting them in this process.
 const (
-	writeAuthHeader   = "X-GC-City-Write"
-	writeAuthAudience = "gc-city-write"
+	writeAuthHeader = "X-GC-City-Write"
+
+	// writeAuthAudience is the expected grant audience. The ".v2" suffix is
+	// the cid-tenancy cutover's deploy-ordering forcing function (see the
+	// crucible cityWriteAudience doc): a pre-cid verifier build would silently
+	// drop the unknown cid claim from a v2 token and admit it unchecked, so
+	// the audience was bumped in lockstep with the cid claim — only a build
+	// that enforces cid (this one) may expect the v2 audience. There is NO env
+	// override for the audience and none may be added: a verifier code deploy
+	// IS the forcing function.
+	writeAuthAudience = "gc-city-write.v2"
+	// writeAuthLegacyAudience is the pre-cid audience, still accepted so
+	// grants minted by an operator's own v1 authority keep verifying — but
+	// ONLY on an untenanted deployment. On a tenancy-scoped deployment
+	// (GC_CITY_WRITE_CID set) the verifier accepts only the v2 audience and
+	// rejects the legacy audience outright, so even a mis-minted or
+	// rollout-era grant carrying the legacy audience *and* a matching cid
+	// cannot ride past the v2 cutover. Legacy acceptance therefore never
+	// reopens the tenancy window the v2 cutover closed.
+	writeAuthLegacyAudience = "gc-city-write"
 
 	// maxWriteBodyBytes caps the request body the middleware buffers to compute
 	// the request digest, so an unauthenticated caller cannot exhaust memory by
@@ -229,6 +248,11 @@ var (
 	}
 )
 
+// writeAuthBootLogf is the sink for boot-time write-auth setup warnings,
+// swappable in tests. It follows the package's log.Printf idiom (server-side
+// stderr), matching how the controller and supervisor surface boot diagnostics.
+var writeAuthBootLogf = log.Printf
+
 // parseVerifyKeys parses a verifying-key set of the form
 // "kid:base64,kid2:base64" where each base64 is the standard-encoded 32-byte
 // ed25519 public key. At least one well-formed entry is required.
@@ -265,6 +289,16 @@ func parseVerifyKeys(s string) (map[string]ed25519.PublicKey, error) {
 // required. When write-auth is required (configRequired, or
 // GC_CITY_WRITE_REQUIRED=1) but no key is present it returns an error so the
 // caller can fail closed at boot rather than serve mutations unguarded.
+//
+// GC_CITY_WRITE_CID, when set, is the controller's own org-unique city id (the
+// hosted launcher injects it into every controller pod): the verifier then
+// requires every grant's cid claim to match it exactly, failing closed on a
+// mismatching or missing cid so a grant minted for another tenant's
+// same-named city can never be replayed here. Without a verifying key the cid
+// is inert — the write plane stays off and reads are unaffected. A key WITHOUT
+// a cid boots with a WARN, not an error: tenancy binding is then city-name-only,
+// which untenanted operator-run single-tenant deployments legitimately choose,
+// but which on a hosted deployment means the launcher failed to inject the cid.
 func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywriteauth.Verifier, error) {
 	raw := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_PUBKEY"))
 	if raw == "" {
@@ -288,8 +322,14 @@ func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywrite
 			return nil, fmt.Errorf("GC_CITY_WRITE_EPOCH_FLOOR: %w", err)
 		}
 	}
+	cid := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_CID"))
+	if cid == "" {
+		writeAuthBootLogf("api: write-auth: WARNING: verifying key configured but GC_CITY_WRITE_CID is empty — grant tenancy binding is city-name-only; hosted launchers are expected to inject GC_CITY_WRITE_CID")
+	}
 	return citywriteauth.New(citywriteauth.Options{
 		Aud:        writeAuthAudience,
+		LegacyAud:  writeAuthLegacyAudience,
+		CID:        cid,
 		Keys:       keys,
 		EpochFloor: epochFloor,
 		MaxTTL:     writeAuthMaxTTL,
