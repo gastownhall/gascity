@@ -934,7 +934,7 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 // correct server.
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
 	if o.tm.cfg.SocketName != "" {
-		merged := make(map[string]string, len(env)+1)
+		merged := make(map[string]string)
 		for k, v := range env {
 			merged[k] = v
 		}
