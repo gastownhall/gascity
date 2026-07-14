@@ -214,7 +214,7 @@ func TestResolveActiveWispStep_MoleculeNoSteps(t *testing.T) {
 }
 
 // TestResolveActiveWispStep_WispTypeMolecule verifies that type=wisp beads are
-// also recognised as molecule roots during resolution.
+// also recognized as molecule roots during resolution.
 func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
 	store := beads.NewMemStore()
 

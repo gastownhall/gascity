@@ -201,11 +201,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		prompt := defaultPrimePrompt
+		var stepReminder string
 		if hookMode {
-			prompt += wispStepInjectionContent("")
+			stepReminder = wispStepInjectionContent("")
 		}
-		writePrimePromptWithFormat(stdout, "", "", prompt, hookMode, hookFormat, suppressHookPrompt)
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, stepReminder)
 		return 0
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
@@ -214,11 +214,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		prompt := defaultPrimePrompt
+		var stepReminder string
 		if hookMode {
-			prompt += wispStepInjectionContent(cityPath)
+			stepReminder = wispStepInjectionContent(cityPath)
 		}
-		writePrimePromptWithFormat(stdout, "", "", prompt, hookMode, hookFormat, suppressHookPrompt)
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, stepReminder)
 		return 0
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -325,10 +325,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
+				var stepReminder string
 				if hookMode {
-					prompt += wispStepInjectionContent(cityPath)
+					stepReminder = wispStepInjectionContent(cityPath)
 				}
-				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
+				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, stepReminder)
 				return 0
 			}
 			// File is present but rendered empty. Treat as a legitimate
@@ -351,11 +352,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(promptFile); fErr == nil {
-					builtinPrompt := string(content)
+					var stepReminder string
 					if hookMode {
-						builtinPrompt += wispStepInjectionContent(cityPath)
+						stepReminder = wispStepInjectionContent(cityPath)
 					}
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, builtinPrompt, hookMode, hookFormat, suppressHookPrompt)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, stepReminder)
 					return 0
 				}
 			}
@@ -366,11 +367,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	fallbackPrompt := defaultPrimePrompt
+	var stepReminder string
 	if hookMode {
-		fallbackPrompt += wispStepInjectionContent(cityPath)
+		stepReminder = wispStepInjectionContent(cityPath)
 	}
-	writePrimePromptWithFormat(stdout, cityName, agentName, fallbackPrompt, hookMode, hookFormat, suppressHookPrompt)
+	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, stepReminder)
 	return 0
 }
 
@@ -486,7 +487,7 @@ func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
 }
 
-func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool) {
+func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string) {
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
 		// launch payload or nudge path. SessionStart hooks add context only.
@@ -494,6 +495,10 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 	}
 	if hookMode {
 		prompt = prependHookBeacon(cityName, agentName, prompt)
+		// The step reminder is hook-only context, not the startup prompt, so it
+		// survives suppression — managed SessionStart hooks still carry it. Folded
+		// into the single write below to keep exactly one provider hook context.
+		prompt += hookContextSuffix
 	}
 	if hookMode && hookFormat != "" {
 		_ = writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -563,6 +564,120 @@ prompt_template = "prompts/worker.md"
 	}
 	if !strings.Contains(context, "[gastown] worker") {
 		t.Fatalf("additionalContext = %q, want hook beacon", context)
+	}
+}
+
+// mustCreateInProgressStore creates a bead in a beads.Store and transitions it
+// to in_progress. It mirrors the MemStore helper in wisp_step_inject_test.go
+// but works against the concrete city store opened on disk.
+func mustCreateInProgressStore(t *testing.T, store beads.Store, b beads.Bead) beads.Bead {
+	t.Helper()
+	created, err := store.Create(b)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(created.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+	created.Status = status
+	return created
+}
+
+// TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder is the
+// managed-SessionStart regression: when the startup prompt is suppressed
+// (GC_STARTUP_PROMPT_DELIVERED=1 + managed hook + SessionStart), the rendered
+// startup prompt must be absent from the single hook payload, but the agent's
+// active formula step <system-reminder> must still be injected. The step
+// reminder is hook-only context, not the startup prompt, so it survives
+// suppression — this is the SessionStart leg of the hook-inject feature.
+func TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder(t *testing.T) {
+	for _, hookFormat := range []string{"codex", hookOutputFormatGemini} {
+		t.Run(hookFormat, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+
+			cityDir := t.TempDir()
+			promptDir := filepath.Join(cityDir, "prompts")
+			if err := os.MkdirAll(promptDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(promptDir): %v", err)
+			}
+			const promptContent = "launch-only startup prompt\n"
+			if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+				t.Fatalf("WriteFile(prompt): %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+				t.Fatalf("WriteFile(city.toml): %v", err)
+			}
+
+			// Seed an in-progress molecule with an in-progress step child assigned
+			// to the agent so wispStepInjectionContent resolves an active step.
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt: %v", err)
+			}
+			mol := mustCreateInProgressStore(t, store, beads.Bead{
+				Title:    "Formula: mol-worker",
+				Type:     "molecule",
+				Assignee: "worker",
+			})
+			step := mustCreateInProgressStore(t, store, beads.Bead{
+				Title:       "Step 1: implement the widget",
+				Description: "Write the widget code",
+				Type:        "step",
+				Assignee:    "worker",
+				ParentID:    mol.ID,
+			})
+
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_SESSION_NAME", "gastown--worker")
+			t.Setenv("GC_SESSION_ID", "sess-777")
+			t.Setenv(managedSessionHookEnv, "1")
+			t.Setenv("GC_HOOK_SOURCE", "startup")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			t.Setenv(startupPromptDeliveredEnv, "1")
+			withPrimeHookStdin(t)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookFormat, false)
+			if code != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+
+			var got struct {
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			context := got.HookSpecificOutput.AdditionalContext
+			// The suppressed startup prompt must be absent...
+			if strings.Contains(context, promptContent) {
+				t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+			}
+			// ...but the active step reminder must survive suppression.
+			for _, want := range []string{"<system-reminder>", step.Title, step.ID, "Write the widget code"} {
+				if !strings.Contains(context, want) {
+					t.Fatalf("additionalContext = %q, want step reminder substring %q", context, want)
+				}
+			}
+			if !strings.Contains(context, "[gastown] worker") {
+				t.Fatalf("additionalContext = %q, want hook beacon", context)
+			}
+		})
 	}
 }
 
