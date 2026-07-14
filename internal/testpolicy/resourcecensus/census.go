@@ -270,6 +270,17 @@ var bootstrapPolicy = Ledger{
 	},
 	Medium: []MediumOwner{
 		{
+			PackageDir:      "internal/api",
+			PackageName:     "api",
+			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "internal/api tracked-source error URN guard is a checked Medium owner",
+			ResourceOwner:   "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
 			PackageDir:      "cmd/gc",
 			PackageName:     "main",
 			Owner:           "TestMain",
@@ -285,10 +296,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   375,
-			BaselineFiles:   98,
-			ReportedCalls:   375,
-			ReportedFiles:   98,
+			BaselineCalls:   374,
+			BaselineFiles:   97,
+			ReportedCalls:   374,
+			ReportedFiles:   97,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners remove or replace each process call site",
