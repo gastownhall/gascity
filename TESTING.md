@@ -590,6 +590,14 @@ below. The auto composition lives outside that registry and is bound to the
 exact production function and `runtime/auto.New` result it returns. A waiver is
 a visible contract gap, not evidence that conformance passes.
 
+A proved row names one runnable test whose final top-level statement invokes
+the declared shared contract with an inline factory. The source guard requires
+that factory to return the row's exact constructor directly, rejects pre-run
+helper gates and direct skip syntax, and permits only named testing operations
+plus explicitly ledgered setup functions. E1 separately proves that
+build-tagged rows execute in their required CI lane; a source-bound proof does
+not claim cadence ownership by itself.
+
 Reusable-double discovery is intentionally bounded, not repository-wide. The
 designated boundary is `internal/runtime/fake.go` for the `runtime.Provider`
 port. The guard type-checks its declared runtime type context, discovers every
@@ -617,12 +625,10 @@ construction boundary because that is the wrapper returned directly by the
 runtime registry. This ledger does not recursively claim the wrapper's internal
 tmux, K8s, or hybrid constructors.
 
-This first ledger slice records only owned, expiring waivers and explicit
-not-applicable dispositions. `ga-80po0c.1.2` owns structural binding of the
-existing Fake/subprocess conformance evidence to these exact production
-constructors and the resulting proof-row upgrades. E1 (`ga-80po0c.6`)
-separately owns the Large provider/E2E manifest and its required lane/cadence
-execution; it does not own these constructor bindings.
+`runtime.NewFake` is source-bound to the shared runtime contract below.
+`ga-80po0c.1.2` still owns the separate subprocess constructor bindings. E1
+(`ga-80po0c.6`) owns the Large provider/E2E manifest and required lane/cadence
+execution; it does not own constructor-to-contract source binding.
 
 <!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->
 This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.
@@ -634,7 +640,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw exec provider, not the production seam-backed prefix composition |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
-| `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: existing full conformance is not yet structurally bound to runtime.NewFake; exact proof binding is deferred to ga-80po0c.1.2 |
+| `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips in short mode or when the herdr executable is absent |
 | `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
 | `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the actual K8s production composition has no full shared runtime contract |

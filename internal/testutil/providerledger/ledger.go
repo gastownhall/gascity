@@ -49,11 +49,15 @@ const (
 type Disposition string
 
 const (
+	// DispositionProved records an executable, source-checked contract proof.
+	DispositionProved Disposition = "proved"
 	// DispositionWaived records a temporary, owned contract gap.
 	DispositionWaived Disposition = "waived"
 	// DispositionNotApplicable records why a contract does not apply.
 	DispositionNotApplicable Disposition = "not_applicable"
 )
+
+var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
 
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
@@ -82,6 +86,16 @@ type SourceRef struct {
 	Reason   string
 }
 
+// ProofRef binds an exact runnable test to its contract runner. AllowedCalls
+// lists pure setup calls permitted inside the inline provider factory; provider
+// construction itself is always bound separately through ContractClaim.
+type ProofRef struct {
+	File         string
+	Test         string
+	Runner       SymbolRef
+	AllowedCalls []SymbolRef
+}
+
 // Waiver is a temporary, owned exception to an applicable contract.
 type Waiver struct {
 	Owner   string
@@ -94,6 +108,7 @@ type ContractClaim struct {
 	Constructor         SymbolRef
 	Contract            ContractID
 	Disposition         Disposition
+	Proof               *ProofRef
 	Waiver              *Waiver
 	NotApplicableReason string
 }
@@ -120,10 +135,12 @@ func Catalog() []Entry {
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime", "NewFake"),
-				"ga-80po0c.1.2",
-				"existing full conformance is not yet structurally bound to runtime.NewFake; exact proof binding is deferred to ga-80po0c.1.2",
+				"internal/runtime/fake_conformance_test.go",
+				"TestFakeConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		reusableBuiltin(
@@ -266,6 +283,20 @@ func reusableBuiltin(id, key string, doubleType SymbolRef, claims ...ContractCla
 	entry.DoubleType = &doubleType
 	entry.DoubleBoundary = runtimeDoubleBoundaryPath
 	return entry
+}
+
+func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...SymbolRef) ContractClaim {
+	return ContractClaim{
+		Constructor: constructor,
+		Contract:    ContractRuntimeProvider,
+		Disposition: DispositionProved,
+		Proof: &ProofRef{
+			File:         file,
+			Test:         test,
+			Runner:       runtimeProviderRunner,
+			AllowedCalls: append([]SymbolRef(nil), allowedCalls...),
+		},
+	}
 }
 
 func waivedRuntime(constructor SymbolRef, owner, reason string) ContractClaim {
@@ -439,6 +470,9 @@ func hasRole(roles []Role, want Role) bool {
 func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 	var problems []string
 	payloads := 0
+	if claim.Proof != nil {
+		payloads++
+	}
 	if claim.Waiver != nil {
 		payloads++
 	}
@@ -446,10 +480,33 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 		payloads++
 	}
 	if payloads != 1 {
-		problems = append(problems, prefix+" requires exactly one of waiver or not-applicable reason")
+		problems = append(problems, prefix+" requires exactly one of proof, waiver, or not-applicable reason")
 	}
 
 	switch claim.Disposition {
+	case DispositionProved:
+		if claim.Proof == nil {
+			problems = append(problems, prefix+" proved claim requires a proof")
+		} else {
+			if strings.TrimSpace(claim.Proof.File) == "" || strings.TrimSpace(claim.Proof.Test) == "" {
+				problems = append(problems, prefix+" proof file and test are required")
+			}
+			if err := validateSymbolRef(claim.Proof.Runner); err != nil {
+				problems = append(problems, fmt.Sprintf("%s proof runner: %v", prefix, err))
+			} else if claim.Contract == ContractRuntimeProvider && claim.Proof.Runner != runtimeProviderRunner {
+				problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(runtimeProviderRunner)))
+			}
+			seenAllowed := make(map[SymbolRef]bool)
+			for _, allowed := range claim.Proof.AllowedCalls {
+				if err := validateSymbolRef(allowed); err != nil {
+					problems = append(problems, fmt.Sprintf("%s allowed proof call: %v", prefix, err))
+				}
+				if seenAllowed[allowed] {
+					problems = append(problems, fmt.Sprintf("%s repeats allowed proof call %s", prefix, renderSymbolRef(allowed)))
+				}
+				seenAllowed[allowed] = true
+			}
+		}
 	case DispositionWaived:
 		if claim.Waiver == nil {
 			problems = append(problems, prefix+" waived claim requires a waiver")
@@ -614,6 +671,11 @@ func renderDiscovery(entry Entry) string {
 
 func renderClaim(claim ContractClaim) string {
 	switch claim.Disposition {
+	case DispositionProved:
+		if claim.Proof == nil {
+			return "proved (invalid: no proof)"
+		}
+		return fmt.Sprintf("proved by %s#%s", claim.Proof.File, claim.Proof.Test)
 	case DispositionWaived:
 		if claim.Waiver == nil {
 			return "waived (invalid: no waiver)"
