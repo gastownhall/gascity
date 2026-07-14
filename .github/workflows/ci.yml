@@ -529,7 +529,33 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
-        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
+        env:
+          GO_TEST_TIMING_FILE: ${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json
+          GO_TEST_TIMING_NAME: cmd-gc-process-${{ matrix.shard }}-of-12
+          GO_TEST_TIMING_VARIANT: linux-default
+          GO_TEST_RUNNER_LABEL: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+          EXTRA_TEST_ENV: >-
+            GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}"
+            GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}"
+            GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}"
+            GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}"
+            GITHUB_SHA="$${GITHUB_SHA}"
+            GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}"
+            GITHUB_RUN_ID="$${GITHUB_RUN_ID}"
+            GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}"
+            GITHUB_JOB="$${GITHUB_JOB}"
+            RUNNER_NAME="$${RUNNER_NAME}"
+            RUNNER_OS="$${RUNNER_OS}"
+            RUNNER_ARCH="$${RUNNER_ARCH}"
+        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"
+      - name: Upload cmd/gc process timing
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: timing-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json
+          if-no-files-found: warn
+          retention-days: 7
 
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}

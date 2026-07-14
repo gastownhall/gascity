@@ -309,7 +309,7 @@ print-cgo-flags:
 	}
 
 	cmdArgs := append([]string{"--no-print-directory", "-f", testMakefile, "print-cgo-flags"}, args...)
-	cmd := exec.Command("make", cmdArgs...)
+	cmd := makeCommand(cmdArgs...)
 	cmd.Dir = repoRoot
 	cmd.Env = append(filteredMakefileCGOTestEnv(),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -320,6 +320,10 @@ print-cgo-flags:
 		t.Fatalf("make print-cgo-flags failed: %v\n%s", err, out)
 	}
 	return string(out)
+}
+
+func makeCommand(args ...string) *exec.Cmd {
+	return exec.Command("make", args...)
 }
 
 func filteredMakefileCGOTestEnv() []string {
