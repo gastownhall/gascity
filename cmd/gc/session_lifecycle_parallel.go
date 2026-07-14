@@ -293,14 +293,15 @@ func (p startPhaseTimings) formatLog() string {
 }
 
 type startExecutionOptions struct {
-	async            bool
-	asyncFollowUp    func()
-	asyncLimiter     *asyncStartLimiter
-	asyncTracker     *asyncStartTracker
-	asyncStopTracker *asyncStartTracker
-	maxSessionAgeTr  maxSessionAgeTracker
-	workDirResolver  taskWorkDirResolver
-	stabilityWaiter  startStabilityWaiter
+	async                          bool
+	asyncFollowUp                  func()
+	asyncLimiter                   *asyncStartLimiter
+	asyncTracker                   *asyncStartTracker
+	asyncStopTracker               *asyncStartTracker
+	maxSessionAgeTr                maxSessionAgeTracker
+	workDirResolver                taskWorkDirResolver
+	stabilityWaiter                startStabilityWaiter
+	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -364,6 +365,12 @@ func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption 
 func withStartStabilityWaiter(waiter startStabilityWaiter) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.stabilityWaiter = waiter
+	}
+}
+
+func withSessionStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaiter) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.sessionStaleKeyDetectionWaiter = waiter
 	}
 }
 
@@ -1285,13 +1292,7 @@ func executePreparedStartWave(
 	startupTimeout time.Duration,
 	options ...startExecutionOption,
 ) []startResult {
-	startOpts := startExecutionOptions{}
-	for _, apply := range options {
-		if apply != nil {
-			apply(&startOpts)
-		}
-	}
-	return executePreparedStartWaveForCity(ctx, prepared, "", sp, store, nil, startupTimeout, 1, startOpts.stabilityWaiter)
+	return executePreparedStartWaveForCity(ctx, prepared, "", sp, store, nil, startupTimeout, 1, options...)
 }
 
 func executePreparedStartWaveForCity(
@@ -1303,7 +1304,7 @@ func executePreparedStartWaveForCity(
 	cfg *config.City,
 	startupTimeout time.Duration,
 	maxParallel int,
-	stabilityWaiters ...startStabilityWaiter,
+	options ...startExecutionOption,
 ) []startResult {
 	if len(prepared) == 0 {
 		return nil
@@ -1311,11 +1312,13 @@ func executePreparedStartWaveForCity(
 	if maxParallel <= 0 {
 		maxParallel = 1
 	}
-	var stabilityWaiter startStabilityWaiter
-	if len(stabilityWaiters) > 0 {
-		stabilityWaiter = stabilityWaiters[0]
+	startOpts := startExecutionOptions{}
+	for _, apply := range options {
+		if apply != nil {
+			apply(&startOpts)
+		}
 	}
-	stabilityWaiter = resolveStartStabilityWaiter(stabilityWaiter)
+	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
 	results := make([]startResult, len(prepared))
 	sem := make(chan struct{}, maxParallel)
 	done := make(chan int, len(prepared))
@@ -1327,7 +1330,7 @@ func executePreparedStartWaveForCity(
 				<-sem
 				done <- i
 			}()
-			results[i] = runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter)
+			results[i] = runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter)
 		}()
 	}
 	for range prepared {
@@ -1345,6 +1348,7 @@ func runPreparedStartCandidate(
 	cfg *config.City,
 	startupTimeout time.Duration,
 	stabilityWaiter startStabilityWaiter,
+	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 ) (result startResult) {
 	started := time.Now()
 	result = startResult{
@@ -1373,7 +1377,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases)
+	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -1539,6 +1543,7 @@ func enqueuePreparedStartWaveForCity(
 	trace *sessionReconcilerTraceCycle,
 	asyncFollowUp func(),
 	stabilityWaiter startStabilityWaiter,
+	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 ) []startResult {
 	if len(prepared) == 0 {
 		return nil
@@ -1563,7 +1568,7 @@ func enqueuePreparedStartWaveForCity(
 			if release != nil {
 				defer release()
 			}
-			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter)
+			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter)
 			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -1785,6 +1790,7 @@ func startPreparedStartCandidate(
 	sp runtime.Provider,
 	cfg *config.City,
 	phases *startPhaseTimings,
+	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
@@ -1833,7 +1839,7 @@ func startPreparedStartCandidate(
 		}
 		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
 	}
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, item.candidate.info.ID)
+	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
@@ -2536,6 +2542,7 @@ func executePlannedStartsTraced(
 		}
 	}
 	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
+	sessionStaleKeyDetectionWaiter := startOpts.sessionStaleKeyDetectionWaiter
 	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
 	var cb *sessionCircuitBreaker
 	if cbEnabled {
@@ -2710,12 +2717,23 @@ func executePlannedStartsTraced(
 				return wakeCount
 			}
 			if startOpts.async {
-				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter)
+				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter)
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
 				}
 			} else {
-				results = executePreparedStartWaveForCity(ctx, prepared, cityPath, sp, store, cfg, startupTimeout, batchSize, stabilityWaiter)
+				results = executePreparedStartWaveForCity(
+					ctx,
+					prepared,
+					cityPath,
+					sp,
+					store,
+					cfg,
+					startupTimeout,
+					batchSize,
+					withStartStabilityWaiter(stabilityWaiter),
+					withSessionStaleKeyDetectionWaiter(sessionStaleKeyDetectionWaiter),
+				)
 			}
 			for _, result := range results {
 				if trace != nil {

@@ -90,8 +90,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 75
-baseline_files = 26
+baseline_calls = 73
+baseline_files = 24
 reported_calls = 78
 reported_files = 27
 owner_bead = "ga-80po0c.2.3"
@@ -248,10 +248,10 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 75
-baseline_files = 26
-reported_calls = 75
-reported_files = 26
+baseline_calls = 73
+baseline_files = 24
+reported_calls = 73
+reported_files = 24
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "each non-Medium marked caller retains an explicit process-suite migration owner"

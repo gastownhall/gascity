@@ -854,7 +854,6 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 }
 
 func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testing.T) {
-	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)}
@@ -919,6 +918,7 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 		ioDiscard{},
 		ioDiscard{},
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)
@@ -1304,6 +1304,7 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		ioDiscard{},
 		ioDiscard{},
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
 	if woken != budget {
 		t.Fatalf("woken = %d, want %d", woken, budget)
@@ -5572,6 +5573,10 @@ func immediateStartStabilityWaiter(context.Context, string) bool {
 	return true
 }
 
+func immediateSessionStaleKeyDetectionWaiter(context.Context, string) error {
+	return nil
+}
+
 func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *testing.T) {
 	sp := runtime.NewFake()
 	newItem := func(id, name string) preparedStart {
@@ -5608,7 +5613,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 			nil,
 			10*time.Second,
 			2,
-			waiter.wait,
+			withStartStabilityWaiter(waiter.wait),
 		)
 	}()
 
@@ -5648,6 +5653,73 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 	}
 	if got := fakeRuntimeCallCount(sp, "IsRunning"); got != isRunningCallsBeforeProbe+2 {
 		t.Fatalf("IsRunning calls after both stability signals = %d, want %d", got, isRunningCallsBeforeProbe+2)
+	}
+}
+
+func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := sessionpkg.NewManagerWithOptions(store, sp)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly: true,
+		Template: "worker",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    "--resume",
+			SessionIDFlag: "--session-id",
+		},
+		ExtraMeta: map[string]string{"session_origin": "named"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			info: info,
+			tp: TemplateParams{
+				Command:      "claude --resume " + info.SessionKey,
+				SessionName:  info.SessionName,
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude --resume " + info.SessionKey},
+	}
+	waiter := newManualStartStabilityWaiter(t)
+	resultsCh := make(chan []startResult, 1)
+	go func() {
+		resultsCh <- executePreparedStartWave(
+			context.Background(),
+			[]preparedStart{item},
+			sp,
+			store,
+			10*time.Second,
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(func(ctx context.Context, name string) error {
+				if waiter.wait(ctx, name) {
+					return nil
+				}
+				return ctx.Err()
+			}),
+		)
+	}()
+
+	gate := waiter.gate(info.SessionName)
+	awaitStartStabilitySignal(t, gate.entered, "inner session stability entry")
+	select {
+	case results := <-resultsCh:
+		t.Fatalf("start wave completed before inner stability release: %+v", results)
+	default:
+	}
+	waiter.release(info.SessionName)
+	select {
+	case results := <-resultsCh:
+		if len(results) != 1 || results[0].err != nil || results[0].outcome != TraceOutcomeSuccess {
+			t.Fatalf("results = %+v, want one successful start", results)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for worker-boundary start after inner stability release")
 	}
 }
 
@@ -6287,7 +6359,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		&config.City{},
 		10*time.Second,
 		1,
-		immediateStartStabilityWaiter,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
@@ -6380,7 +6452,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 		&config.City{},
 		10*time.Second,
 		1,
-		immediateStartStabilityWaiter,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))

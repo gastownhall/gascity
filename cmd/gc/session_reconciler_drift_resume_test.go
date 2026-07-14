@@ -83,7 +83,16 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 
-	if _, err := startPreparedStartCandidate(context.Background(), *prepared, "", env.store, env.sp, cfg, nil); err != nil {
+	if _, err := startPreparedStartCandidate(
+		context.Background(),
+		*prepared,
+		"",
+		env.store,
+		env.sp,
+		cfg,
+		nil,
+		immediateSessionStaleKeyDetectionWaiter,
+	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
 	}
 
@@ -233,14 +242,11 @@ func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *te
 }
 
 // TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd
-// is the slow integration cousin of the fast preserve test. It runs the
-// full executePlannedStarts pipeline (which adds the post-Start
-// staleKeyDetectDelay sleep), so the assertion is on the actually-Started
-// runtime exec — not just the prepared command. Skipped in the default
-// fast suite; opt in with GC_FAST_UNIT=0 or make test-cmd-gc-process.
+// runs the full executePlannedStarts pipeline, so the assertion is on the
+// actually-started runtime command rather than only the prepared command.
+// Deterministic inner and outer lifecycle signals keep the fake-runtime path
+// in the fast suite without weakening either liveness probe.
 func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t *testing.T) {
-	skipSlowCmdGCTest(t, "executePlannedStarts waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
-
 	env := newReconcilerTestEnv()
 	session := env.createSessionBead("mayor", "mayor")
 
@@ -291,6 +297,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		&env.stdout,
 		&env.stderr,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)

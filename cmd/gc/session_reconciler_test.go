@@ -281,7 +281,10 @@ func newReconcilerTestEnv() *reconcilerTestEnv {
 		rec:          events.Discard,
 		cfg:          &config.City{},
 		desiredState: make(map[string]TemplateParams),
-		startOptions: []startExecutionOption{withStartStabilityWaiter(immediateStartStabilityWaiter)},
+		startOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+		},
 	}
 }
 
