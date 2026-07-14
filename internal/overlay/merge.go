@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // mergeablePaths is the set of relative paths that get JSON-level merge
@@ -311,9 +314,43 @@ func managedSessionStartHookKey(entry map[string]any) (string, bool) {
 }
 
 func isManagedSessionStartPrimeCommand(command string) bool {
-	return bytes.Contains([]byte(command), []byte("gc prime --hook --hook-format codex")) ||
-		(bytes.Contains([]byte(command), []byte("gc hook run")) &&
-			bytes.Contains([]byte(command), []byte("-- prime --hook --hook-format codex")))
+	// Managed commands carry a shell prefix:
+	//   export PATH="..." && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart <gc ...>
+	// Take everything after the last "&&" so the quoted PATH and the "&&"
+	// operator never reach the word splitter.
+	if idx := strings.LastIndex(command, "&&"); idx >= 0 {
+		command = command[idx+2:]
+	}
+	tokens := shellquote.Split(command)
+	i := 0
+	for i < len(tokens) && strings.Contains(tokens[i], "=") && !strings.HasPrefix(tokens[i], "=") {
+		i++ // skip leading env assignments (GC_MANAGED_SESSION_HOOK=1, …)
+	}
+	if i >= len(tokens) || tokens[i] != "gc" {
+		return false
+	}
+	args := tokens[i+1:]
+	// strip optional --city <dir> / --city=<dir>
+	if len(args) >= 2 && args[0] == "--city" {
+		args = args[2:]
+	} else if len(args) >= 1 && strings.HasPrefix(args[0], "--city=") {
+		args = args[1:]
+	}
+	// direct: prime --hook --hook-format codex
+	if len(args) >= 4 && args[0] == "prime" && args[1] == "--hook" &&
+		args[2] == "--hook-format" && args[3] == "codex" {
+		return true
+	}
+	// wrapper: hook run … -- prime --hook --hook-format codex
+	if len(args) >= 2 && args[0] == "hook" && args[1] == "run" {
+		for j := 2; j+4 < len(args); j++ {
+			if args[j] == "--" && args[j+1] == "prime" && args[j+2] == "--hook" &&
+				args[j+3] == "--hook-format" && args[j+4] == "codex" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // innerHooksKey derives a stable identity from the inner "hooks" array of a

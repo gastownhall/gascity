@@ -156,6 +156,47 @@ func TestMergeSettingsJSON_DedupesManagedCodexSessionStartVariants(t *testing.T)
 	}
 }
 
+func TestMergeSettingsJSON_DedupesCityBoundManagedCodexSessionStartVariants(t *testing.T) {
+	// Production shape: codexCityFlag emits `--city '<dir>'` whenever a city
+	// dir is set, so the real managed commands carry a --city token between
+	// `gc` and the prime/hook-run verb. The dedup must still collapse them.
+	base := `{
+		"hooks": {
+			"SessionStart": [
+				{"matcher": "startup", "hooks": [{"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex"}]},
+				{"matcher": "", "hooks": [{"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- prime --hook --hook-format codex"}]}
+			]
+		}
+	}`
+	over := `{
+		"hooks": {
+			"SessionStart": [
+				{"matcher": "", "hooks": [{"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex"}]}
+			]
+		}
+	}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	arr := doc["hooks"].(map[string]any)["SessionStart"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("SessionStart entries = %d, want 1:\n%s", len(arr), result)
+	}
+	entry := arr[0].(map[string]any)
+	inner := entry["hooks"].([]any)
+	command := inner[0].(map[string]any)["command"].(string)
+	if !bytes.Contains([]byte(command), []byte("GC_MANAGED_SESSION_HOOK=1")) {
+		t.Fatalf("SessionStart command = %q, want managed direct prime", command)
+	}
+}
+
 func TestMergeSettingsJSON_DoesNotDedupeSameCommandAcrossNonSessionStartMatchers(t *testing.T) {
 	base := `{
 		"hooks": {
