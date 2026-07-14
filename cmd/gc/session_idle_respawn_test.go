@@ -132,7 +132,7 @@ func TestBeginIdleRespawnDrainIfIdle(t *testing.T) {
 	}
 }
 
-// Non-interactive sessions short-circuit shouldBeginIdleDrain to true without a
+// Non-interactive sessions short-circuit shouldBeginIdleDrainInfo to true without a
 // probe; they must be excluded from idle-respawn so an assigned non-interactive
 // (e.g. named) session is not wrongly drained.
 func TestBeginIdleRespawnDrainIfIdle_SkipsNonInteractive(t *testing.T) {
