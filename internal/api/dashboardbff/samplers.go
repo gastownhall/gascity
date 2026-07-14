@@ -112,7 +112,7 @@ func newSamplerManager(deps Deps, exec *execRunner) *samplerManager {
 	return &samplerManager{
 		deps:   deps,
 		exec:   exec,
-		httpc:  &http.Client{Timeout: statusFetchTimeout},
+		httpc:  &http.Client{Timeout: statusFetchTimeout, Transport: deps.SelfReadTransport},
 		cities: make(map[string]*citySampler),
 	}
 }

@@ -112,7 +112,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			// backing and are intentionally tolerated without declining.
 			if fieldConflictCached {
 				c.mu.Lock()
-				c.dirty[patch.ID] = struct{}{}
+				c.markDirtyLocked(patch.ID)
 				c.mu.Unlock()
 			}
 			return
@@ -217,10 +217,14 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	case "bead.created":
 		if _, exists := c.beads[b.ID]; !exists {
 			c.noteMutationLocked(b.ID)
-			c.beads[b.ID] = cloneBead(b)
+			// OC-3: absorb installs the row before updateEventDepsLocked, whose
+			// clearReadyProjectionLocked must observe the newly absorbed row.
+			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+				depsMode:   depsKeepCached,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
 			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
-			delete(c.dirty, b.ID)
-			delete(c.deletedSeq, b.ID)
 		}
 		c.updateStatsLocked()
 		mutated = true
@@ -231,9 +235,11 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		existing, cached := c.beads[b.ID]
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
-			c.beads[b.ID] = cloneBead(b)
-			delete(c.dirty, b.ID)
-			delete(c.deletedSeq, b.ID)
+			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+				depsMode:   depsKeepCached,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
 			mutated = true
 		}
 		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking); depsMutated && !mutated {
@@ -248,22 +254,20 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		if _, exists := c.beads[b.ID]; !exists {
 			c.updateStatsLocked()
 		}
-		c.beads[b.ID] = cloneBead(b)
+		// OC-3: absorb before updateEventDepsLocked (see bead.created).
+		c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
-		delete(c.dirty, b.ID)
-		delete(c.deletedSeq, b.ID)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.deleted":
 		c.noteMutationLocked(b.ID)
-		delete(c.beads, b.ID)
-		delete(c.deps, b.ID)
-		delete(c.dirty, b.ID)
-		delete(c.beadSeq, b.ID)
-		delete(c.localBeadAt, b.ID)
-		c.deletedSeq[b.ID] = c.mutationSeq
+		c.tombstoneLocked(b.ID, c.mutationSeq)
 		c.updateStatsLocked()
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
@@ -351,8 +355,7 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.noteMutationLocked(beadID)
 	c.deps[beadID] = cloneDeps(deps)
 	c.clearReadyProjectionLocked(beadID)
-	delete(c.dirty, beadID)
-	delete(c.deletedSeq, beadID)
+	c.clearStalenessMarksLocked(beadID)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 }

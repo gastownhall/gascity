@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -83,6 +84,182 @@ func TestProcessRetryControlPass(t *testing.T) {
 		after.Metadata["gc.controller_error_class"] != "" ||
 		after.Metadata["gc.controller_retryable"] != "" {
 		t.Fatalf("stale controller retry metadata was not cleared: %v", after.Metadata)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// processAttemptControl shared-loop tests (fake evaluator)
+// ---------------------------------------------------------------------------
+
+// setupAttemptControl builds a retry-shaped control bead with a single closed
+// attempt whose gc.attempt is attemptNum, suitable for driving
+// processAttemptControl with a scripted strategy.
+func setupAttemptControl(t *testing.T, store beads.Store, maxAttempts, attemptNum int) beads.Bead {
+	t.Helper()
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "control",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.control",
+			"gc.step_id":      "control",
+			"gc.max_attempts": strconv.Itoa(maxAttempts),
+		},
+	})
+	attempt := mustCreate(t, store, beads.Bead{
+		Title: "attempt",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     fmt.Sprintf("mol-test.control.attempt.%d", attemptNum),
+			"gc.attempt":      strconv.Itoa(attemptNum),
+		},
+	})
+	mustClose(t, store, attempt.ID)
+	mustDep(t, store, control.ID, attempt.ID, "blocks")
+	return mustGet(t, store, control.ID)
+}
+
+func TestProcessAttemptControlPassInvokesOnPass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := setupAttemptControl(t, store, 3, 1)
+
+	onPassCalled := false
+	strategy := controlAttemptStrategy{
+		kind:        "retry",
+		subjectNoun: "attempt",
+		missingNoun: "no attempt found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			return attemptEvaluation{disposition: attemptPass, logOutcome: "pass"}, nil
+		},
+		onPass: func(closeMetadata map[string]string, _ beads.Bead) {
+			onPassCalled = true
+			closeMetadata["fake.stamp"] = "yes"
+		},
+	}
+
+	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	if err != nil {
+		t.Fatalf("processAttemptControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+	if !onPassCalled {
+		t.Fatal("onPass was not invoked on the pass path")
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = %q/%q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+	if after.Metadata["fake.stamp"] != "yes" {
+		t.Fatalf("onPass metadata not persisted: %v", after.Metadata)
+	}
+}
+
+func TestProcessAttemptControlHardFailStampsTerminalMetadata(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := setupAttemptControl(t, store, 3, 1)
+
+	strategy := controlAttemptStrategy{
+		kind:        "retry",
+		subjectNoun: "attempt",
+		missingNoun: "no attempt found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			return attemptEvaluation{disposition: attemptHardFail, logOutcome: "hard", reason: "boom"}, nil
+		},
+	}
+
+	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	if err != nil {
+		t.Fatalf("processAttemptControl: %v", err)
+	}
+	if result.Action != "hard-fail" {
+		t.Fatalf("action = %q, want hard-fail", result.Action)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Metadata["gc.outcome"] != "fail" ||
+		after.Metadata["gc.failure_class"] != beadmeta.FailureClassHard ||
+		after.Metadata["gc.failure_reason"] != "boom" ||
+		after.Metadata["gc.final_disposition"] != beadmeta.DispositionHardFail {
+		t.Fatalf("terminal metadata = %v, want hard-fail shape", after.Metadata)
+	}
+}
+
+func TestProcessAttemptControlExhaustDelegatesToStrategy(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := setupAttemptControl(t, store, 2, 2) // attemptNum == maxAttempts
+
+	var gotReason, gotLog string
+	strategy := controlAttemptStrategy{
+		kind:        "retry",
+		subjectNoun: "attempt",
+		missingNoun: "no attempt found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			return attemptEvaluation{disposition: attemptContinue, logOutcome: "transient", reason: "drained"}, nil
+		},
+		exhaust: func(store beads.Store, beadID string, _ int, reason, attemptLog string) (ControlResult, error) {
+			gotReason, gotLog = reason, attemptLog
+			if err := updateMetadataAndClose(store, beadID, map[string]string{"gc.outcome": "fail"}); err != nil {
+				return ControlResult{}, err
+			}
+			return ControlResult{Processed: true, Action: "exhausted-sentinel"}, nil
+		},
+	}
+
+	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	if err != nil {
+		t.Fatalf("processAttemptControl: %v", err)
+	}
+	if result.Action != "exhausted-sentinel" {
+		t.Fatalf("action = %q, want exhausted-sentinel (strategy.exhaust must own the disposition)", result.Action)
+	}
+	if gotReason != "drained" {
+		t.Fatalf("exhaust reason = %q, want drained", gotReason)
+	}
+	if gotLog == "" {
+		t.Fatal("exhaust received empty attempt log")
+	}
+}
+
+func TestProcessAttemptControlMissingAttemptUsesStrategyNouns(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "control",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.max_attempts": "3",
+		},
+	})
+
+	strategy := controlAttemptStrategy{
+		kind:        "ralph",
+		subjectNoun: "iteration",
+		missingNoun: "no iteration found",
+		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+			t.Fatal("evaluate must not run when no attempt exists")
+			return attemptEvaluation{}, nil
+		},
+	}
+
+	_, err := processAttemptControl(store, mustGet(t, store, control.ID), ProcessOptions{}, strategy)
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("err = %v, want ErrControlGraphMalformed", err)
+	}
+	if !strings.Contains(err.Error(), "no iteration found") {
+		t.Fatalf("err = %v, want strategy missingNoun 'no iteration found'", err)
 	}
 }
 
@@ -1426,7 +1603,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		MemStore: base,
 		err:      errors.New("adding dep: invalid connection: i/o timeout"),
 	}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("first processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1435,7 +1612,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		t.Fatal("expected graph attach to leave nested spec bead open after outer dep failure")
 	}
 
-	_, err = processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err = processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1463,6 +1640,9 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: true},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: true},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: true},
+		{name: "dolt breaker open", err: errors.New("Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"), want: true},
+		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
+		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
@@ -2577,6 +2757,94 @@ func TestAttemptLogJSONRoundTrips(t *testing.T) {
 	}
 	if roundTripped[0]["reason"] != "auth_error" {
 		t.Errorf("round-trip log[0].reason = %q, want auth_error", roundTripped[0]["reason"])
+	}
+}
+
+// TestAppendAttemptLogValueCorruptHistoryTracesReset proves the corrupt-log
+// fix: a malformed existing gc.attempt_log is no longer silently discarded — it
+// is traced and a valid fresh entry is written.
+func TestAppendAttemptLogValueCorruptHistoryTracesReset(t *testing.T) {
+	t.Parallel()
+	var traced []string
+	tracef := func(format string, args ...any) {
+		traced = append(traced, fmt.Sprintf(format, args...))
+	}
+
+	out, err := appendAttemptLogValue("{not valid json", 3, "transient", "rate_limited", tracef)
+	if err != nil {
+		t.Fatalf("appendAttemptLogValue: %v", err)
+	}
+	if len(traced) != 1 || !strings.Contains(traced[0], "attempt-log corrupt") {
+		t.Fatalf("expected one corrupt-log trace, got %v", traced)
+	}
+	var log []map[string]string
+	if err := json.Unmarshal([]byte(out), &log); err != nil {
+		t.Fatalf("output not valid JSON: %v (raw=%q)", err, out)
+	}
+	if len(log) != 1 || log[0]["attempt"] != "3" {
+		t.Fatalf("expected fresh single-entry log, got %v", log)
+	}
+}
+
+// TestAppendAttemptLogValueValidHistoryDoesNotTrace guards against noise: a
+// well-formed history appends normally and never fires the corrupt-log trace.
+func TestAppendAttemptLogValueValidHistoryDoesNotTrace(t *testing.T) {
+	t.Parallel()
+	traced := 0
+	tracef := func(string, ...any) { traced++ }
+
+	out, err := appendAttemptLogValue(`[{"attempt":"1","outcome":"transient","action":"retry"}]`, 2, "pass", "", tracef)
+	if err != nil {
+		t.Fatalf("appendAttemptLogValue: %v", err)
+	}
+	if traced != 0 {
+		t.Fatalf("valid history must not trace, got %d traces", traced)
+	}
+	var log []map[string]string
+	if err := json.Unmarshal([]byte(out), &log); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if len(log) != 2 {
+		t.Fatalf("expected two entries, got %d", len(log))
+	}
+}
+
+// TestRouteConfigSurfacesLoadErrorOnce proves the swallowed city.toml parse
+// error is now surfaced (returned + traced) and that the lazy cache parses at
+// most once per invocation.
+func TestRouteConfigSurfacesLoadErrorOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("key = \"unterminated"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	traces := 0
+	opts := ProcessOptions{
+		CityPath: dir,
+		Tracef:   func(string, ...any) { traces++ },
+		routeCfg: &routeConfigCache{},
+	}
+
+	cfg, err := opts.routeConfig()
+	if err == nil {
+		t.Fatalf("expected the load error to be surfaced, got nil (cfg=%v)", cfg)
+	}
+	if _, err2 := opts.routeConfig(); err2 == nil {
+		t.Fatalf("expected the cached load error on the second call")
+	}
+	if traces != 1 {
+		t.Fatalf("expected exactly one trace across two cached calls, got %d", traces)
+	}
+}
+
+// TestRouteConfigEmptyCityPathIsNilNoError confirms an absent city path stays a
+// legitimate metadata-only route (nil cfg, nil error) — not an error.
+func TestRouteConfigEmptyCityPathIsNilNoError(t *testing.T) {
+	t.Parallel()
+	opts := ProcessOptions{routeCfg: &routeConfigCache{}}
+	cfg, err := opts.routeConfig()
+	if err != nil || cfg != nil {
+		t.Fatalf("empty CityPath must yield (nil,nil), got cfg=%v err=%v", cfg, err)
 	}
 }
 

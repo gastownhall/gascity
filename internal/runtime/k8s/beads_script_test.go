@@ -169,6 +169,28 @@ func TestBeadsScriptListUsesScopedWorkdir(t *testing.T) {
 	assertCallContains(t, result.callLog, `git config --global beads.role`)
 }
 
+func TestBeadsScriptCloseForcesCrossActorClose(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:       "close",
+		Args:     []string{"ga-orphan"},
+		PodPhase: "Running",
+		Env: map[string]string{
+			"GC_CITY_PATH":  "/city",
+			"GC_STORE_ROOT": "/city/frontend",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s close error = %v\noutput:\n%s", result.err, result.output)
+	}
+	// This wrapper's close is an exec Store.Close delegate: it runs under the
+	// pod/controller actor against agent-owned beads, so it must force-close to
+	// clear bd's cross-actor guard (gastownhall/beads#3734). Pin the full argv so
+	// a regression dropping --force (which would leak at the BD_VERSION bump) or
+	// reordering the id past --force (the constraint exec.go's Close comment
+	// documents) is caught here rather than in a live k8s deploy.
+	assertCallContains(t, result.callLog, "close --force --json ga-orphan")
+}
+
 func TestBeadsScriptListDoesNotRewriteIssuePrefixPerCommand(t *testing.T) {
 	result := runBeadsScript(t, beadsScriptOptions{
 		Op: "list",

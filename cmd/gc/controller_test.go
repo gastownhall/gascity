@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestControllerLoopCancel(t *testing.T) {
@@ -1464,7 +1465,7 @@ func TestResetSessionCircuitBreakerStateClearsRacingOpenPersist(t *testing.T) {
 
 	persistErr := make(chan error, 1)
 	go func() {
-		persistErr <- persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), &session, cb, identity, t0.Add(6*time.Minute))
+		persistErr <- persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, identity, t0.Add(6*time.Minute))
 	}()
 
 	select {
@@ -1645,7 +1646,7 @@ func TestResetSessionCircuitBreakerStateRejectsStaleRestoreSnapshot(t *testing.T
 	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "2" {
 		t.Fatalf("%s = %q, want 2", sessionCircuitResetGenerationMetadata, got)
 	}
-	if reset, err := cb.restoreFromMetadata(identity, staleSnapshot, t0.Add(7*time.Minute)); err != nil || reset {
+	if reset, err := cb.restoreFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(staleSnapshot), t0.Add(7*time.Minute)); err != nil || reset {
 		t.Fatalf("restoreFromMetadata stale reset=%v err=%v", reset, err)
 	}
 	if cb.IsOpen(identity, t0.Add(7*time.Minute)) {
@@ -1689,7 +1690,7 @@ func TestResetSessionCircuitBreakerStateRejectsHigherGenerationStaleRestoreSnaps
 	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "5" {
 		t.Fatalf("%s = %q, want 5", sessionCircuitResetGenerationMetadata, got)
 	}
-	if reset, err := cb.restoreFromMetadata(identity, staleSnapshot, t0.Add(7*time.Minute)); err != nil || reset {
+	if reset, err := cb.restoreFromMetadata(identity, sessionpkg.CircuitStateFromMetadata(staleSnapshot), t0.Add(7*time.Minute)); err != nil || reset {
 		t.Fatalf("restoreFromMetadata stale reset=%v err=%v", reset, err)
 	}
 	if cb.IsOpen(identity, t0.Add(7*time.Minute)) {

@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/user"
@@ -4233,6 +4236,78 @@ func TestRunSupervisorFailsWhenAPIPortUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "api: listen") {
 		t.Fatalf("stderr = %q, want API listen failure", stderr.String())
+	}
+}
+
+// TestRunSupervisorPortCollisionWithForeignHTTPBinderFallsThroughToExit1
+// covers the /health gate's discrimination case that the bare-listener test
+// above cannot: a binder that DOES speak HTTP on the shared port but is not
+// a gc supervisor (no {"status":"ok"} payload). EADDRINUSE alone must not be
+// treated as proof of a duplicate gc supervisor — only a positive /health
+// identification does (gc-r0k40, MAJOR-B).
+func TestRunSupervisorPortCollisionWithForeignHTTPBinderFallsThroughToExit1(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hello":"world"}`) //nolint:errcheck
+	}))
+	defer foreign.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(foreign.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split foreign server addr: %v", err)
+	}
+	cfg := []byte("[supervisor]\nport = " + port + "\n")
+	if err := os.WriteFile(supervisor.ConfigPath(), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1 (foreign binder, not a duplicate); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "api: listen") {
+		t.Fatalf("stderr = %q, want API listen failure", stderr.String())
+	}
+}
+
+// TestRunSupervisorPortCollisionWithRespondingGCSupervisorExitsDuplicate
+// covers the true-duplicate case: the binder on the shared port answers
+// /health like a gc supervisor, so runSupervisor must take the exit-3
+// duplicate path (gc-r0k40, MAJOR-B).
+func TestRunSupervisorPortCollisionWithRespondingGCSupervisorExitsDuplicate(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","version":"1.2.3","build_id":"deadbeef"}`) //nolint:errcheck
+	}))
+	defer other.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(other.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split other server addr: %v", err)
+	}
+	cfg := []byte("[supervisor]\nport = " + port + "\n")
+	if err := os.WriteFile(supervisor.ConfigPath(), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != supervisorExitCodePortInUse {
+		t.Fatalf("runSupervisor code = %d, want %d (duplicate gc supervisor); stderr=%q", code, supervisorExitCodePortInUse, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already in use") {
+		t.Fatalf("stderr = %q, want port-in-use message", stderr.String())
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -275,5 +276,40 @@ func TestStopManagedDoltWaitsForLockReleaseAfterExit(t *testing.T) {
 	}
 	if pidAlive(pid) {
 		t.Fatal("expected the SIGTERM-respecting process to have exited")
+	}
+}
+
+// TestManagedDoltProcessControllableGatesForcedStopByOwnership pins the decision
+// the normal-stop forced kill now gates on (PR #4004 attempt-4). Before SIGKILL,
+// stopManagedDoltProcessWithOptions re-checks managedDoltProcessControllable, so
+// a PID reused by an unrelated process after our server exited during the SIGTERM
+// grace is never force-killed. An owned live server is controllable; a live
+// process that is not our managed dolt server is not — that is exactly the
+// reused-PID case the escalation must skip.
+func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process semantics required")
+	}
+	city, _ := raceTestCity(t, "")
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolve layout: %v", err)
+	}
+	dataDir := filepath.Join(city, ".beads", "dolt")
+
+	// Owned: cwd is the managed data dir, so the ownership inspection
+	// (processCWDMatches) attributes it to our server.
+	owned := startSigtermIgnoringProcess(t, dataDir)
+	if !managedDoltProcessControllable(owned, layout) {
+		t.Fatalf("owned managed dolt process pid %d reported not controllable; a genuine forced stop would be skipped", owned)
+	}
+
+	// Unowned: a live process whose cwd is unrelated to the data dir stands in
+	// for the stranger that reused the PID after our server exited; the forced
+	// kill must skip it.
+	unownedDir := t.TempDir()
+	unowned := startSigtermIgnoringProcess(t, unownedDir)
+	if managedDoltProcessControllable(unowned, layout) {
+		t.Fatalf("unrelated process pid %d (cwd %s) reported controllable; forced stop would SIGKILL a reused PID", unowned, unownedDir)
 	}
 }

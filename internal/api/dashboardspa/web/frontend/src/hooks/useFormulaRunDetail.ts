@@ -1,13 +1,29 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormulaRunDetail, RunScopeKind } from 'gas-city-dashboard-shared';
 import { errorMessage } from 'gas-city-dashboard-shared';
 import { reportClientError } from '../lib/clientErrorReporting';
-import { loadSupervisorFormulaRunDetail } from '../supervisor/runDetail';
+import {
+  loadSupervisorFormulaRunDetail,
+  type LoadRunDetailOptions,
+  type RunDetailWarming,
+} from '../supervisor/runDetail';
 import { ApiClientError } from '../api/client';
 import { useCachedData } from './useCachedData';
+import { useFormulaRunDetailStream } from './useFormulaRunDetailStream';
 
 interface FormulaRunDetailState {
   kind: 'idle' | 'loading' | 'ready' | 'failed' | 'unsupported' | 'not_found';
   refresh: () => Promise<void>;
+  /**
+   * Whether the per-run SSE stream can still carry detail updates, so the caller
+   * can leave detail to the stream and nudge only the diff. False when the runtime
+   * has no EventSource (SSR/tests, or a browser without it) OR when the stream has
+   * terminally closed (a fatal precheck: 422/404/503, which EventSource does not
+   * retry) — both mean detail would freeze unless the nudge keeps refreshing it. A
+   * transient reconnect ('connecting') stays true because the browser self-heals
+   * it. See the P4 stream-vs-nudge division in FormulaRunDetail.
+   */
+  streamActive: boolean;
 }
 
 type FormulaRunRefreshState =
@@ -40,7 +56,12 @@ type FormulaRunDetailPayload =
 
 export type FormulaRunDetailLoadState =
   | (FormulaRunDetailState & { kind: 'idle' })
-  | (FormulaRunDetailState & { kind: 'loading' })
+  // F4: while the initial load polls the BFF's warming 503s (the just-slung
+  // deep-link case, up to ~180s), `warming` carries the loader's signal — with
+  // reason 'unknown_run' when the projection is warm but has not seen the run
+  // yet — so the route can render honest "may still be being recorded" copy
+  // instead of an anonymous spinner. Null while no warming 503 has been seen.
+  | (FormulaRunDetailState & { kind: 'loading'; warming: RunDetailWarming | null })
   | (FormulaRunDetailState & {
       kind: 'ready';
       detail: FormulaRunDetail;
@@ -56,9 +77,41 @@ export function useFormulaRunDetail(
   scopeRef?: string,
 ): FormulaRunDetailLoadState {
   const key = formulaRunDetailCacheKey(runId, scopeKind, scopeRef);
-  const { data, loading, error, refresh } = useCachedData(
+  // F4: the loader polls warming 503s for up to ~180s (the just-slung
+  // deep-link grace window). Each fetcher invocation gets a generation; a
+  // newer invocation (key change, manual refresh, nudge) or unmount
+  // supersedes older polls via keepPolling, so a superseded poll stops
+  // issuing GETs and its warming signal can never overwrite the current
+  // load's state. The settled poll clears its own warming signal so the
+  // failed/ready states never carry stale interim copy.
+  const [warming, setWarming] = useState<RunDetailWarming | null>(null);
+  const pollGenRef = useRef(0);
+  useEffect(
+    () => () => {
+      pollGenRef.current += 1;
+    },
+    [],
+  );
+  const {
+    data,
+    loading,
+    error,
+    refresh: cachedRefresh,
+  } = useCachedData(
     key,
-    () => loadFormulaRunDetail(runId),
+    () => {
+      const gen = ++pollGenRef.current;
+      const isCurrent = () => pollGenRef.current === gen;
+      const load = loadFormulaRunDetail(runId, {
+        onWarming: (next) => {
+          if (isCurrent()) setWarming(next);
+        },
+        keepPolling: isCurrent,
+      });
+      return load.finally(() => {
+        if (isCurrent()) setWarming(null);
+      });
+    },
     {
       onError: (err) => {
         if (runId !== undefined) reportRunDetailError('load detail', runId, err);
@@ -66,25 +119,85 @@ export function useFormulaRunDetail(
     },
   );
 
-  if (runId === undefined) return { kind: 'idle', refresh: noopRefresh };
-  if (data?.kind === 'loaded') {
+  // P4: the per-run SSE stream pushes the whole DTO, so a pushed frame becomes
+  // the rendered detail with ZERO refetch. The stream hook warms the SWR cache
+  // on every frame; we mirror the freshest frame into local state so the render
+  // updates immediately without waiting for a cache re-read. The initial GET
+  // (useCachedData) is still first paint and the fallback when the stream is
+  // unavailable or errors. The frame is tagged with the cache key the STREAM was
+  // opened for (passed in by the stream hook), not this render's key, so a frame
+  // that arrives mid-navigation A→B — while the callback ref already points here
+  // but A's EventSource has not yet been closed — is stored under A's key and
+  // dropped by the `streamed.key === key` guard below rather than flashing A's
+  // detail under run B.
+  const [streamed, setStreamed] = useState<{ key: string; detail: FormulaRunDetail } | null>(null);
+  const onStreamDetail = useCallback(
+    (detail: FormulaRunDetail, frameKey: string) => setStreamed({ key: frameKey, detail }),
+    [],
+  );
+  // F4: don't open the stream for a run the GET has definitively resolved as
+  // non-streamable — an unsupported (v1/wisp, 422) or not_found (404) run has no
+  // graph.v2 detail to push, and connecting would just spend one wasted
+  // EventSource that the browser reaps on the fatal 4xx precheck. Any other state
+  // (loading, ready, transient failed) keeps the stream enabled.
+  const streamEnabled =
+    runId !== undefined && data?.kind !== 'unsupported' && data?.kind !== 'not_found';
+  const streamState = useFormulaRunDetailStream(
+    runId,
+    streamEnabled,
+    onStreamDetail,
+    scopeKind,
+    scopeRef,
+  );
+  const streamedDetail = streamed?.key === key ? streamed.detail : null;
+
+  // A live stream carries detail, so the nudge lane refreshes only the diff. Only
+  // 'open' and 'connecting' count as active: 'connecting' is a transient reconnect
+  // the browser self-heals (readyState CONNECTING), so it briefly keeps the nudge
+  // on diff-only, which is fine. 'closed' is TERMINAL — EventSource sets it after a
+  // non-200/wrong-content-type precheck (422/404/503) and never reconnects, so the
+  // stream will push no further detail; it must release the nudge back to detail,
+  // exactly like 'unavailable' (no EventSource), or the view freezes at the last
+  // GET/frame. See the P4 stream-vs-nudge division in FormulaRunDetail.
+  const streamActive = streamState === 'open' || streamState === 'connecting';
+
+  // A manual refresh must clear the pinned streamed frame so the fresh GET
+  // renders (otherwise streamedDetail permanently shadows the refetch — the
+  // Refresh button would appear to no-op for the detail). The next stream frame
+  // re-populates it. Streaming keeps the render live between refreshes.
+  const refresh = useCallback(async () => {
+    setStreamed(null);
+    await cachedRefresh();
+  }, [cachedRefresh]);
+
+  if (runId === undefined) return { kind: 'idle', refresh: noopRefresh, streamActive };
+  // A pushed frame wins over the GET-backed cache value: it is the freshest
+  // snapshot of this run's detail. It stays subordinate to a definitive
+  // unsupported/not_found answer below (those come only from the GET precheck;
+  // the stream never delivers a frame for them).
+  const detail = streamedDetail ?? (data?.kind === 'loaded' ? data.detail : null);
+  if (detail !== null) {
     return {
       kind: 'ready',
-      detail: data.detail,
+      detail,
       refresh,
       refreshState: refreshState(loading, error),
+      streamActive,
     };
   }
-  if (data?.kind === 'unsupported') return { kind: 'unsupported', refresh };
-  if (data?.kind === 'not_found') return { kind: 'not_found', refresh };
-  if (error !== null) return { kind: 'failed', error, refresh };
-  return { kind: 'loading', refresh };
+  if (data?.kind === 'unsupported') return { kind: 'unsupported', refresh, streamActive };
+  if (data?.kind === 'not_found') return { kind: 'not_found', refresh, streamActive };
+  if (error !== null) return { kind: 'failed', error, refresh, streamActive };
+  return { kind: 'loading', warming, refresh, streamActive };
 }
 
-async function loadFormulaRunDetail(runId: string | undefined): Promise<FormulaRunDetailPayload> {
+async function loadFormulaRunDetail(
+  runId: string | undefined,
+  options?: LoadRunDetailOptions,
+): Promise<FormulaRunDetailPayload> {
   if (!runId) return { kind: 'unrequested' };
   try {
-    const detail = await loadSupervisorFormulaRunDetail(runId);
+    const detail = await loadSupervisorFormulaRunDetail(runId, options);
     return { kind: 'loaded', detail };
   } catch (err) {
     // gascity-dashboard-9w3k: a v1 / wisp run (not graph.v2) loads but has no

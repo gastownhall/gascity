@@ -29,6 +29,11 @@ type CreateParams struct {
 	// whichever store the handler is bound to; Rig is persisted as
 	// metadata so status/list and audit can report the owning scope.
 	Rig string
+	// RetrySource, when non-empty, marks this loop as a retry of a
+	// terminated source loop. It changes the partial-create rollback close
+	// reason and stamps FieldRetrySource metadata plus the retry_source
+	// event payload. Empty means a fresh (non-retry) create.
+	RetrySource string
 }
 
 // CreateResult holds the outcome of creating a convergence loop.
@@ -88,9 +93,13 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 
 	// closeBead terminates the root bead on partial-create failure so the
 	// reconciler does not try to resume an incomplete convergence loop.
+	closeReason := CloseReasonCreateRollback
+	if params.RetrySource != "" {
+		closeReason = CloseReasonRetryRollback
+	}
 	closeBead := func(cause error) error {
 		_ = h.Store.SetMetadata(beadID, FieldState, StateTerminated)
-		_ = h.Store.CloseBead(beadID, CloseReasonCreateRollback)
+		_ = h.Store.CloseBead(beadID, closeReason)
 		return cause
 	}
 
@@ -114,10 +123,20 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		{FieldTrigger, params.Trigger},
 		{FieldTriggerCondition, params.TriggerCondition},
 	}
+	if params.RetrySource != "" {
+		metaWrites = append(metaWrites, struct{ key, value string }{FieldRetrySource, params.RetrySource})
+	}
 	for _, mw := range metaWrites {
 		if err := h.Store.SetMetadata(beadID, mw.key, mw.value); err != nil {
 			return CreateResult{}, closeBead(fmt.Errorf("setting %s on convergence bead: %w", mw.key, err))
 		}
+	}
+
+	// retrySource is stamped on the created event when this is a retry so
+	// downstream observers can trace the lineage to the source loop.
+	var retrySource *string
+	if params.RetrySource != "" {
+		retrySource = &params.RetrySource
 	}
 
 	// Step 3: Set template variables.
@@ -143,6 +162,7 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 			GateMode:      params.GateMode,
 			MaxIterations: params.MaxIterations,
 			Title:         title,
+			RetrySource:   retrySource,
 		}
 		h.emitEvent(EventCreated, EventIDCreated(beadID), beadID, createdPayload)
 		return CreateResult{BeadID: beadID}, nil
@@ -176,6 +196,7 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		MaxIterations: params.MaxIterations,
 		Title:         title,
 		FirstWispID:   firstWispID,
+		RetrySource:   retrySource,
 	}
 	h.emitEvent(EventCreated, EventIDCreated(beadID), beadID, createdPayload)
 

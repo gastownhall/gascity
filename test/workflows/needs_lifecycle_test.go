@@ -228,6 +228,7 @@ type workflowOp struct {
 }
 
 func TestNeedsStatusLabelCreatesVisibleIdempotentRequestForReporter(t *testing.T) {
+	requireNode(t)
 	repo := repoRoot(t)
 	scripts := workflowScriptsFor(t, repo, "issues", "labeled", func(workflowScript) bool {
 		return true
@@ -262,6 +263,7 @@ func TestNeedsStatusLabelCreatesVisibleIdempotentRequestForReporter(t *testing.T
 }
 
 func TestNeedsStatusLabelIgnoresReporterAuthoredRequestComment(t *testing.T) {
+	requireNode(t)
 	repo := repoRoot(t)
 	scripts := workflowScriptsFor(t, repo, "issues", "labeled", func(workflowScript) bool {
 		return true
@@ -291,6 +293,7 @@ func TestNeedsStatusLabelIgnoresReporterAuthoredRequestComment(t *testing.T) {
 }
 
 func TestNeedsStatusLabelReapplyPostsFreshRequestForReporter(t *testing.T) {
+	requireNode(t)
 	repo := repoRoot(t)
 	scripts := workflowScriptsFor(t, repo, "issues", "labeled", func(workflowScript) bool {
 		return true
@@ -325,6 +328,7 @@ func TestNeedsStatusLabelReapplyPostsFreshRequestForReporter(t *testing.T) {
 }
 
 func TestCloseStaleNeedsLabelsRequiresVisibleRequestAfterLatestLabelEvent(t *testing.T) {
+	requireNode(t)
 	repo := repoRoot(t)
 	scripts := workflowScriptsFor(t, repo, "schedule", "", func(script workflowScript) bool {
 		return mentionsNeedsLabel(script.script)
@@ -407,6 +411,7 @@ func TestCloseStaleNeedsLabelsRequiresVisibleRequestAfterLatestLabelEvent(t *tes
 }
 
 func TestAuthorActivityClearsNeedsLabelsAndPreventsStaleClosure(t *testing.T) {
+	requireNode(t)
 	repo := repoRoot(t)
 	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
 
@@ -594,6 +599,18 @@ func eventSpecMatchesAction(spec any, action string) bool {
 }
 
 type scriptResults []scriptRun
+
+// requireNode skips the calling test when the "node" executable is not
+// available on PATH. These tests execute the repository's
+// actions/github-script workflow logic by shelling out to node, so hosts
+// without Node.js installed (for example the CI or refinery fast-unit
+// baseline) should skip them rather than fail.
+func requireNode(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not found on PATH: %v", err)
+	}
+}
 
 func runScripts(t *testing.T, scripts []workflowScript, context, state map[string]any) scriptResults {
 	t.Helper()

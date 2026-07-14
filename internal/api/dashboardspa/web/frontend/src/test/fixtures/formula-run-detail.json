@@ -64,7 +64,8 @@
         "completed": 2,
         "ready": 1,
         "skipped": 1
-      }
+      },
+      "terminal": false
     },
     "nodes": [
       {

@@ -1,0 +1,313 @@
+version = 2
+
+# Every field below is pinned by resourcecensus.bootstrapPolicy. Changing this
+# manifest alone fails; an intentional policy change updates the Go policy,
+# this file, and the generated TESTING.md table under council review.
+
+# These broad rows retain the audit's point-in-time source needles. They do
+# not classify tests. The AST baselines below ignore comments and strings;
+# reported_* preserves the historical regex totals for comparison.
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+baseline_calls = 491
+baseline_files = 136
+reported_calls = 495
+reported_files = 135
+owner_bead = "ga-80po0c.2"
+invariant = "tracked test source totals remain visible as audit evidence"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+migration_target = "P0.4a"
+expires = "2026-10-01"
+
+[[audit_baseline]]
+scope = "all"
+resource = "fixed_sleep"
+baseline_calls = 436
+baseline_files = 153
+reported_calls = 447
+reported_files = 157
+owner_bead = "ga-80po0c.2"
+invariant = "tracked test source totals remain visible as audit evidence"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+migration_target = "P0.4a"
+expires = "2026-10-01"
+
+# Debt rows ratchet source call sites only. They are not test-size entries and
+# do not exempt or reclassify any test.
+[[debt]]
+scope = "untagged"
+resource = "subprocess"
+baseline_calls = 374
+baseline_files = 97
+reported_calls = 380
+reported_files = 98
+owner_bead = "ga-80po0c.2"
+invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each process-owning test removes or replaces its source call site"
+migration_target = "D1/D2/D5/D6/E6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+baseline_calls = 284
+baseline_files = 110
+reported_calls = 295
+reported_files = 114
+owner_bead = "ga-80po0c.2"
+invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal"
+migration_target = "W1-W5"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "cmd/gc+untagged"
+resource = "environment"
+baseline_calls = 4092
+baseline_files = 180
+reported_calls = 3960
+reported_files = 184
+owner_bead = "ga-80po0c.2.3"
+invariant = "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "cmd/gc callers restore or eliminate every recognized process-environment mutation"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "cmd/gc+untagged"
+resource = "cwd"
+baseline_calls = 208
+baseline_files = 40
+reported_calls = 98
+reported_files = 13
+owner_bead = "ga-80po0c.2.3"
+invariant = "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "cmd/gc callers restore or eliminate every recognized cwd mutation"
+migration_target = "D5/D6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "cmd/gc+untagged"
+resource = "slow_process_gate"
+baseline_calls = 77
+baseline_files = 26
+reported_calls = 78
+reported_files = 27
+owner_bead = "ga-80po0c.2.3"
+invariant = "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
+resource_owner = "the helper definition and every marked caller retain an explicit process-suite migration owner"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "http_test_server"
+baseline_calls = 255
+baseline_files = 56
+reported_calls = 255
+reported_files = 56
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "net_listen"
+baseline_calls = 92
+baseline_files = 34
+reported_calls = 92
+reported_files = 34
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "net_listen_config"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its configured listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "net_listen_unixgram"
+baseline_calls = 3
+baseline_files = 2
+reported_calls = 3
+reported_files = 2
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "syscall_listen"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+# Exact Medium owners are keyed by source directory, package clause, and
+# top-level Go test identity. Only matching resources lexically inside that
+# declaration leave the Small-debt census; helper bodies and sibling tests do
+# not inherit a source exemption.
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestMain"
+resources = ["environment"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "cmd/gc TestMain is the checked package-level Medium owner"
+resource_owner = "only environment calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+# Small-debt rows apply the exact Medium filter while the source-debt rows
+# above retain the raw anti-growth census.
+[[small_debt]]
+scope = "untagged"
+resource = "subprocess"
+baseline_calls = 374
+baseline_files = 97
+reported_calls = 374
+reported_files = 97
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners remove or replace each process call site"
+migration_target = "D1/D2/D5/D6/E6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+baseline_calls = 284
+baseline_files = 110
+reported_calls = 284
+reported_files = 110
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals"
+migration_target = "W1-W5"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "cmd/gc+untagged"
+resource = "environment"
+baseline_calls = 4086
+baseline_files = 180
+reported_calls = 4086
+reported_files = 180
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners restore or eliminate every process-environment mutation"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "cmd/gc+untagged"
+resource = "cwd"
+baseline_calls = 208
+baseline_files = 40
+reported_calls = 208
+reported_files = 40
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners restore or eliminate every cwd mutation"
+migration_target = "D5/D6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "cmd/gc+untagged"
+resource = "slow_process_gate"
+baseline_calls = 77
+baseline_files = 26
+reported_calls = 77
+reported_files = 26
+owner_bead = "ga-80po0c.2.1"
+invariant = "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
+resource_owner = "each non-Medium marked caller retains an explicit process-suite migration owner"
+migration_target = "D5/D6/E6"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "http_test_server"
+baseline_calls = 255
+baseline_files = 56
+reported_calls = 255
+reported_files = 56
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "net_listen"
+baseline_calls = 92
+baseline_files = 34
+reported_calls = 92
+reported_files = 34
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "net_listen_config"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "net_listen_unixgram"
+baseline_calls = 3
+baseline_files = 2
+reported_calls = 3
+reported_files = 2
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "syscall_listen"
+baseline_calls = 1
+baseline_files = 1
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-80po0c.2.2"
+invariant = "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c"
+expires = "2026-10-01"

@@ -896,3 +896,56 @@ func TestAddDiscoveredCommandsToRoot_CanSuppressCollisionWarnings(t *testing.T) 
 		t.Fatalf("got %d import commands, want 1", importCount)
 	}
 }
+
+// An imported command group must reject unknown subcommands with a non-zero
+// exit ("unknown command"), matching native command groups, rather than
+// printing help and exiting 0. Regression for #3966.
+func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
+	newRoot := func() *cobra.Command {
+		root := &cobra.Command{Use: "gc", SilenceUsage: true, SilenceErrors: true}
+		entries := []config.DiscoveredCommand{
+			{BindingName: "gs", Command: []string{"status"}, Description: "Show status"},
+			{BindingName: "gs", Command: []string{"repo", "sync"}, Description: "Sync repo"},
+		}
+		addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", os.Stdout, os.Stderr, true)
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(new(bytes.Buffer))
+		return root
+	}
+
+	t.Run("unknown subcommand under namespace fails", func(t *testing.T) {
+		root := newRoot()
+		root.SetArgs([]string{"gs", "bogus"})
+		err := root.Execute()
+		if err == nil {
+			t.Fatal("expected error for unknown subcommand, got nil (would exit 0)")
+		}
+		if !strings.Contains(err.Error(), "unknown command") {
+			t.Fatalf("error = %q, want it to mention \"unknown command\"", err.Error())
+		}
+	})
+
+	t.Run("unknown subcommand under nested namespace fails", func(t *testing.T) {
+		root := newRoot()
+		root.SetArgs([]string{"gs", "repo", "bogus"})
+		if err := root.Execute(); err == nil {
+			t.Fatal("expected error for unknown nested subcommand, got nil (would exit 0)")
+		}
+	})
+
+	t.Run("bare namespace still succeeds (prints help)", func(t *testing.T) {
+		root := newRoot()
+		root.SetArgs([]string{"gs"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("bare namespace should succeed with help, got error: %v", err)
+		}
+	})
+
+	t.Run("bare nested namespace still succeeds (prints help)", func(t *testing.T) {
+		root := newRoot()
+		root.SetArgs([]string{"gs", "repo"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("bare nested namespace should succeed with help, got error: %v", err)
+		}
+	})
+}

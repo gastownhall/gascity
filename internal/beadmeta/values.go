@@ -46,6 +46,10 @@ const (
 	OutcomePass    = "pass"
 	OutcomeFail    = "fail"
 	OutcomeSkipped = "skipped"
+	// OutcomeCanceled records a bead closed because its run was canceled via the
+	// API (POST /runs/{id}/cancel). It is a distinct terminal outcome from fail
+	// and skipped so a client can tell an operator-canceled run apart.
+	OutcomeCanceled = "canceled"
 
 	// OutcomeMissingRoot records a control bead closed because its workflow
 	// root vanished from the store (see closeOrphanedControl in

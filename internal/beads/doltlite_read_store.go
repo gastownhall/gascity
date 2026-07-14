@@ -807,6 +807,13 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		if len(sets) > 1 {
 			tableLimit = 0
 		}
+		// A seek boundary is applied Go-side (filterDoltliteBeforeTimes) after
+		// this fetch; a SQL LIMIT cut before that filter would silently drop
+		// page rows, so seeked reads fetch unbounded and let the Go
+		// filter+sort+limit below cut the exact page.
+		if query.SeekAfter != nil {
+			tableLimit = 0
+		}
 		rows, err := s.queryIssueTable(query, tables, extraWhere, extraArgs, tableLimit, orderBy)
 		if err != nil {
 			return nil, err
@@ -848,7 +855,8 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 		query.ParentID == "" &&
 		len(query.Metadata) == 0 &&
 		query.CreatedBefore.IsZero() &&
-		query.UpdatedBefore.IsZero()
+		query.UpdatedBefore.IsZero() &&
+		query.SeekAfter == nil
 }
 
 // queryBoundedTopN resolves a bounded multi-table read by selecting the exact
@@ -1337,7 +1345,7 @@ func doltliteSQLiteTime(t time.Time) string {
 }
 
 func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
-	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero()) {
+	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.SeekAfter == nil) {
 		return rows
 	}
 	out := rows[:0]
@@ -1346,6 +1354,13 @@ func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
 			continue
 		}
 		if !query.UpdatedBefore.IsZero() && !beadUpdatedReferenceTime(row).Before(query.UpdatedBefore) {
+			continue
+		}
+		// Exact Go-side seek: the compound (created_at, id) boundary is
+		// resolved here rather than in SQL so the tie-break stays identical to
+		// the in-memory sort, so the fetch above is a superset and this is
+		// where the page boundary is enforced (before the Go limit).
+		if query.SeekAfter != nil && !query.SeekAfter.After(row, query.Sort) {
 			continue
 		}
 		out = append(out, row)

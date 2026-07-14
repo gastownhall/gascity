@@ -505,6 +505,69 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// BeadDeadAssigneeReopenedPayload is the typed payload for
+// bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
+// routed work bead whose assignee no longer maps to any open session bead —
+// the owning session closed/retired while the bead stayed assigned, so it sat
+// open+routed but unclaimable. The reconciler clears DeadAssignee (empty-string
+// clear) so the RoutedTo pool can reclaim BeadID; the payload makes the repair
+// observable for eval/audit (mirrors BeadClaimRejectedPayload).
+type BeadDeadAssigneeReopenedPayload struct {
+	BeadID       string `json:"bead_id" doc:"ID of the reopened work bead (also the envelope Subject)."`
+	DeadAssignee string `json:"dead_assignee,omitempty" doc:"The assignee identity that resolved to no open session bead, cleared by the reopen."`
+	RoutedTo     string `json:"routed_to,omitempty" doc:"The gc.routed_to target the bead stays routed to after the reopen, when set."`
+}
+
+// IsEventPayload marks BeadDeadAssigneeReopenedPayload as an events.Payload variant.
+func (BeadDeadAssigneeReopenedPayload) IsEventPayload() {}
+
+// BeadDeadAssigneeReopenedPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. DeadAssignee and RoutedTo are emitted only
+// when non-empty.
+func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) json.RawMessage {
+	b, _ := json.Marshal(BeadDeadAssigneeReopenedPayload{
+		BeadID:       beadID,
+		DeadAssignee: deadAssignee,
+		RoutedTo:     routedTo,
+	})
+	return b
+}
+
+// SessionUnknownStatePayload carries the machine-readable context for a
+// session.unknown_state event: a session bead whose metadata state the
+// reconciler does not recognize and therefore skips (forward-compatible
+// rollback). The envelope Message renders the same facts as operator text;
+// this payload is the machine contract so subscribers can correlate the stuck
+// bead, compute how long it has been unrecognized, and distinguish the
+// first-sight emission from the past-threshold escalation.
+type SessionUnknownStatePayload struct {
+	SessionID   string `json:"session_id" doc:"Canonical session bead ID for the unrecognized-state session (also the envelope Subject)."`
+	SessionName string `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	State       string `json:"state" doc:"The raw, unrecognized metadata state value the reconciler skipped."`
+	FirstSeen   string `json:"first_seen,omitempty" doc:"RFC3339 timestamp the reconciler first observed this unrecognized state; the escalation clock counts from here."`
+	Escalated   bool   `json:"escalated" doc:"False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold."`
+}
+
+// IsEventPayload marks SessionUnknownStatePayload as an events.Payload variant.
+func (SessionUnknownStatePayload) IsEventPayload() {}
+
+// SessionUnknownStatePayloadJSON builds the JSON wire form for attachment to an
+// events.Event.Payload field. SessionName and FirstSeen are emitted only when
+// set.
+func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstSeen time.Time, escalated bool) json.RawMessage {
+	p := SessionUnknownStatePayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		State:       state,
+		Escalated:   escalated,
+	}
+	if !firstSeen.IsZero() {
+		p.FirstSeen = firstSeen.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -520,6 +583,7 @@ func init() {
 	events.RegisterPayload(events.BeadUpdated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
+	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;
@@ -539,6 +603,7 @@ func init() {
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})

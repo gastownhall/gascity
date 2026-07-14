@@ -143,3 +143,27 @@ func TestResolveEmptyStoreListIsNotFound(t *testing.T) {
 		t.Fatalf("Resolve(nil) error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestScopeRigContext(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		storeRef   string
+		rigContext string
+		ok         bool
+	}{
+		{name: "city", storeRef: "city:test-city", ok: true},
+		{name: "rig", storeRef: "rig:frontend", rigContext: "frontend", ok: true},
+		{name: "trims whitespace", storeRef: "  rig:frontend  ", rigContext: "frontend", ok: true},
+		{name: "empty", storeRef: ""},
+		{name: "bare legacy label", storeRef: "frontend"},
+		{name: "missing rig name", storeRef: "rig:"},
+		{name: "missing city name", storeRef: "city:"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rigContext, ok := ScopeRigContext(tt.storeRef)
+			if rigContext != tt.rigContext || ok != tt.ok {
+				t.Fatalf("ScopeRigContext(%q) = (%q, %v), want (%q, %v)", tt.storeRef, rigContext, ok, tt.rigContext, tt.ok)
+			}
+		})
+	}
+}

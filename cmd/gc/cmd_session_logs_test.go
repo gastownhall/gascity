@@ -404,7 +404,7 @@ func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t
 		},
 	})
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -451,7 +451,7 @@ func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T
 		},
 	})
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -491,7 +491,7 @@ func TestResolveStoredSessionLogSource_CodexDoesNotUseAmbiguousWorkDirFallback(t
 		_ = store.Close(b.ID)
 	}
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-one", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "workflows__codex-max-mc-one", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -561,7 +561,7 @@ func TestResolveStoredSessionLogSource_CodexAmbiguousWorkDirUsesStartOrder(t *te
 		t.Fatal(err)
 	}
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-two", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "workflows__codex-max-mc-two", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -591,7 +591,7 @@ func TestCanFallbackStoredSessionLogByWorkDirUsesTargetedLookup(t *testing.T) {
 		},
 	})
 
-	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+	ok := canFallbackStoredSessionLogByWorkDir(sessionFrontDoor(store), sessionLogContext{
 		sessionID: b.ID,
 		workDir:   workDir,
 		provider:  "codex",
@@ -627,7 +627,7 @@ func TestCanFallbackStoredSessionLogByWorkDirIgnoresAsleepPeersForLiveTarget(t *
 		},
 	})
 
-	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+	ok := canFallbackStoredSessionLogByWorkDir(sessionFrontDoor(store), sessionLogContext{
 		sessionID: target.ID,
 		workDir:   workDir,
 		provider:  "codex",
@@ -934,7 +934,7 @@ func TestResolveSessionLogWorkDirByAlias(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogContext("", nil, store, "worker")
+	got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "worker")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
@@ -955,7 +955,7 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
+	got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "s-gc-77")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
@@ -977,7 +977,7 @@ func TestResolveSessionLogWorkDirDoesNotUseClosedHistoricalAlias(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	if got, ok := resolveSessionLogContext("", nil, store, "mayor"); ok {
+	if got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "mayor"); ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for historical alias", got)
 	}
 }
@@ -1052,7 +1052,7 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	})
 	_ = store.Close(b.ID)
 
-	got, ok := resolveSessionLogContext(cityPath, cfg, store, "demo/witness")
+	got, ok := resolveSessionLogContext(cityPath, cfg, sessionFrontDoor(store), "demo/witness")
 	if ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for reserved named target", got)
 	}

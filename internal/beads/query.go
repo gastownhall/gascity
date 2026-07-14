@@ -98,12 +98,33 @@ type ListQuery struct {
 	// TierMode selects the storage tier(s) to read from. Zero value
 	// (TierIssues) preserves the legacy single-tier behavior.
 	TierMode TierMode
+	// SeekAfter is an exclusive keyset boundary for cursor pagination: only
+	// rows STRICTLY AFTER the boundary in the query's sort order match. It
+	// requires an explicit Sort (Validate enforces this) because a seek
+	// without a total order is meaningless. Every backend resolves the compound
+	// (created_at, id) boundary Go-side via Matches to keep the tie-break
+	// byte-identical to the in-memory sort — a SQL/CLI seek predicate is
+	// expressible but risks collation/precision divergence. Because the filter
+	// is Go-side, it must run BEFORE any native row limit — a limit applied
+	// first silently drops page rows — so seeked reads fetch a superset and cut
+	// the page in Go.
+	SeekAfter *SeekBoundary
+}
+
+// SeekBoundary identifies the last row a pagination client has seen, in the
+// (created_at, id) total order (#3208). The boundary row itself is excluded.
+type SeekBoundary struct {
+	CreatedAt time.Time
+	ID        string
 }
 
 // Validate returns an error when the query contains contradictory selectors.
 func (q ListQuery) Validate() error {
 	if q.Assignee != "" && len(q.Assignees) > 0 {
 		return errors.New("ListQuery: Assignee and Assignees are mutually exclusive")
+	}
+	if q.SeekAfter != nil && q.Sort != SortCreatedAsc && q.Sort != SortCreatedDesc {
+		return errors.New("ListQuery: SeekAfter requires an explicit created_at sort order")
 	}
 	return nil
 }
@@ -139,7 +160,8 @@ func (q ListQuery) HasFilter() bool {
 		q.ParentID != "" ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
-		!q.UpdatedBefore.IsZero()
+		!q.UpdatedBefore.IsZero() ||
+		q.SeekAfter != nil
 }
 
 // IncludesClosed reports whether the query may return closed beads.
@@ -147,19 +169,24 @@ func (q ListQuery) IncludesClosed() bool {
 	return q.IncludeClosed || q.Status == "closed"
 }
 
-// Matches reports whether the bead satisfies the query.
-func (q ListQuery) Matches(b Bead) bool {
+// matchesTier reports whether the bead is in the storage tier(s) the query
+// selects. TierIssues (the zero value) excludes ephemeral wisps; TierWisps
+// keeps only ephemeral or no-history rows; TierBoth applies no tier filter.
+func (q ListQuery) matchesTier(b Bead) bool {
 	switch q.TierMode {
 	case TierWisps:
-		if !b.Ephemeral && !b.NoHistory {
-			return false
-		}
+		return b.Ephemeral || b.NoHistory
 	case TierBoth:
-		// no tier filter
+		return true
 	default: // TierIssues
-		if b.Ephemeral {
-			return false
-		}
+		return !b.Ephemeral
+	}
+}
+
+// Matches reports whether the bead satisfies the query.
+func (q ListQuery) Matches(b Bead) bool {
+	if !q.matchesTier(b) {
+		return false
 	}
 	if q.Status != "" {
 		if b.Status != q.Status {
@@ -201,7 +228,33 @@ func (q ListQuery) Matches(b Bead) bool {
 	if !q.UpdatedBefore.IsZero() && !beadUpdatedReferenceTime(b).Before(q.UpdatedBefore) {
 		return false
 	}
+	if q.SeekAfter != nil && !q.SeekAfter.After(b, q.Sort) {
+		return false
+	}
 	return true
+}
+
+// After reports whether the bead sorts strictly after the boundary in the
+// given order — i.e. it belongs on a page that resumes from the boundary.
+// The comparison mirrors sortBeadsForQuery's (created_at, id) total order
+// exactly, id tie-break included, so a page boundary can never skip or
+// duplicate a row.
+func (sb *SeekBoundary) After(b Bead, sort SortOrder) bool {
+	switch sort {
+	case SortCreatedAsc:
+		if b.CreatedAt.After(sb.CreatedAt) {
+			return true
+		}
+		return b.CreatedAt.Equal(sb.CreatedAt) && b.ID > sb.ID
+	case SortCreatedDesc:
+		if b.CreatedAt.Before(sb.CreatedAt) {
+			return true
+		}
+		return b.CreatedAt.Equal(sb.CreatedAt) && b.ID < sb.ID
+	default:
+		// Validate rejects this shape; match nothing rather than guess.
+		return false
+	}
 }
 
 func beadUpdatedReferenceTime(b Bead) time.Time {

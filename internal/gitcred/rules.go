@@ -55,6 +55,10 @@ type LoadedRule struct {
 	// Origin is the absolute path of the declaring file, or
 	// "$GC_GIT_CREDENTIAL_COMMAND" for the command-layer fallback.
 	Origin string
+	// httpsOnly withholds this rule from plaintext http transport. The built-in
+	// ambient github.com token default sets it so a bearer token is never served
+	// over http://; file and command rules leave it false.
+	httpsOnly bool
 }
 
 // layer is one resolution tier's rules, kept separate so Match can apply
@@ -118,10 +122,59 @@ func Load(cityRoot string) (*Rules, error) {
 		}
 	}
 
-	if strings.TrimSpace(os.Getenv(EnvCredentialCommand)) != "" {
-		rules.commandLayer = true
+	// A configured command layer (GC_GIT_CREDENTIAL_COMMAND) is a deliberate
+	// operator choice and must outrank the built-in convenience default below,
+	// so detect it first.
+	commandLayerConfigured := strings.TrimSpace(os.Getenv(EnvCredentialCommand)) != ""
+	rules.commandLayer = commandLayerConfigured
+
+	// Built-in default layer, appended LAST so any explicit file rule for the
+	// same host wins. It lets `gc` clone a private github.com pack over HTTPS
+	// using the ambient GitHub token — the ubiquitous convention used by CI and
+	// the gh CLI — without requiring a hand-written credentials.toml. Scoped
+	// strictly to the github.com host so the token is never offered to any other
+	// (possibly attacker-supplied) pack source, marked httpsOnly so the matcher
+	// withholds it from plaintext http github.com sources (no bearer token over
+	// cleartext), and skipped entirely when a command layer is configured so the
+	// explicitly-configured helper keeps precedence over this ambient-token
+	// convenience: the command layer is a no-rule fallback consulted only when no
+	// rule matches, so a default rule here would otherwise silently shadow it.
+	if lyr := githubDefaultTokenLayer(commandLayerConfigured); lyr != nil {
+		rules.layers = append(rules.layers, *lyr)
 	}
 	return rules, nil
+}
+
+// githubDefaultTokenEnvVars are the environment variables, in priority order,
+// that the built-in github.com default rule consults for a token. GH_TOKEN is
+// the gh CLI convention and takes precedence: it is the usual cross-repo
+// override — a broad PAT set alongside the workflow's repo-scoped GITHUB_TOKEN,
+// which is the GitHub Actions auto-provisioned fallback.
+var githubDefaultTokenEnvVars = []string{"GH_TOKEN", "GITHUB_TOKEN"}
+
+// githubDefaultTokenLayer returns a single-rule layer that authenticates
+// https://github.com clones from the ambient GitHub token, or nil when no such
+// token is set (the byte-identical guarantee — no rule, no injection) or when a
+// command layer is configured (which takes precedence). The rule binds to
+// whichever env var is populated so the existing TokenEnv resolution path
+// (resolve.go) reads it unchanged. It is marked httpsOnly so the matcher never
+// offers the bearer token to a plaintext http github.com source, where it would
+// travel in cleartext.
+func githubDefaultTokenLayer(commandLayerConfigured bool) *layer {
+	if commandLayerConfigured {
+		return nil
+	}
+	for _, envVar := range githubDefaultTokenEnvVars {
+		if strings.TrimSpace(os.Getenv(envVar)) == "" {
+			continue
+		}
+		return &layer{rules: []LoadedRule{{
+			Rule:      Rule{Match: "github.com", TokenEnv: envVar},
+			Origin:    "$" + envVar,
+			httpsOnly: true,
+		}}}
+	}
+	return nil
 }
 
 // loadFileLayer reads and validates a single credentials file. A missing file

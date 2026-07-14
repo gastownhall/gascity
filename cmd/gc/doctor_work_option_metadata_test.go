@@ -163,7 +163,7 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 		map[string]string{"model": "opus"},
 		map[string]string{"model": "sonnet", "effort": "high"},
 	)
-	if err := store.SetMetadata(candidate.session.ID, "gc.per_dispatch_model", "sonnet"); err != nil {
+	if err := store.SetMetadata(candidate.info.ID, "gc.per_dispatch_model", "sonnet"); err != nil {
 		t.Fatalf("SetMetadata(gc.per_dispatch_model): %v", err)
 	}
 	check := newWorkOptionMetadataMigrationCheck(nil, cityDir, func(path string) (beads.Store, error) {
@@ -178,7 +178,7 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
 	}
 	details := strings.Join(res.Details, "\n")
-	for _, want := range []string{candidate.session.ID, "gc.per_dispatch_model", "template_overrides.model"} {
+	for _, want := range []string{candidate.info.ID, "gc.per_dispatch_model", "template_overrides.model"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
@@ -190,7 +190,7 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 	if res2 := check.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
 		t.Fatalf("post-fix Run status = %v, want OK: %#v", res2.Status, res2)
 	}
-	session, err := store.Get(candidate.session.ID)
+	session, err := store.Get(candidate.info.ID)
 	if err != nil {
 		t.Fatalf("Get(session): %v", err)
 	}
@@ -198,12 +198,18 @@ func TestWorkOptionMetadataMigrationClearsStaleSessionAutoStampedModel(t *testin
 		t.Fatalf("gc.per_dispatch_model = %q, want tombstone", got)
 	}
 	wantOverrides := map[string]string{"effort": "high"}
-	if got := storedSessionOverrides(t, store, candidate.session.ID); !reflect.DeepEqual(got, wantOverrides) {
+	if got := storedSessionOverrides(t, store, candidate.info.ID); !reflect.DeepEqual(got, wantOverrides) {
 		t.Fatalf("template_overrides = %v, want %v", got, wantOverrides)
 	}
 
-	candidate.session = &session
-	prepared, err := buildPreparedStart(candidate, &config.City{}, store)
+	// Refresh the typed twin after swapping in the post-fix bead so buildPreparedStart
+	// decodes the cleaned-up template_overrides off candidate.info (production keeps this
+	// coherent via prepareStartCandidateForCity's front-door refresh).
+	candidate.info, err = sessionFrontDoor(store).Get(candidate.info.ID)
+	if err != nil {
+		t.Fatalf("front-door Get(session): %v", err)
+	}
+	prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
 		t.Fatalf("buildPreparedStart: %v", err)
 	}

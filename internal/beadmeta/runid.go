@@ -7,7 +7,7 @@ import "strings"
 // nested-workflow root (gc.root_bead_id). workflow_id and molecule_id are the
 // engine's bare (non-"gc."-namespaced) run-chain keys written by internal/sling;
 // RootBeadIDMetadataKey is the gc.-namespaced nesting root.
-var runIDChainKeys = []string{"workflow_id", "molecule_id", RootBeadIDMetadataKey}
+var runIDChainKeys = []string{"workflow_id", MoleculeIDMetadataKey, RootBeadIDMetadataKey}
 
 // ResolveRunID derives the run-root identifier for a bead from its metadata run
 // chain, falling back to the bead's own id and then a caller-supplied fallback.

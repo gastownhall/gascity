@@ -145,7 +145,7 @@ func withCORSAllowing(extra []string, next http.Handler) http.Handler {
 		if originAllowed(origin, extra) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request, X-GC-City-Write")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request, X-GC-City-Write, X-GC-City-Read")
 			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id, Retry-After")
 		}
 		if r.Method == http.MethodOptions {

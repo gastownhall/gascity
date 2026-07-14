@@ -201,6 +201,22 @@ func TestClassifyRetryAttemptRetriesInvalidRequiredOutputJSON(t *testing.T) {
 	}
 }
 
+// TestClassifyRetryAttemptCanceledIsTerminalNonRetry pins that a canceled attempt
+// subject (its run was canceled via the API) is a terminal non-failure and is not
+// retried — before the fix it fell through to the invalid_outcome_value transient
+// branch and would have scheduled another attempt.
+func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
+	t.Parallel()
+
+	got := classifyRetryAttempt(beads.Bead{
+		Metadata: map[string]string{"gc.outcome": "canceled"},
+	})
+	want := retryEvalResult{Outcome: "canceled"}
+	if got != want {
+		t.Fatalf("classifyRetryAttempt(canceled) = %+v, want %+v", got, want)
+	}
+}
+
 func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
 	t.Parallel()
 

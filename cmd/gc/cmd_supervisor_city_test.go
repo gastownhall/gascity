@@ -22,6 +22,18 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
+// withControllerAlive overrides the standalone-controller probe so the
+// registration-rejection tests exercise the reject path deterministically,
+// without depending on a real socket-accept handshake winning a race against
+// controllerAlive's read deadline under parallel/high-load runs (#3847). The
+// real probe mechanics stay covered by controller_test.go.
+func withControllerAlive(t *testing.T, pid int) {
+	t.Helper()
+	prev := controllerAliveHook
+	controllerAliveHook = func(string) int { return pid }
+	t.Cleanup(func() { controllerAliveHook = prev })
+}
+
 //nolint:unparam // tests override hook behavior but keep fixed timeout/poll values for determinism
 func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer) int, reload func(stdout, stderr io.Writer) int, alive func() int, running func(string) (bool, string, bool), timeout, poll time.Duration) {
 	t.Helper()
@@ -705,25 +717,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	var stdout, stderr bytes.Buffer
 	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true)
@@ -867,25 +862,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedC
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	withSupervisorTestHooks(
 		t,
@@ -985,25 +963,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerDuringSupervisorSt
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	withSupervisorTestHooks(
 		t,

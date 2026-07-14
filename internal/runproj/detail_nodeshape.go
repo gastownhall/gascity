@@ -182,6 +182,9 @@ func presentationStatus(b runSnapshotBead) string {
 		if outcome == "skipped" {
 			return "skipped"
 		}
+		if outcome == "canceled" {
+			return "canceled"
+		}
 		return "completed"
 	}
 	if raw == "in_progress" || raw == "active" || raw == "running" {
@@ -196,6 +199,8 @@ func presentationStatus(b runSnapshotBead) string {
 		return "failed"
 	case "skipped":
 		return "skipped"
+	case "canceled":
+		return "canceled"
 	}
 	return "pending"
 }

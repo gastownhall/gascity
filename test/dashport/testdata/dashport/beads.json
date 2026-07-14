@@ -1,0 +1,68 @@
+{
+  "seq": 100,
+  "beads": [
+    {
+      "id": "run-anchor",
+      "title": "mol-adopt-pr-v2",
+      "status": "open",
+      "issue_type": "molecule",
+      "ref": "mol-adopt-pr-v2",
+      "created_at": "2026-06-01T10:00:00Z",
+      "updated_at": "2026-06-01T12:00:00Z",
+      "metadata": {
+        "gc.formula_contract": "graph.v2",
+        "gc.kind": "workflow",
+        "gc.formula": "mol-adopt-pr-v2",
+        "gc.run_target": "rig:demo",
+        "gc.root_store_ref": "city:dashport-city",
+        "gc.scope_kind": "city",
+        "gc.scope_ref": "dashport-city"
+      }
+    },
+    {
+      "id": "run-anchor.preflight",
+      "title": "preflight",
+      "status": "in_progress",
+      "issue_type": "task",
+      "parent": "run-anchor",
+      "assignee": "builder",
+      "ref": "mol-adopt-pr-v2.preflight",
+      "created_at": "2026-06-01T10:01:00Z",
+      "updated_at": "2026-06-01T10:05:00Z",
+      "needs": ["run-anchor"],
+      "metadata": {
+        "gc.kind": "step",
+        "gc.root_bead_id": "run-anchor",
+        "gc.step_id": "preflight",
+        "gc.step_ref": "mol-adopt-pr-v2.preflight",
+        "gc.scope_ref": "dashport-city"
+      }
+    },
+    {
+      "id": "run-anchor.review",
+      "title": "review",
+      "status": "open",
+      "issue_type": "task",
+      "parent": "run-anchor",
+      "ref": "mol-adopt-pr-v2.review",
+      "created_at": "2026-06-01T10:02:00Z",
+      "updated_at": "2026-06-01T10:02:00Z",
+      "needs": ["run-anchor.preflight"],
+      "metadata": {
+        "gc.kind": "step",
+        "gc.root_bead_id": "run-anchor",
+        "gc.step_id": "review",
+        "gc.step_ref": "mol-adopt-pr-v2.review",
+        "gc.scope_ref": "dashport-city"
+      }
+    },
+    {
+      "id": "work-1",
+      "title": "Wire the seeded dashboard corpus",
+      "status": "open",
+      "issue_type": "task",
+      "created_at": "2026-06-01T09:00:00Z",
+      "updated_at": "2026-06-01T09:00:00Z"
+    }
+  ]
+}

@@ -8,13 +8,14 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.CreateBeadOnly("worker", "Worker", "claude", t.TempDir(), "claude", "", nil, sessionpkg.ProviderResume{})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Resume: sessionpkg.ProviderResume{}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
@@ -27,8 +28,8 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{
-				session: &bead,
-				tp:      TemplateParams{TemplateName: "worker"},
+				info: sessiontest.SeedBead(t, bead),
+				tp:   TemplateParams{TemplateName: "worker"},
 			},
 			cfg: runtime.Config{
 				Command: "claude --resume seeded-session",
@@ -67,18 +68,13 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 
 func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *testing.T) {
 	sp := runtime.NewFake()
-	sessionBead := &beads.Bead{
-		Metadata: map[string]string{
-			"session_name": "legacy-runtime-only",
-		},
-	}
 
 	usedWorker, err := startPreparedStartCandidate(
 		context.Background(),
 		preparedStart{
 			candidate: startCandidate{
-				session: sessionBead,
-				tp:      TemplateParams{TemplateName: "worker"},
+				info: sessionpkg.Info{SessionName: "legacy-runtime-only", SessionNameMetadata: "legacy-runtime-only"},
+				tp:   TemplateParams{TemplateName: "worker"},
 			},
 			cfg: runtime.Config{
 				Command: "claude --resume seeded",

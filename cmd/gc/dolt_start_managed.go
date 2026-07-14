@@ -46,6 +46,14 @@ type managedDoltStartedProcess struct {
 	// used as a fallback when StartTimeTicks is unavailable (macOS, locked-down
 	// /proc). Mirrors the production reap algorithm.
 	StartIdentity string
+	// WatchdogStartTimeTicks and WatchdogStartIdentity snapshot the supervising
+	// watchdog's OS start identity at spawn, with the same precedence and
+	// fallback as StartTimeTicks/StartIdentity. The parent reaps the watchdog
+	// with a background cmd.Wait() just like the dolt child, so a watchdog PID
+	// can be freed and reused mid-cleanup; startup-failure cleanup re-verifies
+	// these before signaling WatchdogPID. Zero/empty when there is no watchdog.
+	WatchdogStartTimeTicks uint64
+	WatchdogStartIdentity  string
 }
 
 // defaultManagedDoltBindHost is the listener host a managed dolt sql-server
@@ -426,7 +434,44 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
 	}
-	return managedDoltStartedProcess{CityPath: cityPath, PID: cmd.Process.Pid}, nil
+	// Snapshot the child's OS-level start identity while it is still definitely
+	// alive — before the reap goroutine below can Wait() it and free the PID.
+	// A same-attempt startup-failure cleanup (terminateManagedDoltStartedProcess)
+	// re-reads this before signaling, so a numeric PID reused after this child
+	// exits and is reaped is never signaled. Mirrors the test reaper's
+	// registration snapshot and the production reaper
+	// (cmd_dolt_cleanup.go:sameReapProcessIdentity): start-time ticks first, ps
+	// lstart as the no-/proc fallback.
+	pid := cmd.Process.Pid
+	startTimeTicks, startIdentity := snapshotManagedDoltStartIdentity(pid)
+	started := managedDoltStartedProcess{
+		CityPath:       cityPath,
+		PID:            pid,
+		StartTimeTicks: startTimeTicks,
+		StartIdentity:  startIdentity,
+	}
+	// Reap the child when it exits so it does not linger as a zombie under a
+	// non-reaping PID-1 controller. This server is managed out-of-band by PID
+	// (health checks, terminateManagedDoltPID); the returned struct carries no
+	// *exec.Cmd, so this goroutine is the sole Wait — matching the scope/test
+	// watchdog paths, which already reap via a background cmd.Wait().
+	go func() { _ = cmd.Wait() }()
+	return started, nil
+}
+
+// snapshotManagedDoltStartIdentity captures a live PID's OS-level start identity
+// for the PID-reuse guard. It reads /proc start-time ticks first and only forks
+// `ps -o lstart=` when ticks are unavailable (macOS, locked-down /proc), so the
+// common Linux path — the container target — never spawns ps on the managed-dolt
+// startup critical path. The precedence mirrors the guard itself
+// (managedDoltStartedPIDIdentityMatches): where ticks are present the ps fallback
+// is never consulted, so reading it eagerly only burdens the hot path (and, on
+// the scope-watchdog handshake, couples the parent's read to ps's own timeout).
+func snapshotManagedDoltStartIdentity(pid int) (uint64, string) {
+	if ticks := readProcStartTimeTicks(pid); ticks != 0 {
+		return ticks, ""
+	}
+	return 0, readProcStartIdentity(pid)
 }
 
 func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
@@ -550,7 +595,11 @@ func managedDoltTestWatchdogDisarmFile(logFilePath string) (string, error) {
 	return path, nil
 }
 
-func readManagedDoltTestWatchdogPID(r io.Reader, watchdogPID int) (int, error) {
+// readManagedDoltWatchdogLine reads one newline-terminated handshake line from a
+// watchdog's stdout, bounded by managedDoltTestWatchdogPIDTimeout so a wedged
+// watchdog cannot hang the caller. Shared by the test watchdog (PID only) and
+// the production scope watchdog (PID + start identity).
+func readManagedDoltWatchdogLine(r io.Reader, watchdogPID int) (string, error) {
 	type result struct {
 		line string
 		err  error
@@ -564,16 +613,77 @@ func readManagedDoltTestWatchdogPID(r io.Reader, watchdogPID int) (int, error) {
 	select {
 	case res := <-ch:
 		if res.err != nil {
-			return 0, fmt.Errorf("read dolt test watchdog pid: %w", res.err)
+			return "", res.err
 		}
-		pid, err := strconv.Atoi(strings.TrimSpace(res.line))
-		if err != nil || pid <= 0 {
-			return 0, fmt.Errorf("read dolt test watchdog pid: invalid pid %q", strings.TrimSpace(res.line))
-		}
-		return pid, nil
+		return res.line, nil
 	case <-time.After(managedDoltTestWatchdogPIDTimeout):
-		return 0, fmt.Errorf("dolt test watchdog pid timed out (watchdog pid %d)", watchdogPID)
+		return "", fmt.Errorf("dolt watchdog handshake timed out (watchdog pid %d)", watchdogPID)
 	}
+}
+
+func readManagedDoltTestWatchdogPID(r io.Reader, watchdogPID int) (int, error) {
+	line, err := readManagedDoltWatchdogLine(r, watchdogPID)
+	if err != nil {
+		return 0, fmt.Errorf("read dolt test watchdog pid: %w", err)
+	}
+	trimmed := strings.TrimSpace(line)
+	pid, err := strconv.Atoi(trimmed)
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("read dolt test watchdog pid: invalid pid %q", trimmed)
+	}
+	return pid, nil
+}
+
+// managedDoltWatchdogStartFieldSep separates the PID, start-time ticks, and
+// start-identity fields on the scope watchdog's one-line stdout handshake. Tab
+// is safe because the ps-lstart identity contains spaces but never a tab or a
+// newline, so the identity survives as a single trailing field.
+const managedDoltWatchdogStartFieldSep = "\t"
+
+// formatManagedDoltWatchdogStartLine renders the scope watchdog's stdout
+// handshake: the dolt child PID plus the OS start identity the parent uses to
+// guard against PID reuse. Either identity field may be zero/empty on hosts
+// without /proc or ps; the parent then behaves exactly like the direct-spawn
+// path with no snapshot.
+func formatManagedDoltWatchdogStartLine(pid int, startTimeTicks uint64, startIdentity string) string {
+	return strings.Join([]string{
+		strconv.Itoa(pid),
+		strconv.FormatUint(startTimeTicks, 10),
+		startIdentity,
+	}, managedDoltWatchdogStartFieldSep)
+}
+
+// parseManagedDoltWatchdogStartLine parses the scope watchdog handshake back
+// into the dolt child PID and its OS start identity. A legacy bare-PID line
+// (no identity fields) parses with a zero identity, keeping the reader tolerant
+// of an older watchdog binary. An empty or non-numeric PID field is an error.
+func parseManagedDoltWatchdogStartLine(line string) (pid int, startTimeTicks uint64, startIdentity string, err error) {
+	fields := strings.SplitN(strings.TrimRight(line, "\r\n"), managedDoltWatchdogStartFieldSep, 3)
+	pidField := strings.TrimSpace(fields[0])
+	pid, err = strconv.Atoi(pidField)
+	if err != nil || pid <= 0 {
+		return 0, 0, "", fmt.Errorf("invalid dolt watchdog pid %q", pidField)
+	}
+	if len(fields) >= 2 {
+		startTimeTicks, _ = strconv.ParseUint(strings.TrimSpace(fields[1]), 10, 64)
+	}
+	if len(fields) >= 3 {
+		startIdentity = strings.TrimSpace(fields[2])
+	}
+	return pid, startTimeTicks, startIdentity, nil
+}
+
+// readManagedDoltScopeWatchdogStart reads the scope watchdog's stdout handshake
+// (PID + OS start identity), bounded by the same timeout as the test watchdog
+// PID read so a wedged watchdog cannot hang startup. The identity lets the
+// parent guard startup-failure cleanup against numeric PID reuse on the
+// production scope-watchdog path.
+func readManagedDoltScopeWatchdogStart(r io.Reader, watchdogPID int) (pid int, startTimeTicks uint64, startIdentity string, err error) {
+	line, err := readManagedDoltWatchdogLine(r, watchdogPID)
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("read dolt scope watchdog start: %w", err)
+	}
+	return parseManagedDoltWatchdogStartLine(line)
 }
 
 func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
@@ -622,11 +732,37 @@ func managedDoltTestDisarmOnReady() bool {
 	return managedDoltTestModeFromEnvOnly() && !managedDoltTestHasExternalParent()
 }
 
+// managedDoltCleanupLogf records a managed-dolt startup-failure cleanup
+// diagnostic. It defaults to a GC_DEBUG-gated stderr line so the decision is
+// observable to an operator without noising the default CLI; the production
+// reaper keeps an analogous audit via appendProtectedPID. It is a package var
+// so tests can capture the message.
+var managedDoltCleanupLogf = func(format string, args ...any) {
+	if !gcDebugEnabled() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "managed-dolt cleanup: "+format+"\n", args...)
+}
+
 func terminateManagedDoltStartedProcess(started managedDoltStartedProcess) {
 	unregisterManagedDoltStartedProcess(started)
-	_ = terminateManagedDoltPID(started.CityPath, started.PID)
+	// The reap goroutine in startManagedDoltSQLServer (and the scope watchdog)
+	// Wait()s a failed child and frees its PID, so an unrelated process can reuse
+	// it before — or during — this same-attempt cleanup; signaling by bare PID
+	// would then hit the wrong process. terminateManagedDoltPIDGuarded re-verifies
+	// the snapshotted start identity immediately before SIGTERM and again before
+	// the SIGKILL escalation, skipping (and logging) the signal on a mismatch.
+	// When no identity was snapshotted (no /proc and no ps) the guard keeps the
+	// legacy terminate.
+	_ = terminateManagedDoltPIDGuarded(started.CityPath, started.PID, func() bool {
+		return managedDoltPIDStartIdentityMatches(started.PID, started.StartTimeTicks, started.StartIdentity)
+	})
+	// The watchdog PID carries the same reuse hazard — the parent reaps it too —
+	// so guard it against its own snapshot rather than signaling it blind.
 	if started.WatchdogPID > 0 {
-		_ = terminateManagedDoltPID(started.CityPath, started.WatchdogPID)
+		_ = terminateManagedDoltPIDGuarded(started.CityPath, started.WatchdogPID, func() bool {
+			return managedDoltPIDStartIdentityMatches(started.WatchdogPID, started.WatchdogStartTimeTicks, started.WatchdogStartIdentity)
+		})
 	}
 	if started.DisarmFile != "" {
 		_ = os.Remove(started.DisarmFile)
@@ -712,7 +848,7 @@ func reapManagedDoltTestProcesses() {
 			managedDoltTestProcessRegistry.Delete(key)
 			return true
 		}
-		if started.PID > 0 && pidAlive(started.PID) && managedDoltTestPIDIdentityMatches(started) {
+		if started.PID > 0 && pidAlive(started.PID) && managedDoltStartedPIDIdentityMatches(started) {
 			_ = managedDoltTestTerminateProcess(started.PID)
 		}
 		if started.WatchdogPID > 0 && pidAlive(started.WatchdogPID) {
@@ -725,27 +861,47 @@ func reapManagedDoltTestProcesses() {
 	})
 }
 
-// managedDoltTestPIDIdentityMatches re-reads the OS-level start identity for
-// started.PID and compares it against the snapshot taken at registration. If
-// both snapshots are present and disagree, the PID was reused — we must NOT
-// terminate. If neither snapshot is present, we can't verify and fall through
-// to the existing behavior (terminate). This mirrors the production reaper's
-// sameReapProcessIdentity (cmd_dolt_cleanup.go) precedence: ticks first, ps
-// lstart as fallback.
-func managedDoltTestPIDIdentityMatches(started managedDoltStartedProcess) bool {
-	if started.StartTimeTicks != 0 {
-		current := managedDoltTestReadStartTimeTicks(started.PID)
+// managedDoltStartedPIDIdentityMatches re-reads the OS-level start identity for
+// started.PID and compares it against the snapshot taken when the process was
+// started/registered. It guards both the background test reaper
+// (reapManagedDoltTestProcesses) and the synchronous production startup-failure
+// cleanup (terminateManagedDoltStartedProcess). A present snapshot that
+// disagrees with the re-read means the PID was reused — we must NOT terminate.
+func managedDoltStartedPIDIdentityMatches(started managedDoltStartedProcess) bool {
+	return managedDoltPIDStartIdentityMatches(started.PID, started.StartTimeTicks, started.StartIdentity)
+}
+
+// managedDoltPIDStartIdentityMatches re-reads pid's OS-level start identity and
+// compares it against a snapshot (startTimeTicks/startIdentity captured while the
+// process was known alive). It backs managedDoltStartedPIDIdentityMatches and the
+// SIGTERM/SIGKILL re-checks in terminateManagedDoltPIDGuarded, including the
+// watchdog PID's own snapshot.
+//
+// Only the identity PRECEDENCE mirrors the production reaper's
+// sameReapProcessIdentity (cmd_dolt_cleanup.go): start-time ticks first, ps
+// lstart as the no-/proc fallback. The unconfirmed-re-read DEFAULT intentionally
+// diverges. Where the production reaper protects (returns false) when it cannot
+// re-confirm a live process, this returns true — keep the legacy terminate —
+// because these callers reach here only for a PID they just observed alive and
+// own: if the re-read now yields nothing the PID has genuinely vanished, so the
+// ensuing signal is a harmless ESRCH no-op, while still cleaning up our own
+// failed child on a host that momentarily cannot read /proc. When neither
+// snapshot was captured at all (no /proc and no ps) the guard likewise cannot
+// verify and keeps the legacy terminate.
+func managedDoltPIDStartIdentityMatches(pid int, startTimeTicks uint64, startIdentity string) bool {
+	if startTimeTicks != 0 {
+		current := managedDoltTestReadStartTimeTicks(pid)
 		if current == 0 {
 			return true
 		}
-		return current == started.StartTimeTicks
+		return current == startTimeTicks
 	}
-	if started.StartIdentity != "" {
-		current := managedDoltTestReadStartIdentity(started.PID)
+	if startIdentity != "" {
+		current := managedDoltTestReadStartIdentity(pid)
 		if current == "" {
 			return true
 		}
-		return current == started.StartIdentity
+		return current == startIdentity
 	}
 	return true
 }
@@ -898,7 +1054,30 @@ func resolveDoltArchiveLevel(explicit int) int {
 // cityPath (test watchdog, recovery cleanup without a city) keeps the legacy
 // unconditional SIGKILL.
 func terminateManagedDoltPID(cityPath string, pid int) error {
+	return terminateManagedDoltPIDGuarded(cityPath, pid, nil)
+}
+
+// terminateManagedDoltPIDGuarded is terminateManagedDoltPID with a PID-reuse
+// guard. When identityMatches is non-nil it is evaluated immediately before the
+// SIGTERM and again immediately before the SIGKILL escalation; a false result
+// means the numeric PID no longer belongs to the process we intended to signal
+// (it exited, was reaped, and the number was reused), so the pending signal is
+// skipped and the decision is logged.
+//
+// The SIGKILL re-check is the load-bearing one. terminateManagedDoltPID's own
+// caller (terminateManagedDoltStartedProcess) checks identity once at entry, but
+// the target can exit and its PID be reused during the SIGTERM grace below —
+// pidAlive then reports the reused process as alive, the grace runs to its
+// deadline, and a bare-PID SIGKILL would land on the stranger. Re-verifying just
+// before the kill closes that window. A nil guard keeps the legacy unconditional
+// behavior for callers that never snapshotted an identity (test watchdog,
+// recovery cleanup, pre-handshake scope watchdog).
+func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches func() bool) error {
 	if pid <= 0 {
+		return nil
+	}
+	if identityMatches != nil && !identityMatches() {
+		managedDoltCleanupLogf("skipping terminate of pid %d: start identity changed (PID reused)", pid)
 		return nil
 	}
 	process, err := os.FindProcess(pid)
@@ -922,6 +1101,14 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 		if !pidAlive(pid) {
 			return nil
 		}
+	}
+	// Re-verify identity immediately before the forced kill: the target outlived
+	// the SIGTERM grace, but if it exited and the PID was reused mid-grace,
+	// pidAlive is now reporting the reused process. Skip the SIGKILL on a
+	// mismatch so it never lands on an unrelated process.
+	if identityMatches != nil && !identityMatches() {
+		managedDoltCleanupLogf("skipping SIGKILL of pid %d: start identity changed (PID reused)", pid)
+		return nil
 	}
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)

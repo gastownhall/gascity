@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,8 +31,26 @@ import (
 // direct city mutations away with a clear 401; an authority-fronted deployment
 // supplies grants out of band rather than minting them in this process.
 const (
-	writeAuthHeader   = "X-GC-City-Write"
-	writeAuthAudience = "gc-city-write"
+	writeAuthHeader = "X-GC-City-Write"
+
+	// writeAuthAudience is the expected grant audience. The ".v2" suffix is
+	// the cid-tenancy cutover's deploy-ordering forcing function (see the
+	// crucible cityWriteAudience doc): a pre-cid verifier build would silently
+	// drop the unknown cid claim from a v2 token and admit it unchecked, so
+	// the audience was bumped in lockstep with the cid claim — only a build
+	// that enforces cid (this one) may expect the v2 audience. There is NO env
+	// override for the audience and none may be added: a verifier code deploy
+	// IS the forcing function.
+	writeAuthAudience = "gc-city-write.v2"
+	// writeAuthLegacyAudience is the pre-cid audience, still accepted so
+	// grants minted by an operator's own v1 authority keep verifying — but
+	// ONLY on an untenanted deployment. On a tenancy-scoped deployment
+	// (GC_CITY_WRITE_CID set) the verifier accepts only the v2 audience and
+	// rejects the legacy audience outright, so even a mis-minted or
+	// rollout-era grant carrying the legacy audience *and* a matching cid
+	// cannot ride past the v2 cutover. Legacy acceptance therefore never
+	// reopens the tenancy window the v2 cutover closed.
+	writeAuthLegacyAudience = "gc-city-write"
 
 	// maxWriteBodyBytes caps the request body the middleware buffers to compute
 	// the request digest, so an unauthenticated caller cannot exhaust memory by
@@ -44,26 +63,20 @@ const (
 	writeAuthSkew   = 30 * time.Second
 )
 
-// cityScopedObjectMutation reports whether path targets an existing city whose
-// config the write-auth gate must cover, returning the city name. It matches the
-// per-city typed gc routes: /v0/city/{cityName} (the suspend/resume PATCH) and
+// cityScopedObjectPath is the shared path grammar for the city-scoped auth gates
+// (write-auth and read-auth), returning the city name. It matches the per-city
+// typed gc routes: /v0/city/{cityName} (the suspend/resume PATCH) and
 // /v0/city/{cityName}/<sub-resource>. It excludes:
-//   - registry creation (POST /v0/city) and the bare /v0/city/ (empty name): a
-//     grant binds a path-resident city name, so creating a city — which carries
-//     no city in its path yet — stays governed by the prior supervisor-registry
-//     guards, not this gate. Write-auth covers mutations of cities that already
-//     exist (including unregister, which does carry the city in its path).
-//   - any other non-city path,
+//   - the bare /v0/city/ (empty name) and any non-city path,
 //   - an empty sub-resource (/v0/city/{name}/),
-//   - the /svc/ workspace-service pass-through, which cannot mutate gc config
-//     objects and applies its own publication rules.
+//   - the /svc/ workspace-service pass-through, which applies its own
+//     publication rules.
 //
-// The /hook/ webhook receiver is deliberately NOT exempted (the H2 reversal): a
-// /hook/{name} POST dispatches order → sh -c authenticated by a verifier a pack
-// may author, so when write-auth is configured it stays gated on the operator's
-// signed grant. Signature verification (E4) is an ADDITIONAL gate for public
-// webhooks, never a replacement for this one. Do not add a /hook/ exemption here.
-func cityScopedObjectMutation(path string) (city string, ok bool) {
+// It matches on path only; the caller applies the method policy (write-auth
+// gates mutations; read-auth gates GET/HEAD). Registry creation (POST /v0/city)
+// carries no path-resident city and so does not match here — see the
+// method-policy callers for the carve-out rationale.
+func cityScopedObjectPath(path string) (city string, ok bool) {
 	const prefix = "/v0/city/"
 	if !strings.HasPrefix(path, prefix) {
 		return "", false
@@ -90,6 +103,25 @@ func cityScopedObjectMutation(path string) (city string, ok bool) {
 		return "", false // workspace-service pass-through is exempt
 	}
 	return city, true
+}
+
+// cityScopedObjectMutation reports whether path targets an existing city whose
+// config the write-auth gate must cover, returning the city name. It shares the
+// grammar in cityScopedObjectPath; the write gate additionally restricts by
+// method (mutations only). Notes on the write-side carve-outs:
+//   - registry creation (POST /v0/city) carries no path-resident city name, so
+//     creating a city stays governed by the prior supervisor-registry guards,
+//     not this gate. Write-auth covers mutations of cities that already exist
+//     (including unregister, which does carry the city in its path).
+//   - the /svc/ workspace-service pass-through is exempt (shared grammar).
+//
+// The /hook/ webhook receiver is deliberately NOT exempted (the H2 reversal): a
+// /hook/{name} POST dispatches order → sh -c authenticated by a verifier a pack
+// may author, so when write-auth is configured it stays gated on the operator's
+// signed grant. Signature verification (E4) is an ADDITIONAL gate for public
+// webhooks, never a replacement for this one. Do not add a /hook/ exemption here.
+func cityScopedObjectMutation(path string) (city string, ok bool) {
+	return cityScopedObjectPath(path)
 }
 
 // writeAuthMiddleware enforces a valid X-GC-City-Write grant on every
@@ -216,6 +248,11 @@ var (
 	}
 )
 
+// writeAuthBootLogf is the sink for boot-time write-auth setup warnings,
+// swappable in tests. It follows the package's log.Printf idiom (server-side
+// stderr), matching how the controller and supervisor surface boot diagnostics.
+var writeAuthBootLogf = log.Printf
+
 // parseVerifyKeys parses a verifying-key set of the form
 // "kid:base64,kid2:base64" where each base64 is the standard-encoded 32-byte
 // ed25519 public key. At least one well-formed entry is required.
@@ -229,19 +266,19 @@ func parseVerifyKeys(s string) (map[string]ed25519.PublicKey, error) {
 		kid, b64, ok := strings.Cut(part, ":")
 		kid = strings.TrimSpace(kid)
 		if !ok || kid == "" {
-			return nil, fmt.Errorf("write-auth key %q: want kid:base64", part)
+			return nil, fmt.Errorf("verify key %q: want kid:base64", part)
 		}
 		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 		if err != nil {
-			return nil, fmt.Errorf("write-auth key %q: %w", kid, err)
+			return nil, fmt.Errorf("verify key %q: %w", kid, err)
 		}
 		if len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("write-auth key %q: wrong public-key size %d", kid, len(raw))
+			return nil, fmt.Errorf("verify key %q: wrong public-key size %d", kid, len(raw))
 		}
 		keys[kid] = ed25519.PublicKey(raw)
 	}
 	if len(keys) == 0 {
-		return nil, errors.New("write-auth: no verifying keys parsed")
+		return nil, errors.New("no verifying keys parsed")
 	}
 	return keys, nil
 }
@@ -252,6 +289,16 @@ func parseVerifyKeys(s string) (map[string]ed25519.PublicKey, error) {
 // required. When write-auth is required (configRequired, or
 // GC_CITY_WRITE_REQUIRED=1) but no key is present it returns an error so the
 // caller can fail closed at boot rather than serve mutations unguarded.
+//
+// GC_CITY_WRITE_CID, when set, is the controller's own org-unique city id (the
+// hosted launcher injects it into every controller pod): the verifier then
+// requires every grant's cid claim to match it exactly, failing closed on a
+// mismatching or missing cid so a grant minted for another tenant's
+// same-named city can never be replayed here. Without a verifying key the cid
+// is inert — the write plane stays off and reads are unaffected. A key WITHOUT
+// a cid boots with a WARN, not an error: tenancy binding is then city-name-only,
+// which untenanted operator-run single-tenant deployments legitimately choose,
+// but which on a hosted deployment means the launcher failed to inject the cid.
 func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywriteauth.Verifier, error) {
 	raw := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_PUBKEY"))
 	if raw == "" {
@@ -275,8 +322,14 @@ func ResolveWriteAuthVerifier(configKey string, configRequired bool) (*citywrite
 			return nil, fmt.Errorf("GC_CITY_WRITE_EPOCH_FLOOR: %w", err)
 		}
 	}
+	cid := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_CID"))
+	if cid == "" {
+		writeAuthBootLogf("api: write-auth: WARNING: verifying key configured but GC_CITY_WRITE_CID is empty — grant tenancy binding is city-name-only; hosted launchers are expected to inject GC_CITY_WRITE_CID")
+	}
 	return citywriteauth.New(citywriteauth.Options{
 		Aud:        writeAuthAudience,
+		LegacyAud:  writeAuthLegacyAudience,
+		CID:        cid,
 		Keys:       keys,
 		EpochFloor: epochFloor,
 		MaxTTL:     writeAuthMaxTTL,

@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestParseTemplateOverrides pins the shared template_overrides parse contract
@@ -54,5 +56,34 @@ func TestParseTemplateOverrides(t *testing.T) {
 				t.Fatalf("ParseTemplateOverrides() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseTemplateOverridesFromInfoMatchesRaw proves the Info front-door decode
+// (ParseTemplateOverridesFromInfo, used by the reconciler config-drift hash path
+// and the launch path) is byte-identical to the raw ParseTemplateOverrides for
+// the same bead across the full absent/blank/null/empty/malformed/valid contract.
+func TestParseTemplateOverridesFromInfoMatchesRaw(t *testing.T) {
+	metas := []map[string]string{
+		nil,
+		{"state": "asleep"},
+		{"template_overrides": ""},
+		{"template_overrides": " \n\t "},
+		{"template_overrides": "null"},
+		{"template_overrides": "{}"},
+		{"template_overrides": "{not json"},
+		{"template_overrides": `{"model":1}`},
+		{"template_overrides": `{"model":"sonnet","initial_message":"hi"}`},
+	}
+	for _, meta := range metas {
+		info := infoFromPersistedBead(beads.Bead{Metadata: meta})
+		rawOut, rawErr := ParseTemplateOverrides(meta)
+		infoOut, infoErr := ParseTemplateOverridesFromInfo(info)
+		if (rawErr == nil) != (infoErr == nil) {
+			t.Fatalf("meta=%v: raw err=%v info err=%v", meta, rawErr, infoErr)
+		}
+		if !reflect.DeepEqual(rawOut, infoOut) {
+			t.Fatalf("meta=%v: raw=%v info=%v", meta, rawOut, infoOut)
+		}
 	}
 }

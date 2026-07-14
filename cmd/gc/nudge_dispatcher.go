@@ -112,7 +112,7 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 //
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
@@ -153,10 +153,18 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		return 0, nil
 	}
 
+	// The dispatcher receives the nudges-class store (store) PLUS the session-class
+	// store (sessStore) the caller resolved from the WORK store — the controller
+	// threads cr.sessionsBeadStore().Store, whose fallback is the work store, NOT
+	// the nudges store. The session observe below and the queue-delivery path's
+	// session ops route through sessStore; the queue record/dead-letter stays on
+	// store. Identity today; corrects the pre-existing controller-side class mix
+	// (deriving sessStore from the nudges base would mis-resolve session beads once
+	// nudges relocates independently of sessions).
 	delivered := 0
 	var firstErr error
-	for _, b := range sessionBeads.Open() {
-		target := resolveNudgeTargetFromSessionBead(cityPath, cfg, b)
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
 			continue
 		}
@@ -176,7 +184,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if !matched {
 			continue
 		}
-		obs, err := workerObserveNudgeTarget(target, store, sp)
+		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -186,7 +194,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if !obs.Running {
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sp, defaultNudgePollQuiescence, obs)
+		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

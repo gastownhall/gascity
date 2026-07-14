@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 // TestHumaBinary_SupervisorBootsAndServesSpec builds `gc`, starts the
@@ -761,6 +763,10 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	bin := buildGCBinary(t)
 
 	root := shortTempDir(t)
+	providerBinDir := filepath.Join(root, "bin")
+	if err := helpers.StageIdleProviderBinary(providerBinDir, "claude"); err != nil {
+		t.Fatalf("stage Claude provider double: %v", err)
+	}
 	gcHome := filepath.Join(root, "home")
 	runtimeDir := filepath.Join(root, "run")
 	for _, dir := range []string{gcHome, runtimeDir} {
@@ -776,7 +782,9 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	env := integrationEnvFor(gcHome, runtimeDir, true)
-	env = append(env, "GC_SESSION=fake")
+	envMap := parseEnvList(env)
+	env = replaceEnv(env, "PATH", prependPath(providerBinDir, envMap["PATH"]))
+	env = replaceEnv(env, "GC_SESSION", "fake")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
