@@ -65,6 +65,7 @@ endif
 endif
 
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go
+.PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
 build:
@@ -109,7 +110,22 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-routed-test-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test
+
+## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
+check-release-dist-ignore:
+	@ tracked=$$(git ls-files -- dist); \
+	if [ -n "$$tracked" ]; then \
+		echo "ERROR: release output is tracked:" >&2; \
+		echo "$$tracked" >&2; \
+		exit 1; \
+	fi; \
+	if git check-ignore --no-index -q dist/metadata.json; then \
+		echo "check-release-dist-ignore: OK (/dist/ is ignored)"; \
+	else \
+		echo "ERROR: dist/metadata.json is not ignored; GoReleaser builds will report vcs.modified=true" >&2; \
+		exit 1; \
+	fi
 
 ## check-routed-test-rows: enforce the six-row matrix on read-path routed tests
 ## Prevents per-file read-path migrations (ga-h6w) from regressing below the
@@ -179,7 +195,7 @@ check-version-tag:
 	exit 1
 
 ## check-all: run all quality gates including integration tests (CI)
-check-all: fmt-check lint vet check-bd check-dolt check-docker test-integration check-docs
+check-all: fmt-check lint vet check-release-dist-ignore check-bd check-dolt check-docker test-integration check-docs
 
 LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD

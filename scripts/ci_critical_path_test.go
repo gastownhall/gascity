@@ -618,6 +618,98 @@ func TestPackGateAddsOnlyParallelPackCoverage(t *testing.T) {
 	}
 }
 
+func TestGoReleaserOutputCannotDirtyReleaseBuilds(t *testing.T) {
+	gitignorePath := filepath.Join(repoRoot(t), ".gitignore")
+	body, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", gitignorePath, err)
+	}
+
+	var ignoresRootDist bool
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == "/dist/" {
+			ignoresRootDist = true
+			break
+		}
+	}
+	if !ignoresRootDist {
+		t.Fatal("root .gitignore must contain anchored /dist/ so GoReleaser metadata cannot set vcs.modified=true")
+	}
+}
+
+func TestReleasePipelinesVerifyExactBinaryMetadata(t *testing.T) {
+	tests := []struct {
+		name               string
+		workflow           string
+		job                string
+		wantCommitResolver string
+		wantVersionArg     string
+	}{
+		{
+			name:               "release",
+			workflow:           "release.yml",
+			job:                "release",
+			wantCommitResolver: `git rev-parse "${GITHUB_REF_NAME}^{commit}"`,
+			wantVersionArg:     `"${GITHUB_REF_NAME#v}"`,
+		},
+		{
+			name:               "rc gate snapshot",
+			workflow:           "rc-gate.yml",
+			job:                "ubuntu_goreleaser_snapshot",
+			wantCommitResolver: "git rev-parse HEAD",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := readCriticalPathWorkflow(t, tt.workflow)
+			job, ok := wf.Jobs[tt.job]
+			if !ok {
+				t.Fatalf("workflow %s has no %s job", tt.workflow, tt.job)
+			}
+
+			goreleaserIndex := -1
+			ignoreCheckIndex := -1
+			metadataCheckIndex := -1
+			var metadataCheck ciCriticalPathStep
+			for i, step := range job.Steps {
+				if strings.HasPrefix(step.Uses, "goreleaser/goreleaser-action@") {
+					goreleaserIndex = i
+				}
+				if strings.Contains(step.Run, "make check-release-dist-ignore") {
+					ignoreCheckIndex = i
+				}
+				if step.Name == "Verify release binary metadata" {
+					metadataCheckIndex = i
+					metadataCheck = step
+				}
+			}
+
+			if goreleaserIndex < 0 {
+				t.Fatal("GoReleaser step not found")
+			}
+			if ignoreCheckIndex < 0 || ignoreCheckIndex >= goreleaserIndex {
+				t.Fatalf("release-output ignore check index = %d, want before GoReleaser index %d", ignoreCheckIndex, goreleaserIndex)
+			}
+			if metadataCheckIndex <= goreleaserIndex {
+				t.Fatalf("binary metadata check index = %d, want after GoReleaser index %d", metadataCheckIndex, goreleaserIndex)
+			}
+			if metadataCheck.ContinueOnError {
+				t.Fatal("binary metadata verification must block release progression")
+			}
+			if !strings.Contains(metadataCheck.Run, "scripts/verify-release-binary-metadata.sh") {
+				t.Fatal("binary metadata verification must use the shared checker")
+			}
+			if !strings.Contains(metadataCheck.Run, tt.wantCommitResolver) {
+				t.Errorf("binary metadata verification does not resolve the expected commit with %q", tt.wantCommitResolver)
+			}
+			if tt.wantVersionArg != "" && !strings.Contains(metadataCheck.Run, tt.wantVersionArg) {
+				t.Errorf("binary metadata verification does not require release version %s", tt.wantVersionArg)
+			}
+		})
+	}
+}
+
 func readCriticalPathWorkflow(t *testing.T, name string) ciCriticalPathWorkflow {
 	t.Helper()
 

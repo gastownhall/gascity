@@ -6,6 +6,7 @@ coverage.noncmdgc.txt
 coverage.cmdgc.*.txt
 cmd/gc/.runtime/
 /bin/
+/dist/
 /gc
 /genschema
 /bd
