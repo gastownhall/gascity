@@ -170,6 +170,17 @@ expires = "2026-10-01"
 # declaration leave the Small-debt census; helper bodies and sibling tests do
 # not inherit a source exemption.
 [[medium]]
+package_dir = "internal/api"
+package_name = "api"
+owner = "TestEveryEmittedErrorCodeIsRegistered"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "internal/api tracked-source error URN guard is a checked Medium owner"
+resource_owner = "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
 package_dir = "cmd/gc"
 package_name = "main"
 owner = "TestMain"
@@ -185,8 +196,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 375
-baseline_files = 98
+baseline_calls = 374
+baseline_files = 97
 reported_calls = 374
 reported_files = 97
 owner_bead = "ga-80po0c.2.1"
