@@ -40,6 +40,20 @@ func TestDefaultAvoidsSharedTempFallback(t *testing.T) {
 	}
 }
 
+func TestProcessUniqueFallbackNeverShared(t *testing.T) {
+	got := ProcessUniqueFallback()
+
+	if shared := filepath.Join(os.TempDir(), ".gc"); got == shared {
+		t.Fatalf("ProcessUniqueFallback() = %q, want a process-isolated path, not the shared %q", got, shared)
+	}
+	if got == "" {
+		t.Fatal("ProcessUniqueFallback() returned an empty path; callers would write state to a CWD-relative path")
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("ProcessUniqueFallback() = %q, want an absolute process-isolated path", got)
+	}
+}
+
 func TestRegistryPathsUseHome(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "gc")
 

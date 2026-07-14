@@ -10,13 +10,22 @@ vulnerabilities:
   # upstream actually rebuilds.
   #
   # Go stdlib CVEs disclosed 2026-05-12. Fixed in Go 1.25.10 / 1.26.3 for
-  # the first batch (33811–42499); Go 1.26.4 / 1.25.11 for CVE-2026-42504.
+  # the first batch (33811–42499); Go 1.26.4 / 1.25.11 for CVE-2026-42504
+  # and CVE-2026-27145.
   # As of 2026-06-15: cli/cli v2.94.0 ships Go 1.26.4 (clears all entries);
   # gh is installed unpinned via apt so a base-image rebuild picks it up
   # automatically. dolthub/dolt v2.1.7 still uses Go 1.26.2 (pending
   # upstream). gc builds against Go 1.26.4 (go.mod, via PR #3297).
   # Durable full fix tracked in ga-frh27v; remove dolt entries once upstream
   # ships a Go 1.26.4+ build.
+  - id: CVE-2026-27145
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-07-07
+    statement: Go stdlib x509 VerifyHostname issue (CVE-2026-27145), fixed in Go 1.25.11 / 1.26.4. bd, br, dolt, and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.4+. gh cleared by v2.94.0 (Go 1.26.4) on base-image rebuild; gc cleared by go.mod bump to 1.26.4 (PR #3297).
   - id: CVE-2026-33811
     paths:
       - "usr/local/bin/bd"

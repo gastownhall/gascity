@@ -153,16 +153,10 @@ func EnsureBootstrapForCity(gcHome string, userImports map[string]config.Import)
 	return nil
 }
 
-func defaultGCHome() string {
-	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
-		return v
-	}
-	if strings.HasSuffix(os.Args[0], ".test") {
-		return ""
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".gc")
-	}
+// defaultGCHomeFallback is a copy of gchome.ProcessUniqueFallback kept
+// package-internal to avoid a new cross-package dependency (#3661).
+// Any changes here must be mirrored in the other three copies.
+func defaultGCHomeFallback() string {
 	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
 	// is shared and world-writable, so concurrent processes clobber each
 	// other's state and unrelated city scans pick it up as a real city
@@ -176,6 +170,19 @@ func defaultGCHome() string {
 	// the shared os.TempDir()/.gc that #3506 is about. The caller then fails
 	// loudly when it cannot create or write this path.
 	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
+}
+
+func defaultGCHome() string {
+	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
+		return v
+	}
+	if strings.HasSuffix(os.Args[0], ".test") {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".gc")
+	}
+	return defaultGCHomeFallback()
 }
 
 func bootstrapPackRevision(entry Entry) (string, error) {

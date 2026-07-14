@@ -18,6 +18,16 @@ func Default() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".gc")
 	}
+	return ProcessUniqueFallback()
+}
+
+// ProcessUniqueFallback returns a process-unique directory for use when the
+// user home directory is unresolvable. It tries os.MkdirTemp first; if that
+// fails it falls back to a PID-stamped path under os.TempDir. It never returns
+// the shared os.TempDir()/.gc (#3506) and never returns "" (which callers
+// would join into a CWD-relative path, silently writing state to the wrong
+// place).
+func ProcessUniqueFallback() string {
 	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
 	// is shared and world-writable, so concurrent processes clobber each
 	// other's state and unrelated city scans pick it up as a real city

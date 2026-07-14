@@ -224,10 +224,10 @@ func DefaultHome() string {
 	return builtinDefaultHome()
 }
 
-func builtinDefaultHome() string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".gc")
-	}
+// builtinDefaultHomeFallback is a copy of gchome.ProcessUniqueFallback kept
+// package-internal to avoid a new cross-package dependency (#3661).
+// Any changes here must be mirrored in the other three copies.
+func builtinDefaultHomeFallback() string {
 	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
 	// is shared and world-writable, so concurrent processes clobber each
 	// other's state and unrelated city scans pick it up as a real city
@@ -241,6 +241,13 @@ func builtinDefaultHome() string {
 	// the shared os.TempDir()/.gc that #3506 is about. The caller then fails
 	// loudly when it cannot create or write this path.
 	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
+}
+
+func builtinDefaultHome() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".gc")
+	}
+	return builtinDefaultHomeFallback()
 }
 
 // UsesIsolatedGCHomeOverride reports whether GC_HOME points away from the builtin ~/.gc default.
