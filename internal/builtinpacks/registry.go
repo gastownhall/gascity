@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/examples/bd"
 	"github.com/gastownhall/gascity/examples/bd/dolt"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	gitutil "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/remotesource"
@@ -469,7 +470,15 @@ func materializeFS(src fs.FS, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		if err := fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, target, file.data, file.perm); err != nil {
+		data := file.data
+		// Resolve {{binary}} and other built-in vars at write time so materialized
+		// content references the actual binary name. Applied only on write (not on
+		// hash computation) so the content hash remains stable across renames.
+		base := filepath.Base(rel)
+		if base == "SKILL.md" || (strings.HasSuffix(base, ".toml") && strings.HasPrefix(base, "mol-")) {
+			data = []byte(formula.Substitute(string(data), nil))
+		}
+		if err := fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, target, data, file.perm); err != nil {
 			return err
 		}
 	}
@@ -494,7 +503,12 @@ func validatePackFiles(pack Pack, dst string) error {
 		if err != nil {
 			return fmt.Errorf("reading bundled pack cache %q file %s: %w", pack.Name, rel, err)
 		}
-		if !bytes.Equal(got, want.data) {
+		wantData := want.data
+		base := filepath.Base(rel)
+		if base == "SKILL.md" || (strings.HasSuffix(base, ".toml") && strings.HasPrefix(base, "mol-")) {
+			wantData = []byte(formula.Substitute(string(wantData), nil))
+		}
+		if !bytes.Equal(got, wantData) {
 			return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", pack.Name, rel)
 		}
 	}

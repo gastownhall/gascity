@@ -19,7 +19,8 @@ BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
-           -X main.date=$(BUILD_TIME)
+           -X main.date=$(BUILD_TIME) \
+           -X main.binaryName=$(BINARY)
 
 unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
 

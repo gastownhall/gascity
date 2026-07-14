@@ -556,6 +556,18 @@ func mergeComposeRules(base, overlay *ComposeRules) *ComposeRules {
 // varPattern matches {{variable}} placeholders.
 var varPattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
 
+// builtInVars holds variables registered at startup (e.g. "binary") that are
+// available in all formula substitutions without explicit --var flags.
+var builtInVars map[string]string
+
+// RegisterBuiltInVars sets the package-level built-in variables.
+// Substitute falls back to these when the caller-supplied map doesn't match.
+// CheckResidualVars skips names present here.
+// Pass nil to clear (useful in test cleanup).
+func RegisterBuiltInVars(vars map[string]string) {
+	builtInVars = vars
+}
+
 // ExtractVariables finds all {{variable}} references in a formula.
 func ExtractVariables(formula *Formula) []string {
 	seen := make(map[string]bool)
@@ -614,12 +626,18 @@ func ExtractVariables(formula *Formula) []string {
 }
 
 // Substitute replaces {{variable}} placeholders with values.
+// Caller-supplied vars take priority; built-in vars (registered via
+// RegisterBuiltInVars) are used as a fallback.
 func Substitute(s string, vars map[string]string) string {
 	return varPattern.ReplaceAllStringFunc(s, func(match string) string {
-		// Extract variable name from {{name}}
 		name := match[2 : len(match)-2]
 		if val, ok := vars[name]; ok {
 			return val
+		}
+		if builtInVars != nil {
+			if val, ok := builtInVars[name]; ok {
+				return val
+			}
 		}
 		return match // Keep unresolved placeholders
 	})
@@ -627,7 +645,8 @@ func Substitute(s string, vars map[string]string) string {
 
 // CheckResidualVars returns the names of any {{...}} placeholders remaining
 // in s after substitution. A non-empty return indicates a var name typo or
-// a missing or misspelled --var flag.
+// a missing or misspelled --var flag. Names present in builtInVars are
+// skipped since they will be resolved by Substitute.
 func CheckResidualVars(s string) []string {
 	matches := varPattern.FindAllStringSubmatch(s, -1)
 	if len(matches) == 0 {
@@ -636,11 +655,20 @@ func CheckResidualVars(s string) []string {
 	seen := make(map[string]bool, len(matches))
 	names := make([]string, 0, len(matches))
 	for _, m := range matches {
-		if seen[m[1]] {
+		name := m[1]
+		if seen[name] {
 			continue
 		}
-		seen[m[1]] = true
-		names = append(names, m[1])
+		seen[name] = true
+		if builtInVars != nil {
+			if _, ok := builtInVars[name]; ok {
+				continue
+			}
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil
 	}
 	return names
 }
