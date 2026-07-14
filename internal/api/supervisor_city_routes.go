@@ -34,6 +34,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Status + Health.
 	cityGet(sm, "/status", (*Server).humaHandleStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/health", (*Server).humaHandleHealth, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/usage", (*Server).humaHandleUsage, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// City detail.
 	cityGet(sm, "", (*Server).humaHandleCityGet, errorStatuses(http.StatusNotFound))

@@ -396,6 +396,24 @@ func (e TranscriptProvenance) Valid() bool {
 	}
 }
 
+// Defines values for UsageBodySource.
+const (
+	LocalEstimate UsageBodySource = "local_estimate"
+	Unavailable   UsageBodySource = "unavailable"
+)
+
+// Valid indicates whether the value is a known member of the UsageBodySource enum.
+func (e UsageBodySource) Valid() bool {
+	switch e {
+	case LocalEstimate:
+		return true
+	case Unavailable:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PostV0CityByCityNameAgentByBaseByActionParamsAction.
 const (
 	PostV0CityByCityNameAgentByBaseByActionParamsActionResume  PostV0CityByCityNameAgentByBaseByActionParamsAction = "resume"
@@ -2930,6 +2948,33 @@ type RunScope struct {
 // RunStatus Closed lifecycle state of a run.
 type RunStatus string
 
+// RunStatusCounts defines model for RunStatusCounts.
+type RunStatusCounts struct {
+	// Active Runs with work in progress.
+	Active int64 `json:"active"`
+
+	// Canceled Runs terminated by cancellation.
+	Canceled int64 `json:"canceled"`
+
+	// Canceling Runs winding down after cancellation.
+	Canceling int64 `json:"canceling"`
+
+	// Completed Runs completed successfully.
+	Completed int64 `json:"completed"`
+
+	// Failed Runs completed with failure.
+	Failed int64 `json:"failed"`
+
+	// Pending Runs created but not yet started.
+	Pending int64 `json:"pending"`
+
+	// Skipped Runs completed as a no-op or skip.
+	Skipped int64 `json:"skipped"`
+
+	// Waiting Runs waiting on a dependency or gate.
+	Waiting int64 `json:"waiting"`
+}
+
 // RunStep defines model for RunStep.
 type RunStep struct {
 	// Assignee Current assignee, when set.
@@ -2969,7 +3014,8 @@ type RunsListOutputBody struct {
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Runs Runs in the city, newest activity first.
-	Runs *[]Run `json:"runs"`
+	Runs         *[]Run          `json:"runs"`
+	StatusCounts RunStatusCounts `json:"status_counts"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -6177,6 +6223,98 @@ type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 type UnboundEventPayload struct {
 	Count     int64  `json:"count"`
 	SessionId string `json:"session_id"`
+}
+
+// UsageBody defines model for UsageBody.
+type UsageBody struct {
+	// Available True when this city is configured to record local usage estimates.
+	Available bool `json:"available"`
+
+	// ObservedFrom RFC3339 timestamp of the oldest fact included in this bounded read.
+	ObservedFrom *string `json:"observed_from,omitempty"`
+
+	// Partial True when the bounded reader skipped history or malformed records.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialReasons Path-sanitized reasons the aggregate may be incomplete.
+	PartialReasons *[]string   `json:"partial_reasons,omitempty"`
+	Recent         UsageTotals `json:"recent"`
+
+	// RecentBySession Recent model usage per session, largest token volume first.
+	RecentBySession *[]UsageSessionRecent `json:"recent_by_session,omitempty"`
+
+	// RecentWindowSecs Length of the recent window in seconds.
+	RecentWindowSecs int64 `json:"recent_window_secs"`
+
+	// Recording True when new facts are currently being written to the local estimate log.
+	Recording bool `json:"recording"`
+
+	// Source Source of this usage reading.
+	Source UsageBodySource `json:"source"`
+	Today  UsageTotals     `json:"today"`
+
+	// UpdatedAt RFC3339 time at which the aggregate was built.
+	UpdatedAt string `json:"updated_at"`
+}
+
+// UsageBodySource Source of this usage reading.
+type UsageBodySource string
+
+// UsageSessionRecent defines model for UsageSessionRecent.
+type UsageSessionRecent struct {
+	// CacheCreationTokens Prompt-cache creation tokens in the window.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens in the window.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// CostUsdEstimate List-price estimate for the window.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens in the window.
+	InputTokens int64 `json:"input_tokens"`
+
+	// OutputTokens Completion tokens in the window.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Session Session (worker) name the facts were attributed to.
+	Session string `json:"session"`
+
+	// SessionId Session bead id, when attributed.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// Unpriced Facts in this window whose price is unknown.
+	Unpriced int64 `json:"unpriced"`
+}
+
+// UsageTotals defines model for UsageTotals.
+type UsageTotals struct {
+	// CacheCreationTokens Prompt-cache creation tokens.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// ComputeFacts Compute (wall-clock) facts in the window.
+	ComputeFacts int64 `json:"compute_facts"`
+
+	// CostUsdEstimate List-price estimate; decision-support only, never an authoritative charge.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens.
+	InputTokens int64 `json:"input_tokens"`
+
+	// Invocations Model facts (LLM invocations) in the window.
+	Invocations int64 `json:"invocations"`
+
+	// OutputTokens Completion tokens.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Unpriced Facts with unknown pricing; their cost is not included in the estimate.
+	Unpriced int64 `json:"unpriced"`
+
+	// WallSeconds Compute wall-clock seconds.
+	WallSeconds float64 `json:"wall_seconds"`
 }
 
 // WaitListBody defines model for WaitListBody.
@@ -14175,6 +14313,9 @@ type ClientInterface interface {
 	// PostV0CityByCityNameUnregister request
 	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameUsage request
+	GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameWaitById request
 	GetV0CityByCityNameWaitById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16554,6 +16695,18 @@ func (c *Client) GetV0CityByCityNameStatus(ctx context.Context, cityName string,
 
 func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameUnregisterRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -26344,6 +26497,40 @@ func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, pa
 	return req, nil
 }
 
+// NewGetV0CityByCityNameUsageRequest generates requests for GetV0CityByCityNameUsage
+func NewGetV0CityByCityNameUsageRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/usage", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameWaitByIdRequest generates requests for GetV0CityByCityNameWaitById
 func NewGetV0CityByCityNameWaitByIdRequest(server string, cityName string, id string) (*http.Request, error) {
 	var err error
@@ -27525,6 +27712,9 @@ type ClientWithResponsesInterface interface {
 
 	// PostV0CityByCityNameUnregisterWithResponse request
 	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
+
+	// GetV0CityByCityNameUsageWithResponse request
+	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
 
 	// GetV0CityByCityNameWaitByIdWithResponse request
 	GetV0CityByCityNameWaitByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitByIdResponse, error)
@@ -31737,6 +31927,32 @@ func (r PostV0CityByCityNameUnregisterResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameUsageResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *UsageBody
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameUsageResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameUsageResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameWaitByIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -33662,6 +33878,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx con
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameUnregisterResponse(rsp)
+}
+
+// GetV0CityByCityNameUsageWithResponse request returning *GetV0CityByCityNameUsageResponse
+func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
+	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameUsageResponse(rsp)
 }
 
 // GetV0CityByCityNameWaitByIdWithResponse request returning *GetV0CityByCityNameWaitByIdResponse
@@ -43320,6 +43545,60 @@ func ParsePostV0CityByCityNameUnregisterResponse(rsp *http.Response) (*PostV0Cit
 			return nil, err
 		}
 		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameUsageResponse parses an HTTP response from a GetV0CityByCityNameUsageWithResponse call
+func ParseGetV0CityByCityNameUsageResponse(rsp *http.Response) (*GetV0CityByCityNameUsageResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameUsageResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UsageBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

@@ -2854,6 +2854,41 @@ export type RunScope = {
  */
 export type RunStatus = 'pending' | 'active' | 'waiting' | 'canceling' | 'completed' | 'failed' | 'canceled' | 'skipped';
 
+export type RunStatusCounts = {
+    /**
+     * Runs with work in progress.
+     */
+    active: number;
+    /**
+     * Runs terminated by cancellation.
+     */
+    canceled: number;
+    /**
+     * Runs winding down after cancellation.
+     */
+    canceling: number;
+    /**
+     * Runs completed successfully.
+     */
+    completed: number;
+    /**
+     * Runs completed with failure.
+     */
+    failed: number;
+    /**
+     * Runs created but not yet started.
+     */
+    pending: number;
+    /**
+     * Runs completed as a no-op or skip.
+     */
+    skipped: number;
+    /**
+     * Runs waiting on a dependency or gate.
+     */
+    waiting: number;
+};
+
 export type RunStep = {
     /**
      * Current assignee, when set.
@@ -2906,6 +2941,10 @@ export type RunsListOutputBody = {
      * Runs in the city, newest activity first.
      */
     runs: Array<Run> | null;
+    /**
+     * All projected runs by canonical lifecycle state; not truncated by the row limit.
+     */
+    status_counts: RunStatusCounts;
 };
 
 export type ScopeGroup = {
@@ -6906,6 +6945,127 @@ export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
 export type UnboundEventPayload = {
     count: number;
     session_id: string;
+};
+
+export type UsageBody = {
+    /**
+     * True when this city is configured to record local usage estimates.
+     */
+    available: boolean;
+    /**
+     * RFC3339 timestamp of the oldest fact included in this bounded read.
+     */
+    observed_from?: string;
+    /**
+     * True when the bounded reader skipped history or malformed records.
+     */
+    partial?: boolean;
+    /**
+     * Path-sanitized reasons the aggregate may be incomplete.
+     */
+    partial_reasons?: Array<string> | null;
+    /**
+     * Usage in the trailing recent window.
+     */
+    recent: UsageTotals;
+    /**
+     * Recent model usage per session, largest token volume first.
+     */
+    recent_by_session?: Array<UsageSessionRecent> | null;
+    /**
+     * Length of the recent window in seconds.
+     */
+    recent_window_secs: number;
+    /**
+     * True when new facts are currently being written to the local estimate log.
+     */
+    recording: boolean;
+    /**
+     * Source of this usage reading.
+     */
+    source: 'local_estimate' | 'unavailable';
+    /**
+     * Usage since local midnight on the supervisor host.
+     */
+    today: UsageTotals;
+    /**
+     * RFC3339 time at which the aggregate was built.
+     */
+    updated_at: string;
+};
+
+export type UsageSessionRecent = {
+    /**
+     * Prompt-cache creation tokens in the window.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens in the window.
+     */
+    cache_read_tokens: number;
+    /**
+     * List-price estimate for the window.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens in the window.
+     */
+    input_tokens: number;
+    /**
+     * Completion tokens in the window.
+     */
+    output_tokens: number;
+    /**
+     * Session (worker) name the facts were attributed to.
+     */
+    session: string;
+    /**
+     * Session bead id, when attributed.
+     */
+    session_id?: string;
+    /**
+     * Facts in this window whose price is unknown.
+     */
+    unpriced: number;
+};
+
+export type UsageTotals = {
+    /**
+     * Prompt-cache creation tokens.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens.
+     */
+    cache_read_tokens: number;
+    /**
+     * Compute (wall-clock) facts in the window.
+     */
+    compute_facts: number;
+    /**
+     * List-price estimate; decision-support only, never an authoritative charge.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens.
+     */
+    input_tokens: number;
+    /**
+     * Model facts (LLM invocations) in the window.
+     */
+    invocations: number;
+    /**
+     * Completion tokens.
+     */
+    output_tokens: number;
+    /**
+     * Facts with unknown pricing; their cost is not included in the estimate.
+     */
+    unpriced: number;
+    /**
+     * Compute wall-clock seconds.
+     */
+    wall_seconds: number;
 };
 
 export type WaitListBody = {
@@ -16013,6 +16173,48 @@ export type PostV0CityByCityNameUnregisterResponses = {
 };
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];
+
+export type GetV0CityByCityNameUsageData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/usage';
+};
+
+export type GetV0CityByCityNameUsageErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameUsageError = GetV0CityByCityNameUsageErrors[keyof GetV0CityByCityNameUsageErrors];
+
+export type GetV0CityByCityNameUsageResponses = {
+    /**
+     * OK
+     */
+    200: UsageBody;
+};
+
+export type GetV0CityByCityNameUsageResponse = GetV0CityByCityNameUsageResponses[keyof GetV0CityByCityNameUsageResponses];
 
 export type GetV0CityByCityNameWaitByIdData = {
     body?: never;

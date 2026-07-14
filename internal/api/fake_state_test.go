@@ -59,6 +59,7 @@ type fakeState struct {
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
+	usageSink         usage.Sink
 	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
 	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
 	// matching the real implementation's answer for the MemStore fakes most
@@ -107,8 +108,13 @@ func (f *fakeState) MailProviders() map[string]mail.Provider {
 	}
 	return map[string]mail.Provider{f.cityName: f.cityMailProv}
 }
-func (f *fakeState) EventProvider() events.Provider        { return f.eventProv }
-func (f *fakeState) UsageSink() usage.Sink                 { return usage.Discard }
+func (f *fakeState) EventProvider() events.Provider { return f.eventProv }
+func (f *fakeState) UsageSink() usage.Sink {
+	if f.usageSink != nil {
+		return f.usageSink
+	}
+	return usage.Discard
+}
 func (f *fakeState) CityName() string                      { return f.cityName }
 func (f *fakeState) CityPath() string                      { return f.cityPath }
 func (f *fakeState) Version() string                       { return "test" }

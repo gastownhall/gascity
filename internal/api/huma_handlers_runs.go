@@ -99,20 +99,22 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	if err != nil {
 		return nil, runProjectionUnavailable(err)
 	}
-	summary := runproj.BuildRunSummary(fold.beads)
+	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(fold.beads)
 	byID := beadsByID(fold.beads)
+	startedByRun := countStartedMembersByRun(fold.beads, censusLanes)
 
 	limit := normalizeRunsListLimit(input.Limit)
 	lanes := allRunLanes(summary)
+	rowCount := min(limit, len(lanes))
+	projected := make([]Run, 0, rowCount)
+	for i := range rowCount {
+		lane := lanes[i]
+		projected = append(projected, laneToRun(lane, byID, startedByRun[lane.ID]))
+	}
 
 	out := &RunsListOutput{}
-	out.Body.Runs = make([]Run, 0, len(lanes))
-	for i := range lanes {
-		if len(out.Body.Runs) >= limit {
-			break
-		}
-		out.Body.Runs = append(out.Body.Runs, laneToRun(lanes[i], byID, fold.beads))
-	}
+	out.Body.StatusCounts = countRunLaneStatuses(censusLanes, byID, startedByRun)
+	out.Body.Runs = projected
 
 	// Do not silently hide incompleteness: the projection caps the historical
 	// lane list, the caller-supplied limit can drop runs, and a corrupt event
@@ -130,6 +132,44 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	return out, nil
 }
 
+func countRunStatuses(runs []Run) RunStatusCounts {
+	var counts RunStatusCounts
+	for _, run := range runs {
+		addRunStatus(&counts, run.Status)
+	}
+	return counts
+}
+
+func countRunLaneStatuses(lanes []runproj.RunLane, byID map[string]beads.Bead, startedByRun map[string]int) RunStatusCounts {
+	var counts RunStatusCounts
+	for _, lane := range lanes {
+		root, rootFound := byID[lane.ID]
+		addRunStatus(&counts, deriveRunStatus(lane, root, rootFound, startedByRun[lane.ID]))
+	}
+	return counts
+}
+
+func addRunStatus(counts *RunStatusCounts, status RunStatus) {
+	switch status {
+	case RunStatusPending:
+		counts.Pending++
+	case RunStatusActive:
+		counts.Active++
+	case RunStatusWaiting:
+		counts.Waiting++
+	case RunStatusCanceling:
+		counts.Canceling++
+	case RunStatusCompleted:
+		counts.Completed++
+	case RunStatusFailed:
+		counts.Failed++
+	case RunStatusCanceled:
+		counts.Canceled++
+	case RunStatusSkipped:
+		counts.Skipped++
+	}
+}
+
 // humaHandleRunGet is the Huma-typed handler for
 // GET /v0/city/{cityName}/runs/{run_id}. It resolves the single run off the fold
 // via BuildRunLane, so a completed run beyond the list's historical cap is still
@@ -143,7 +183,7 @@ func (s *Server) humaHandleRunGet(_ context.Context, input *RunGetInput) (*RunGe
 	if !ok {
 		return nil, apierr.RunNotFound.Msgf("run not found: %s", input.RunID)
 	}
-	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), fold.beads)}, nil
+	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), countStartedMembers(fold.beads, lane.ID))}, nil
 }
 
 // humaHandleRunSteps is the Huma-typed handler for
@@ -309,12 +349,8 @@ func findWorkflowRoots(store beads.Store, runID string) ([]beads.Bead, error) {
 // bead (when present) for start time, target, and terminal outcome. The started
 // member count (used only to split pending from active) is computed just for
 // non-terminal runs.
-func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, beadList []beads.Bead) Run {
+func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, started int) Run {
 	root, rootFound := byID[lane.ID]
-	started := 0
-	if !rootFound || !isClosedStatus(root.Status) {
-		started = countStartedMembers(beadList, lane.ID)
-	}
 	run := Run{
 		RunID:  lane.ID,
 		Title:  lane.Title,
@@ -468,6 +504,50 @@ func countStartedMembers(beadList []beads.Bead, rootID string) int {
 		}
 	}
 	return n
+}
+
+// countStartedMembersByRun indexes started membership for every projected run
+// in one pass. A bead may match more than one nested dotted root; candidates
+// are de-duplicated per bead to mirror runMemberBeads exactly without an
+// O(runs*beads) scan on the polled list endpoint.
+func countStartedMembersByRun(beadList []beads.Bead, lanes []runproj.RunLane) map[string]int {
+	roots := make(map[string]struct{}, len(lanes))
+	counts := make(map[string]int, len(lanes))
+	for _, lane := range lanes {
+		roots[lane.ID] = struct{}{}
+		counts[lane.ID] = 0
+	}
+	for _, bead := range beadList {
+		if !runStepStarted(bead.Status) {
+			continue
+		}
+		candidates := make(map[string]struct{}, 4)
+		for _, rootID := range []string{
+			bead.ParentID,
+			bead.Metadata[beadmeta.RootBeadIDMetadataKey],
+			strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]),
+		} {
+			if _, ok := roots[rootID]; ok {
+				candidates[rootID] = struct{}{}
+			}
+		}
+		for offset, char := range bead.ID {
+			if char != '.' {
+				continue
+			}
+			if rootID := bead.ID[:offset]; rootID != "" {
+				if _, ok := roots[rootID]; ok {
+					candidates[rootID] = struct{}{}
+				}
+			}
+		}
+		for rootID := range candidates {
+			if bead.ID != rootID {
+				counts[rootID]++
+			}
+		}
+	}
+	return counts
 }
 
 func runStepStarted(status string) bool {

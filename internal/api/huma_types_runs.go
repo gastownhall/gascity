@@ -109,6 +109,20 @@ type Run struct {
 	LastError *RunLastError `json:"last_error,omitempty" doc:"Structured failure reason for a terminal run."`
 }
 
+// RunStatusCounts is a complete census of the closed RunStatus enum. Keeping
+// every field typed lets generated clients switch exhaustively and makes the
+// counts stable even when the response's run rows are limited.
+type RunStatusCounts struct {
+	Pending   int `json:"pending" doc:"Runs created but not yet started."`
+	Active    int `json:"active" doc:"Runs with work in progress."`
+	Waiting   int `json:"waiting" doc:"Runs waiting on a dependency or gate."`
+	Canceling int `json:"canceling" doc:"Runs winding down after cancellation."`
+	Completed int `json:"completed" doc:"Runs completed successfully."`
+	Failed    int `json:"failed" doc:"Runs completed with failure."`
+	Canceled  int `json:"canceled" doc:"Runs terminated by cancellation."`
+	Skipped   int `json:"skipped" doc:"Runs completed as a no-op or skip."`
+}
+
 // RunStep is one step of a run (a child bead), projected to a stable shape.
 type RunStep struct {
 	ID       string        `json:"id" doc:"Step (child bead) identifier."`
@@ -142,9 +156,10 @@ type RunsListInput struct {
 // RunsListOutput is the response body for the run list.
 type RunsListOutput struct {
 	Body struct {
-		Runs          []Run    `json:"runs" doc:"Runs in the city, newest activity first."`
-		Partial       bool     `json:"partial,omitempty" doc:"True when some runs could not be fully projected."`
-		PartialErrors []string `json:"partial_errors,omitempty" doc:"Reasons the projection was partial."`
+		Runs          []Run           `json:"runs" doc:"Runs in the city, newest activity first."`
+		StatusCounts  RunStatusCounts `json:"status_counts" doc:"All projected runs by canonical lifecycle state; not truncated by the row limit."`
+		Partial       bool            `json:"partial,omitempty" doc:"True when some runs could not be fully projected."`
+		PartialErrors []string        `json:"partial_errors,omitempty" doc:"Reasons the projection was partial."`
 	}
 }
 

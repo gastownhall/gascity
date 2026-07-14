@@ -170,6 +170,58 @@ describe('supervisor client wrapper', () => {
     );
   });
 
+  it('calls city-scoped usage and canonical runs through the generated SDK', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (url.endsWith('/usage')) {
+        return new Response(
+          JSON.stringify({
+            available: true,
+            recording: true,
+            source: 'local_estimate',
+            today: { invocations: 4, input_tokens: 100, output_tokens: 20 },
+            recent: { invocations: 1, input_tokens: 25, output_tokens: 5 },
+            recent_window_secs: 300,
+            updated_at: '2026-07-14T12:00:00Z',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          runs: [{ run_id: 'run-1', title: 'Run one', status: 'active', scope: {} }],
+          status_counts: {
+            pending: 0,
+            active: 1,
+            waiting: 0,
+            canceling: 0,
+            completed: 0,
+            failed: 0,
+            canceled: 0,
+            skipped: 0,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.cityUsage('test-city')).resolves.toMatchObject({
+      available: true,
+      today: { invocations: 4 },
+    });
+    await expect(api.listRuns('test-city')).resolves.toMatchObject({
+      status_counts: { active: 1 },
+    });
+    expect(fetchSpy.mock.calls.map((call) => requestedUrl(call[0]))).toEqual([
+      'http://gc-supervisor.test/v0/city/test-city/usage',
+      'http://gc-supervisor.test/v0/city/test-city/runs',
+    ]);
+  });
+
   it('calls supervisor sessions through the generated SDK without dashboard DTO stripping', async () => {
     const fetchSpy = vi.fn(
       async (_input: RequestInfo | URL) =>
@@ -1129,6 +1181,8 @@ describe('supervisor client wrapper', () => {
       getBead: vi.fn(),
       cityHealth: vi.fn(),
       cityStatus: vi.fn(),
+      cityUsage: vi.fn(),
+      listRuns: vi.fn(),
       health: vi.fn(),
       listAgents: vi.fn(),
       listRigs: vi.fn(),

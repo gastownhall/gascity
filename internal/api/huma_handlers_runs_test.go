@@ -201,6 +201,82 @@ func TestRunsListEndpoint(t *testing.T) {
 	if run.StartedAt == "" {
 		t.Errorf("started_at empty, want RFC3339 timestamp")
 	}
+	if out.Body.StatusCounts.Active != 1 {
+		t.Errorf("status_counts.active = %d, want 1", out.Body.StatusCounts.Active)
+	}
+}
+
+func TestCountRunStatusesCoversClosedEnum(t *testing.T) {
+	runs := []Run{
+		{Status: RunStatusPending},
+		{Status: RunStatusActive},
+		{Status: RunStatusWaiting},
+		{Status: RunStatusCanceling},
+		{Status: RunStatusCompleted},
+		{Status: RunStatusFailed},
+		{Status: RunStatusCanceled},
+		{Status: RunStatusSkipped},
+	}
+	got := countRunStatuses(runs)
+	want := RunStatusCounts{
+		Pending: 1, Active: 1, Waiting: 1, Canceling: 1,
+		Completed: 1, Failed: 1, Canceled: 1, Skipped: 1,
+	}
+	if got != want {
+		t.Fatalf("countRunStatuses = %+v, want %+v", got, want)
+	}
+}
+
+func TestRunsListStatusCountsAreNotTruncatedByLimit(t *testing.T) {
+	completed := runRootBead("run-complete", "mol-adopt-pr-v2", "closed")
+	completed.Metadata["gc.outcome"] = "pass"
+	s := newRunServer(t,
+		beadCreatedEvent(1, runRootBead("run-active", "mol-adopt-pr-v2", "open")),
+		beadCreatedEvent(2, runChildBead("run-active.step", "run-active", "in_progress", nil)),
+		beadCreatedEvent(3, completed),
+	)
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Body.Runs) != 1 {
+		t.Fatalf("len(runs) = %d, want limit 1", len(out.Body.Runs))
+	}
+	if out.Body.StatusCounts.Active != 1 || out.Body.StatusCounts.Completed != 1 {
+		t.Fatalf("status_counts = %+v, want active=1 completed=1", out.Body.StatusCounts)
+	}
+	if !out.Body.Partial {
+		t.Fatal("Partial = false, want true when the row list is limited")
+	}
+}
+
+func TestRunsListStatusCountsIncludeHistoryBeyondTheLaneCap(t *testing.T) {
+	const completedRuns = 55
+	events := make([]events.Event, 0, completedRuns)
+	for i := range completedRuns {
+		root := runRootBead(runFixtureID(i), "mol-adopt-pr-v2", "closed")
+		root.Metadata["gc.outcome"] = "pass"
+		events = append(events, beadCreatedEvent(uint64(i+1), root))
+	}
+	s := newRunServer(t, events...)
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+		Limit:     maxRunsListLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Body.StatusCounts.Completed != completedRuns {
+		t.Fatalf("status_counts.completed = %d, want %d", out.Body.StatusCounts.Completed, completedRuns)
+	}
+	if len(out.Body.Runs) != 50 || !out.Body.Partial {
+		t.Fatalf("rows/partial = %d/%v, want capped 50/true", len(out.Body.Runs), out.Body.Partial)
+	}
 }
 
 func TestRunsListEmptyCity(t *testing.T) {
