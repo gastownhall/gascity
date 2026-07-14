@@ -3439,3 +3439,187 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
 	}
 }
+
+// rootOnlyGraphWorkflowRecipe builds a compiled-recipe shape matching a vapor
+// graph.v2 formula after sling stamping: RootOnly with a workflow root, one
+// (dropped) work step, and the compiled workflow-finalize control step.
+// inputConvoyID mirrors stampGraphV2RootMetadata; pass "" for a launch with no
+// input convoy (e.g. a standalone cook).
+func rootOnlyGraphWorkflowRecipe(inputConvoyID string) *formula.Recipe {
+	rootMeta := map[string]string{
+		"gc.kind":             "workflow",
+		"gc.formula_contract": "graph.v2",
+	}
+	if inputConvoyID != "" {
+		rootMeta["gc.input_convoy_id"] = inputConvoyID
+	}
+	return &formula.Recipe{
+		Name:     "mol-review",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "mol-review", Title: "Review", Type: "task", IsRoot: true, Metadata: rootMeta},
+			{ID: "mol-review.work", Title: "Work", Type: "task", Metadata: map[string]string{"gc.step_ref": "mol-review.work"}},
+			{ID: "mol-review.workflow-finalize", Title: "Finalize workflow", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-review.workflow-finalize", DependsOnID: "mol-review.work", Type: "blocks"},
+			{StepID: "mol-review", DependsOnID: "mol-review.workflow-finalize", Type: "blocks"},
+		},
+	}
+}
+
+// Regression test for the graph.v2 root-finalize gap (gc-8h5ls follow-up):
+// RootOnly instantiation of a graph workflow with a stamped input convoy must
+// keep the compiled workflow-finalize control bead — gated on the input convoy
+// — so processWorkflowFinalize can close the root once the tracked work
+// closes. It must NOT keep any other step, and must NOT block the root (the
+// root IS the claimable work in a root-only wisp).
+func TestInstantiateRootOnlyGraphWorkflowKeepsGatedFinalizer(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := rootOnlyGraphWorkflowRecipe("gc-convoy1")
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if result.Created != 2 {
+		t.Fatalf("Created = %d, want 2 (root + workflow-finalize)", result.Created)
+	}
+	if _, ok := result.IDMapping["mol-review.work"]; ok {
+		t.Fatal("work step was created; RootOnly must drop non-finalize steps")
+	}
+
+	finalizeID := result.IDMapping["mol-review.workflow-finalize"]
+	if finalizeID == "" {
+		t.Fatal("workflow-finalize bead missing from IDMapping")
+	}
+	finalize, err := store.Get(finalizeID)
+	if err != nil {
+		t.Fatalf("Get(finalize): %v", err)
+	}
+	if got := finalize.Metadata["gc.kind"]; got != "workflow-finalize" {
+		t.Fatalf("finalize gc.kind = %q, want workflow-finalize", got)
+	}
+	if got := finalize.Metadata["gc.root_bead_id"]; got != result.RootID {
+		t.Fatalf("finalize gc.root_bead_id = %q, want %q", got, result.RootID)
+	}
+	if got := finalize.Metadata["gc.finalize_gate"]; got != "input-convoy" {
+		t.Fatalf("finalize gc.finalize_gate = %q, want input-convoy", got)
+	}
+
+	// The root must stay unblocked: a blocks dep from the root onto the
+	// finalizer would hide the root from ready/hook claim and wedge dispatch.
+	rootDeps, err := store.DepList(result.RootID, "down")
+	if err != nil {
+		t.Fatalf("DepList(root): %v", err)
+	}
+	for _, dep := range rootDeps {
+		if dep.Type == "blocks" {
+			t.Fatalf("root has blocks dep on %s; RootOnly root must stay claimable", dep.DependsOnID)
+		}
+	}
+
+	// The finalizer must carry no blocks deps (its compiled sink blockers were
+	// dropped with their steps) and a non-blocking tracks edge to the root for
+	// cascade discovery.
+	finalizeDeps, err := store.DepList(finalizeID, "down")
+	if err != nil {
+		t.Fatalf("DepList(finalize): %v", err)
+	}
+	tracksRoot := false
+	for _, dep := range finalizeDeps {
+		if dep.Type == "blocks" {
+			t.Fatalf("finalize has blocks dep on %s; sink blockers must be dropped", dep.DependsOnID)
+		}
+		if dep.Type == "tracks" && dep.DependsOnID == result.RootID {
+			tracksRoot = true
+		}
+	}
+	if !tracksRoot {
+		t.Fatal("finalize missing tracks dep to root")
+	}
+}
+
+// A RootOnly graph workflow with no stamped input convoy keeps today's shape:
+// nothing survives but the root. Without a convoy there is no completion
+// signal to gate on, and an ungated finalizer would close the root instantly.
+func TestInstantiateRootOnlyGraphWorkflowWithoutConvoyDropsFinalizer(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := rootOnlyGraphWorkflowRecipe("")
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if result.Created != 1 {
+		t.Fatalf("Created = %d, want 1 (root only)", result.Created)
+	}
+}
+
+// The graph-apply plan builder must mirror the fallback path: root +
+// gated finalizer nodes, no blocks edges, one tracks edge to the root.
+func TestBuildRecipeApplyPlanRootOnlyGraphWorkflowKeepsGatedFinalizer(t *testing.T) {
+	recipe := rootOnlyGraphWorkflowRecipe("gc-convoy1")
+
+	plan, graphWorkflow, rootKey, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if !graphWorkflow {
+		t.Fatal("graphWorkflow = false, want true")
+	}
+	if rootKey != "mol-review" {
+		t.Fatalf("rootKey = %q, want mol-review", rootKey)
+	}
+	if len(plan.Nodes) != 2 {
+		keys := make([]string, 0, len(plan.Nodes))
+		for _, n := range plan.Nodes {
+			keys = append(keys, n.Key)
+		}
+		t.Fatalf("plan nodes = %v, want [mol-review mol-review.workflow-finalize]", keys)
+	}
+	var finalizeNode *beads.GraphApplyNode
+	for i := range plan.Nodes {
+		if plan.Nodes[i].Key == "mol-review.workflow-finalize" {
+			finalizeNode = &plan.Nodes[i]
+		}
+	}
+	if finalizeNode == nil {
+		t.Fatal("plan missing workflow-finalize node")
+	}
+	if got := finalizeNode.Metadata["gc.finalize_gate"]; got != "input-convoy" {
+		t.Fatalf("finalize node gc.finalize_gate = %q, want input-convoy", got)
+	}
+	if got := finalizeNode.MetadataRefs["gc.root_bead_id"]; got != "mol-review" {
+		t.Fatalf("finalize node gc.root_bead_id ref = %q, want mol-review", got)
+	}
+	for _, e := range plan.Edges {
+		if e.Type == "blocks" {
+			t.Fatalf("plan has blocks edge %s -> %s%s; RootOnly must carry none", e.FromKey, e.ToKey, e.ToID)
+		}
+	}
+	if !graphApplyPlanHasEdgeFromKeyToTarget(plan.Edges, "mol-review.workflow-finalize", "mol-review", "") {
+		t.Fatal("plan missing tracks edge finalize -> root")
+	}
+}
+
+// A plain RootOnly wisp (no graph workflow) never keeps a finalizer even if
+// its root somehow carries an input convoy stamp.
+func TestInstantiateRootOnlyNonGraphKeepsNothing(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:     "patrol",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "patrol", Title: "Patrol", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "wisp", "gc.input_convoy_id": "gc-convoy1"}},
+			{ID: "patrol.workflow-finalize", Title: "Finalize workflow", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+	}
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if result.Created != 1 {
+		t.Fatalf("Created = %d, want 1 (root only)", result.Created)
+	}
+}

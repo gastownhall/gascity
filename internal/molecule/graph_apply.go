@@ -153,8 +153,10 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	}
 
 	for i, step := range recipe.Steps {
-		if recipe.RootOnly && i > 0 {
-			break
+		// For RootOnly recipes, only create the root bead — plus the gated
+		// workflow-finalize control for graph workflows (keepRootOnlyGraphStep).
+		if recipe.RootOnly && i > 0 && !keepRootOnlyGraphStep(recipe, step) {
+			continue
 		}
 		node, err := recipeStepToGraphNode(step, vars, priorityOverride)
 		if err != nil {
@@ -222,6 +224,12 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				}
 				node.MetadataRefs[beadmeta.RootBeadIDMetadataKey] = rootKey
 			}
+			// A finalizer kept through a RootOnly drop has no compiled step
+			// blockers; mark it so processWorkflowFinalize gates on the
+			// root's input convoy instead of closing the root immediately.
+			if recipe.RootOnly {
+				node.Metadata[beadmeta.FinalizeGateMetadataKey] = beadmeta.FinalizeGateInputConvoy
+			}
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
@@ -266,18 +274,26 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		included[node.Key] = true
 	}
 
-	for _, dep := range recipe.Deps {
-		if !included[dep.StepID] || !included[dep.DependsOnID] {
-			continue
-		}
-		plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
-			FromKey:  dep.StepID,
-			ToKey:    dep.DependsOnID,
-			Type:     dep.Type,
-			Metadata: dep.Metadata,
-		})
-		if dep.Type == "parent-child" {
-			setNodeParentRef(plan.Nodes, dep.StepID, dep.DependsOnID, "")
+	// RootOnly instantiation carries no recipe dependency edges: the root must
+	// stay unblocked (it IS the claimable work — a blocks edge onto the root
+	// would hide it from ready/hook claim) and the kept finalizer's sink
+	// blockers were dropped with their steps. The graphWorkflow block below
+	// still adds the non-blocking tracks edge to the root for cascade
+	// discovery.
+	if !recipe.RootOnly {
+		for _, dep := range recipe.Deps {
+			if !included[dep.StepID] || !included[dep.DependsOnID] {
+				continue
+			}
+			plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
+				FromKey:  dep.StepID,
+				ToKey:    dep.DependsOnID,
+				Type:     dep.Type,
+				Metadata: dep.Metadata,
+			})
+			if dep.Type == "parent-child" {
+				setNodeParentRef(plan.Nodes, dep.StepID, dep.DependsOnID, "")
+			}
 		}
 	}
 

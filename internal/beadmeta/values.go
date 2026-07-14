@@ -57,6 +57,14 @@ const (
 	OutcomeMissingRoot = "missing_root"
 )
 
+// FinalizeGateInputConvoy is the FinalizeGateMetadataKey ("gc.finalize_gate")
+// value stamped on the workflow-finalize control of a RootOnly graph.v2
+// workflow. Such a finalizer has no compiled step blockers — the in-session
+// worker owns every formula step — so processWorkflowFinalize instead waits
+// until every member tracked by the root's gc.input_convoy_id is terminal
+// before closing the workflow root.
+const FinalizeGateInputConvoy = "input-convoy"
+
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record
 // close disposition (ADR-0009). Deliberately disjoint from the control-plane
 // OutcomeMetadataKey vocabulary above so the two never collide on one key. Only

@@ -650,6 +650,64 @@ func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t
 	}
 }
 
+func TestWispAutocloseDefersGatedFinalizerRootToDispatcher(t *testing.T) {
+	// A RootOnly graph.v2 workflow instantiated after the finalize-gap fix
+	// keeps a gated workflow-finalize control bead (gc.finalize_gate=
+	// input-convoy) attached via gc.root_bead_id. That open finalizer is a
+	// non-terminal descendant, so the input-convoy reap must park the root
+	// and leave the close to processWorkflowFinalize — the canonical
+	// dispatcher path that stamps gc.outcome and closes the source chain.
+	// Only pre-fix stepless roots (no finalizer) still reap here.
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "work issue", Type: "task"})
+	convoy, _ := store.Create(beads.Bead{
+		Title:    "synthetic input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{
+		Title: "mol-focus-review",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	})
+	finalizer, _ := store.Create(beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         "workflow-finalize",
+			beadmeta.RootBeadIDMetadataKey:   root.ID,
+			beadmeta.FinalizeGateMetadataKey: beadmeta.FinalizeGateInputConvoy,
+		},
+	})
+
+	_ = store.Close(issue.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, issue.ID, &stdout)
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "open" {
+		t.Fatalf("gated root status = %q, want open (left for the gated workflow-finalize)", rootAfter.Status)
+	}
+	finalizerAfter, err := store.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("Get(finalizer): %v", err)
+	}
+	if finalizerAfter.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open", finalizerAfter.Status)
+	}
+}
+
 func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {
 	// The input-convoy reap is graph.v2-only by contract: a legacy
 	// gc.kind=workflow root keeps its gc.source_bead_id attachment and is reaped

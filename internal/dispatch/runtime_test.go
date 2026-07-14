@@ -10023,3 +10023,269 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 		}
 	}
 }
+
+// gatedFinalizeFixture creates the bead shape a RootOnly graph.v2 sling
+// leaves behind after the finalize-gap fix: a workflow root stamped with an
+// input convoy, the synthetic single-item convoy tracking a work issue, and a
+// dependency-free workflow-finalize control gated on that convoy.
+type gatedFinalizeFixture struct {
+	root      beads.Bead
+	convoy    beads.Bead
+	issue     beads.Bead
+	finalizer beads.Bead
+}
+
+func newGatedFinalizeFixture(t *testing.T, store beads.Store, issue beads.Bead) gatedFinalizeFixture {
+	t.Helper()
+	createdIssue := mustCreateWorkflowBead(t, store, issue)
+	convoy := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "input convoy for " + createdIssue.ID,
+		Type:     "convoy",
+		Metadata: map[string]string{"gc.synthetic": "true"},
+	})
+	mustDepAdd(t, store, convoy.ID, createdIssue.ID, "tracks")
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  convoy.ID,
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":          "workflow-finalize",
+			"gc.root_bead_id":  root.ID,
+			"gc.finalize_gate": "input-convoy",
+		},
+	})
+	mustDepAdd(t, store, finalizer.ID, root.ID, "tracks")
+	return gatedFinalizeFixture{root: root, convoy: convoy, issue: createdIssue, finalizer: finalizer}
+}
+
+// The gate: while the tracked issue is open the finalizer is pending and the
+// root stays open. This is the engine-side regression test for the graph.v2
+// root-finalize gap (RCA gc-8h5ls): before the fix nothing ever closed the
+// root of a RootOnly graph.v2 workflow.
+func TestProcessWorkflowFinalizeInputConvoyGatePendingWhileIssueOpen(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	fx := newGatedFinalizeFixture(t, store, beads.Bead{Title: "review issue", Type: "task"})
+
+	_, err := ProcessControl(store, fx.finalizer, ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl err = %v, want ErrControlPending", err)
+	}
+	if got := mustGetBead(t, store, fx.root.ID).Status; got != "open" {
+		t.Fatalf("root status = %q, want open (gate must not close early)", got)
+	}
+	if got := mustGetBead(t, store, fx.finalizer.ID).Status; got != "open" {
+		t.Fatalf("finalizer status = %q, want open", got)
+	}
+}
+
+func TestProcessWorkflowFinalizeInputConvoyGateClosesRootOnceIssueCloses(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	fx := newGatedFinalizeFixture(t, store, beads.Bead{Title: "review issue", Type: "task"})
+	if err := store.Close(fx.issue.ID); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+
+	result, err := ProcessControl(store, fx.finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+	rootAfter := mustGetBead(t, store, fx.root.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("root = status %q outcome %q, want closed/pass", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+	}
+	finalizerAfter := mustGetBead(t, store, fx.finalizer.ID)
+	if finalizerAfter.Status != "closed" || finalizerAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("finalizer = status %q outcome %q, want closed/pass", finalizerAfter.Status, finalizerAfter.Metadata["gc.outcome"])
+	}
+}
+
+// A tracked member that closed with an explicit gc.outcome=fail fails the
+// workflow root, mirroring resolveBlockedOutcome's blocker aggregation.
+func TestProcessWorkflowFinalizeInputConvoyGateAggregatesMemberFailure(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	fx := newGatedFinalizeFixture(t, store, beads.Bead{
+		Title:    "review issue",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	})
+
+	result, err := ProcessControl(store, fx.finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("result = %+v, want processed workflow-fail", result)
+	}
+	rootAfter := mustGetBead(t, store, fx.root.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("root = status %q outcome %q, want closed/fail", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+	}
+}
+
+// Fail-safe: a gated finalizer whose convoy vanished must stay pending, never
+// close the root on a missing completion signal.
+func TestProcessWorkflowFinalizeInputConvoyGatePendingWhenConvoyMissing(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  "gc-gone",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":          "workflow-finalize",
+			"gc.root_bead_id":  root.ID,
+			"gc.finalize_gate": "input-convoy",
+		},
+	})
+
+	_, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl err = %v, want ErrControlPending", err)
+	}
+	if got := mustGetBead(t, store, root.ID).Status; got != "open" {
+		t.Fatalf("root status = %q, want open", got)
+	}
+}
+
+// Fail-safe: a dangling tracks member (target bead deleted) resolves as
+// non-terminal, so the gate stays pending instead of closing the root.
+func TestProcessWorkflowFinalizeInputConvoyGatePendingOnDanglingMember(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	fx := newGatedFinalizeFixture(t, store, beads.Bead{Title: "review issue", Type: "task"})
+	mustDepAdd(t, store, fx.convoy.ID, "gc-deleted-member", "tracks")
+	if err := store.Close(fx.issue.ID); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+
+	_, err := ProcessControl(store, fx.finalizer, ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl err = %v, want ErrControlPending", err)
+	}
+	if got := mustGetBead(t, store, fx.root.ID).Status; got != "open" {
+		t.Fatalf("root status = %q, want open", got)
+	}
+}
+
+// An already-terminal root (reaped by wisp autoclose, canceled, or manually
+// closed) short-circuits the gate: the finalizer closes itself as cleanup and
+// must not mutate the root's recorded outcome.
+func TestProcessWorkflowFinalizeInputConvoyGateClosedRootClosesFinalizerOnly(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	fx := newGatedFinalizeFixture(t, store, beads.Bead{Title: "review issue", Type: "task"})
+	if err := store.SetMetadata(fx.root.ID, "gc.outcome", "canceled"); err != nil {
+		t.Fatalf("set root outcome: %v", err)
+	}
+	if err := store.Close(fx.root.ID); err != nil {
+		t.Fatalf("close root: %v", err)
+	}
+
+	result, err := ProcessControl(store, fx.finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-root_closed" {
+		t.Fatalf("result = %+v, want processed workflow-root_closed", result)
+	}
+	rootAfter := mustGetBead(t, store, fx.root.ID)
+	if rootAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("root outcome = %q, want canceled preserved", rootAfter.Metadata["gc.outcome"])
+	}
+	finalizerAfter := mustGetBead(t, store, fx.finalizer.ID)
+	if finalizerAfter.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+	}
+}
+
+// End-to-end over the molecule seam: instantiate the RootOnly graph.v2
+// recipe shape (as the sling leaves it), verify the gated finalizer is
+// pending while the issue is open, then close the issue and verify the
+// dispatcher closes the workflow root. This is the failing-before /
+// passing-after regression for the review-pool spawn-churn wedge.
+func TestRootOnlyGraphWorkflowFinalizeClosesRootEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	issue := mustCreateWorkflowBead(t, store, beads.Bead{Title: "review issue", Type: "task"})
+	convoy := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "input convoy for " + issue.ID,
+		Type:     "convoy",
+		Metadata: map[string]string{"gc.synthetic": "true"},
+	})
+	mustDepAdd(t, store, convoy.ID, issue.ID, "tracks")
+
+	recipe := &formula.Recipe{
+		Name:     "mol-review",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "mol-review", Title: "Review", Type: "task", IsRoot: true, Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+				"gc.input_convoy_id":  convoy.ID,
+			}},
+			{ID: "mol-review.work", Title: "Work", Type: "task"},
+			{ID: "mol-review.workflow-finalize", Title: "Finalize workflow", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-review.workflow-finalize", DependsOnID: "mol-review.work", Type: "blocks"},
+			{StepID: "mol-review", DependsOnID: "mol-review.workflow-finalize", Type: "blocks"},
+		},
+	}
+	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	finalizeID := result.IDMapping["mol-review.workflow-finalize"]
+	if finalizeID == "" {
+		t.Fatal("workflow-finalize bead missing; RootOnly graph.v2 must keep its gated finalizer")
+	}
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, finalizeID), ProcessOptions{}); !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl (issue open) err = %v, want ErrControlPending", err)
+	}
+
+	if err := store.Close(issue.ID); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+	procResult, err := ProcessControl(store, mustGetBead(t, store, finalizeID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl (issue closed): %v", err)
+	}
+	if !procResult.Processed || procResult.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", procResult)
+	}
+	rootAfter := mustGetBead(t, store, result.RootID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("root = status %q outcome %q, want closed/pass", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+	}
+}

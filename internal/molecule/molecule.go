@@ -808,9 +808,10 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	recipeParentByStep := recipeParentDeps(recipe.Deps)
 
 	for i, step := range recipe.Steps {
-		// For RootOnly recipes, only create the root bead.
-		if recipe.RootOnly && i > 0 {
-			break
+		// For RootOnly recipes, only create the root bead — plus the gated
+		// workflow-finalize control for graph workflows (keepRootOnlyGraphStep).
+		if recipe.RootOnly && i > 0 && !keepRootOnlyGraphStep(recipe, step) {
+			continue
 		}
 
 		b := stepToBead(step, vars, priorityOverride)
@@ -909,6 +910,13 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				}
 			}
 
+			// A finalizer kept through a RootOnly drop has no compiled step
+			// blockers; mark it so processWorkflowFinalize gates on the
+			// root's input convoy instead of closing the root immediately.
+			if recipe.RootOnly {
+				b.Metadata[beadmeta.FinalizeGateMetadataKey] = beadmeta.FinalizeGateInputConvoy
+			}
+
 			// Inline Ralph attempt beads need the actual logical bead ID at runtime.
 			// Stamp it during instantiation while the recipe-step -> bead mapping is live.
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
@@ -960,8 +968,25 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 
 	}
 
-	// Wire dependencies using the IDMapping.
-	if !recipe.RootOnly {
+	// Wire dependencies using the IDMapping. RootOnly instantiation carries no
+	// recipe dependency edges: the root must stay unblocked (it IS the
+	// claimable work) and the kept finalizer's sink blockers were dropped with
+	// their steps. A non-blocking tracks edge still links each kept bead to
+	// the root so cascade delete discovers it alongside the gc.root_bead_id
+	// metadata (mirroring buildRecipeApplyPlan's root-track edges).
+	if recipe.RootOnly {
+		rootBeadID := idMapping[recipe.Steps[0].ID]
+		for _, step := range recipe.Steps[1:] {
+			beadID := idMapping[step.ID]
+			if beadID == "" {
+				continue // dropped by the RootOnly keep filter
+			}
+			if err := store.DepAdd(beadID, rootBeadID, "tracks"); err != nil {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("wiring root track %s->%s: %w", step.ID, recipe.Steps[0].ID, err)
+			}
+		}
+	} else {
 		for _, dep := range recipe.Deps {
 			fromID, fromOK := idMapping[dep.StepID]
 			toID, toOK := idMapping[dep.DependsOnID]
@@ -1300,6 +1325,26 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
 }
 
+// keepRootOnlyGraphStep reports whether a non-root step survives RootOnly
+// instantiation. A RootOnly graph workflow keeps its compiled
+// workflow-finalize control bead when the launch stamped an input convoy on
+// the root: the in-session worker owns every formula step, so the finalizer —
+// gated on that convoy by processWorkflowFinalize — is the only engine-side
+// signal that closes the workflow root once the tracked work completes (the
+// graph.v2 root-finalize gap, RCA gc-8h5ls). Without a convoy there is no
+// completion signal to gate on, and an ungated dependency-free finalizer
+// would close the root the moment the dispatcher saw it, so every other
+// launch shape keeps today's root-only drop.
+func keepRootOnlyGraphStep(recipe *formula.Recipe, step formula.RecipeStep) bool {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflowFinalize {
+		return false
+	}
+	if !preservesGraphActionTypes(recipe) {
+		return false
+	}
+	return strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.InputConvoyIDMetadataKey]) != ""
+}
+
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
 func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverride *int) beads.Bead {
 	stepType := step.Type
@@ -1546,8 +1591,8 @@ func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Option
 	vars := applyVarDefaults(providedVars, recipe.Vars)
 	errs := make([]string, 0)
 	for i, step := range recipe.Steps {
-		if recipe.RootOnly && i > 0 {
-			break
+		if recipe.RootOnly && i > 0 && !keepRootOnlyGraphStep(recipe, step) {
+			continue
 		}
 		rawTitle := step.Title
 		if step.IsRoot && opts.Title != "" {

@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -809,12 +810,29 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
 
+	gate, err := resolveInputConvoyFinalizeGate(store, bead, rootID, opts)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	if gate.rootTerminal {
+		// The root already reached a terminal state through another close
+		// path (wisp-autoclose reap, run cancel, manual close). Close the
+		// finalizer as cleanup without rewriting the root's recorded outcome.
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow finalizer under closed root %s: %w", bead.ID, rootID, err))
+		}
+		return ControlResult{Processed: true, Action: "workflow-root_closed"}, nil
+	}
+
 	outcome, err := resolveFinalizeOutcome(store, bead)
 	if err != nil {
 		if errors.Is(err, errFinalizePending) {
 			return ControlResult{}, ErrControlPending
 		}
 		return ControlResult{}, fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, err)
+	}
+	if gate.failed {
+		outcome = beadmeta.OutcomeFail
 	}
 
 	// On success, propagate the closure across the gc.source_bead_id chain so
@@ -1544,6 +1562,111 @@ func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 	}
 	stepRef := bead.Metadata[beadmeta.StepRefMetadataKey]
 	return stepRef == scopeRef || strings.HasSuffix(stepRef, "."+scopeRef)
+}
+
+// finalizeGateState is resolveInputConvoyFinalizeGate's verdict for a gated
+// workflow-finalize bead that is allowed to proceed.
+type finalizeGateState struct {
+	// rootTerminal reports the workflow root already reached a terminal
+	// status through another close path; the finalizer should close itself
+	// without touching the root.
+	rootTerminal bool
+	// failed reports that a tracked input-convoy member closed with a failure
+	// outcome, which downgrades the workflow outcome to fail.
+	failed bool
+}
+
+// resolveInputConvoyFinalizeGate evaluates the gc.finalize_gate=input-convoy
+// gate on a workflow-finalize bead. Such a finalizer belongs to a RootOnly
+// graph.v2 workflow: the in-session worker owns every formula step, so the
+// finalizer has no compiled step blockers and the only completion signal is
+// the work tracked by the root's synthetic input convoy. The gate returns
+// ErrControlPending until every tracked member is terminal; a missing convoy
+// or a dangling tracked member also stays pending — closing a workflow root
+// on an absent completion signal is the failure mode this gate exists to
+// prevent. Ungated finalizers pass through untouched.
+func resolveInputConvoyFinalizeGate(store beads.Store, bead beads.Bead, rootID string, opts ProcessOptions) (finalizeGateState, error) {
+	if strings.TrimSpace(bead.Metadata[beadmeta.FinalizeGateMetadataKey]) != beadmeta.FinalizeGateInputConvoy {
+		return finalizeGateState{}, nil
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			// Fall through ungated: setOutcomeAndClose's ErrNotFound handling
+			// closes the finalizer as an orphan (workflow-missing_root).
+			return finalizeGateState{}, nil
+		}
+		return finalizeGateState{}, fmt.Errorf("%s: loading gated workflow root %s: %w", bead.ID, rootID, err)
+	}
+	if convoy.IsTerminalStatus(root.Status) {
+		return finalizeGateState{rootTerminal: true}, nil
+	}
+	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if convoyID == "" {
+		opts.tracef("workflow-finalize bead=%s root=%s gate=input-convoy pending reason=missing_input_convoy_id", bead.ID, rootID)
+		return finalizeGateState{}, fmt.Errorf("%w: gated finalizer %s: root %s has no gc.input_convoy_id", ErrControlPending, bead.ID, rootID)
+	}
+	convoyStore, memberStores, err := findFinalizeGateConvoyStore(store, convoyID, opts)
+	if err != nil {
+		return finalizeGateState{}, fmt.Errorf("%s: locating input convoy %s: %w", bead.ID, convoyID, err)
+	}
+	if convoyStore == nil {
+		opts.tracef("workflow-finalize bead=%s root=%s gate=input-convoy pending reason=convoy_not_found convoy=%s", bead.ID, rootID, convoyID)
+		return finalizeGateState{}, fmt.Errorf("%w: gated finalizer %s: input convoy %s not found", ErrControlPending, bead.ID, convoyID)
+	}
+	members, err := convoy.Members(convoyStore, convoyID, true, memberStores...)
+	if err != nil {
+		return finalizeGateState{}, fmt.Errorf("%s: listing input convoy %s members: %w", bead.ID, convoyID, err)
+	}
+	if len(members) == 0 {
+		opts.tracef("workflow-finalize bead=%s root=%s gate=input-convoy pending reason=convoy_empty convoy=%s", bead.ID, rootID, convoyID)
+		return finalizeGateState{}, fmt.Errorf("%w: gated finalizer %s: input convoy %s has no tracked members", ErrControlPending, bead.ID, convoyID)
+	}
+	state := finalizeGateState{}
+	for _, member := range members {
+		if !convoy.IsTerminalStatus(member.Status) {
+			return finalizeGateState{}, fmt.Errorf("%w: gated finalizer %s: tracked member %s is still %s", ErrControlPending, bead.ID, member.ID, member.Status)
+		}
+		if beadOutcomeFailed(member) {
+			state.failed = true
+		}
+	}
+	return state, nil
+}
+
+// findFinalizeGateConvoyStore locates the store holding the input convoy
+// bead: the finalizer's own store first (convoy, issue, and workflow root are
+// co-resident on every single-store deployment), then each source-workflow
+// store when the caller wired the lister. The remaining stores are returned
+// as member-resolution probes so tracked members that live in a different
+// per-class store still materialize. A nil store with nil error means the
+// convoy was not found anywhere.
+func findFinalizeGateConvoyStore(store beads.Store, convoyID string, opts ProcessOptions) (beads.Store, []beads.Store, error) {
+	probeStores := []beads.Store{store}
+	if opts.SourceWorkflowStores != nil {
+		sourceStores, err := opts.SourceWorkflowStores()
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, candidate := range sourceStores {
+			if candidate.Store != nil {
+				probeStores = append(probeStores, candidate.Store)
+			}
+		}
+	}
+	for i, candidate := range probeStores {
+		if _, err := candidate.Get(convoyID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, nil, err
+		}
+		memberStores := make([]beads.Store, 0, len(probeStores)-1)
+		memberStores = append(memberStores, probeStores[:i]...)
+		memberStores = append(memberStores, probeStores[i+1:]...)
+		return candidate, memberStores, nil
+	}
+	return nil, nil, nil
 }
 
 func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, error) {
