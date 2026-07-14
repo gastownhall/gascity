@@ -57,7 +57,24 @@ if [ "$warned" -eq 0 ]; then pass "30 fast probes -> 0 false warns"; else bad "$
 # now_ms off the GNU-date branch on any platform, so the perl/python3
 # fallbacks are exercised even on GNU/Linux CI.
 
-SHIM_DIR=$(mktemp -d)
+# Reap shim dirs left by a run of this script that was SIGKILLed or timed
+# out: SIGKILL cannot be trapped, so `trap ... EXIT` below never fires for
+# a killed run. This sweep is the backstop, keying on the creator's PID
+# embedded in the dir name (ga-ntbpyb.1 -- same fragility class as the tmux
+# socket parent dir leak; smaller blast radius so no age guard is needed).
+TMPROOT="${TMPDIR:-/tmp}"
+for d in "$TMPROOT"/gc-dolt-latency-test-shim.*; do
+  [ -d "$d" ] || continue
+  base=${d##*/}
+  rest=${base#gc-dolt-latency-test-shim.}
+  pid=${rest%%.*}
+  case "$pid" in
+    ''|*[!0-9]*) continue ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || rm -rf "$d"
+done
+
+SHIM_DIR=$(mktemp -d "$TMPROOT/gc-dolt-latency-test-shim.$$.XXXXXX")
 trap 'rm -rf "$SHIM_DIR"' EXIT
 REAL_DATE=$(command -v date)
 

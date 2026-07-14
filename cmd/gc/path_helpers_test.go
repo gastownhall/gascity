@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 func canonicalTestPath(path string) string {
@@ -32,21 +33,29 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
-func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, error) {
-	parent, err := os.MkdirTemp("/tmp", "gct-")
+// cmdGCTmuxSocketRoot returns a short-path tmux socket root under /tmp (not
+// testTempRoot, which can be an arbitrarily long macOS $TMPDIR path that
+// blows Unix socket path limits), plus the parent dir to remove at teardown
+// and the *os.File holding its alive sentinel. The sentinel must stay
+// referenced by the caller for the process lifetime so a concurrent sibling
+// run's orphan sweep (tmuxtest.SweepOrphanPIDPrefixedDirs, invoked inside
+// NewSocketParentDir) does not reclaim this still-active directory.
+func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, *os.File, error) {
+	parent, sentinel, err := tmuxtest.NewSocketParentDir("/tmp")
 	if err != nil {
 		root := filepath.Join(testTempRoot, "tmux")
 		if err := os.MkdirAll(root, 0o700); err != nil {
-			return "", "", fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
+			return "", "", nil, fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
 		}
-		return root, "", nil
+		return root, "", nil, nil
 	}
 	root := filepath.Join(parent, "tmux")
 	if err := os.MkdirAll(root, 0o700); err != nil {
+		_ = sentinel.Close()
 		_ = os.RemoveAll(parent)
-		return "", "", fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
+		return "", "", nil, fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
 	}
-	return root, parent, nil
+	return root, parent, sentinel, nil
 }
 
 // clearInheritedBeadsEnv prevents tests that explicitly write

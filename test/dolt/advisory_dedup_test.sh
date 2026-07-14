@@ -26,7 +26,24 @@ command -v advisory_changed >/dev/null 2>&1 || { echo "FAIL: advisory_changed no
 command -v advisory_record  >/dev/null 2>&1 || { echo "FAIL: advisory_record not defined"; exit 1; }
 command -v advisory_clear   >/dev/null 2>&1 || { echo "FAIL: advisory_clear not defined"; exit 1; }
 
-WORK=$(mktemp -d)
+# Reap work dirs left by a run of this script that was SIGKILLed or timed
+# out: SIGKILL cannot be trapped, so `trap ... EXIT` below never fires for
+# a killed run. This sweep is the backstop, keying on the creator's PID
+# embedded in the dir name (ga-ntbpyb.1 -- same fragility class as the tmux
+# socket parent dir leak; smaller blast radius so no age guard is needed).
+TMPROOT="${TMPDIR:-/tmp}"
+for d in "$TMPROOT"/gc-dolt-advisory-test-work.*; do
+  [ -d "$d" ] || continue
+  base=${d##*/}
+  rest=${base#gc-dolt-advisory-test-work.}
+  pid=${rest%%.*}
+  case "$pid" in
+    ''|*[!0-9]*) continue ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || rm -rf "$d"
+done
+
+WORK=$(mktemp -d "$TMPROOT/gc-dolt-advisory-test-work.$$.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 STATE="$WORK/doctor-advisory-state"
 
