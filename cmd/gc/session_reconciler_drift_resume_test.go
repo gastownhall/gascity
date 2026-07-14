@@ -290,6 +290,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		10*time.Second,
 		&env.stdout,
 		&env.stderr,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)

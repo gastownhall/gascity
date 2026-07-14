@@ -126,6 +126,7 @@ func (e *restartRequestTestEnv) reconcileAtPathWithDrainOps(cityPath string, ses
 		0,
 		&e.stdout,
 		&e.stderr,
+		e.startOptions...,
 	)
 }
 
@@ -162,6 +163,7 @@ func (e *restartRequestTestEnv) reconcileAtPathWithProvider(cityPath string, sp 
 		0,
 		&e.stdout,
 		&e.stderr,
+		e.startOptions...,
 	)
 }
 

@@ -266,6 +266,7 @@ type reconcilerTestEnv struct {
 	stderr       bytes.Buffer
 	cfg          *config.City
 	desiredState map[string]TemplateParams
+	startOptions []startExecutionOption
 }
 
 func newReconcilerTestEnv() *reconcilerTestEnv {
@@ -280,6 +281,7 @@ func newReconcilerTestEnv() *reconcilerTestEnv {
 		rec:          events.Discard,
 		cfg:          &config.City{},
 		desiredState: make(map[string]TemplateParams),
+		startOptions: []startExecutionOption{withStartStabilityWaiter(immediateStartStabilityWaiter)},
 	}
 }
 
@@ -430,6 +432,7 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads
 		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
 		e.store, dops, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
+		e.startOptions...,
 	)
 }
 

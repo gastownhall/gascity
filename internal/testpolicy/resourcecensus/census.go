@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4151,
+			BaselineCalls:   4155,
 			BaselineFiles:   189,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -192,7 +192,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   77,
+			BaselineCalls:   75,
 			BaselineFiles:   26,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -322,9 +322,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4145,
+			BaselineCalls:   4149,
 			BaselineFiles:   189,
-			ReportedCalls:   4145,
+			ReportedCalls:   4149,
 			ReportedFiles:   189,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
@@ -348,9 +348,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   77,
+			BaselineCalls:   75,
 			BaselineFiles:   26,
-			ReportedCalls:   77,
+			ReportedCalls:   75,
 			ReportedFiles:   26,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
