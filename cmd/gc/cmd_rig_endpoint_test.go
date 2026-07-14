@@ -1043,6 +1043,7 @@ func TestRemoveDoltPortFileStrictClearsThroughSymlink(t *testing.T) {
 func TestSyncRigEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
 	fs := fsys.NewFake()
 	cityDir := "/city"
+	fs.Dirs[cityDir] = true
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: "/city/frontend", Prefix: "fe", DoltHost: "old-db.example.com", DoltPort: "3307"}}}
 	if err := syncRigEndpointCompatConfig(fs, cityDir, cfg, "frontend", contract.ConfigState{DoltHost: "new-db.example.com", DoltPort: "4406"}); err != nil {
 		t.Fatalf("syncRigEndpointCompatConfig: %v", err)
@@ -1064,6 +1065,7 @@ func TestSyncRigEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
 
 func TestRestoreSnapshotUsesAtomicWrite(t *testing.T) {
 	fs := fsys.NewFake()
+	fs.Dirs["/city"] = true
 	snap := fileSnapshot{path: "/city/city.toml", data: []byte("updated = true\n"), exists: true}
 	if err := restoreSnapshot(fs, snap); err != nil {
 		t.Fatalf("restoreSnapshot: %v", err)

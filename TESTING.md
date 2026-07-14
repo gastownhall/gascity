@@ -575,6 +575,14 @@ the constructor-specific source of truth.
 | `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | See the checked runtime ledger below |
 | `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec |
 | `events.Recorder` | `internal/events/eventstest/conformance.go` | FileRecorder, exec |
+| `fsys.FS` | `internal/fsys/fsystest/conformance.go` | OSFS, Fake |
+
+The `fsys.FS` suite currently proves the portable namespace core: parent and
+file/directory collisions, regular-file copying and modes, `ReadDir` errors,
+file and directory-tree rename, empty/non-empty removal, and chmod. Symlink
+resolution/replacement, atomic-write composition, and operation-scoped fault
+and recording decorators remain follow-up contract slices; do not delete their
+OS-backed coverage based on the namespace suite alone.
 
 Builtin runtime production compositions are source-bound to `cmd/gc`'s
 registry, their constructor-specific contract dispositions, and the table
