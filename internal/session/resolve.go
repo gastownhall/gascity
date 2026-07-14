@@ -63,6 +63,30 @@ func ResolveSessionBeadByExactID(store beads.Store, identifier string) (beads.Be
 	return beads.Bead{}, "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }
 
+// ResolveSessionRecordByExactID is the domain-object twin of
+// ResolveSessionBeadByExactID: it performs the SAME single store.Get, the same
+// IsSessionBeadOrRepairable acceptance, the same in-memory empty-type normalize,
+// and the same error contract (wrapped "looking up session %q" for a hard store
+// error, ErrSessionNotFound for an absent or non-session id) — but projects the
+// resolved bead onto the typed session record (Info + PersistedResponse) instead
+// of returning a raw beads.Bead. It keeps the worker-boundary resolve+construct
+// path (cmd/gc/worker_handle.go) at a single store Get while removing the raw
+// bead from the interior. Pair it with worker.Factory.SessionByRecord.
+func ResolveSessionRecordByExactID(store beads.Store, identifier string) (Info, PersistedResponse, error) {
+	if store == nil {
+		return Info{}, PersistedResponse{}, fmt.Errorf("session store unavailable")
+	}
+	b, err := store.Get(identifier)
+	if err == nil && IsSessionBeadOrRepairable(b) {
+		normalizeEmptyType(&b)
+		return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+	}
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return Info{}, PersistedResponse{}, fmt.Errorf("looking up session %q: %w", identifier, err)
+	}
+	return Info{}, PersistedResponse{}, fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
+}
+
 func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (string, error) {
 	if id, err := ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -214,6 +238,28 @@ func IsSessionBeadOrRepairable(b beads.Bead) bool {
 		return true
 	}
 	return b.Type == "" && hasSessionLabel(b)
+}
+
+// hasSessionLabelInfo is the Info mirror of hasSessionLabel: it reports whether
+// the projected labels carry the gc:session marker.
+func hasSessionLabelInfo(i Info) bool {
+	for _, l := range i.Labels {
+		if l == LabelSession {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSessionBeadOrRepairableInfo is the session.Info mirror of
+// IsSessionBeadOrRepairable: a proper session bead (Type == BeadType) or a
+// crash/migration-damaged bead (empty Type carrying the gc:session label).
+// Info.Type and Info.Labels project both inputs verbatim, so the two agree.
+func IsSessionBeadOrRepairableInfo(i Info) bool {
+	if i.Type == BeadType {
+		return true
+	}
+	return i.Type == "" && hasSessionLabelInfo(i)
 }
 
 // RepairEmptyType fixes a session bead with an empty type field by

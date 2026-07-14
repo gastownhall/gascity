@@ -3,6 +3,7 @@ package nudgequeue
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,10 @@ type NudgeShadow struct {
 	ID string
 	// BeadID is the shadow bead's own id.
 	BeadID string
+	// Open reports whether the shadow bead is still open (bead Status == "open").
+	// It is bead-authoritative: the retention sweep reads it in place of cracking
+	// the raw bead Status.
+	Open bool
 	// State is the lifecycle state stamped on the bead ("queued" or a terminal
 	// state like "injected"/"failed"/"expired"/"superseded").
 	State string
@@ -54,6 +59,11 @@ type NudgeShadow struct {
 	TerminalReason string
 	// CommitBoundary is the controller-stamped commit boundary at terminalization.
 	CommitBoundary string
+	// CloseReason is the bead-lifecycle close_reason stamped before Close — the
+	// canonical terminal / rollback / gc-swept reason forwarded to
+	// `bd close --reason`. Bead-authoritative and codec-stamped, same class as
+	// State / TerminalReason.
+	CloseReason string
 	// Reference is the optional decoded reference (the previously write-only
 	// reference_json field — this decoder is the first reader of it).
 	Reference *Reference
@@ -91,10 +101,12 @@ func NewStore(store beads.NudgesStore) *Store {
 func decodeNudgeItem(b beads.Bead) NudgeShadow {
 	s := NudgeShadow{
 		BeadID:         b.ID,
+		Open:           b.Status == "open",
 		ID:             b.Metadata["nudge_id"],
 		State:          b.Metadata["state"],
 		TerminalReason: b.Metadata["terminal_reason"],
 		CommitBoundary: b.Metadata["commit_boundary"],
+		CloseReason:    b.Metadata["close_reason"],
 		Agent:          b.Metadata["agent"],
 		SessionID:      b.Metadata["session_id"],
 		Source:         b.Metadata["source"],
@@ -118,11 +130,6 @@ func decodeNudgeItem(b beads.Bead) NudgeShadow {
 	}
 	return s
 }
-
-// DecodeShadow exposes decodeNudgeItem for callers in package main that route
-// their Metadata[...] cracks through the typed view in Phase 2. It is the public
-// face of the read codec; the unexported name keeps the codec confined.
-func DecodeShadow(b beads.Bead) NudgeShadow { return decodeNudgeItem(b) }
 
 // EnqueueRollbackCloseReason is the close_reason metadata value stamped on a
 // partially-created nudge shadow bead when the enqueue transaction fails after
@@ -264,6 +271,85 @@ func (s *Store) RollbackEnqueue(beadID string) error {
 	return errs
 }
 
+// SweepStale stamps the gc-swept terminal vocabulary on a stale nudge shadow bead
+// past the gc retention window and closes it. It is the retention-sweep sibling of
+// Terminalize/RollbackEnqueue: the gc-swept terminal-key vocabulary (state /
+// terminal_reason / commit_boundary / terminal_at / close_reason) is now confined
+// here alongside Terminalize's canonicalCloseReason vocabulary, so the cmd/gc
+// sweep no longer re-stamps these keys inline. closeReason is caller-supplied —
+// cmd/gc keeps ownership of the human message constant — and must satisfy the
+// >=20-char validation.on-close floor.
+//
+// SweepStale emits byte-identical bead writes to the prior inline stamp+close
+// block in cmd/gc/nudge_mail_sweep.go: a single SetMetadataBatch with the same
+// five keys, then Close. A SetMetadataBatch failure returns without closing,
+// matching the sweep's continue-without-close semantics, and both error strings
+// preserve the caller's prior "nudge %s: set metadata/close: %w" text so
+// joined-error assertions keep passing. Unlike Terminalize it adds no missing-bead
+// tolerance, matching the inline sweep it replaces.
+func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
+	if s == nil || s.store.Store == nil {
+		return nil
+	}
+	update := map[string]string{
+		"state":           "gc-swept",
+		"terminal_reason": "gc-swept-stale",
+		"commit_boundary": "gc-swept",
+		"terminal_at":     now.UTC().Format(time.RFC3339),
+		"close_reason":    closeReason,
+	}
+	if err := s.store.SetMetadataBatch(beadID, update); err != nil {
+		return fmt.Errorf("nudge %s: set metadata: %w", beadID, err)
+	}
+	if err := s.store.Close(beadID); err != nil {
+		return fmt.Errorf("nudge %s: close: %w", beadID, err)
+	}
+	return nil
+}
+
+// StaleShadowsBefore lists stale nudge shadows created before `before`, oldest
+// first, EXCLUDING any whose durable nudge id is in liveExcludeIDs — the live
+// flock-queue set (nudgequeue.State Pending/InFlight ids) a caller must never
+// sweep. It is the typed read behind the retention sweep and its dry-run twin:
+// callers iterate the returned NudgeShadow values, reading shadow.Open in place
+// of a raw b.Status crack and shadow.BeadID for the close target, instead of
+// holding raw beads and calling the deleted DecodeShadow.
+//
+// The query is byte-identical to the prior StaleCandidatesBefore (the gc:nudge
+// label, CreatedBefore cutoff, oldest-first sort, both storage tiers), so the
+// candidate set the sweep and dry-run see is unchanged. limit caps the number of
+// candidate beads FETCHED (0 or negative == unbounded); the caller keeps its own
+// cross-phase close budget on top, so the live exclusion moving inside here does
+// not alter which beads the budget-limited loop closes. It is nil-receiver safe
+// and callable inside the withNudgeQueueState flock transaction.
+func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs map[string]bool) ([]NudgeShadow, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	candidates, err := s.store.List(beads.ListQuery{
+		Label:         nudgeBeadLabel,
+		CreatedBefore: before,
+		Limit:         limit,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	shadows := make([]NudgeShadow, 0, len(candidates))
+	for _, b := range candidates {
+		shadow := decodeNudgeItem(b)
+		if id := strings.TrimSpace(shadow.ID); id != "" && liveExcludeIDs[id] {
+			continue
+		}
+		shadows = append(shadows, shadow)
+	}
+	return shadows, nil
+}
+
 // Find returns the OPEN (or terminal-but-decodable) nudge shadow for nudgeID as
 // a typed NudgeShadow, plus whether one was found. It is the existence gate used
 // by wait readiness; callers receive the decoded view rather than a raw bead.
@@ -335,20 +421,6 @@ func (s *Store) find(nudgeID string, includeClosed bool) (beads.Bead, bool, erro
 // is the package-canonical predicate; callers route their state checks through
 // it (or through the decoded NudgeShadow) rather than re-listing the codes.
 func IsTerminalState(state string) bool { return isTerminalNudgeState(state) }
-
-// FindBead returns the raw OPEN nudge shadow bead for nudgeID. It exists for the
-// cmd/gc thin adapters (and their existing tests) that still inspect the bead
-// directly; new callers should prefer Find, which returns the decoded shadow.
-func (s *Store) FindBead(nudgeID string) (beads.Bead, bool, error) {
-	return s.find(nudgeID, false)
-}
-
-// FindBeadIncludingTerminal returns the raw nudge shadow bead for nudgeID,
-// including closed terminal beads. Cmd/gc adapter shim; prefer
-// FindIncludingTerminal for new callers.
-func (s *Store) FindBeadIncludingTerminal(nudgeID string) (beads.Bead, bool, error) {
-	return s.find(nudgeID, true)
-}
 
 // CanonicalCloseReason is the exported face of the close_reason floor codec, for
 // the cmd/gc adapter test that guards the >=20 char validator floor.

@@ -6,8 +6,63 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
+
+// TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore pins the WI-6 R4
+// residue-coherence contract on the buildPreparedStart-ERROR abort path. When a
+// pending-create recovery rebuilds the prepared start, buildPreparedStart persists a
+// stale-resume started_config_hash clear ("") and THEN aborts (fork + wake_mode=fresh
+// fails loud, Q2). The abort residue recoverRunningPendingCreate returns must fold the
+// store-coherent cleared hash — pre-R4 the raw-bead mirror carried it; post-R4 the
+// threaded post-mutation Info carries it. If the residue instead carried the stale
+// pre-prep "deadbeef", the same-tick config-drift gate would read a non-empty hash and
+// resetConfiguredNamedSessionForConfigDrift would write it back over the store's clear
+// (#127-class drift). This FAILS against pendingCreateResidueFold(info) and PASSES
+// against pendingCreateResidueFold(partialInfo).
+func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) {
+	const parentSID = "brain-xyz"
+	candidate, cfg, store := newForkSessionCandidate(t, forkClaude(), parentSID, "fresh")
+	if candidate.info.StartedConfigHash != "deadbeef" {
+		t.Fatalf("fixture started_config_hash = %q, want deadbeef (the pre-prep value)", candidate.info.StartedConfigHash)
+	}
+
+	// The session's own keyed transcript is stale (gone), so buildPreparedStart's
+	// pre-flight guard fires clearStaleResumeKeyMetadata (persisting started_config_hash="")
+	// before validateForkLaunch aborts on fork + wake_mode=fresh.
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	ok, residue := recoverRunningPendingCreate(candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
+	if ok {
+		t.Fatal("recoverRunningPendingCreate ok=true; want false (buildPreparedStart errors on fork + wake_mode=fresh)")
+	}
+
+	// The store already holds the cleared hash: clearStaleResumeKeyMetadata persisted it
+	// before buildPreparedStart aborted.
+	got, err := store.Get(candidate.info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("store started_config_hash = %q, want cleared %q", got.Metadata["started_config_hash"], "")
+	}
+
+	// The abort residue must match the store, not the stale pre-prep hash.
+	if v, present := residue["started_config_hash"]; !present || v != "" {
+		t.Fatalf("residue started_config_hash = %q (present=%v), want %q to match the store the clear persisted", v, present, "")
+	}
+
+	// The reconciler folds the residue onto its infoByID snapshot; the folded twin must
+	// carry StartedConfigHash="" so the same-tick config-drift gate skips (#127).
+	folded := candidate.info.ApplyPatch(residue)
+	if folded.StartedConfigHash != "" {
+		t.Fatalf("folded snapshot StartedConfigHash = %q, want %q (same-tick config-drift gate must skip)", folded.StartedConfigHash, "")
+	}
+}
 
 // forkClaude is a resolved provider with full fork support, mirroring the
 // claude builtin profile (--resume / --fork-session / --session-id).
@@ -239,7 +294,7 @@ func newForkSessionCandidate(t *testing.T, rp *config.ResolvedProvider, parentSI
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", ResolvedProvider: rp}
-	return startCandidate{session: &session, tp: tp, order: 0}, cfg, store
+	return startCandidate{info: sessiontest.SeedBead(t, session), tp: tp, order: 0}, cfg, store
 }
 
 // TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery is the
@@ -309,7 +364,7 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 			}
 			t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
-			prepared, err := buildPreparedStart(candidate, cfg, store)
+			prepared, _, err := buildPreparedStart(candidate, cfg, store)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("buildPreparedStart = nil error, want loud failure; command=%q", prepared.cfg.Command)
@@ -354,11 +409,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: ""})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: ""})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "" {
+		if got := boundInfo.BrainParentSID; got != "" {
 			t.Errorf("%s = %q, want cleared", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})
@@ -368,11 +423,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: "wb-B"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "" {
+		if got := boundInfo.BrainParentSID; got != "" {
 			t.Errorf("%s = %q, want cleared on reassign to non-warm work", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})
@@ -382,11 +437,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "brain-B" {
+		if got := boundInfo.BrainParentSID; got != "brain-B" {
 			t.Errorf("%s = %q, want brain-B", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})
@@ -396,11 +451,11 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		bound, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", session, SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
-		if got := bound.Metadata[beadmeta.BrainParentSIDMetadataKey]; got != "brain-A" {
+		if got := boundInfo.BrainParentSID; got != "brain-A" {
 			t.Errorf("%s = %q, want brain-A preserved", beadmeta.BrainParentSIDMetadataKey, got)
 		}
 	})

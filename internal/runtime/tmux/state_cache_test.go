@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
 // mockFetcher implements StateFetcher for testing.
@@ -306,6 +308,97 @@ func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
 	}
 	if calls := f.getCalls(); calls != 1 {
 		t.Fatalf("fetch calls = %d, want 1 across repeated ObserveLiveness calls", calls)
+	}
+}
+
+// FetchState must report an unreachable tmux server as an observation FAILURE
+// (runtime.ErrRuntimeUnavailable), not as an empty success. The empty-success
+// form let refresh() overwrite last-known-good and instantly report every
+// session not-running, draining healthy pool slots on a brief tmux blip. The
+// wrapped error must still satisfy isNoServerError so downstream absorbers keep
+// working.
+func TestTmuxFetcher_NoServerMapsToRuntimeUnavailable(t *testing.T) {
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: &fakeExecutor{err: ErrNoServer}}}
+
+	snap, err := f.FetchState(context.Background())
+	if err == nil {
+		t.Fatalf("FetchState() err = nil (snapshot %+v), want an error for an unreachable server", snap)
+	}
+	if !errors.Is(err, gcruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("FetchState() err = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+	if !isNoServerError(err) {
+		t.Fatalf("FetchState() err = %v must still satisfy isNoServerError so downstream ErrNoServer absorbers work", err)
+	}
+}
+
+// End to end at the cache: after a good prime, an ErrNoServer refresh must
+// preserve last-known-good (within staleTTL) instead of collapsing to empty.
+func TestStateCache_NoServerRefreshPreservesLastKnownGood(t *testing.T) {
+	fe := &fakeExecutor{
+		// FetchState issues exactly one executor call (list-panes); the
+		// process-table half reads /proc directly, not through exec. First
+		// call primes one live pane, every later call reports no server.
+		outs: []string{"agent-1\t0\tclaude\t123"},
+		errs: []error{nil, ErrNoServer, ErrNoServer, ErrNoServer},
+	}
+	// TTL 0 forces every read to refresh unconditionally (time.Since(fetchedAt)
+	// is never < 0). A nanosecond TTL is non-deterministic here: on a coarse
+	// monotonic clock time.Since can read 0 on the very next call, so the second
+	// IsRunning may skip the refresh and leave lastError nil (flaky).
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}, 0)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 running after prime")
+	}
+	// TTL 0, so the next read forces a refresh that hits ErrNoServer.
+	// Last-known-good must survive it (staleTTL default 30s).
+	if !cache.IsRunning("agent-1") {
+		t.Error("expected agent-1 still running after an ErrNoServer refresh (last-known-good); a brief tmux outage must not report sessions as gone")
+	}
+	cache.mu.RLock()
+	lastErr := cache.lastError
+	cache.mu.RUnlock()
+	if !errors.Is(lastErr, gcruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("cache.lastError = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", lastErr)
+	}
+}
+
+// An UNPRIMED cache (never held a good state, fetchedAt zero) that hits a
+// genuine "no server" must prime itself to an empty snapshot rather than
+// re-spawning list-panes and re-logging the failure on every IsRunning. A
+// fresh city with no tmux server yet would otherwise storm the (absent) server
+// with one list-panes per liveness probe.
+func TestStateCache_UnprimedNoServerPrimesEmptyWithoutRefetch(t *testing.T) {
+	fe := &fakeExecutor{
+		// Every list-panes reports no server; the cache is never primed good.
+		errs: []error{ErrNoServer, ErrNoServer, ErrNoServer, ErrNoServer},
+	}
+	// A real TTL (not 0) so a successfully primed empty snapshot is a cache hit
+	// on the next read — proving priming stops the refetch storm.
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}, time.Second)
+
+	if cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 not running against a server-less city")
+	}
+	// The first read primed an empty snapshot with a single list-panes spawn.
+	// Every subsequent read within the TTL must be a cache hit — no refetch.
+	_ = cache.IsRunning("agent-1")
+	_ = cache.IsRunning("agent-2")
+	if calls := len(fe.calls); calls != 1 {
+		t.Fatalf("list-panes calls = %d, want 1: an unprimed no-server must prime empty once, not refetch on every IsRunning", calls)
+	}
+
+	// The cache is primed: fetchedAt set, and the failure recorded in lastError.
+	cache.mu.RLock()
+	fetchedAt := cache.fetchedAt
+	lastErr := cache.lastError
+	cache.mu.RUnlock()
+	if fetchedAt.IsZero() {
+		t.Error("expected fetchedAt to be set (cache primed) after an unprimed no-server refresh")
+	}
+	if !errors.Is(lastErr, gcruntime.ErrRuntimeUnavailable) {
+		t.Errorf("cache.lastError = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", lastErr)
 	}
 }
 

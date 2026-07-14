@@ -441,6 +441,24 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
 		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)
 	}
+	// Verify append modifiers extended the lists (not replaced). These guard
+	// the toAgentPatch adapter: a dropped *Append field would leave the base
+	// list at length 1.
+	if len(agent.PreStart) != 2 || agent.PreStart[1] != "pre-append" {
+		t.Errorf("PreStartAppend not applied: %v", agent.PreStart)
+	}
+	if len(agent.SessionSetup) != 2 || agent.SessionSetup[1] != "setup-append" {
+		t.Errorf("SessionSetupAppend not applied: %v", agent.SessionSetup)
+	}
+	if len(agent.SessionLive) != 2 || agent.SessionLive[1] != "live-append" {
+		t.Errorf("SessionLiveAppend not applied: %v", agent.SessionLive)
+	}
+	if len(agent.InstallAgentHooks) != 2 || agent.InstallAgentHooks[1] != "gemini" {
+		t.Errorf("InstallAgentHooksAppend not applied: %v", agent.InstallAgentHooks)
+	}
+	if len(agent.InjectFragments) != 2 || agent.InjectFragments[1] != "frag2" {
+		t.Errorf("InjectFragmentsAppend not applied: %v", agent.InjectFragments)
+	}
 }
 
 // TestProviderFieldSync verifies every ProviderSpec field (other than the
@@ -513,6 +531,61 @@ func TestProviderFieldSync(t *testing.T) {
 	for _, f := range patchFields {
 		if !specSet[f] && !patchOnly[f] {
 			t.Errorf("ProviderPatch has field %q not on ProviderSpec or patchOnly exclusion list", f)
+		}
+	}
+}
+
+// TestAgentCloneIsDeep verifies that Agent.Clone independently allocates every
+// slice, map, and pointer field, so a clone never shares backing storage with
+// its source. It reflects over Agent, populates every settable reference-type
+// field with real backing storage, clones, and asserts the clone's field
+// points at distinct storage. A new reference-type field that Clone forgets to
+// deep-copy fails here instead of silently aliasing (the in-process cousin of
+// the pack-load-cache corruption class).
+func TestAgentCloneIsDeep(t *testing.T) {
+	var orig Agent
+	v := reflect.ValueOf(&orig).Elem()
+	tp := v.Type()
+
+	// Populate every settable reference-type field with non-empty backing
+	// storage. Unexported fields (source, layout) are value enums, not
+	// reference types, so skipping them is correct.
+	for i := 0; i < tp.NumField(); i++ {
+		f := v.Field(i)
+		if !f.CanSet() {
+			continue
+		}
+		switch f.Kind() {
+		case reflect.Slice:
+			f.Set(reflect.MakeSlice(f.Type(), 1, 1))
+		case reflect.Map:
+			m := reflect.MakeMapWithSize(f.Type(), 1)
+			m.SetMapIndex(reflect.New(f.Type().Key()).Elem(), reflect.New(f.Type().Elem()).Elem())
+			f.Set(m)
+		case reflect.Ptr:
+			f.Set(reflect.New(f.Type().Elem()))
+		}
+	}
+
+	clone := orig.Clone()
+	cv := reflect.ValueOf(clone)
+
+	for i := 0; i < tp.NumField(); i++ {
+		f := v.Field(i)
+		if !f.CanSet() {
+			continue
+		}
+		name := tp.Field(i).Name
+		cf := cv.Field(i)
+		switch f.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Ptr:
+			if cf.IsNil() {
+				t.Errorf("Agent.Clone left reference field %q nil — add a deep copy in Clone()", name)
+				continue
+			}
+			if f.Pointer() == cf.Pointer() {
+				t.Errorf("Agent.Clone aliases field %q (shared backing storage) — add a deep copy in Clone()", name)
+			}
 		}
 	}
 }

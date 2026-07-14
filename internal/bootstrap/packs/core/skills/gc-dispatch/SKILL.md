@@ -30,7 +30,7 @@ where work goes. Example: bead `hw-42` → rig `hello-world` → target
 `hello-world/polecat`.
 
 **Rig-scoped beads:** `gc sling` automatically resolves the rig directory
-for rig-scoped bead IDs (e.g. `hw-abc`) and runs `bd update` from there,
+for rig-scoped bead IDs (e.g. `hw-abc`) and runs `gc bd update` from there,
 so the rig's `.beads` database is found without manual intervention.
 
 **Beads must be in the agent's rig database.** Sling operates on the

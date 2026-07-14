@@ -8,6 +8,7 @@
     "frontend"
   ],
   "scripts": {
+    "generate:client": "openapi-ts",
     "build:shared": "npm --workspace gas-city-dashboard-shared run build",
     "build:frontend": "npm --workspace gas-city-dashboard-frontend run build",
     "build": "npm run build:shared && npm run build:frontend",

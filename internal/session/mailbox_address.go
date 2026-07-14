@@ -34,6 +34,30 @@ func MailboxAddress(b beads.Bead) string {
 // is the canonical home of the logic the mail CLI previously inlined as
 // sessionMailboxAddresses.
 func MailboxAddresses(b beads.Bead) []string {
+	return mailboxAddresses(b, false)
+}
+
+// MailboxAddressesIncludingRuntimeName returns every mailbox address a session
+// bead can receive mail at, always including its runtime session_name (appended
+// last), even when other addresses already resolved. This is the API read
+// semantics introduced by bf576b04a ("fix: include runtime session mailboxes in
+// API reads"): mail persisted under a session's runtime name must stay
+// reachable via API inbox/count queries, guarded by
+// TestMailAPIQueriesAllResolvedSessionMailboxAddresses.
+//
+// It deliberately forks from MailboxAddresses, which appends session_name only
+// as a last-resort fallback. That CLI/API fork is a documented product decision
+// (the CLI inbox can miss mail persisted under a runtime session_name the API
+// finds); reconciling the two recipient views is tracked as a follow-up.
+func MailboxAddressesIncludingRuntimeName(b beads.Bead) []string {
+	return mailboxAddresses(b, true)
+}
+
+// mailboxAddresses is the shared body behind MailboxAddresses (CLI fallback-only
+// session_name) and MailboxAddressesIncludingRuntimeName (API unconditional
+// session_name). When includeRuntimeName is true the session_name is always
+// added; otherwise it is only added when nothing else resolved.
+func mailboxAddresses(b beads.Bead, includeRuntimeName bool) []string {
 	seen := map[string]bool{}
 	var addresses []string
 	add := func(value string) {
@@ -49,8 +73,67 @@ func MailboxAddresses(b beads.Bead) []string {
 	for _, alias := range AliasHistory(b.Metadata) {
 		add(alias)
 	}
-	if len(addresses) == 0 {
+	if includeRuntimeName {
+		add(b.Metadata["session_name"])
+	} else if len(addresses) == 0 {
 		add(strings.TrimSpace(b.Metadata["session_name"]))
+	}
+	return addresses
+}
+
+// MailboxAddressFromInfo is the Info-taking twin of MailboxAddress: the primary
+// mailbox address a session publishes under — its alias if set, else its bead
+// id, else its runtime session_name. It reads Info fields that mirror the exact
+// bead metadata (Alias, ID, SessionNameMetadata — the RAW session_name without
+// the sessionNameFor fallback), so it is byte-identical to MailboxAddress.
+func MailboxAddressFromInfo(info Info) string {
+	if alias := strings.TrimSpace(info.Alias); alias != "" {
+		return alias
+	}
+	if info.ID != "" {
+		return info.ID
+	}
+	return strings.TrimSpace(info.SessionNameMetadata)
+}
+
+// MailboxAddressesFromInfo is the Info-taking twin of MailboxAddresses: every
+// address a session can receive mail at (primary, bead id, alias history),
+// falling back to session_name only when nothing else resolves.
+func MailboxAddressesFromInfo(info Info) []string {
+	return mailboxAddressesFromInfo(info, false)
+}
+
+// MailboxAddressesIncludingRuntimeNameFromInfo is the Info-taking twin of
+// MailboxAddressesIncludingRuntimeName: the API read semantics that always
+// include the runtime session_name (appended last), even when other addresses
+// resolved.
+func MailboxAddressesIncludingRuntimeNameFromInfo(info Info) []string {
+	return mailboxAddressesFromInfo(info, true)
+}
+
+// mailboxAddressesFromInfo is the Info-taking shared body behind the two Info
+// mailbox twins, byte-identical to mailboxAddresses: it reads Alias/ID
+// (via MailboxAddressFromInfo), AliasHistory, and the RAW SessionNameMetadata.
+func mailboxAddressesFromInfo(info Info, includeRuntimeName bool) []string {
+	seen := map[string]bool{}
+	var addresses []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		addresses = append(addresses, value)
+	}
+	add(MailboxAddressFromInfo(info))
+	add(info.ID)
+	for _, alias := range info.AliasHistory {
+		add(alias)
+	}
+	if includeRuntimeName {
+		add(info.SessionNameMetadata)
+	} else if len(addresses) == 0 {
+		add(strings.TrimSpace(info.SessionNameMetadata))
 	}
 	return addresses
 }
@@ -73,7 +156,7 @@ func ExtmsgHandleSource(b beads.Bead) string {
 // error is returned verbatim (beads.ErrNotFound-wrapped when the bead is
 // absent), matching the raw mail path it replaces — the callers pass an
 // already-resolved session id and surface the error to the operator.
-func (s *InfoStore) MailboxAddress(id string) (string, error) {
+func (s *Store) MailboxAddress(id string) (string, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return "", err
@@ -84,7 +167,7 @@ func (s *InfoStore) MailboxAddress(id string) (string, error) {
 // MailboxAddresses loads the session bead for id and returns all addresses it
 // can receive mail at. The Get error is returned verbatim, matching the raw
 // mail path it replaces.
-func (s *InfoStore) MailboxAddresses(id string) ([]string, error) {
+func (s *Store) MailboxAddresses(id string) ([]string, error) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return nil, err
@@ -97,7 +180,7 @@ func (s *InfoStore) MailboxAddresses(id string) ([]string, error) {
 // false) return signals "no session bead / load error" so the caller can fall
 // back to its selector, matching the raw extmsg handler which fell back on any
 // Get error.
-func (s *InfoStore) ExtmsgHandleSource(id string) (string, bool) {
+func (s *Store) ExtmsgHandleSource(id string) (string, bool) {
 	b, err := s.store.Get(id)
 	if err != nil {
 		return "", false

@@ -271,7 +271,17 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 	return nil
 }
 
-// Close sets a bead's status to "closed": script close <id>
+// Close sets a bead's status to "closed": script close <id>.
+//
+// This delegate stays bare (no --force). The exec: wrapper scripts
+// (contrib/beads-scripts/gc-beads-k8s, gc-beads-br) are the canonical place
+// that injects --force for bd's cross-actor close guard
+// (gastownhall/beads#3734): they run under the pod/controller actor with
+// BEADS_ACTOR stripped while closing agent-owned beads, mirroring the SDK
+// BdStore, which always force-closes. Do not add --force here — the wrappers
+// read the bead id as their first positional argument, so a leading --force
+// would break them. A new exec: wrapper that closes agent-owned beads must
+// inject --force itself.
 func (s *Store) Close(id string) error {
 	_, err := s.run(nil, "close", id)
 	if err != nil {
@@ -335,7 +345,10 @@ func (s *Store) List(query beads.ListQuery) ([]beads.Bead, error) {
 		if query.Type != "" {
 			args = append(args, "--type="+query.Type)
 		}
-		if query.Limit > 0 && query.CreatedBefore.IsZero() {
+		// SeekAfter (like CreatedBefore) is applied Go-side after the script
+		// returns, so a script-side limit would cut rows before the boundary
+		// filter runs and silently skip page rows.
+		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.SeekAfter == nil {
 			args = append(args, "--limit="+strconv.Itoa(query.Limit))
 		}
 		out, err = s.run(nil, args...)

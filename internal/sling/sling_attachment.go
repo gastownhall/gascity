@@ -56,7 +56,7 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 		attachments = append(attachments, attached)
 	}
 
-	addByID(parent.Metadata["molecule_id"])
+	addByID(parent.Metadata[beadmeta.MoleculeIDMetadataKey])
 	addByID(parent.Metadata["workflow_id"])
 
 	if childQuerier != nil {
@@ -109,13 +109,16 @@ func IsMoleculeAttachment(b beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(b.Type), "molecule")
 }
 
-// FindBlockingMolecule checks if the bead has any open attached molecule
-// or wisp children. Returns the blocking attachment's label and ID, or
-// empty strings if none. Read-only -- does not auto-burn.
-func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string) {
+// findBlockingMolecule is the error-returning core behind FindBlockingMolecule
+// and HasMoleculeChildren. It returns the first open attached molecule/wisp
+// child, and surfaces the attachment-probe error only when no live attachment
+// was found -- a discovered live attachment is definitive even if the probe was
+// partial. Callers that must fail closed can inspect the error to tell "no
+// attachment" apart from "probe failed". Read-only -- does not auto-burn.
+func findBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string, err error) {
 	parent, ok := BeadFromGetters(beadID, q, store)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
 	var childQuerier BeadChildQuerier
 	if cq, ok := q.(BeadChildQuerier); ok {
@@ -123,23 +126,35 @@ func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (labe
 	} else if cq, ok := any(store).(BeadChildQuerier); ok {
 		childQuerier = cq
 	}
-	attachments, err := CollectAttachedBeads(parent, store, childQuerier)
-	if err != nil && len(attachments) == 0 {
-		return "", ""
-	}
+	attachments, probeErr := CollectAttachedBeads(parent, store, childQuerier)
 	for _, attached := range attachments {
 		if attached.Status != "closed" {
-			return AttachmentLabel(attached), attached.ID
+			return AttachmentLabel(attached), attached.ID, nil
 		}
 	}
-	return "", ""
+	// No live attachment found. A probe error here means we cannot conclude the
+	// bead is unattached, so report it rather than a clean "none".
+	return "", "", probeErr
 }
 
-// HasMoleculeChildren reports whether the bead has any open attached
-// molecule or wisp children. Read-only -- does not auto-burn.
-func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) bool {
-	label, _ := FindBlockingMolecule(q, beadID, store)
-	return label != ""
+// FindBlockingMolecule checks if the bead has any open attached molecule
+// or wisp children. Returns the blocking attachment's label and ID, or
+// empty strings if none (or if the attachment probe could not complete).
+// Read-only -- does not auto-burn.
+func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string) {
+	label, id, _ = findBlockingMolecule(q, beadID, store)
+	return label, id
+}
+
+// HasMoleculeChildren reports whether the bead has any open attached molecule
+// or wisp children. The returned error is non-nil only when the attachment
+// probe could not complete and no live attachment was found, so a caller that
+// must fail closed -- such as the --on idempotency override -- can preserve its
+// safe state instead of mistaking a probe failure for "no molecule". Read-only
+// -- does not auto-burn.
+func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) (bool, error) {
+	label, _, err := findBlockingMolecule(q, beadID, store)
+	return label != "", err
 }
 
 // CloseAttachedSubtree closes an attached workflow or molecule root and any
@@ -163,8 +178,8 @@ func clearAttachmentMetadata(store beads.Store, parent beads.Bead, attached bead
 			return err
 		}
 	}
-	if strings.TrimSpace(parent.Metadata["molecule_id"]) == attached.ID {
-		if err := store.SetMetadata(parent.ID, "molecule_id", ""); err != nil {
+	if strings.TrimSpace(parent.Metadata[beadmeta.MoleculeIDMetadataKey]) == attached.ID {
+		if err := store.SetMetadata(parent.ID, beadmeta.MoleculeIDMetadataKey, ""); err != nil {
 			return err
 		}
 	}
@@ -323,45 +338,62 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 
 // needsConvoyRecovery reports whether an already-routed bead should re-enter
 // finalize to repair missing or closed auto-convoy membership.
-func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadCheckOptions) bool {
+//
+// It fails CLOSED on a store error: rather than reporting "recovery needed"
+// (which re-runs finalize and mints a duplicate auto-convoy under a transient
+// store hiccup, #2987), it returns the error so callers can treat the convoy
+// as already present. A read error is never evidence that recovery is needed.
+func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadCheckOptions) (bool, error) {
 	if opts.NoConvoy {
-		return false
+		return false, nil
 	}
-	if hasLiveTrackingConvoy(deps.Store, b.ID) {
-		return false
+	live, err := hasLiveTrackingConvoy(deps.Store, b.ID)
+	if err != nil {
+		return false, err
+	}
+	if live {
+		return false, nil
 	}
 	parentID := strings.TrimSpace(b.ParentID)
 	if parentID == "" {
-		return true
+		return true, nil
 	}
 	if q == nil {
-		return false
+		return false, nil
 	}
 	parent, err := q.Get(parentID)
 	if err != nil {
-		return true
+		if errors.Is(err, beads.ErrNotFound) {
+			// A genuinely deleted parent is not a transient store hiccup: the
+			// routed child is orphaned, so finalize must re-run to recreate its
+			// missing auto-convoy. Return recovery-needed rather than failing
+			// closed. Only ambiguous/transient store errors fail closed below
+			// (assuming the convoy already exists, #2987).
+			return true, nil
+		}
+		return false, fmt.Errorf("reading parent %s for convoy recovery of %s: %w", parentID, b.ID, err)
 	}
 	if parent.Type == "convoy" {
-		return convoycore.IsTerminalStatus(parent.Status)
+		return convoycore.IsTerminalStatus(parent.Status), nil
 	}
 	if sourceworkflow.IsWorkflowRoot(parent) {
-		return false
+		return false, nil
 	}
 	// Ordinary parent beads do not own the routing lifecycle. A routed child
 	// without a live tracking convoy needs finalize to run again so the missing
 	// auto-convoy can be recreated; finalize is idempotent for an already-routed
 	// bead because CheckBeadState preserves the routed metadata and only repairs
 	// the missing tracking attachment.
-	return true
+	return true, nil
 }
 
-func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {
+func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
 	if store == nil {
-		return false
+		return false, nil
 	}
 	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
 	for _, convoy := range convoys {
 		// These are convoys by construction, so the convoy type's Ready
@@ -371,10 +403,31 @@ func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {
 			continue
 		}
 		if !convoycore.IsTerminalStatus(convoy.Status) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+// resolveConvoyRecovery maps needsConvoyRecovery onto a BeadCheckResult for an
+// already-routed bead: an empty result when finalize must re-run to recreate a
+// missing auto-convoy, or Idempotent otherwise. On a store error it fails
+// CLOSED — assuming the convoy already exists rather than minting a duplicate
+// (#2987) — and surfaces the error as a warning instead of swallowing it.
+func resolveConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadCheckOptions, beadID string) BeadCheckResult {
+	needRecovery, err := needsConvoyRecovery(q, b, deps, opts)
+	if err != nil {
+		return BeadCheckResult{
+			Idempotent: true,
+			Warnings:   []string{fmt.Sprintf("warning: bead %s convoy-recovery check failed, assuming convoy exists: %v", beadID, err)},
+		}
+	}
+	if needRecovery {
+		// Prior sling set gc.routed_to but left no convoy — let finalize
+		// re-run to create it and poke the controller.
+		return BeadCheckResult{}
+	}
+	return BeadCheckResult{Idempotent: true}
 }
 
 // CheckBeadState checks whether a bead is already routed and returns a
@@ -395,30 +448,13 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	if IsCustomSlingQuery(a) {
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return BeadCheckResult{Warnings: warnings}
+		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}
 
 	target := a.QualifiedName()
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
 		if b.Assignee == "" || b.Assignee == target {
-			if needsConvoyRecovery(q, b, deps, opts) {
-				// Prior sling set gc.routed_to but left no convoy — let
-				// finalize re-run to create it and poke the controller.
-				return BeadCheckResult{}
-			}
-			return BeadCheckResult{Idempotent: true}
+			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
 			Warnings: []string{fmt.Sprintf("warning: bead %s routed to %q but assigned to %q", beadID, target, b.Assignee)},
@@ -428,37 +464,27 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
-			if needsConvoyRecovery(q, b, deps, opts) {
-				return BeadCheckResult{}
-			}
-			return BeadCheckResult{Idempotent: true}
+			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return BeadCheckResult{Warnings: warnings}
+		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}
 
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
 		poolLabel := "pool:" + target
 		for _, l := range b.Labels {
 			if l == poolLabel {
-				if needsConvoyRecovery(q, b, deps, opts) {
-					return BeadCheckResult{}
-				}
-				return BeadCheckResult{Idempotent: true}
+				return resolveConvoyRecovery(q, b, deps, opts, beadID)
 			}
 		}
 	}
+	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+}
+
+// routedStateWarnings reports human-readable warnings describing any existing
+// routing state on b (assignee, gc.routed_to metadata, and pool: labels) that
+// would collide with a fresh sling of beadID. It returns nil when b carries no
+// such state.
+func routedStateWarnings(b beads.Bead, beadID string) []string {
 	var warnings []string
 	if b.Assignee != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
@@ -471,5 +497,5 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
 		}
 	}
-	return BeadCheckResult{Warnings: warnings}
+	return warnings
 }

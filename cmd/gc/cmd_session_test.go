@@ -1370,7 +1370,7 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1378,6 +1378,43 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	)
 	if reason != string(WakeAttached) {
 		t.Fatalf("sessionReason = %q, want %q", reason, WakeAttached)
+	}
+}
+
+// TestSessionReason_IndexMissReturnsDash pins the miss-path guard: a session
+// missing from the reason-projection index (infoIndex) must render "-", never a
+// zero-value session.Info fed to wakeReasonsInfo (which would silently emit a
+// wrong REASON cell). WI-6 R5: the projection reads only the typed Info snapshot
+// (the raw beadIndex is gone — Info.SessionCircuitState carries the last field
+// the display reason needed), so infoIndex is the single guarded index.
+func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-miss",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-miss",
+			"state":        "asleep",
+			"sleep_reason": "user-hold",
+		},
+	}
+	s := session.Info{
+		ID:          "gc-miss",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-miss",
+	}
+	full := seedSessionInfo(bead)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// Missing from infoIndex → "-".
+	if got := sessionReason(s, map[string]session.Info{}, cfg, nil, nil, nil); got != "-" {
+		t.Fatalf("sessionReason(missing from infoIndex) = %q, want -", got)
+	}
+	// Sanity: present renders the real reason, so the guard above is not trivially
+	// returning "-" for a resolvable session.
+	if got := sessionReason(s, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "user-hold" {
+		t.Fatalf("sessionReason(present) = %q, want user-hold", got)
 	}
 }
 
@@ -1413,7 +1450,7 @@ func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1458,7 +1495,7 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		provider,
 		nil,
@@ -1493,7 +1530,7 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		provider,
 		nil,
@@ -1528,7 +1565,7 @@ func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1562,7 +1599,7 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1683,7 +1720,7 @@ func TestSessionReason_PriorityMatrix(t *testing.T) {
 
 			reason := sessionReason(
 				newInfo(sessionName),
-				map[string]beads.Bead{bead.ID: bead},
+				map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 				tt.cfg,
 				provider,
 				tt.poolDesired,
@@ -1737,7 +1774,7 @@ func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1774,7 +1811,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		runtime.NewFake(),
 		nil,
@@ -1782,6 +1819,131 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 	)
 	if reason != "-" {
 		t.Fatalf("sessionReason = %q, want - for historical archived bead", reason)
+	}
+}
+
+// TestSessionReason_MultiReasonColumnCharacterization pins the exact
+// comma-joined REASON cell that `gc session` emits today. It is a
+// byte-identical gate: the wake-helper cleanup (ga-6aaj6q) retires the legacy
+// drain/dependency wake path but must not change what the CLI displays, which
+// still runs through evaluateWakeReasonsInfo. If a literal ever drifts, this test
+// fails and forces a deliberate decision rather than a silent regression.
+func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
+	const agentName = "worker"
+	const sessionName = "reason-worker"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: agentName}},
+	}
+
+	newBead := func(state string, extra map[string]string) beads.Bead {
+		md := map[string]string{
+			"template":     agentName,
+			"session_name": sessionName,
+			"state":        state,
+		}
+		for k, v := range extra {
+			md[k] = v
+		}
+		return beads.Bead{ID: "gc-1", Status: "open", Metadata: md}
+	}
+	newInfo := func(state session.State) session.Info {
+		return session.Info{
+			ID:          "gc-1",
+			Template:    agentName,
+			State:       state,
+			SessionName: sessionName,
+		}
+	}
+	attachingProvider := func(attached bool) runtime.Provider {
+		return &attachmentCachingProvider{
+			Provider: runtime.NewFake(),
+			cache: buildAttachmentCache([]session.Info{newInfo(session.StateActive)}, func(session.Info) (bool, error) {
+				return attached, nil
+			}),
+		}
+	}
+
+	type matchMode int
+	const (
+		matchExact matchMode = iota
+		matchContains
+		matchSuffix
+	)
+
+	tests := []struct {
+		name        string
+		bead        beads.Bead
+		info        session.Info
+		provider    runtime.Provider
+		poolDesired map[string]int
+		readyWait   map[string]bool
+		mode        matchMode
+		want        string
+	}{
+		{
+			name:        "active pool session attached emits ordered multi-reason cell",
+			bead:        newBead("active", nil),
+			info:        newInfo(session.StateActive),
+			provider:    attachingProvider(true),
+			poolDesired: map[string]int{agentName: 1},
+			mode:        matchExact,
+			want:        "session,config,attached",
+		},
+		{
+			name:      "asleep session with ready wait shows wait reason",
+			bead:      newBead("asleep", nil),
+			info:      newInfo(session.StateAsleep),
+			provider:  runtime.NewFake(),
+			readyWait: map[string]bool{"gc-1": true},
+			mode:      matchContains,
+			want:      string(WakeWait),
+		},
+		{
+			name:        "pin_awake appends pin as the final reason",
+			bead:        newBead("active", map[string]string{"pin_awake": "true"}),
+			info:        newInfo(session.StateActive),
+			provider:    attachingProvider(false),
+			poolDesired: map[string]int{agentName: 1},
+			mode:        matchSuffix,
+			want:        "," + string(WakePin),
+		},
+		{
+			name:     "no reasons collapses to dash",
+			bead:     newBead("asleep", nil),
+			info:     newInfo(session.StateAsleep),
+			provider: runtime.NewFake(),
+			mode:     matchExact,
+			want:     "-",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := cloneSessionReasonMetadata(tt.bead.Metadata)
+			got := sessionReason(
+				tt.info,
+				map[string]session.Info{tt.bead.ID: seedSessionInfo(tt.bead)},
+				cfg,
+				tt.provider,
+				tt.poolDesired,
+				tt.readyWait,
+			)
+			switch tt.mode {
+			case matchExact:
+				if got != tt.want {
+					t.Fatalf("sessionReason = %q, want %q", got, tt.want)
+				}
+			case matchContains:
+				if !strings.Contains(got, tt.want) {
+					t.Fatalf("sessionReason = %q, want it to contain %q", got, tt.want)
+				}
+			case matchSuffix:
+				if !strings.HasSuffix(got, tt.want) {
+					t.Fatalf("sessionReason = %q, want it to end with %q", got, tt.want)
+				}
+			}
+			assertStringMapEqual(t, tt.bead.Metadata, before)
+		})
 	}
 }
 

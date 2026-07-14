@@ -279,7 +279,10 @@ case "$op" in
     if [ "$status" = "closed" ]; then
       exit 0
     fi
-    br close --json "$id" > /dev/null
+    # --force: same generic exec Store.Close delegate as gc-beads-k8s (br backend).
+    # Closes agent-owned beads under the controller/reaper actor, so it must bypass
+    # the cross-actor close guard, mirroring the SDK BdStore's always-force close.
+    br close --force --json "$id" > /dev/null
     ;;
 
   list)

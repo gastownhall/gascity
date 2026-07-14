@@ -28,7 +28,7 @@ LOOKBACK="${CROSS_RIG_LOOKBACK:-15m}"
 SINCE=$(date -u -d "-${LOOKBACK%m} minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
         date -u -v-"${LOOKBACK%m}"M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || exit 0
 
-CLOSED=$(bd list --status=closed --closed-after="$SINCE" --json 2>/dev/null) || exit 0
+CLOSED=$(gc bd list --status=closed --closed-after="$SINCE" --json 2>/dev/null) || exit 0
 if [ -z "$CLOSED" ] || [ "$CLOSED" = "[]" ]; then
     exit 0
 fi
@@ -43,7 +43,7 @@ RESOLVED=0
 CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
 while IFS= read -r closed_id; do
     # Find beads that have a blocks dep on this closed issue.
-    DEPS=$(bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
+    DEPS=$(gc bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then
         continue
     fi
@@ -58,8 +58,8 @@ while IFS= read -r closed_id; do
     fi
     while IFS= read -r dep_id; do
         # Convert blocks → related: remove blocking semantics, keep audit trail.
-        bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
-        bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
+        gc bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
+        gc bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
         RESOLVED=$((RESOLVED + 1))
     done <<< "$EXTERNAL_DEPS"
 done <<< "$CLOSED_IDS"

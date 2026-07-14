@@ -187,6 +187,72 @@ func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])
 }
 
+// NamedSessionModeInfo is the session.Info mirror of NamedSessionMode: it trims
+// the raw configured_named_mode metadata (Info.ConfiguredNamedMode carries the
+// verbatim value), so the trimmed result is byte-identical to the bead form.
+func NamedSessionModeInfo(i Info) string {
+	return strings.TrimSpace(i.ConfiguredNamedMode)
+}
+
+// IsNamedSessionInfo is the session.Info mirror of IsNamedSessionBead:
+// Info.ConfiguredNamedSession already projects the trimmed
+// configured_named_session == "true" flag.
+func IsNamedSessionInfo(i Info) bool {
+	return i.ConfiguredNamedSession
+}
+
+// NamedSessionIdentityInfo is the session.Info mirror of NamedSessionIdentity:
+// the trimmed configured_named_identity (Info.ConfiguredNamedIdentity is the raw
+// value).
+func NamedSessionIdentityInfo(i Info) string {
+	return strings.TrimSpace(i.ConfiguredNamedIdentity)
+}
+
+// NamedSessionInfoMatchesSpec is the session.Info mirror of
+// NamedSessionBeadMatchesSpec.
+func NamedSessionInfoMatchesSpec(i Info, spec NamedSessionSpec) bool {
+	if IsNamedSessionInfo(i) && NamedSessionIdentityInfo(i) == spec.Identity {
+		return true
+	}
+	template := NormalizeNamedSessionTarget(strings.TrimSpace(i.Template))
+	agentName := NormalizeNamedSessionTarget(strings.TrimSpace(i.AgentName))
+	backingTemplate := NamedSessionBackingTemplate(spec)
+	return template == backingTemplate || agentName == backingTemplate
+}
+
+// NamedSessionInfoContinuityEligible is the session.Info mirror of
+// NamedSessionContinuityEligible. It reads the raw continuity_eligible and raw
+// state metadata (Info.ContinuityEligible / Info.MetadataState).
+func NamedSessionInfoContinuityEligible(i Info) bool {
+	continuity := strings.TrimSpace(i.ContinuityEligible)
+	if continuity == "false" {
+		return false
+	}
+	switch strings.TrimSpace(i.MetadataState) {
+	case "archived":
+		return continuity == "true"
+	case "closing", "closed", string(StateFailedCreate):
+		return false
+	default:
+		return true
+	}
+}
+
+// InfoConflictsWithNamedSession is the session.Info mirror of
+// BeadConflictsWithNamedSession.
+func InfoConflictsWithNamedSession(i Info, spec NamedSessionSpec) bool {
+	if IsNamedSessionInfo(i) && NamedSessionIdentityInfo(i) == spec.Identity {
+		return false
+	}
+	if strings.TrimSpace(i.SessionNameMetadata) == spec.SessionName {
+		return !NamedSessionInfoMatchesSpec(i, spec)
+	}
+	if strings.TrimSpace(i.Alias) == spec.Identity {
+		return true
+	}
+	return false
+}
+
 // NamedSessionBeadMatchesSpec reports whether a bead belongs to the named session spec.
 func NamedSessionBeadMatchesSpec(b beads.Bead, spec NamedSessionSpec) bool {
 	if IsNamedSessionBead(b) && NamedSessionIdentity(b) == spec.Identity {
@@ -437,6 +503,49 @@ func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (b
 		}
 	}
 	return beads.Bead{}, false
+}
+
+// FindNamedSessionConflictInfo is the session.Info mirror of
+// FindNamedSessionConflict: it finds the first live session Info that blocks a
+// configured named session.
+func FindNamedSessionConflictInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed {
+			continue
+		}
+		if InfoConflictsWithNamedSession(i, spec) {
+			return i, true
+		}
+	}
+	return Info{}, false
+}
+
+// FindCanonicalNamedSessionInfo is the session.Info mirror of
+// FindCanonicalNamedSessionBead: it finds the active Info that owns a configured
+// named session.
+func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
+	identity := NormalizeNamedSessionTarget(spec.Identity)
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+			continue
+		}
+		if IsNamedSessionInfo(i) && NamedSessionIdentityInfo(i) == identity {
+			return i, true
+		}
+	}
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+			continue
+		}
+		if !NamedSessionInfoMatchesSpec(i, spec) {
+			continue
+		}
+		sn := strings.TrimSpace(i.SessionNameMetadata)
+		if sn == spec.SessionName || sn == identity {
+			return i, true
+		}
+	}
+	return Info{}, false
 }
 
 // FindClosedNamedSessionBead finds the newest closed bead for a named session identity.

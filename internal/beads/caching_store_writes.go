@@ -39,10 +39,11 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(created.ID)
-	c.beads[created.ID] = cloneBead(created)
-	c.deps[created.ID] = depsFromBeadFields(created)
-	delete(c.dirty, created.ID)
-	delete(c.deletedSeq, created.ID)
+	c.absorbFreshLocked(created.ID, created, time.Now(), absorbOpts{
+		depsMode:   depsFromFields,
+		seqMode:    seqKeep,
+		clearDirty: true,
+	})
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -79,12 +80,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 				closed.Status = "closed"
 				notifyClosed = true
 			}
-			delete(c.beads, id)
-			delete(c.deps, id)
-			delete(c.dirty, id)
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-			c.deletedSeq[id] = seq
+			c.tombstoneLocked(id, seq)
 			c.clearDependentReadyProjectionsLocked(id)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
@@ -96,20 +92,22 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		}
 		if current, ok := c.beads[id]; ok {
 			fresh = applyUpdateOptsToBead(current, opts)
-			c.beads[id] = cloneBead(fresh)
-			c.deps[id] = depsFromBeadFields(fresh)
+			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqKeep,
+				clearDirty: false,
+			})
 			if opts.Status != nil {
 				c.clearDependentReadyProjectionsLocked(id)
 			}
-			c.dirty[id] = struct{}{}
-			delete(c.deletedSeq, id)
+			c.markDirtyLocked(id)
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
 			c.notifyChange("bead.updated", fresh)
 			return nil
 		}
-		c.dirty[id] = struct{}{}
+		c.markDirtyLocked(id)
 		c.mu.Unlock()
 		c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
 		return nil
@@ -118,13 +116,14 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
-	c.beads[id] = cloneBead(fresh)
-	c.deps[id] = depsFromBeadFields(fresh)
+	c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+		depsMode:   depsFromFields,
+		seqMode:    seqKeep,
+		clearDirty: true,
+	})
 	if opts.Status != nil {
 		c.clearDependentReadyProjectionsLocked(id)
 	}
-	delete(c.dirty, id)
-	delete(c.deletedSeq, id)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -151,23 +150,27 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	if refreshed {
-		c.beads[id] = cloneBead(fresh)
-		c.deps[id] = depsFromBeadFields(fresh)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+			depsMode:   depsFromFields,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
 		b.Status = "open"
 		b.Assignee = ""
 		b.UpdatedAt = time.Now()
-		c.beads[id] = b
-		c.dirty[id] = struct{}{}
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: false,
+		})
+		c.markDirtyLocked(id)
 		updated = cloneBead(b)
 		notify = true
 	} else {
-		c.dirty[id] = struct{}{}
+		c.markDirtyLocked(id)
 	}
 	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())
@@ -206,15 +209,19 @@ func (c *CachingStore) Close(id string) error {
 	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		b.Status = "closed"
-		c.beads[id] = b
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		closed = cloneBead(b)
 		found = true
 	} else if found {
-		c.beads[id] = cloneBead(closed)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, closed, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 	}
 	dependentProjectionCleared := c.clearDependentReadyProjectionsLocked(id)
 	if found || dependentProjectionCleared {
@@ -249,15 +256,19 @@ func (c *CachingStore) Reopen(id string) error {
 	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		b.Status = "open"
-		c.beads[id] = b
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		reopened = cloneBead(b)
 		found = true
 	} else if found {
-		c.beads[id] = cloneBead(reopened)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, reopened, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 	}
 	dependentProjectionCleared := c.clearDependentReadyProjectionsLocked(id)
 	if found || dependentProjectionCleared {
@@ -303,15 +314,16 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		c.recordProblemLocked("close-all refresh", refreshErr)
 	}
 	for id := range refreshFailed {
-		c.dirty[id] = struct{}{}
+		c.markDirtyLocked(id)
 	}
 	for _, item := range refreshed {
 		previous, hadPrevious := c.beads[item.id]
-		c.beads[item.id] = cloneBead(item.bead)
-		delete(c.dirty, item.id)
-		delete(c.deletedSeq, item.id)
+		opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 		if item.bead.Status == "closed" {
-			delete(c.deps, item.id)
+			opts.depsMode = depsDrop
+		}
+		c.absorbFreshLocked(item.id, item.bead, time.Now(), opts)
+		if item.bead.Status == "closed" {
 			c.clearDependentReadyProjectionsLocked(item.id)
 		}
 		if hadPrevious && previous.Status != "closed" && item.bead.Status == "closed" {
@@ -352,10 +364,11 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	if refreshed {
-		c.beads[id] = cloneBead(fresh)
-		c.deps[id] = depsFromBeadFields(fresh)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+			depsMode:   depsFromFields,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
@@ -363,13 +376,15 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 			b.Metadata = make(map[string]string)
 		}
 		b.Metadata[key] = value
-		c.beads[id] = b
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		updated = cloneBead(b)
 		notify = true
 	} else {
-		c.dirty[id] = struct{}{}
+		c.markDirtyLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -404,10 +419,11 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	if refreshed {
-		c.beads[id] = cloneBead(fresh)
-		c.deps[id] = depsFromBeadFields(fresh)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+			depsMode:   depsFromFields,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
@@ -417,13 +433,15 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		for k, v := range kvs {
 			b.Metadata[k] = v
 		}
-		c.beads[id] = b
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		updated = cloneBead(b)
 		notify = true
 	} else {
-		c.dirty[id] = struct{}{}
+		c.markDirtyLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -587,10 +605,11 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			if hadPrevious && previous.Status != fresh.Status {
 				statusChanged = true
 			}
-			c.beads[item.id] = fresh
-			c.deps[item.id] = depsFromBeadFields(fresh)
-			delete(c.dirty, item.id)
-			delete(c.deletedSeq, item.id)
+			c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
 			if statusChanged {
 				c.clearDependentReadyProjectionsLocked(item.id)
 			}
@@ -609,9 +628,11 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 		if item.closed {
 			if b, ok := c.beads[item.id]; ok {
 				b.Status = "closed"
-				c.beads[item.id] = b
-				delete(c.dirty, item.id)
-				delete(c.deletedSeq, item.id)
+				c.absorbFreshLocked(item.id, b, now, absorbOpts{
+					depsMode:   depsKeepCached,
+					seqMode:    seqKeep,
+					clearDirty: true,
+				})
 				c.clearDependentReadyProjectionsLocked(item.id)
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.closed",
@@ -621,7 +642,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			continue
 		}
 		if item.err != nil {
-			c.dirty[item.id] = struct{}{}
+			c.markDirtyLocked(item.id)
 		}
 	}
 	c.markFreshLocked(now)
@@ -794,11 +815,13 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(issueID)
 	if refreshed {
-		c.beads[issueID] = cloneBead(fresh)
-		c.deps[issueID] = cloneDeps(deps)
+		c.absorbFreshLocked(issueID, fresh, time.Now(), absorbOpts{
+			depsMode:   depsExplicit,
+			deps:       deps,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		c.clearReadyProjectionLocked(issueID)
-		delete(c.dirty, issueID)
-		delete(c.deletedSeq, issueID)
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 		c.mu.Unlock()
@@ -807,8 +830,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 	if !c.depsComplete {
 		if _, known := c.deps[issueID]; !known {
-			delete(c.dirty, issueID)
-			delete(c.deletedSeq, issueID)
+			c.clearStalenessMarksLocked(issueID)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -821,8 +843,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 			cachedDeps[i].Type = depType
 			c.deps[issueID] = cachedDeps
 			c.clearReadyProjectionLocked(issueID)
-			delete(c.dirty, issueID)
-			delete(c.deletedSeq, issueID)
+			c.clearStalenessMarksLocked(issueID)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -831,8 +852,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 	c.deps[issueID] = append(cachedDeps, Dep{IssueID: issueID, DependsOnID: dependsOnID, Type: depType})
 	c.clearReadyProjectionLocked(issueID)
-	delete(c.dirty, issueID)
-	delete(c.deletedSeq, issueID)
+	c.clearStalenessMarksLocked(issueID)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -849,11 +869,13 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(issueID)
 	if refreshed {
-		c.beads[issueID] = cloneBead(fresh)
-		c.deps[issueID] = cloneDeps(deps)
+		c.absorbFreshLocked(issueID, fresh, time.Now(), absorbOpts{
+			depsMode:   depsExplicit,
+			deps:       deps,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		c.clearReadyProjectionLocked(issueID)
-		delete(c.dirty, issueID)
-		delete(c.deletedSeq, issueID)
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 		c.mu.Unlock()
@@ -862,8 +884,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	}
 	if !c.depsComplete {
 		if _, known := c.deps[issueID]; !known {
-			delete(c.dirty, issueID)
-			delete(c.deletedSeq, issueID)
+			c.clearStalenessMarksLocked(issueID)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -875,8 +896,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 		if d.DependsOnID == dependsOnID {
 			c.deps[issueID] = append(cachedDeps[:i], cachedDeps[i+1:]...)
 			c.clearReadyProjectionLocked(issueID)
-			delete(c.dirty, issueID)
-			delete(c.deletedSeq, issueID)
+			c.clearStalenessMarksLocked(issueID)
 			break
 		}
 	}
@@ -895,12 +915,7 @@ func (c *CachingStore) Delete(id string) error {
 
 	c.mu.Lock()
 	seq := c.noteLocalMutationLocked(id)
-	delete(c.beads, id)
-	delete(c.deps, id)
-	delete(c.dirty, id)
-	delete(c.beadSeq, id)
-	delete(c.localBeadAt, id)
-	c.deletedSeq[id] = seq
+	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -909,6 +924,186 @@ func (c *CachingStore) Delete(id string) error {
 		c.notifyChange("bead.deleted", deleted)
 	}
 	return nil
+}
+
+// DeleteBatch forwards the batched delete capability to the backing store when
+// it implements BatchDeleter, then evicts exactly those ids from the cache in
+// one pass: it installs a deletion fence per id, drops their outgoing deps (via
+// tombstoneLocked), and scrubs stale incoming edges from surviving beads so the
+// cache mirrors the backend's ON DELETE CASCADE cleanup of edge rows. Because
+// the backend orphans external dependents rather than recursively deleting them
+// (see BatchDeleter), beads that merely depend on a deleted bead are preserved.
+// This lets the wisp GC tear down a molecule closure with a single backing call
+// instead of an O(subprocess-per-edge) loop. When the backing store lacks
+// BatchDeleter, DeleteBatch falls back to a per-bead delete that first strips
+// the dependency rows touching each id, so surviving dependents are orphaned
+// rather than left with a dangling edge — the same contract a BatchDeleter
+// backing gets from the schema's ON DELETE CASCADE. It satisfies BatchDeleter.
+func (c *CachingStore) DeleteBatch(ids []string) error {
+	cd, ok := c.backing.(BatchDeleter)
+	if !ok {
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			if err := c.deleteOrphaningDeps(id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Snapshot bead.deleted payloads from the cache only. Unlike Delete, which
+	// reads each snapshot from the backing store, forwarding N backing Get calls
+	// here would reintroduce the per-bead subprocess storm this batch path exists
+	// to remove; a bead absent from the cache is still evicted but emits no
+	// event. In practice the wisp GC lists the closure just before deleting it,
+	// so members are warm in the cache.
+	deleted := make(map[string]struct{}, len(ids))
+	c.mu.RLock()
+	events := make([]Bead, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		deleted[id] = struct{}{}
+		if b, ok := c.beads[id]; ok {
+			events = append(events, cloneBead(b))
+		}
+	}
+	c.mu.RUnlock()
+
+	if err := cd.DeleteBatch(ids); err != nil {
+		return c.reconcilePartialBatchDelete(err, events)
+	}
+
+	c.mu.Lock()
+	c.evictBatchDeletedLocked(deleted)
+	c.mu.Unlock()
+
+	for _, b := range events {
+		c.notifyChange("bead.deleted", b)
+	}
+	return nil
+}
+
+// evictBatchDeletedLocked removes exactly the ids in deleted from the cache:
+// per-id local-mutation fence + tombstone and dropped dependent ready
+// projections, then a single scrub of inbound edges from survivors — mirroring
+// the backend's ON DELETE CASCADE cleanup of the deleted beads' edge rows.
+// Callers must hold c.mu.
+func (c *CachingStore) evictBatchDeletedLocked(deleted map[string]struct{}) {
+	for id := range deleted {
+		seq := c.noteLocalMutationLocked(id)
+		c.tombstoneLocked(id, seq)
+		c.clearDependentReadyProjectionsLocked(id)
+	}
+	c.dropIncomingEdgesToDeletedLocked(deleted)
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+}
+
+// reconcilePartialBatchDelete handles a backing DeleteBatch error. A
+// chunk-committing backend (BdStore) can durably remove earlier chunks before a
+// later chunk fails, reporting the removed ids via *BatchDeleteError. This
+// evicts exactly those committed ids and fires their bead.deleted events so a
+// mid-batch failure never leaves a deleted bead present-but-stale in the cache,
+// while the uncommitted ids stay resident because the backing did not remove
+// them. The original error is always returned so the caller still sees the
+// failure; a backing that reports no committed ids leaves the cache untouched.
+func (c *CachingStore) reconcilePartialBatchDelete(err error, events []Bead) error {
+	var batchErr *BatchDeleteError
+	if !errors.As(err, &batchErr) || len(batchErr.Committed) == 0 {
+		return err
+	}
+	committed := make(map[string]struct{}, len(batchErr.Committed))
+	for _, id := range batchErr.Committed {
+		if id != "" {
+			committed[id] = struct{}{}
+		}
+	}
+	if len(committed) == 0 {
+		return err
+	}
+	c.mu.Lock()
+	c.evictBatchDeletedLocked(committed)
+	c.mu.Unlock()
+	for _, b := range events {
+		if _, ok := committed[b.ID]; ok {
+			c.notifyChange("bead.deleted", b)
+		}
+	}
+	return err
+}
+
+// deleteOrphaningDeps removes id after stripping every dependency row touching
+// it in both directions, so surviving beads that depend on id are orphaned
+// rather than left with a dangling edge. DeleteBatch uses it as the fallback
+// when the backing store does not implement BatchDeleter: a bare backing Delete
+// (MemStore, FileStore, and other non-BatchDeleter stores) drops only the bead
+// row, so DeleteBatch must clean the edge rows itself to honor the same
+// orphaning contract a BatchDeleter backing gets from the schema's ON DELETE
+// CASCADE. It performs the same edge-strip-then-delete as the per-bead workflow
+// delete (deleteWorkflowBead in cmd/gc), and the DepRemove/Delete methods it
+// calls keep the cache coherent. Unlike deleteWorkflowBead it intentionally does
+// not roll back already-stripped edges when a mid-strip DepRemove or the final
+// Delete fails: this fallback runs only against non-BatchDeleter backings
+// (MemStore/FileStore), whose in-memory edge operations do not fail partway, and
+// the wisp GC re-collects and re-deletes any half-stripped member idempotently
+// on a later tick.
+func (c *CachingStore) deleteOrphaningDeps(id string) error {
+	downDeps, err := c.DepList(id, "down")
+	if err != nil {
+		return fmt.Errorf("list down deps for %s: %w", id, err)
+	}
+	for _, dep := range downDeps {
+		if err := c.DepRemove(id, dep.DependsOnID); err != nil {
+			return fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err)
+		}
+	}
+	upDeps, err := c.DepList(id, "up")
+	if err != nil {
+		return fmt.Errorf("list up deps for %s: %w", id, err)
+	}
+	for _, dep := range upDeps {
+		if err := c.DepRemove(dep.IssueID, id); err != nil {
+			return fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err)
+		}
+	}
+	return c.Delete(id)
+}
+
+// dropIncomingEdgesToDeletedLocked scrubs cached dependency rows that point at a
+// just-deleted bead, mirroring the backend's ON DELETE CASCADE cleanup of the
+// deleted beads' edge rows. Surviving beads are kept; only their now-dangling
+// edges into the deleted set are removed. Callers must hold c.mu.
+func (c *CachingStore) dropIncomingEdgesToDeletedLocked(deleted map[string]struct{}) {
+	for issueID, deps := range c.deps {
+		if _, gone := deleted[issueID]; gone {
+			continue
+		}
+		kept := deps[:0]
+		changed := false
+		for _, d := range deps {
+			if _, gone := deleted[d.DependsOnID]; gone {
+				changed = true
+				continue
+			}
+			kept = append(kept, d)
+		}
+		if !changed {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(c.deps, issueID)
+		} else {
+			c.deps[issueID] = kept
+		}
+		c.clearReadyProjectionLocked(issueID)
+	}
 }
 
 func (c *CachingStore) snapshotBeadBeforeDelete(id string) (Bead, bool) {

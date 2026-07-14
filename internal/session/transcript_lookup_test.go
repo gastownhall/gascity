@@ -55,9 +55,9 @@ func TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt(t *testing.
 	pathA := writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-3591-7532-a1ef-8b9e882bea2f", startA)
 	writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-ffff-7000-a1ef-8b9e882bea2f", startB)
 
-	sessions := []beads.Bead{
-		sleptCodexSessionBead("sess-a", workDir, provider, startA),
-		sleptCodexSessionBead("sess-b", workDir, provider, startB),
+	sessions := []Info{
+		infoFromPersistedBead(sleptCodexSessionBead("sess-a", workDir, provider, startA)),
+		infoFromPersistedBead(sleptCodexSessionBead("sess-b", workDir, provider, startB)),
 	}
 
 	got := ResolveCodexTranscriptBySessionOrder([]string{root}, provider, workDir, "sess-a", sessions)

@@ -175,6 +175,52 @@ func TestAttachToWorkflowRoot(t *testing.T) {
 	assertBlockingDep(t, store, root.ID, result.RootID)
 }
 
+// TestAttachResolvesRootFromRunChainNotOwnID is the regression for the
+// maintainer-city grafted-wisp incident (gcg-wisp-y785sz). A wisp/source bead
+// grafted mid-workflow carries the true top workflow root in its run-chain
+// metadata (workflow_id / molecule_id, written by sling) but NOT its own
+// gc.root_bead_id. The old Attach fallback checked only gc.root_bead_id and
+// then defaulted to the parent's own id, stamping the whole sub-DAG (attempt
+// container, scope-check, every child) with the WRONG root. Downstream
+// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong root>),
+// found the wrong set, and burned ralph attempts until abort_scope fired on
+// green work. Attach must resolve the root through the canonical run chain
+// (beadmeta.ResolveRunID), never the parent's own id.
+func TestAttachResolvesRootFromRunChainNotOwnID(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// The true top workflow root.
+	root := setupWorkflow(t, store)
+
+	// A wisp/source bead grafted mid-workflow: it carries the true root in the
+	// run chain (workflow_id) but has no gc.root_bead_id of its own.
+	wisp, err := store.Create(beads.Bead{
+		Title: "grafted wisp",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":     "wisp",
+			"workflow_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create grafted wisp: %v", err)
+	}
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, wisp.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// The sub-DAG must be rooted at the TRUE workflow root from the run chain,
+	// never at the grafted wisp's own id.
+	if result.WorkflowRootID != root.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (true root from run chain, not the wisp's own id %q)", result.WorkflowRootID, root.ID, wisp.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
+}
+
 // Test 3: Blocking dep prevents premature unblock
 func TestAttachBlockingDepPreventsClose(t *testing.T) {
 	store := beads.NewMemStore()

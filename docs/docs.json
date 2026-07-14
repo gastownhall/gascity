@@ -5,7 +5,7 @@
   "logo": {
     "light": "/images/logo-wordmark.svg",
     "dark": "/images/logo-wordmark.svg",
-    "href": "https://docs.gascityhall.com"
+    "href": "https://docs.gascity.com"
   },
   "favicon": "/images/favicon.png",
   "navbar": {
@@ -153,6 +153,7 @@
           "getting-started/dashboard",
           "getting-started/how-gas-city-works",
           "getting-started/coming-from-gastown",
+          "getting-started/faq",
           "getting-started/troubleshooting"
         ]
       },
@@ -243,7 +244,8 @@
               "reference/specs/index",
               "reference/specs/pack-spec",
               "reference/specs/formula-spec-v1",
-              "reference/specs/formula-spec-v2"
+              "reference/specs/formula-spec-v2",
+              "reference/specs/service-protocol-v0"
             ]
           },
           {

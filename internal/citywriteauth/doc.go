@@ -20,7 +20,12 @@
 //
 //	kid    key id selecting the verifying public key
 //	aud    audience discriminator; must equal the verifier's expected value
+//	       (or, on an untenanted verifier, its configured legacy value —
+//	       see [Options.LegacyAud])
 //	city   the target city; must equal the request's {cityName} path segment
+//	cid    tenancy binding: the org-unique city id the grant was minted for;
+//	       required to match exactly when the verifier is configured with a
+//	       CID (see [Options.CID]); absent on legacy grants
 //	epoch  rotation/teardown counter; must be >= the verifier's floor
 //	iat    issued-at, unix seconds
 //	exp    expiry, unix seconds; exp-iat must be <= the verifier's MaxTTL
@@ -32,6 +37,15 @@
 // able to read it. The query is folded into the digest only when the request
 // carries one (see [ReqDigest]), so a narrow ?delete=true or scope-selector
 // variant cannot be reached with a grant minted for the query-less request.
+//
+// The cid binding ties a grant to exactly one tenant: city names are unique
+// per org, not globally, so on a multi-tenant deployment the city claim alone
+// would let a grant minted for one org's city replay against another org's
+// identically named city. A verifier configured with its own cid rejects any
+// grant not minted for it, and refuses the legacy audience outright (see
+// [Options.LegacyAud]), so no legacy grant — not even a mis-minted or
+// rollout-era one that carries a matching cid — is accepted where tenancy
+// matters.
 //
 // # Integration
 //

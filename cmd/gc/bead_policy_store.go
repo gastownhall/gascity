@@ -37,6 +37,11 @@ type beadPolicyGraphStore struct {
 
 var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
 
+var (
+	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)
+)
+
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	if store == nil {
 		return nil
@@ -89,6 +94,22 @@ func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excl
 		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
 	}
 	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
+}
+
+// DeleteBatch implements beads.BatchDeleter by forwarding to the wrapped store
+// when it supports batched deletion. Like Count, this delegation must be
+// explicit: the embedded Store interface does not promote optional
+// capabilities, so a policy-wrapped caching/bd store would otherwise hide
+// BatchDeleter and force the wisp-GC closure teardown back onto the per-bead
+// subprocess path. Inner stores without BatchDeleter report
+// ErrBatchDeleteUnsupported, signaling callers to fall back to per-bead delete.
+// beadPolicyGraphStore embeds *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) DeleteBatch(ids []string) error {
+	deleter, ok := s.Store.(beads.BatchDeleter)
+	if !ok {
+		return beads.ErrBatchDeleteUnsupported
+	}
+	return deleter.DeleteBatch(ids)
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {

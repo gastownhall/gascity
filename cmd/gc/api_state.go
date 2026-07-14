@@ -75,6 +75,7 @@ type controllerState struct {
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
+	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
@@ -128,24 +129,27 @@ func newControllerState(
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	var beadEventStartSeq uint64
+	var beadEventStartSeqOK bool
 	if ep != nil {
 		if seq, err := ep.LatestSeq(); err == nil {
 			beadEventStartSeq = seq
+			beadEventStartSeqOK = true
 		}
 	}
 	cs := &controllerState{
-		cfg:               cfg,
-		sp:                sp,
-		cacheCtx:          ctx,
-		eventProv:         ep,
-		usageSink:         usageSinkForCity(cfg, cityPath),
-		editor:            configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:          cityName,
-		cityPath:          cityPath,
-		version:           version,
-		startedAt:         time.Now(),
-		adapterReg:        extmsg.NewAdapterRegistry(),
-		beadEventStartSeq: beadEventStartSeq,
+		cfg:                 cfg,
+		sp:                  sp,
+		cacheCtx:            ctx,
+		eventProv:           ep,
+		usageSink:           usageSinkForCity(cfg, cityPath),
+		editor:              configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:            cityName,
+		cityPath:            cityPath,
+		version:             version,
+		startedAt:           time.Now(),
+		adapterReg:          extmsg.NewAdapterRegistry(),
+		beadEventStartSeq:   beadEventStartSeq,
+		beadEventStartSeqOK: beadEventStartSeqOK,
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
@@ -362,7 +366,19 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			if err != nil {
 				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+			// Reopen hook for the native read-path reconnect (see the matching
+			// comment in main.go openStoreResultAtForCity): re-resolve the CURRENT
+			// managed Dolt env on every reconnect so the controller's reconcile
+			// scan / Get recovers a managed-Dolt hard-kill/rebind instead of
+			// dialing the dead port for the whole retry budget.
+			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, cs.cityPath, cfg, scopeRoot)
+				if rerr != nil {
+					return nil, fmt.Errorf("re-resolve native rig store env %s: %w", scopeRoot, rerr)
+				}
+				return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
 		},
 	})
 	if err != nil {
@@ -380,6 +396,22 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 		return
 	}
 	seq := cs.beadEventStartSeq
+	// A captured seq of 0 with OK=true means the log was genuinely empty at
+	// construction — Watch(0) then replays exactly the prime-window events and
+	// nothing more (nothing older is retained), which is the replay contract
+	// this watcher exists for. Only when LatestSeq ERRORED at construction is 0
+	// untrusted: Watch now treats afterSeq=0 as "replay the entire retained
+	// history" (across archives), so re-resolve the head here and fail closed
+	// (skip the watcher; the scale patrol still converges) rather than flood
+	// the bead caches with the whole log.
+	if !cs.beadEventStartSeqOK {
+		latest, err := ep.LatestSeq()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "api: bead event watcher: start cursor unresolved (%v); skipping watcher\n", err)
+			return
+		}
+		seq = latest
+	}
 	go func() {
 		for {
 			watcher, err := ep.Watch(ctx, seq)

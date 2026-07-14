@@ -544,8 +544,20 @@ func TestValidateRequiredParams(t *testing.T) {
 		t.Fatalf("error = %q, want it to name missing param pr", err.Error())
 	}
 
-	// A present-but-empty value still counts as supplied.
-	if err := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": ""}); err != nil {
-		t.Fatalf("ValidateRequiredParams with empty-but-present pr = %v, want nil", err)
+	// A present-but-empty value counts as MISSING: webhook arg extraction inserts
+	// the key even when the payload path resolved to "", so a required param that
+	// rendered empty must not be treated as supplied (else the order fires with an
+	// empty required value).
+	emptyErr := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": ""})
+	if emptyErr == nil {
+		t.Fatal("ValidateRequiredParams with empty-but-present pr = nil, want error (empty required value is not supplied)")
+	}
+	if !strings.Contains(emptyErr.Error(), "pr") {
+		t.Fatalf("error = %q, want it to name the empty required param pr", emptyErr.Error())
+	}
+
+	// A whitespace-only value is likewise treated as missing.
+	if err := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": "   "}); err == nil {
+		t.Fatal("ValidateRequiredParams with whitespace-only pr = nil, want error")
 	}
 }

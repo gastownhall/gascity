@@ -453,8 +453,8 @@ the bounds if needed.
 
 ## Open Questions
 
-1. Whether `advanceSessionDrains` should later parallelize timed-out
-   `verifiedStop` calls. This proposal leaves that path unchanged.
+1. Whether `advanceSessionDrainsWithSessionsTraced` should later parallelize
+   timed-out `verifiedStop` calls. This proposal leaves that path unchanged.
 2. Whether provider conformance tests should explicitly require
    concurrent `Start`/`Stop` safety across distinct session names.
 3. Whether wake budget should eventually become per-layer instead of

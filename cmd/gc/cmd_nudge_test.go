@@ -93,7 +93,7 @@ type unusableCappedNudgeStore struct {
 }
 
 func (s unusableCappedNudgeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	items := make([]beads.Bead, nudgeLookupLimit+1)
+	items := make([]beads.Bead, nudgequeue.NudgeLookupLimit+1)
 	for i := range items {
 		items[i] = beads.Bead{
 			ID:     fmt.Sprintf("closed-nudge-%d", i),
@@ -514,7 +514,7 @@ func TestDeliverSessionNudgeWithWorkerImmediateResumesSuspendedSession(t *testin
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleResumesClaudeSession(t *testing.T)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -623,7 +623,7 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -706,7 +706,7 @@ func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -864,7 +864,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueued
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -976,7 +976,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1050,7 +1050,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1532,7 +1532,7 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1613,7 +1613,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1692,7 +1692,7 @@ func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1740,7 +1740,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1818,7 +1818,7 @@ func TestSendMailNotifyWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1925,7 +1925,7 @@ func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) 
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2080,7 +2080,7 @@ func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *test
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2192,7 +2192,7 @@ func TestSendMailNotifyWithWorkerWaitIdlePreservesMailSource(t *testing.T) {
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2235,7 +2235,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenRuntimeIsGone(t *testing.T) {
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2284,7 +2284,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenDirectProviderMisses(t *testing.T) {
 	fake := &providerMissNudgeProvider{Fake: runtime.NewFake()}
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2434,7 +2434,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2453,7 +2453,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -2503,7 +2503,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *t
 	store := openNudgeBeadStore(dir)
 	fake := &activitylessTimedOnlyNudgeProvider{Fake: runtime.NewFake()}
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2521,7 +2521,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *t
 	}
 	obs := worker.LiveObservation{Running: true}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -2627,7 +2627,7 @@ func TestTryDeliverQueuedNudgesByPollerSkipsStaleSessionGeneration(t *testing.T)
 		t.Fatalf("workerObserveNudgeTarget: %v", err)
 	}
 	if obs.Running {
-		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 		if err != nil {
 			t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 		}
@@ -2672,7 +2672,7 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 	}
 	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -2722,7 +2722,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsACPProviderMissRecoverable(t *testin
 	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
 	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
-		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
 		if err != nil {
 			t.Fatalf("tryDeliverQueuedNudgesByPoller tick %d: %v", i+1, err)
 		}
@@ -2776,7 +2776,7 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2801,7 +2801,7 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 	}
 	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -2830,7 +2830,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore()}
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -2854,14 +2854,14 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, fresh); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore(fresh): %v", err)
 	}
-	staleBead, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, stale.ID)
+	staleBead, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(stale.ID)
 	if err != nil || !ok {
-		t.Fatalf("findQueuedNudgeBead(stale) = %v, ok=%v", err, ok)
+		t.Fatalf("nudgeFrontDoor.Find(stale) = %v, ok=%v", err, ok)
 	}
 	// Terminal-marking the stale item's backing bead fails (store flake).
 	// Dead-lettering bookkeeping for stale items must not block delivery
 	// of the fence-matching item.
-	store.failID = staleBead.ID
+	store.failID = staleBead.BeadID
 
 	var warnings bytes.Buffer
 	origWarn := nudgeWarningWriter
@@ -2878,7 +2878,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	}
 	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -2930,11 +2930,11 @@ func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
 	}
-	itemBead, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, item.ID)
+	itemBead, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(item.ID)
 	if err != nil || !ok {
-		t.Fatalf("findQueuedNudgeBead = %v, ok=%v", err, ok)
+		t.Fatalf("nudgeFrontDoor.Find = %v, ok=%v", err, ok)
 	}
-	store.failID = itemBead.ID
+	store.failID = itemBead.BeadID
 
 	claimed, err := claimDueWorkerNudges(dir)
 	if err != nil {
@@ -2966,9 +2966,9 @@ func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing
 
 	// The backing bead missed its terminal state; the dead-letter repair
 	// pass owns convergence from here (see pruneDeadQueuedNudges).
-	b, err := store.Get(itemBead.ID)
+	b, err := store.Get(itemBead.BeadID)
 	if err != nil {
-		t.Fatalf("Get(%q): %v", itemBead.ID, err)
+		t.Fatalf("Get(%q): %v", itemBead.BeadID, err)
 	}
 	if b.Metadata["state"] != "queued" {
 		t.Fatalf("bead state = %q, want still queued after failed terminal mark", b.Metadata["state"])
@@ -3117,7 +3117,7 @@ func TestDeliverSlingNudgeWaitIdleWrapsInSystemReminder(t *testing.T) {
 	fake := runtime.NewFake()
 
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -3850,7 +3850,7 @@ func TestSplitQueuedNudgesForDelivery_BlocksCanceledWaitNudge(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(store, []queuedNudge{{
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -3881,7 +3881,7 @@ func TestSplitQueuedNudgesForDelivery_AllowsReadyLegacyWaitNudge(t *testing.T) {
 		t.Fatalf("create legacy wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(store, []queuedNudge{{
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -3949,15 +3949,15 @@ func TestFindQueuedNudgeBead_IgnoresClosedRollbackBead(t *testing.T) {
 		t.Fatalf("close nudge bead: %v", err)
 	}
 
-	found, ok, err := findQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).Find("test")
 	if err != nil {
-		t.Fatalf("findQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.Find: %v", err)
 	}
 	if !ok {
-		t.Fatal("findQueuedNudgeBead returned not found, want open bead")
+		t.Fatal("nudgeFrontDoor.Find returned not found, want open bead")
 	}
-	if found.ID != open.ID {
-		t.Fatalf("findQueuedNudgeBead = %s, want %s", found.ID, open.ID)
+	if found.BeadID != open.ID {
+		t.Fatalf("nudgeFrontDoor.Find = %s, want %s", found.BeadID, open.ID)
 	}
 }
 
@@ -3975,14 +3975,14 @@ func TestFindQueuedNudgeBead_UsesBoundedLookup(t *testing.T) {
 	}
 	store := &waitListQueryCaptureStore{Store: mem}
 
-	if _, _, err := findQueuedNudgeBead(beads.NudgesStore{Store: store}, "test"); err != nil {
-		t.Fatalf("findQueuedNudgeBead: %v", err)
+	if _, _, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find("test"); err != nil {
+		t.Fatalf("nudgeFrontDoor.Find: %v", err)
 	}
 	if len(store.queries) != 1 {
 		t.Fatalf("List calls = %d, want 1", len(store.queries))
 	}
-	if got := store.queries[0].Limit; got != nudgeLookupLimit+1 {
-		t.Fatalf("List limit = %d, want %d", got, nudgeLookupLimit+1)
+	if got := store.queries[0].Limit; got != nudgequeue.NudgeLookupLimit+1 {
+		t.Fatalf("List limit = %d, want %d", got, nudgequeue.NudgeLookupLimit+1)
 	}
 	if got := store.queries[0].Sort; got != beads.SortCreatedDesc {
 		t.Fatalf("List sort = %q, want %q", got, beads.SortCreatedDesc)
@@ -3991,7 +3991,7 @@ func TestFindQueuedNudgeBead_UsesBoundedLookup(t *testing.T) {
 
 func TestFindQueuedNudgeBead_AllowsExactLookupLimit(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
-	for i := 0; i < nudgeLookupLimit; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit; i++ {
 		if _, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4004,15 +4004,15 @@ func TestFindQueuedNudgeBead_AllowsExactLookupLimit(t *testing.T) {
 		}
 	}
 
-	if _, ok, err := findQueuedNudgeBead(store, "test"); err != nil || !ok {
-		t.Fatalf("findQueuedNudgeBead ok=%v err=%v, want found with no error", ok, err)
+	if _, ok, err := nudgeFrontDoor(store).Find("test"); err != nil || !ok {
+		t.Fatalf("nudgeFrontDoor.Find ok=%v err=%v, want found with no error", ok, err)
 	}
 }
 
 func TestFindQueuedNudgeBead_ReturnsVisibleOpenBeadBeforeLookupLimit(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
 	var newest beads.Bead
-	for i := 0; i < nudgeLookupLimit+1; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
 		created, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4027,31 +4027,31 @@ func TestFindQueuedNudgeBead_ReturnsVisibleOpenBeadBeforeLookupLimit(t *testing.
 		newest = created
 	}
 
-	found, ok, err := findQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).Find("test")
 	if err != nil {
-		t.Fatalf("findQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.Find: %v", err)
 	}
 	if !ok {
-		t.Fatal("findQueuedNudgeBead returned not found, want visible open bead")
+		t.Fatal("nudgeFrontDoor.Find returned not found, want visible open bead")
 	}
-	if found.ID != newest.ID {
-		t.Fatalf("findQueuedNudgeBead = %s, want newest visible %s", found.ID, newest.ID)
+	if found.BeadID != newest.ID {
+		t.Fatalf("nudgeFrontDoor.Find = %s, want newest visible %s", found.BeadID, newest.ID)
 	}
 }
 
 func TestFindQueuedNudgeBead_ReportsLookupLimitWithoutUsableCandidate(t *testing.T) {
-	_, ok, err := findQueuedNudgeBead(beads.NudgesStore{Store: unusableCappedNudgeStore{Store: beads.NewMemStore()}}, "test")
+	_, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: unusableCappedNudgeStore{Store: beads.NewMemStore()}}).Find("test")
 	if ok {
-		t.Fatal("findQueuedNudgeBead found a bead, want lookup-limit failure")
+		t.Fatal("nudgeFrontDoor.Find found a bead, want lookup-limit failure")
 	}
 	if !beads.IsLookupLimitError(err) {
-		t.Fatalf("findQueuedNudgeBead error = %v, want lookup limit", err)
+		t.Fatalf("nudgeFrontDoor.Find error = %v, want lookup limit", err)
 	}
 }
 
 func TestEnsureQueuedNudgeBead_DoesNotCreateWhenCappedPageHasOpenCandidate(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
-	for i := 0; i < nudgeLookupLimit+1; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
 		if _, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4075,15 +4075,15 @@ func TestEnsureQueuedNudgeBead_DoesNotCreateWhenCappedPageHasOpenCandidate(t *te
 	if err != nil {
 		t.Fatalf("list nudge beads: %v", err)
 	}
-	if len(items) != nudgeLookupLimit+1 {
-		t.Fatalf("nudge bead count = %d, want %d", len(items), nudgeLookupLimit+1)
+	if len(items) != nudgequeue.NudgeLookupLimit+1 {
+		t.Fatalf("nudge bead count = %d, want %d", len(items), nudgequeue.NudgeLookupLimit+1)
 	}
 }
 
 func TestFindAnyQueuedNudgeBead_ReturnsVisibleTerminalBeforeLookupLimit(t *testing.T) {
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
 	var newestTerminal beads.Bead
-	for i := 0; i < nudgeLookupLimit+1; i++ {
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
 		created, err := store.Create(beads.Bead{
 			Type:   nudgeBeadType,
 			Labels: []string{nudgeBeadLabel, "nudge:test"},
@@ -4101,15 +4101,15 @@ func TestFindAnyQueuedNudgeBead_ReturnsVisibleTerminalBeforeLookupLimit(t *testi
 		newestTerminal = created
 	}
 
-	found, ok, err := findAnyQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("test")
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead returned not found, want visible terminal bead")
+		t.Fatal("nudgeFrontDoor.FindIncludingTerminal returned not found, want visible terminal bead")
 	}
-	if found.ID != newestTerminal.ID {
-		t.Fatalf("findAnyQueuedNudgeBead = %s, want newest terminal %s", found.ID, newestTerminal.ID)
+	if found.BeadID != newestTerminal.ID {
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal = %s, want newest terminal %s", found.BeadID, newestTerminal.ID)
 	}
 }
 
@@ -4144,15 +4144,15 @@ func TestFindAnyQueuedNudgeBead_PrefersTerminalClosedBeadOverRollbackArtifact(t 
 		t.Fatalf("close terminal nudge bead: %v", err)
 	}
 
-	found, ok, err := findAnyQueuedNudgeBead(store, "test")
+	found, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("test")
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead returned not found")
+		t.Fatal("nudgeFrontDoor.FindIncludingTerminal returned not found")
 	}
-	if found.ID != terminal.ID {
-		t.Fatalf("findAnyQueuedNudgeBead = %s, want %s", found.ID, terminal.ID)
+	if found.BeadID != terminal.ID {
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal = %s, want %s", found.BeadID, terminal.ID)
 	}
 }
 
@@ -4351,18 +4351,18 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	// Verify the superseded nudge has a terminal bead record with state "superseded".
 	store := openNudgeBeadStore(dir)
 	if store.Store != nil {
-		b, ok, err := findAnyQueuedNudgeBead(store, "n-first")
+		b, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first")
 		if err != nil {
-			t.Fatalf("findAnyQueuedNudgeBead(n-first): %v", err)
+			t.Fatalf("nudgeFrontDoor.FindIncludingTerminal(n-first): %v", err)
 		}
 		if !ok {
 			t.Fatal("expected bead record for superseded nudge n-first")
 		}
-		if got := b.Metadata["state"]; got != "superseded" {
-			t.Fatalf("superseded bead state = %q, want \"superseded\"", got)
+		if got := b.State; got != "superseded" {
+			t.Fatalf("superseded shadow state = %q, want \"superseded\"", got)
 		}
-		if got := b.Metadata["terminal_reason"]; got != "superseded" {
-			t.Fatalf("superseded bead terminal_reason = %q, want \"superseded\"", got)
+		if got := b.TerminalReason; got != "superseded" {
+			t.Fatalf("superseded shadow terminal_reason = %q, want \"superseded\"", got)
 		}
 	}
 }
@@ -4466,7 +4466,7 @@ func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
 //
 // This test pins the contract that the close_reason metadata flows
 // through every state markQueuedNudgeTerminal handles. The
-// nudgeCanonicalCloseReason helper guarantees the >=20 char floor.
+// nudgequeue.CanonicalCloseReason helper guarantees the >=20 char floor.
 func TestMarkQueuedNudgeTerminalStampsCloseReason(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -4509,7 +4509,7 @@ func TestMarkQueuedNudgeTerminalStampsCloseReason(t *testing.T) {
 			if bead.Status != "closed" {
 				t.Fatalf("bead.Status = %q, want closed", bead.Status)
 			}
-			want := nudgeCanonicalCloseReason(tc.state)
+			want := nudgequeue.CanonicalCloseReason(tc.state)
 			if got := bead.Metadata["close_reason"]; got != want {
 				t.Errorf("close_reason = %q, want %q", got, want)
 			}
@@ -4544,23 +4544,23 @@ func TestNudgeCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
 		"accepted_for_injection",
 	}
 	for _, s := range knownStates {
-		got := nudgeCanonicalCloseReason(s)
+		got := nudgequeue.CanonicalCloseReason(s)
 		if len(got) < 20 {
-			t.Errorf("nudgeCanonicalCloseReason(%q) = %q (%d chars), want >=20", s, got, len(got))
+			t.Errorf("nudgequeue.CanonicalCloseReason(%q) = %q (%d chars), want >=20", s, got, len(got))
 		}
 	}
 	// Unknown short code falls back to a >=20 char canonical phrase.
-	if got := nudgeCanonicalCloseReason("x"); len(got) < 20 {
+	if got := nudgequeue.CanonicalCloseReason("x"); len(got) < 20 {
 		t.Errorf("unknown-short-code fallback = %q (%d chars), want >=20", got, len(got))
 	}
 	// Empty input also yields a >=20 char fallback (avoids accidental
 	// short close_reason if a caller passes "").
-	if got := strings.TrimSpace(nudgeCanonicalCloseReason("")); len(got) < 20 {
+	if got := strings.TrimSpace(nudgequeue.CanonicalCloseReason("")); len(got) < 20 {
 		t.Errorf("trimmed empty-code fallback = %q (%d chars), want >=20", got, len(got))
 	}
 	// Codes already >=20 characters pass through unchanged.
 	const long = "a-very-long-state-code-already-sufficient"
-	if got := nudgeCanonicalCloseReason(long); got != long {
+	if got := nudgequeue.CanonicalCloseReason(long); got != long {
 		t.Errorf("long-code passthrough = %q, want %q", got, long)
 	}
 }
@@ -4600,23 +4600,23 @@ func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
 		t.Fatal("enqueueQueuedNudgeWithStore: expected error from corrupt queue state")
 	}
 
-	bead, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
 	if err != nil {
-		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+		t.Fatalf("nudgeFrontDoor.FindIncludingTerminal: %v", err)
 	}
 	if !ok {
-		t.Fatal("findAnyQueuedNudgeBead: bead not found; rollback should leave a closed bead, not delete it")
+		t.Fatal("rollback nudge bead not found; rollback should leave a closed bead, not delete it")
 	}
-	if bead.Status != "closed" {
-		t.Fatalf("bead.Status = %q, want closed (rollback should have closed via store.Close)", bead.Status)
+	if shadow.Open {
+		t.Fatalf("shadow open = true, want closed (rollback should have closed via store.Close)")
 	}
-	if got := bead.Metadata["close_reason"]; got != nudgeEnqueueRollbackCloseReason {
-		t.Errorf("close_reason = %q, want %q", got, nudgeEnqueueRollbackCloseReason)
+	if shadow.CloseReason != nudgequeue.EnqueueRollbackCloseReason {
+		t.Errorf("close_reason = %q, want %q", shadow.CloseReason, nudgequeue.EnqueueRollbackCloseReason)
 	}
 	// Belt-and-braces: the canonical reason itself meets the validator
 	// floor. If someone shortens it without thinking, this guard fires.
-	if got := nudgeEnqueueRollbackCloseReason; len(got) < 20 {
-		t.Errorf("nudgeEnqueueRollbackCloseReason = %q (%d chars), want >=20 to satisfy validation.on-close=error", got, len(got))
+	if got := nudgequeue.EnqueueRollbackCloseReason; len(got) < 20 {
+		t.Errorf("nudgequeue.EnqueueRollbackCloseReason = %q (%d chars), want >=20 to satisfy validation.on-close=error", got, len(got))
 	}
 }
 
@@ -4935,5 +4935,65 @@ func TestDeliverSessionNudgeWaitIdleIdleTargetNotShortCircuited(t *testing.T) {
 	}
 	if !sawWait {
 		t.Fatalf("idle target should consult WaitForIdle (not short-circuited); calls = %#v", fake.Calls)
+	}
+}
+
+// TestBlockedQueuedNudgeReason_GetWaitErrorMapping is the design-promised A2
+// oracle for the WI-1 nudge residual closure: blockedQueuedNudgeReason gates
+// wait-sourced nudges by reading the referenced wait through the session front
+// door's GetWait, mapping a missing bead to "wait-missing", a non-wait bead to
+// "wait-reference-invalid", and each wait state to its block reason.
+func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
+	store := beads.NewMemStore()
+	sessFront := sessionFrontDoor(store)
+
+	newWait := func(state string) string {
+		b, err := store.Create(beads.Bead{
+			Type:     waitBeadType,
+			Status:   "open",
+			Labels:   []string{waitBeadLabel, "session:s-1"},
+			Metadata: map[string]string{"session_id": "s-1", "state": state},
+		})
+		if err != nil {
+			t.Fatalf("create wait: %v", err)
+		}
+		return b.ID
+	}
+	nonWait, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create non-wait: %v", err)
+	}
+
+	waitItem := func(refID string) queuedNudge {
+		return queuedNudge{Source: "wait", Reference: &nudgeReference{Kind: "bead", ID: refID}}
+	}
+
+	cases := []struct {
+		name       string
+		item       queuedNudge
+		wantReason string
+		wantBlock  bool
+	}{
+		{"ready-passes", waitItem(newWait(waitStateReady)), "", false},
+		{"canceled", waitItem(newWait(waitStateCanceled)), "wait-canceled", true},
+		{"closed", waitItem(newWait(waitStateClosed)), "wait-closed", true},
+		{"expired", waitItem(newWait(waitStateExpired)), "wait-expired", true},
+		{"failed", waitItem(newWait(waitStateFailed)), "wait-failed", true},
+		{"pending-not-ready", waitItem(newWait(waitStatePending)), "wait-not-ready", true},
+		{"missing-bead", waitItem("gc-nope"), "wait-missing", true},
+		{"non-wait-bead", waitItem(nonWait.ID), "wait-reference-invalid", true},
+		{"non-wait-source", queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false},
+		{"nil-reference", queuedNudge{Source: "wait"}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, block, err := blockedQueuedNudgeReason(sessFront, tc.item)
+			if err != nil {
+				t.Fatalf("blockedQueuedNudgeReason: %v", err)
+			}
+			if reason != tc.wantReason || block != tc.wantBlock {
+				t.Fatalf("got (%q, %v), want (%q, %v)", reason, block, tc.wantReason, tc.wantBlock)
+			}
+		})
 	}
 }

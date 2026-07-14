@@ -221,9 +221,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
+		// Operational/host-tooling scripts (city-*.sh, update-*.sh) are not part
+		// of any agent's runtime behavior, so they are excluded from the content
+		// hash: editing one must not flip every agent's ContentHash and cascade a
+		// fleet-wide config-drift restart (#3840). This mirrors the path-only
+		// treatment .gc/settings.json already gets above. Agent-relevant scripts
+		// (pack-served helpers, etc.) stay content-hashed so their edits still
+		// propagate.
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: scriptsDir, RelDst: path.Join(".gc", "scripts"),
-			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
+			Probed:      true,
+			ContentHash: runtime.HashPathContentExcluding(scriptsDir, isOperationalScript),
 		})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
@@ -239,8 +247,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// This is what real-world apps use to link beads to session logs.
 	sessionBeadID := ""
 	if p.sessionBeads != nil {
-		for _, b := range p.sessionBeads.Open() {
-			if b.Metadata["session_name"] == sessName {
+		for _, b := range p.sessionBeads.OpenInfos() {
+			if b.SessionNameMetadata == sessName {
 				sessionBeadID = b.ID
 				break
 			}
@@ -679,6 +687,24 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	return params, nil
 }
 
+// isOperationalScript reports whether rel (a slash-separated path relative to
+// the .gc/scripts directory) names an operational/host-tooling script that is
+// not part of any agent's runtime behavior — city lifecycle (city-*.sh) and
+// updaters (update-*.sh). Such scripts are excluded from the .gc/scripts content
+// hash so editing one does not cascade a fleet-wide config-drift restart (#3840).
+// Conservative by design: only these unambiguous host-tooling name patterns are
+// excluded; any other script stays content-hashed (keep-probing is the safe
+// default so legit pack-served / agent-relevant script edits still propagate).
+func isOperationalScript(rel string) bool {
+	base := path.Base(rel)
+	for _, pat := range []string{"city-*.sh", "update-*.sh"} {
+		if ok, _ := path.Match(pat, base); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
 	family = strings.TrimSpace(family)
 	if family == "" {
@@ -778,35 +804,29 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 // launch or nudge path, it marks the runtime env so SessionStart hooks can add
 // context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
-	var promptSuffix string
-	var promptFlag string
-	nudge := tp.Hints.Nudge
+	cfg, _ := templateParamsToConfigWithDelivery(tp)
+	return cfg
+}
+
+// templateParamsToConfigWithDelivery is templateParamsToConfig plus the pure
+// promptDelivery result it computed. The launch path (buildPreparedStart) needs
+// the Delivered decision to stamp the S19 priming markers, but it must NOT infer
+// delivery from cfg.Env[GC_STARTUP_PROMPT_DELIVERED]: the resume override in
+// buildPreparedStartWithWorkDirResolver re-sets that env marker to "1" for hook
+// consumption even when nothing is delivered that incarnation. Threading the
+// result avoids that trap. templateParamsToConfig is the wrapper that discards
+// the second value; all other call sites are unchanged.
+func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult) {
+	// SessionStart hooks can enrich context, but the startup prompt still needs
+	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
+	// spawned workers sit idle at the provider prompt. The routing policy lives
+	// in the pure promptDelivery derivation.
+	delivery := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge)
+	promptSuffix := delivery.PromptSuffix
+	promptFlag := delivery.PromptFlag
+	nudge := delivery.Nudge
 	env := maps.Clone(tp.Env)
-	startupPromptDelivered := false
-	if tp.Prompt != "" {
-		// SessionStart hooks can enrich context, but the startup prompt still
-		// needs a first-turn delivery mechanism. Without argv/flag/nudge
-		// delivery, freshly spawned workers sit idle at the provider prompt.
-		switch {
-		case tp.IsACP:
-			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
-			startupPromptDelivered = true
-		case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none":
-			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
-			startupPromptDelivered = true
-		default:
-			promptSuffix = shellquote.Quote(tp.Prompt)
-			startupPromptDelivered = promptSuffix != ""
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
-				if tp.ResolvedProvider.PromptFlag != "" {
-					promptFlag = tp.ResolvedProvider.PromptFlag
-				} else {
-					startupPromptDelivered = false
-				}
-			}
-		}
-	}
-	if startupPromptDelivered {
+	if delivery.Delivered {
 		if env == nil {
 			env = map[string]string{}
 		}
@@ -843,7 +863,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg
+	return cfg, delivery
 }
 
 func prependStartupPromptToNudge(prompt, nudge string) string {

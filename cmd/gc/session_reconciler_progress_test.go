@@ -88,6 +88,47 @@ func (e *restartRequestTestEnv) reconcileAtPath(cityPath string, sessions []bead
 	e.reconcileAtPathWithProvider(cityPath, e.sp, sessions)
 }
 
+// reconcileAtPathWithDrainOps is reconcileAtPathWithProvider with an injected
+// drainOps, so a test can seed a controller drain-ack (dops.isDrainAcked) — the
+// gate on the two finalizeDrainAckStoppedSession call sites that live below the
+// drain-ack-stop-pending fast path (the orphan drain-ack close and the
+// reconciler-owned drain-ack close). Everything else matches reconcileAtPath.
+func (e *restartRequestTestEnv) reconcileAtPathWithDrainOps(cityPath string, sessions []beads.Bead, dops drainOps) {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	_ = reconcileSessionBeadsAtPath(
+		context.Background(),
+		cityPath,
+		sessions,
+		e.desiredState,
+		cfgNames,
+		e.cfg,
+		e.sp,
+		e.store,
+		dops,
+		nil,
+		nil,
+		nil,
+		e.dt,
+		poolDesired,
+		false,
+		nil,
+		"",
+		nil,
+		e.clk,
+		e.rec,
+		0,
+		0,
+		&e.stdout,
+		&e.stderr,
+	)
+}
+
 func (e *restartRequestTestEnv) reconcileAtPathWithProvider(cityPath string, sp runtime.Provider, sessions []beads.Bead) {
 	poolDesired := make(map[string]int)
 	for _, tp := range e.desiredState {

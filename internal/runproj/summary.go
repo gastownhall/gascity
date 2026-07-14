@@ -272,7 +272,7 @@ func runRootID(issue runIssue) string {
 	if stringValue(md[beadmeta.KindMetadataKey]) == "run" || issue.issueType == "molecule" {
 		return issue.id
 	}
-	if moleculeID := stringValue(md["molecule_id"]); moleculeID != "" {
+	if moleculeID := stringValue(md[beadmeta.MoleculeIDMetadataKey]); moleculeID != "" {
 		return moleculeID
 	}
 	return issue.id

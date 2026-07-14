@@ -383,7 +383,11 @@ case "$op" in
 
   close)
     id="${1:?close: missing id}"
-    run_bd close --json "$id" > /dev/null
+    # --force: this generic exec Store.Close delegate runs under the pod/controller
+    # actor (BEADS_ACTOR is stripped from the child) while closing agent-owned
+    # beads, so it must bypass bd's cross-actor close guard (gastownhall/beads#3734),
+    # matching the SDK BdStore which always force-closes.
+    run_bd close --force --json "$id" > /dev/null
     ;;
 
   list)

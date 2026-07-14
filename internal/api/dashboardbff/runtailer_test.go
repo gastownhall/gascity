@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,11 +20,29 @@ import (
 	"github.com/gastownhall/gascity/internal/runproj"
 )
 
-type fakeResolver struct{ paths map[string]string }
+type fakeResolver struct {
+	paths map[string]string
+	// cities, when non-nil, is what Cities returns (so a test can control the
+	// eager-warm set and ordering independently of the CityPath map, or model a
+	// resolver whose registry is empty at Start). When nil, Cities is derived
+	// from paths so existing tests get eager-warming for free.
+	cities []CityRef
+}
 
 func (f fakeResolver) CityPath(name string) (string, bool) {
 	p, ok := f.paths[name]
 	return p, ok
+}
+
+func (f fakeResolver) Cities() []CityRef {
+	if f.cities != nil {
+		return f.cities
+	}
+	refs := make([]CityRef, 0, len(f.paths))
+	for name, path := range f.paths {
+		refs = append(refs, CityRef{Name: name, Path: path})
+	}
+	return refs
 }
 
 // runMoleculeEvent builds a bead.created event for a run-molecule lane carrying
@@ -133,6 +152,92 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 	appendEvents(t, logPath, runMoleculeEvent(2, "run2", "mol-design-review-v2", "worker-2"))
 	waitForLanes(t, tl, 2)
 
+	cancel()
+	wg.Wait()
+}
+
+// TestRunTailerPrimeDoesNotBlockLiveTail is the regression guard for the
+// startup sessions-prime blocking live polling: the best-effort prime runs off
+// the tail's poll goroutine, so a slow or hung /v0 sessions loopback read cannot
+// delay folding events appended right after cold replay — the exact startup
+// window the eager warm-up exists to cover. A /sessions handler that never
+// responds stands in for the stalled loopback; the tail must still fold a
+// post-ready append while that prime is parked.
+func TestRunTailerPrimeDoesNotBlockLiveTail(t *testing.T) {
+	defer func(prev time.Duration) { runTailPollInterval = prev }(runTailPollInterval)
+	runTailPollInterval = 15 * time.Millisecond
+
+	// /sessions blocks until released, standing in for a slow or hung loopback
+	// read. The post-cold-load prime issues exactly this request; if it ran inline
+	// on the tail's poll goroutine, live folding would stall here for up to the
+	// HTTP client timeout (runSessionsFetchTimeout, 10s) — far past this test's
+	// deadlines.
+	var sessionsHits atomic.Int64
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/sessions") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		sessionsHits.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"total":0}`))
+	}))
+	defer supervisor.Close()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	m := newRunTailerManager(Deps{SupervisorBaseURL: supervisor.URL})
+	m.enable(ctx, &wg)
+	tl := m.ensure("alpha", logPath)
+
+	select {
+	case <-tl.readyCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cold replay did not complete")
+	}
+	waitForLanes(t, tl, 1)
+
+	// The prime fires right after readyCh closes. Wait until it is in-flight and
+	// parked in /sessions, so the append below races a genuinely-stalled prime
+	// rather than one that already returned.
+	deadline := time.Now().Add(2 * time.Second)
+	for sessionsHits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := sessionsHits.Load(); got != 1 {
+		t.Fatalf("sessions prime not in-flight after cold replay: hits=%d, want 1", got)
+	}
+
+	// Append a new run AFTER cold replay (post-ready), so only the live tail poll
+	// can fold it (captureTailCursor took the offset before the replay). With the
+	// prime moved OFF the poll goroutine, the tail folds it within a few poll
+	// intervals even though the prime is still parked — release is not closed until
+	// cleanup. Inline priming would stall the poll here and this waitForLanes would
+	// time out.
+	appendEvents(t, logPath, runMoleculeEvent(2, "run2", "mol-design-review-v2", "worker-2"))
+	waitForLanes(t, tl, 2)
+
+	// The fold above completed while the prime was still parked in /sessions,
+	// proving the prime never gated live polling.
+	if got := sessionsHits.Load(); got != 1 {
+		t.Fatalf("sessions prime hits = %d, want exactly 1 in-flight parked prime", got)
+	}
+
+	unblock()
 	cancel()
 	wg.Wait()
 }
@@ -516,7 +621,7 @@ type runSummaryWire struct {
 	} `json:"census"`
 }
 
-func getRunSummary(t *testing.T, p *Plane, city string) runSummaryWire {
+func getRunSummary(t *testing.T, p *Plane, city string) runSummaryWire { //nolint:unparam // city is fixed today but kept for parity with the other run helpers
 	t.Helper()
 	rec := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/city/"+city+"/runs/summary", nil))

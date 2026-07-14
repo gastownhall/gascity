@@ -367,6 +367,340 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
+// absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.
+type absorbDepsMode int
+
+const (
+	// depsExplicit installs the caller-supplied opts.deps (cloned).
+	depsExplicit absorbDepsMode = iota
+	// depsFromFields recomputes deps from the bead's own fields, unconditionally
+	// (setting a nil entry when the bead carries no dependency fields).
+	depsFromFields
+	// depsFromFieldsIfCarried recomputes deps from the bead's fields only when
+	// the bead carries dependency fields; otherwise the cached deps row is left
+	// untouched.
+	depsFromFieldsIfCarried
+	// depsKeepCached leaves the cached deps row untouched.
+	depsKeepCached
+	// depsDrop removes the deps row.
+	depsDrop
+)
+
+// absorbSeqMode selects how absorbFreshLocked treats the beadSeq/localBeadAt
+// staleness fences for a bead.
+type absorbSeqMode int
+
+const (
+	// seqKeep touches neither fence. Used by write/event paths that ran
+	// noteMutationLocked/noteLocalMutationLocked immediately before the absorb
+	// and MUST preserve the fence they just set (the #2210 staleness defense).
+	seqKeep absorbSeqMode = iota
+	// seqClearGuarded clears both fences unless a recent local write-through is
+	// still inside the recency window.
+	seqClearGuarded
+	// seqClearBeadSeqOnly clears the beadSeq fence unconditionally and leaves
+	// localBeadAt untouched.
+	seqClearBeadSeqOnly
+)
+
+// absorbOpts describes the two axes of variation observed across the cache's
+// absorb sites: how the deps row is sourced and how the staleness fences are
+// treated. clearDirty is separate because a small number of sites (prime's
+// slow path, PrimeActive) deliberately leave a dirty mark in place across an
+// absorb.
+type absorbOpts struct {
+	depsMode   absorbDepsMode
+	deps       []Dep // consulted only for depsExplicit
+	seqMode    absorbSeqMode
+	clearDirty bool
+}
+
+// absorbFreshLocked installs a fresh row for id per opts. It is the only code
+// that installs a cached row alongside clearing the row's tombstone/staleness
+// state. now is the caller's clock read for the whole pass; it is consulted
+// only by seqClearGuarded. Caller must hold c.mu in write mode.
+func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+	c.beads[id] = cloneBead(bead)
+	switch opts.depsMode {
+	case depsExplicit:
+		c.deps[id] = cloneDeps(opts.deps)
+	case depsFromFields:
+		c.deps[id] = depsFromBeadFields(bead)
+	case depsFromFieldsIfCarried:
+		if beadCarriesDependencyFields(bead) {
+			c.deps[id] = depsFromBeadFields(bead)
+		}
+	case depsKeepCached:
+		// leave c.deps[id] untouched
+	case depsDrop:
+		delete(c.deps, id)
+	}
+	if opts.clearDirty {
+		delete(c.dirty, id)
+	}
+	delete(c.deletedSeq, id)
+	switch opts.seqMode {
+	case seqClearGuarded:
+		if !recentLocalMutation(c.localBeadAt[id], now) {
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+		}
+	case seqClearBeadSeqOnly:
+		delete(c.beadSeq, id)
+	}
+}
+
+// evictLocked removes every trace of id from the six per-row maps. It does not
+// touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu in
+// write mode.
+func (c *CachingStore) evictLocked(id string) {
+	delete(c.beads, id)
+	delete(c.deps, id)
+	delete(c.dirty, id)
+	delete(c.deletedSeq, id)
+	delete(c.beadSeq, id)
+	delete(c.localBeadAt, id)
+}
+
+// tombstoneLocked evicts id and installs a deletion fence at seq. seq must be a
+// mutationSeq value obtained under the same lock hold so the fence exceeds any
+// startSeq captured before this section. Caller must hold c.mu in write mode.
+func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
+	c.evictLocked(id)
+	c.deletedSeq[id] = seq
+}
+
+// markDirtyLocked flags id as known-stale so reads bypass the cache until a
+// refresh clears the mark. Caller must hold c.mu in write mode.
+func (c *CachingStore) markDirtyLocked(id string) {
+	c.dirty[id] = struct{}{}
+}
+
+// clearStalenessMarksLocked clears the dirty flag and deletion fence for id
+// without touching the cached row or its deps. Used by the deps-overlay
+// fallbacks that trust an in-place dependency mutation. Caller must hold c.mu
+// in write mode.
+func (c *CachingStore) clearStalenessMarksLocked(id string) {
+	delete(c.dirty, id)
+	delete(c.deletedSeq, id)
+}
+
+// dirtyOverlayMaxGets bounds the inline per-ID refresh a cached read will do
+// before it declines the overlay and falls back to today's full backing scan.
+// Above the cap the read degrades to prior behavior — never worse.
+const dirtyOverlayMaxGets = 8
+
+// errDirtyOverlayFallback signals that a cached read must take its existing
+// fallback path (backing.List / backing.Ready / ErrCacheUnavailable / ok=false,
+// each unchanged per site). It never escapes the read site.
+var errDirtyOverlayFallback = errors.New("beads cache: dirty overlay fallback")
+
+// cacheServableLocked reports whether the active read model can answer from
+// cache: the cache is live or partial and the prime was not a partial error.
+// Dirty is no longer a serve-blocker — it is handled by readCacheWithOverlay.
+// Caller must hold c.mu (read or write).
+func (c *CachingStore) cacheServableLocked() bool {
+	return (c.state == cacheLive || c.state == cachePartial) && c.primePartialErr == nil
+}
+
+// readCacheWithOverlay serves a cached read after refreshing only the dirty
+// rows, replacing the old "one dirty bead declines the whole cache" tripwire.
+//
+// gate reports, under the lock, whether the cache is servable for this read
+// shape (cacheServableLocked for most sites; Ready adds depsComplete). collect
+// materializes the read from the cache and is invoked exactly once, while the
+// lock is held, only after every dirty row has been refreshed or confirmed
+// absent — so no dirty row is ever served (I1) and no new mark can slip between
+// the servability re-check and the serve (I7). suppressed holds IDs that
+// backing.Get reported ErrNotFound this pass; collect must omit them, matching
+// what the old full backing.List would have returned for deleted rows (I6). A
+// suppressed id that a concurrent apply resurrects between fetch and re-lock is
+// caught by retrySuppressedChurnLocked and re-fetched, the symmetric fence to
+// the fetched-row deletedSeq/beadSeq check, so the serve never omits a now-live
+// row (I6).
+//
+// A non-nil error means the caller must take its existing fallback path (I5):
+// the dirty set exceeds dirtyOverlayMaxGets, a backing.Get failed with a
+// non-NotFound error, the cache is not servable, or residual dirty churn
+// survived the bounded retry. No backing I/O happens under c.mu (I7).
+func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
+	suppressed := make(map[string]struct{})
+	for pass := 0; pass < 2; pass++ {
+		c.mu.RLock()
+		if !gate() {
+			c.mu.RUnlock()
+			return errDirtyOverlayFallback
+		}
+		startSeq := c.mutationSeq
+		todo := c.dirtyToRefreshLocked(suppressed)
+		if len(todo) == 0 {
+			// Cache is clean, or every remaining dirty row is a confirmed
+			// absence: serve from cache under this same lock hold — but only
+			// after re-verifying no suppressed row was resurrected (see below).
+			if c.retrySuppressedChurnLocked(suppressed, startSeq) {
+				c.mu.RUnlock()
+				continue
+			}
+			collect(suppressed)
+			c.mu.RUnlock()
+			return nil
+		}
+		if len(c.dirty) > dirtyOverlayMaxGets {
+			c.mu.RUnlock()
+			return errDirtyOverlayFallback
+		}
+		c.mu.RUnlock()
+
+		fetched, err := c.fetchDirtyOverlay(todo, suppressed)
+		if err != nil {
+			return errDirtyOverlayFallback
+		}
+
+		c.mu.Lock()
+		if !gate() {
+			c.mu.Unlock()
+			return errDirtyOverlayFallback
+		}
+		now := time.Now()
+		absorbed := 0
+		for _, f := range fetched {
+			// Fence discipline (I3): never overwrite a mutation that landed
+			// after the snapshot. A skipped-but-still-dirty row is caught by
+			// the re-check below and handled by the retry-or-fallback.
+			if c.deletedSeq[f.id] > startSeq || c.beadSeq[f.id] > startSeq {
+				continue
+			}
+			opts := absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqClearBeadSeqOnly,
+				clearDirty: true,
+			}
+			// R1: rows whose backing.Get carried no dependency fields had their
+			// authoritative deps fetched separately; install them verbatim so the
+			// overlay never clobbers a blocked bead's deps to nil.
+			if f.depsFromBacking {
+				opts.depsMode = depsExplicit
+				opts.deps = f.deps
+			}
+			c.absorbFreshLocked(f.id, f.bead, now, opts)
+			absorbed++
+		}
+		if absorbed > 0 {
+			c.markFreshLocked(now)
+			c.updateStatsLocked()
+		}
+		if len(c.dirtyToRefreshLocked(suppressed)) == 0 {
+			if c.retrySuppressedChurnLocked(suppressed, startSeq) {
+				c.mu.Unlock()
+				continue
+			}
+			collect(suppressed)
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+	}
+	return errDirtyOverlayFallback
+}
+
+// retrySuppressedChurnLocked guards the serve against a torn read caused by an
+// ErrNotFound-suppressed row being re-installed by a concurrent event-apply
+// between its fetch and this final lock hold (the symmetric fence to the
+// fetched-row deletedSeq/beadSeq check). A suppressed id is churn if its fence
+// advanced past the snapshot, or a resident non-dirty row is now present — in
+// either case omitting it from collect would serve the cache MINUS a now-live
+// row. Any such id is dropped from suppressed so the next pass re-fetches it,
+// and the function reports true to signal the caller must retry (or, on the
+// final pass, fall back). Caller must hold c.mu. Returns false when the serve
+// may proceed.
+func (c *CachingStore) retrySuppressedChurnLocked(suppressed map[string]struct{}, startSeq uint64) bool {
+	if len(suppressed) == 0 {
+		return false
+	}
+	var churned []string
+	for id := range suppressed {
+		if c.beadSeq[id] > startSeq || c.deletedSeq[id] > startSeq {
+			churned = append(churned, id)
+			continue
+		}
+		if _, resident := c.beads[id]; resident {
+			if _, dirty := c.dirty[id]; !dirty {
+				churned = append(churned, id)
+			}
+		}
+	}
+	for _, id := range churned {
+		delete(suppressed, id)
+	}
+	return len(churned) > 0
+}
+
+// dirtyToRefreshLocked returns the dirty IDs still needing a backing refresh:
+// every dirty mark not already confirmed absent this pass. Caller must hold
+// c.mu (read or write).
+func (c *CachingStore) dirtyToRefreshLocked(suppressed map[string]struct{}) []string {
+	if len(c.dirty) == 0 {
+		return nil
+	}
+	var todo []string
+	for id := range c.dirty {
+		if _, ok := suppressed[id]; ok {
+			continue
+		}
+		todo = append(todo, id)
+	}
+	return todo
+}
+
+type overlayFetched struct {
+	id   string
+	bead Bead
+	// deps holds the authoritative dependency row pulled from backing.DepList,
+	// set only when depsFromBacking is true.
+	deps []Dep
+	// depsFromBacking is true when the fetched bead carried no dependency fields
+	// and deps was sourced from an explicit backing.DepList instead. The absorb
+	// then installs deps verbatim (depsExplicit) rather than recomputing from the
+	// bead's — absent — fields.
+	depsFromBacking bool
+}
+
+// fetchDirtyOverlay fetches each dirty ID via backing.Get with no lock held
+// (I7). Successful Gets are queued for absorb; ErrNotFound IDs are added to
+// suppressed (their dirty mark is deliberately left set, mirroring Get's dirty
+// path — convergence stays with the reconciler). Any other error returns
+// non-nil so the caller falls back.
+//
+// R1 (gastownhall/gascity#2987 class): a backing whose Get carries no dependency
+// fields — the fork's flagship native DoltLite read store — would, if absorbed
+// with depsFromFields, have its cached deps clobbered to nil. For such rows the
+// authoritative deps are pulled here via backing.DepList (still lock-free) so the
+// absorb can install them explicitly and a blocked bead is never served as ready.
+func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]struct{}) ([]overlayFetched, error) {
+	fetched := make([]overlayFetched, 0, len(todo))
+	for _, id := range todo {
+		fresh, err := c.backing.Get(id)
+		switch {
+		case err == nil:
+			row := overlayFetched{id: id, bead: fresh}
+			if !beadCarriesDependencyFields(fresh) {
+				deps, depErr := c.backing.DepList(id, "down")
+				if depErr != nil {
+					return nil, depErr
+				}
+				row.deps = deps
+				row.depsFromBacking = true
+			}
+			fetched = append(fetched, row)
+		case errors.Is(err, ErrNotFound):
+			suppressed[id] = struct{}{}
+		default:
+			return nil, err
+		}
+	}
+	return fetched, nil
+}
+
 // PrimeActive loads the common active bead statuses (open + in_progress) across
 // both persistent issues and ephemeral wisps into the cache. These are fast indexed
 // queries that populate enough data for
@@ -423,17 +757,14 @@ func (c *CachingStore) PrimeActive() error {
 		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now, false); keep {
 			continue
 		}
-		c.beads[b.ID] = cloneBead(b)
+		opts := absorbOpts{seqMode: seqClearGuarded, clearDirty: false}
 		if depsComplete && depErr == nil {
-			c.deps[b.ID] = cloneDeps(depMap[b.ID])
+			opts.depsMode = depsExplicit
+			opts.deps = depMap[b.ID]
 		} else {
-			c.deps[b.ID] = depsFromBeadFields(b)
+			opts.depsMode = depsFromFields
 		}
-		delete(c.deletedSeq, b.ID)
-		if !recentLocalMutation(c.localBeadAt[b.ID], now) {
-			delete(c.beadSeq, b.ID)
-			delete(c.localBeadAt, b.ID)
-		}
+		c.absorbFreshLocked(b.ID, b, now, opts)
 	}
 	if c.state == cacheUninitialized {
 		c.state = cachePartial
@@ -576,14 +907,14 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			if _, exists := c.beads[id]; exists {
 				continue
 			}
-			c.beads[id] = b
-			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
+			opts := absorbOpts{seqMode: seqClearBeadSeqOnly, clearDirty: false}
 			if depsComplete && depErr == nil {
-				c.deps[id] = cloneDeps(depMap[id])
+				opts.depsMode = depsExplicit
+				opts.deps = depMap[id]
 			} else {
-				c.deps[id] = depsFromBeadFields(b)
+				opts.depsMode = depsFromFields
 			}
+			c.absorbFreshLocked(id, b, now, opts)
 		}
 		c.depsComplete = false
 	}

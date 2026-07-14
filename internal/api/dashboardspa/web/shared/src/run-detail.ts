@@ -19,7 +19,8 @@ export type RunNodeStatus =
   | 'completed'
   | 'failed'
   | 'blocked'
-  | 'skipped';
+  | 'skipped'
+  | 'canceled';
 
 export type RunConstructKind =
   | 'run-root'
@@ -134,6 +135,13 @@ export interface FormulaRunProgress {
   streamableSessionIds: string[];
   statusCounts: Partial<Record<RunNodeStatus, number>>;
   allStatusCounts: Partial<Record<RunNodeStatus, number>>;
+  /**
+   * True when every visible node has reached a terminal status. Derived in Go
+   * (runproj.buildFormulaRunProgress — the single source of the status
+   * terminality taxonomy); the client renders this flag instead of
+   * re-deriving terminality from a duplicated status list.
+   */
+  terminal: boolean;
 }
 
 export type FormulaRunPartialReason =

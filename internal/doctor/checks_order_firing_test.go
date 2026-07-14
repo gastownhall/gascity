@@ -195,7 +195,7 @@ func TestOrderFiringCurrent_UsesNewestOrderRunHistory(t *testing.T) {
 	}, nil)
 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(order orders.Order) (time.Time, error) {
-		return orders.LastRunFuncForStore(store)(order.ScopedName())
+		return orders.NewStoreWithGraph(beads.OrdersStore{Store: store}, beads.GraphStore{Store: store}).LastRun(order.ScopedName())
 	}))
 	check.clock = func() time.Time { return now }
 	result := check.Run(&CheckContext{CityPath: cityPath})

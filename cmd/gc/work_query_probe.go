@@ -186,8 +186,8 @@ func probeSessionNameForTemplate(
 	if cfg != nil {
 		if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
 			if sessionBeads != nil {
-				if bead, ok := findCanonicalNamedSessionBead(sessionBeads, spec); ok {
-					if sn := strings.TrimSpace(bead.Metadata["session_name"]); sn != "" {
+				if info, ok := findCanonicalNamedSessionInfo(sessionBeads, spec); ok {
+					if sn := strings.TrimSpace(info.SessionNameMetadata); sn != "" {
 						return sn
 					}
 				}

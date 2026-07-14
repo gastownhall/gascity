@@ -163,6 +163,42 @@ func TestHostedDoltInitOptionsValidate(t *testing.T) {
 	}
 }
 
+// TestHostedDoltInitAppliesAPIPortDefault pins the control-plane reachability
+// contract for hosted cities. A hosted city's controller runs out-of-session,
+// so the control dispatcher and gc CLI reach it only through the HTTP API, and
+// every API consumer treats cfg.API.Port == 0 as "API disabled". Neither plain
+// init nor the hosted endpoint flags write an [api] section (only the k8s-cell
+// bootstrap profile does), so without this default a hosted init yields a city
+// whose control plane is unreachable until an [api] section is hand-added.
+func TestHostedDoltInitAppliesAPIPortDefault(t *testing.T) {
+	t.Run("defaults the API port when no [api] section is set", func(t *testing.T) {
+		o := hostedDoltInitOptions{Host: "gateway.example.com", Port: "4406", Database: "bd_prj_x", ProjectID: "prj_x"}
+		var cfg config.City
+		if err := o.applyToCityConfig(&cfg); err != nil {
+			t.Fatalf("applyToCityConfig() error = %v", err)
+		}
+		if cfg.API.Port != config.DefaultAPIPort {
+			t.Fatalf("cfg.API.Port = %d, want %d (hosted controller is reachable only via the HTTP API)", cfg.API.Port, config.DefaultAPIPort)
+		}
+	})
+	t.Run("preserves an API config already pinned by a bootstrap profile", func(t *testing.T) {
+		o := hostedDoltInitOptions{Host: "gateway.example.com", Port: "4406", Database: "bd_prj_x", ProjectID: "prj_x"}
+		var cfg config.City
+		cfg.API.Port = 12345
+		cfg.API.Bind = "0.0.0.0"
+		cfg.API.AllowMutations = true
+		if err := o.applyToCityConfig(&cfg); err != nil {
+			t.Fatalf("applyToCityConfig() error = %v", err)
+		}
+		if cfg.API.Port != 12345 {
+			t.Fatalf("cfg.API.Port = %d, want 12345 preserved (bootstrap profile wins)", cfg.API.Port)
+		}
+		if cfg.API.Bind != "0.0.0.0" || !cfg.API.AllowMutations {
+			t.Fatalf("bootstrap-profile API config clobbered: bind=%q allowMutations=%v", cfg.API.Bind, cfg.API.AllowMutations)
+		}
+	})
+}
+
 func TestInitWizardConfigFromFlagsCapturesHostedDolt(t *testing.T) {
 	cmd := newInitCmd(io.Discard, io.Discard)
 	if err := cmd.Flags().Set("template", "custom"); err != nil {
