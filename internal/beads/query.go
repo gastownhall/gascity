@@ -308,7 +308,7 @@ func SortBeads(items []Bead, order SortOrder) {
 // which store path served it (#3208).
 func sortBeadsReadyOrder(items []Bead) {
 	sort.Slice(items, func(i, j int) bool {
-		return beadReadyLess(items[i], items[j])
+		return ReadyLess(items[i], items[j])
 	})
 }
 
@@ -357,7 +357,7 @@ func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
 			case j == hi:
 				scratch[k] = items[i]
 				i++
-			case beadReadyLess(items[j], items[i]):
+			case ReadyLess(items[j], items[i]):
 				scratch[k] = items[j]
 				j++
 			default:
@@ -374,24 +374,6 @@ func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
 		return nil
 	}
 	return mergeSort(0, len(items))
-}
-
-func beadReadyLess(a, b Bead) bool {
-	pa, pb := readySortPriority(a), readySortPriority(b)
-	if pa != pb {
-		return pa < pb
-	}
-	if !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.Before(b.CreatedAt)
-	}
-	return a.ID < b.ID
-}
-
-func readySortPriority(b Bead) int {
-	if b.Priority == nil {
-		return 2
-	}
-	return *b.Priority
 }
 
 func sortBeadsForQuery(items []Bead, order SortOrder) {

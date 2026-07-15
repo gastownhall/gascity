@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -110,9 +111,7 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 // normalized in place so a non-terminal caller can reuse the normalized ops
 // (defaults applied) for the shared drain.
 func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
-	opts.Assignee = strings.TrimSpace(opts.Assignee)
-	opts.IdentityCandidates = hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
-	opts.RouteTargets = hookClaimRouteTargets(opts.RouteTargets...)
+	normalizeHookClaimOptions(opts)
 	if opts.Assignee == "" {
 		fmt.Fprintln(stderr, "gc hook --claim: assignee not specified (set $GC_SESSION_NAME or $GC_SESSION_ID)") //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
@@ -146,12 +145,19 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
+	candidates = orderedHookCandidates(candidates)
 
 	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
 	}
 
 	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+}
+
+func normalizeHookClaimOptions(opts *hookClaimOptions) {
+	opts.Assignee = strings.TrimSpace(opts.Assignee)
+	opts.IdentityCandidates = hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
+	opts.RouteTargets = hookClaimRouteTargets(opts.RouteTargets...)
 }
 
 // applyDefaults fills any unset op seam with its production implementation, so
@@ -198,9 +204,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	claimsErrored := false
+	activePriority := -1
 	for _, candidate := range candidates {
 		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
 			continue
+		}
+		candidatePriority := beads.PriorityValue(candidate.Priority)
+		if activePriority < 0 {
+			activePriority = candidatePriority
+		} else if candidatePriority != activePriority {
+			break
 		}
 		if ctx.Err() != nil {
 			// The shared claim budget is spent (an earlier slow-failing claim
@@ -249,6 +262,14 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+func orderedHookCandidates(candidates []beads.Bead) []beads.Bead {
+	ordered := append([]beads.Bead(nil), candidates...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return beads.ReadyLess(ordered[i], ordered[j])
+	})
+	return ordered
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
@@ -381,6 +402,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
+			beads.PriorityValue(sibling.Priority) != beads.PriorityValue(bead.Priority) ||
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}

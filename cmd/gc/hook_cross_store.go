@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -183,35 +185,101 @@ func firstStoreWithWork(command string, stores []hookStore, primary hookStore, r
 	return lastOut, hookStore{}, nil
 }
 
-// claimStoreWithFallback re-validates the discovery-selected store for
-// claim-time freshness, then falls back to federated re-selection across all
-// stores when that store has emptied since discovery. It exists because
-// gc hook --claim selects the first store with ready work, then must commit to
-// one store for the claim mutation. Re-running only the selected store would
-// drain as "no work" whenever its claimable row was taken between discovery and
-// claim — even though a later federated store still has ready routed work. The
-// returned output is the work-query result the claim should act on, paired with
-// the store it came from so the mutation runs against that store's bd context.
-// (The narrow window between this re-validation and the bd update --claim is
-// still handled by the claim itself skipping rows it cannot take.)
-//
-// A re-validation error on the selected store is surfaced only when that store
-// is the primary (own) store; a federated store erroring at claim time is
-// best-effort and falls through to re-selection, mirroring firstStoreWithWork's
-// emit-on-timeout contract so a flaky rig store can't wedge the claim.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
-	selectedOut, err := run(command, selected.dir, selected.env)
-	if err != nil {
-		if sameHookStore(selected, primary) {
-			return "", hookStore{}, err
+type hookClaimCandidateRank struct {
+	tier int
+	bead beads.Bead
+}
+
+func bestClaimStoreWithWork(command string, stores []hookStore, primary hookStore, opts hookClaimOptions, requiredFreshPriority *int, run hookStoreRunner) (string, hookStore, hookClaimCandidateRank, error) {
+	return bestClaimStoreWithSeed(command, stores, primary, opts, requiredFreshPriority, hookStore{}, "", false, run)
+}
+
+func bestClaimStoreWithSeed(command string, stores []hookStore, primary hookStore, opts hookClaimOptions, requiredFreshPriority *int, seedStore hookStore, seedOutput string, hasSeed bool, run hookStoreRunner) (string, hookStore, hookClaimCandidateRank, error) {
+	var bestOut string
+	var bestStore hookStore
+	var bestRank hookClaimCandidateRank
+	foundBest := false
+	var primaryOut string
+	var primaryErr error
+	for _, store := range stores {
+		out := seedOutput
+		var err error
+		if !hasSeed || !sameHookStore(store, seedStore) {
+			out, err = run(command, store.dir, store.env)
 		}
-		return firstStoreWithWork(command, stores, primary, run)
+		if err != nil {
+			if sameHookStore(store, primary) {
+				primaryOut, primaryErr = out, err
+			}
+			continue
+		}
+		rank, ok, err := bestHookClaimCandidate(out, opts, requiredFreshPriority)
+		if err != nil {
+			if sameHookStore(store, primary) {
+				primaryOut = out
+				primaryErr = fmt.Errorf("decoding claim candidates: %w", err)
+			}
+			continue
+		}
+		if !ok || (foundBest && !hookClaimRankLess(rank, bestRank)) {
+			continue
+		}
+		bestOut, bestStore, bestRank = out, store, rank
+		foundBest = true
 	}
-	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
-	if workQueryHasReadyWork(ready) {
-		return selectedOut, selected, nil
+	if foundBest {
+		return bestOut, bestStore, bestRank, nil
 	}
-	return firstStoreWithWork(command, stores, primary, run)
+	if primaryErr != nil {
+		return primaryOut, hookStore{}, hookClaimCandidateRank{}, primaryErr
+	}
+	return "", hookStore{}, hookClaimCandidateRank{}, nil
+}
+
+func bestHookClaimCandidate(output string, opts hookClaimOptions, requiredFreshPriority *int) (hookClaimCandidateRank, bool, error) {
+	normalized := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(output)), time.Now())
+	if !workQueryHasReadyWork(normalized) {
+		return hookClaimCandidateRank{}, false, nil
+	}
+	candidates, err := decodeHookClaimBeads(normalized)
+	if err != nil {
+		return hookClaimCandidateRank{}, false, err
+	}
+	var best hookClaimCandidateRank
+	found := false
+	for _, candidate := range candidates {
+		rank, ok := hookClaimRank(candidate, opts, requiredFreshPriority)
+		if !ok || (found && !hookClaimRankLess(rank, best)) {
+			continue
+		}
+		best, found = rank, true
+	}
+	return best, found, nil
+}
+
+func hookClaimRank(candidate beads.Bead, opts hookClaimOptions, requiredFreshPriority *int) (hookClaimCandidateRank, bool) {
+	status := strings.ToLower(strings.TrimSpace(candidate.Status))
+	switch {
+	case status == "in_progress" && hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates):
+		return hookClaimCandidateRank{tier: 0, bead: candidate}, true
+	case status == "open" && hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates):
+		return hookClaimCandidateRank{tier: 1, bead: candidate}, true
+	case hookCandidateClaimable(candidate, opts.RouteTargets):
+		priority := beads.PriorityValue(candidate.Priority)
+		if requiredFreshPriority != nil && priority != *requiredFreshPriority {
+			return hookClaimCandidateRank{}, false
+		}
+		return hookClaimCandidateRank{tier: 2, bead: candidate}, true
+	default:
+		return hookClaimCandidateRank{}, false
+	}
+}
+
+func hookClaimRankLess(left, right hookClaimCandidateRank) bool {
+	if left.tier != right.tier {
+		return left.tier < right.tier
+	}
+	return beads.ReadyLess(left.bead, right.bead)
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that firstStoreWithWork

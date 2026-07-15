@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -13,17 +14,18 @@ import (
 // SessionRequest represents a single session the reconciler should start.
 type SessionRequest struct {
 	Template     string // agent template qualified name (e.g., "gascity/claude")
-	BeadPriority int    // priority of the driving work bead
+	BeadPriority *int   // priority of the driving work bead; nil means P2
 	// Tier is "resume" for in-progress work with a live session,
 	// "wake-known-identity" for in-progress work whose session exited but
 	// template is configured, or "new" for ready unassigned work.
 	Tier          string
-	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
-	WorkBeadID    string // the work bead driving this request
-	WorkBeadTitle string // title of the work bead driving this request, when known
-	WorkPack      string // pack route key from the work bead, when known
-	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
-	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	SessionBeadID string    // concrete session to preserve for resume or in-flight new demand
+	WorkBeadID    string    // the work bead driving this request
+	WorkBeadTitle string    // title of the work bead driving this request, when known
+	WorkCreatedAt time.Time // creation time used for FIFO within a priority band
+	WorkPack      string    // pack route key from the work bead, when known
+	WorkWorkspace string    // explicit pack workspace route key from the work bead, when known
+	WorkStoreRef  string    // city or rig:<name> store reference for WorkBeadID when known
 	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
@@ -36,11 +38,12 @@ type SessionRequest struct {
 	FloorGuarantee bool
 }
 
-func beadPriority(b beads.Bead) int {
-	if b.Priority != nil {
-		return *b.Priority
+func beadPriority(b beads.Bead) *int {
+	if b.Priority == nil {
+		return nil
 	}
-	return 0
+	priority := *b.Priority
+	return &priority
 }
 
 // PoolDesiredState holds the desired state for a single agent template.
@@ -200,6 +203,7 @@ func computePoolDesiredStates(
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
+					WorkCreatedAt:  wb.CreatedAt,
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
@@ -224,6 +228,7 @@ func computePoolDesiredStates(
 				BeadPriority:   beadPriority(wb),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
+				WorkCreatedAt:  wb.CreatedAt,
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
@@ -283,11 +288,12 @@ func computePoolDesiredStates(
 			for j := 0; j < inFlightCount; j++ {
 				req := inFlight[j]
 				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
 			}
 			for j := inFlightCount; j < newCount; j++ {
 				workBeadID := ""
 				workBeadTitle := ""
+				var workBeadPriority *int
+				var workCreatedAt time.Time
 				workPack := ""
 				workWorkspace := ""
 				workStoreRef := ""
@@ -297,6 +303,10 @@ func computePoolDesiredStates(
 					if demand.Titles != nil {
 						workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
 					}
+					if priority, ok := demand.Priorities[workBeadID]; ok {
+						workBeadPriority = &priority
+					}
+					workCreatedAt = demand.CreatedAt[workBeadID]
 					if demand.Packs != nil {
 						workPack = strings.TrimSpace(demand.Packs[workBeadID])
 					}
@@ -312,16 +322,17 @@ func computePoolDesiredStates(
 				}
 				req := SessionRequest{
 					Template:       template,
+					BeadPriority:   workBeadPriority,
 					Tier:           "new",
 					WorkBeadID:     workBeadID,
 					WorkBeadTitle:  workBeadTitle,
+					WorkCreatedAt:  workCreatedAt,
 					WorkPack:       workPack,
 					WorkWorkspace:  workWorkspace,
 					WorkStoreRef:   workStoreRef,
 					BrainParentSID: workParentSID,
 				}
 				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
 			}
 		}
 	}
@@ -424,19 +435,11 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
-// Accepts requests in priority order, rejecting any that would exceed a cap.
+// Preserves recovery requests first, then admits fresh capacity in canonical
+// priority-band FIFO order, rejecting any request that would exceed a cap.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
-	// Sort by priority DESC, resume tier first within same priority.
-	sort.SliceStable(requests, func(i, j int) bool {
-		if requests[i].BeadPriority != requests[j].BeadPriority {
-			return requests[i].BeadPriority > requests[j].BeadPriority
-		}
-		// Resume-like tiers before new tier at same priority.
-		if requests[i].Tier != requests[j].Tier {
-			return isResumeLikeTier(requests[i].Tier) && !isResumeLikeTier(requests[j].Tier)
-		}
-		return false
-	})
+	sortedRequests := append([]SessionRequest(nil), requests...)
+	sortSessionRequests(sortedRequests)
 
 	limits := newNestedCapLimits(cfg)
 	usage := newNestedCapUsage()
@@ -444,7 +447,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 	// Walk sorted requests, accepting each if all caps have room.
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
 
-	for _, req := range requests {
+	for _, req := range sortedRequests {
 		template := req.Template
 		if usage.isDuplicateSessionRequest(req) {
 			continue
@@ -570,21 +573,47 @@ func newNestedCapUsage() nestedCapUsage {
 func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {
 	usage := newNestedCapUsage()
 	sorted := append([]SessionRequest(nil), requests...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].BeadPriority != sorted[j].BeadPriority {
-			return sorted[i].BeadPriority > sorted[j].BeadPriority
-		}
-		if sorted[i].Tier != sorted[j].Tier {
-			return isResumeLikeTier(sorted[i].Tier) && !isResumeLikeTier(sorted[j].Tier)
-		}
-		return false
-	})
+	sortSessionRequests(sorted)
 	for _, req := range sorted {
 		if usage.canAccept(req, limits) {
 			usage.accept(req, limits)
 		}
 	}
 	return usage
+}
+
+func sortSessionRequests(requests []SessionRequest) {
+	sort.SliceStable(requests, func(i, j int) bool {
+		left, right := requests[i], requests[j]
+		leftRecovery := preservesCommittedCapacity(left)
+		rightRecovery := preservesCommittedCapacity(right)
+		if leftRecovery != rightRecovery {
+			return leftRecovery
+		}
+		if leftRecovery {
+			leftResume := isResumeLikeTier(left.Tier)
+			rightResume := isResumeLikeTier(right.Tier)
+			if leftResume != rightResume {
+				return leftResume
+			}
+		}
+		leftPriority := beads.PriorityValue(left.BeadPriority)
+		rightPriority := beads.PriorityValue(right.BeadPriority)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		if !left.WorkCreatedAt.IsZero() && !right.WorkCreatedAt.IsZero() && !left.WorkCreatedAt.Equal(right.WorkCreatedAt) {
+			return left.WorkCreatedAt.Before(right.WorkCreatedAt)
+		}
+		if left.WorkBeadID != "" && right.WorkBeadID != "" && left.WorkBeadID != right.WorkBeadID {
+			return left.WorkBeadID < right.WorkBeadID
+		}
+		return false
+	})
+}
+
+func preservesCommittedCapacity(request SessionRequest) bool {
+	return isResumeLikeTier(request.Tier) || (request.Tier == "new" && request.SessionBeadID != "")
 }
 
 func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {

@@ -145,8 +145,8 @@ func TestApplyNestedCaps_WakeKnownIdentityRanksBeforeNew(t *testing.T) {
 	// New request is listed first so current sort preserves it ahead of
 	// wake-known-identity. After the fix, wake-known-identity wins.
 	requests := []SessionRequest{
-		{Template: "claude", Tier: "new", BeadPriority: 5},
-		{Template: "claude", Tier: "wake-known-identity", SessionBeadID: "sess-closed", BeadPriority: 5},
+		{Template: "claude", Tier: "new", BeadPriority: intPtr(1)},
+		{Template: "claude", Tier: "wake-known-identity", SessionBeadID: "sess-closed", BeadPriority: intPtr(1)},
 	}
 
 	result := applyNestedCaps(cfg, requests, nil, nil)

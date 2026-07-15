@@ -855,10 +855,14 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	store := beads.NewMemStore()
+	priority := 0
+	createdAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	work, err := store.Create(beads.Bead{
-		Title:  "manual order run wisp",
-		Type:   "task",
-		Status: "open",
+		Title:     "manual order run wisp",
+		Type:      "task",
+		Status:    "open",
+		Priority:  &priority,
+		CreatedAt: createdAt,
 		Metadata: map[string]string{
 			beadmeta.PackMetadataKey:          "packer",
 			beadmeta.PackWorkspaceMetadataKey: "existing-workspace",
@@ -886,6 +890,12 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	if got := demand[template].Titles[work.ID]; got != "manual order run wisp" {
 		t.Fatalf("Titles[%s] = %q, want manual order run wisp", work.ID, got)
 	}
+	if got := demand[template].Priorities[work.ID]; got != 0 {
+		t.Fatalf("Priorities[%s] = %d, want P0", work.ID, got)
+	}
+	if got := demand[template].CreatedAt[work.ID]; !got.Equal(work.CreatedAt) {
+		t.Fatalf("CreatedAt[%s] = %s, want stored time %s", work.ID, got, work.CreatedAt)
+	}
 	if got := demand[template].Packs[work.ID]; got != "packer" {
 		t.Fatalf("Packs[%s] = %q, want packer", work.ID, got)
 	}
@@ -894,6 +904,43 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
 		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
+	}
+}
+
+func TestMergeScaleCheckDemandPreservesPriorityAndCreationTime(t *testing.T) {
+	createdAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	incoming := scaleCheckDemand{
+		Count:       1,
+		WorkBeadIDs: []string{"work-p0"},
+		Priorities:  map[string]int{"work-p0": 0},
+		CreatedAt:   map[string]time.Time{"work-p0": createdAt},
+	}
+
+	got := mergeScaleCheckDemand(scaleCheckDemand{}, incoming, 1)
+	if priority, ok := got.Priorities["work-p0"]; !ok || priority != 0 {
+		t.Fatalf("Priorities = %#v, want explicit P0", got.Priorities)
+	}
+	if timestamp, ok := got.CreatedAt["work-p0"]; !ok || !timestamp.Equal(createdAt) {
+		t.Fatalf("CreatedAt = %#v, want %s", got.CreatedAt, createdAt)
+	}
+}
+
+func TestSortScaleCheckDemandUsesPriorityBandFIFO(t *testing.T) {
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	demand := scaleCheckDemand{
+		WorkBeadIDs: []string{"p1-old", "p0-new", "p0-old"},
+		Priorities:  map[string]int{"p1-old": 1, "p0-new": 0, "p0-old": 0},
+		CreatedAt: map[string]time.Time{
+			"p1-old": base.Add(-time.Hour),
+			"p0-new": base.Add(time.Hour),
+			"p0-old": base,
+		},
+	}
+
+	sortScaleCheckDemand(&demand)
+	want := []string{"p0-old", "p0-new", "p1-old"}
+	if !reflect.DeepEqual(demand.WorkBeadIDs, want) {
+		t.Fatalf("WorkBeadIDs = %v, want %v", demand.WorkBeadIDs, want)
 	}
 }
 
@@ -3660,7 +3707,7 @@ func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWo
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalePriority := 10
+	stalePriority := 0
 	if _, err := store.Create(beads.Bead{
 		Title:    "stale assigned work",
 		Type:     "task",

@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -461,21 +462,20 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
-// ops injected for tests. It selects the first store reporting ready work,
-// re-validates it for claim-time freshness and falls back to a later store if it
-// emptied since discovery (claimStoreWithFallback), then attempts the claim
-// against that store's captured rows, against that store's dir/env.
+// ops injected for tests. It compares eligible work across every store by
+// recovery tier and canonical priority-band FIFO order, re-validates the winner,
+// then attempts the claim against that store's captured rows and bd context.
 //
 // When a selected store still reports ready work but every claimable row is lost
 // to another claimant before the mutation, the single-store claim drains without
-// work. That would strand routed work waiting in a LATER federated store behind
-// the lost race, so this loop drops the exhausted store and reselects across the
-// remaining stores. It writes the shared drain exactly once, after every store
-// has been exhausted; the drain reason is claims_errored when any exhausted
-// store's eligible claims errored rather than merely lost the race, else no_work.
+// work. The loop drops that store and reselects only within the same active
+// priority band, so a lost P0 race cannot fall through to P1. It writes the
+// shared drain exactly once; the drain reason is claims_errored when an eligible
+// mutation errored rather than merely lost the race, else no_work.
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	normalizeHookClaimOptions(&claimOpts)
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
@@ -490,8 +490,9 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// work but every eligible claim mutation errored, so the shared drain below can
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
+	var activePriority *int
 	for len(remaining) > 0 {
-		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
+		_, selected, _, err := bestClaimStoreWithWork(workQuery, remaining, primary, claimOpts, activePriority, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -500,7 +501,18 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, run)
+		selectedOutput, selectedErr := run(workQuery, selected.dir, selected.env)
+		var claimOutput string
+		var claimStore hookStore
+		var claimRank hookClaimCandidateRank
+		switch {
+		case selectedErr != nil && sameHookStore(selected, primary):
+			err = selectedErr
+		case selectedErr != nil:
+			claimOutput, claimStore, claimRank, err = bestClaimStoreWithWork(workQuery, remaining, primary, claimOpts, activePriority, run)
+		default:
+			claimOutput, claimStore, claimRank, err = bestClaimStoreWithSeed(workQuery, remaining, primary, claimOpts, activePriority, selected, selectedOutput, true, run)
+		}
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -508,6 +520,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		}
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
+		}
+		if claimRank.tier == 2 && activePriority == nil {
+			priority := beads.PriorityValue(claimRank.bead.Priority)
+			activePriority = &priority
 		}
 		storeOpts := claimOpts
 		storeOpts.Env = queryEnv

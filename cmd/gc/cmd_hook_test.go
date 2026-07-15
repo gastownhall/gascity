@@ -445,6 +445,36 @@ func TestDoHookClaimRetriesAfterClaimConflict(t *testing.T) {
 	}
 }
 
+func TestDoHookClaimDoesNotCrossPriorityBandAfterLostClaim(t *testing.T) {
+	var attempts []string
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"p1-fallback","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}},
+			{"id":"p0-raced","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
+		},
+		EmitClaimRejected: func(string, string, string) {},
+		DrainAck:          func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, DrainAck: true, JSON: true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim() = %d, want clean requeue; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(attempts, ","); got != "p0-raced" {
+		t.Fatalf("claim attempts = %q, want only active-band P0", got)
+	}
+}
+
 // TestDoHookClaimEmitsRejectedOnLostClaim covers ADR-0009 acceptance (a): a
 // second claim on a bead already live-claimed by another worker is rejected as
 // a no-op and surfaces a bead.claim_rejected event naming the winner.
@@ -931,6 +961,133 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	}
 	if got := strings.Join(result.ContinuationAssigned, ","); got != "hw-4" {
 		t.Fatalf("continuation assigned in result = %q, want hw-4", got)
+	}
+}
+
+func TestDoHookClaimContinuationDoesNotCrossPriorityBand(t *testing.T) {
+	p0, p1 := 0, 1
+	var assigned []string
+	metadata := map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.continuation_group": "body"}
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[{"id":"claimed-p0","status":"open","priority":0,"metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]`, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Priority: &p0, Metadata: metadata}, true, nil
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return []beads.Bead{
+				{ID: "same-p0", Status: "open", Priority: &p0, Metadata: metadata},
+				{ID: "later-p1", Status: "open", Priority: &p1, Metadata: metadata},
+			}, nil
+		},
+		AssignContinuation: func(_ context.Context, _ string, _ []string, beadID, _ string) error {
+			assigned = append(assigned, beadID)
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", hookClaimOptions{
+		Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(assigned, ","); got != "same-p0" {
+		t.Fatalf("continuation assignments = %q, want same-p0 only", got)
+	}
+}
+
+func TestClaimHookWorkSelectsHighestPriorityAcrossStores(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "rig"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"city-p1","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
+		}
+		return `[{"id":"rig-p0","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	var claimed string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimed = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true}
+
+	var stdout, stderr bytes.Buffer
+	if code := claimHookWorkWithRunner("query", "city", nil, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claimHookWorkWithRunner() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimed != "rig-p0" {
+		t.Fatalf("claimed = %q, want global P0 rig-p0", claimed)
+	}
+}
+
+func TestClaimHookWorkDoesNotFallThroughToLowerBandInAnotherStore(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "rig"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"city-p0","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}}]`, nil
+		}
+		return `[{"id":"rig-p1","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	var attempts []string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
+		},
+		EmitClaimRejected: func(string, string, string) {},
+		DrainAck:          func(io.Writer) error { return nil },
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	opts := hookClaimOptions{
+		Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, DrainAck: true, JSON: true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := claimHookWorkWithRunner("query", "city", nil, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claimHookWorkWithRunner() = %d, want clean requeue; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(attempts, ","); got != "city-p0" {
+		t.Fatalf("claim attempts = %q, want only the active P0 band", got)
+	}
+}
+
+func TestClaimHookWorkPreservesExistingAssignmentAcrossStores(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "rig"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"city-p0","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}}]`, nil
+		}
+		return `[{"id":"rig-owned-p4","status":"in_progress","assignee":"worker-1","priority":4,"metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	claimCalls := 0
+	ops := hookClaimOps{
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			claimCalls++
+			return beads.Bead{}, false, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true}
+
+	var stdout, stderr bytes.Buffer
+	if code := claimHookWorkWithRunner("query", "city", nil, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr); code != 0 {
+		t.Fatalf("claimHookWorkWithRunner() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimCalls != 0 {
+		t.Fatalf("fresh claim calls = %d, want 0 while recovering existing work", claimCalls)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.Reason != "existing_assignment" || result.BeadID != "rig-owned-p4" {
+		t.Fatalf("result = %+v, want existing rig assignment", result)
 	}
 }
 
@@ -2422,8 +2579,8 @@ func TestDoHookClaimSkipsUnclaimableCandidateError(t *testing.T) {
 	var attempts []string
 	runner := func(string, string) (string, error) {
 		return `[
-			{"id":"hw-unresolvable","status":"open","metadata":{"gc.routed_to":"worker"}},
-			{"id":"hw-live","status":"open","metadata":{"gc.routed_to":"worker"}}
+			{"id":"hw-unresolvable","status":"open","created_at":"2026-07-15T12:00:00Z","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-live","status":"open","created_at":"2026-07-15T13:00:00Z","metadata":{"gc.routed_to":"worker"}}
 		]`, nil
 	}
 	ops := hookClaimOps{

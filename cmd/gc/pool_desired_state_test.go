@@ -717,11 +717,11 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
 	}
-	// 3 assigned beads with different priorities, max=2. Highest priority wins.
+	// 3 assigned beads with different priority bands, max=2. P0 then P1 win.
 	work := []beads.Bead{
-		workBead("w-low", "claude", "s1", "in_progress", 1),
-		workBead("w-high", "claude", "s2", "in_progress", 10),
-		workBead("w-mid", "claude", "s3", "in_progress", 5),
+		workBead("w-p2", "claude", "s1", "in_progress", 2),
+		workBead("w-p0", "claude", "s2", "in_progress", 0),
+		workBead("w-p1", "claude", "s3", "in_progress", 1),
 	}
 	sessions := []beads.Bead{
 		sessionBead("s1", "open"),
@@ -734,12 +734,106 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
 	}
-	// Highest priority resume requests should be accepted.
-	if result[0].Requests[0].BeadPriority != 10 {
-		t.Errorf("first priority = %d, want 10", result[0].Requests[0].BeadPriority)
+	if got := beads.PriorityValue(result[0].Requests[0].BeadPriority); got != 0 {
+		t.Errorf("first priority = %d, want 0", got)
 	}
-	if result[0].Requests[1].BeadPriority != 5 {
-		t.Errorf("second priority = %d, want 5", result[0].Requests[1].BeadPriority)
+	if got := beads.PriorityValue(result[0].Requests[1].BeadPriority); got != 1 {
+		t.Errorf("second priority = %d, want 1", got)
+	}
+}
+
+func TestComputePoolDesiredStates_ResumePriorityDefaultsToP2AndUsesFIFO(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)}}
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	p3 := 3
+	work := []beads.Bead{
+		{ID: "w-p3", Status: "in_progress", Assignee: "s1", Priority: &p3, CreatedAt: base.Add(-time.Hour), Metadata: map[string]string{"gc.routed_to": "claude"}},
+		{ID: "w-new-p2", Status: "in_progress", Assignee: "s2", CreatedAt: base.Add(time.Hour), Metadata: map[string]string{"gc.routed_to": "claude"}},
+		{ID: "w-old-p2", Status: "in_progress", Assignee: "s3", CreatedAt: base, Metadata: map[string]string{"gc.routed_to": "claude"}},
+	}
+	sessions := []beads.Bead{sessionBead("s1", "open"), sessionBead("s2", "open"), sessionBead("s3", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want two P2 requests", result)
+	}
+	if got := result[0].Requests[0].WorkBeadID; got != "w-old-p2" {
+		t.Fatalf("first work bead = %q, want oldest P2", got)
+	}
+	if got := result[0].Requests[1].WorkBeadID; got != "w-new-p2" {
+		t.Fatalf("second work bead = %q, want newer P2", got)
+	}
+}
+
+func TestComputePoolDesiredStates_NewDemandPriorityWinsSharedWorkspaceCap(t *testing.T) {
+	workspaceMax := 1
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents: []config.Agent{
+			poolAgent("alpha", "", intPtr(1), 0),
+			poolAgent("zulu", "", intPtr(1), 0),
+		},
+	}
+	demand := map[string]scaleCheckDemand{
+		"alpha": {
+			Count: 1, WorkBeadIDs: []string{"alpha-p1"},
+			Priorities: map[string]int{"alpha-p1": 1},
+			CreatedAt:  map[string]time.Time{"alpha-p1": base.Add(-time.Hour)},
+		},
+		"zulu": {
+			Count: 1, WorkBeadIDs: []string{"zulu-p0"},
+			Priorities: map[string]int{"zulu-p0": 0},
+			CreatedAt:  map[string]time.Time{"zulu-p0": base},
+		},
+	}
+
+	result := computePoolDesiredStates(cfg, nil, nil, map[string]int{"alpha": 1, "zulu": 1}, demand, nil)
+	if len(result) != 1 || result[0].Template != "zulu" || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %#v, want only zulu P0 admitted under shared cap", result)
+	}
+	if got := result[0].Requests[0].WorkBeadID; got != "zulu-p0" {
+		t.Fatalf("work bead = %q, want zulu-p0", got)
+	}
+}
+
+func TestApplyNestedCaps_PreservesInFlightCreateBeforeFreshHigherPriority(t *testing.T) {
+	workspaceMax := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents: []config.Agent{
+			poolAgent("alpha", "", intPtr(1), 0),
+			poolAgent("zulu", "", intPtr(1), 0),
+		},
+	}
+	requests := []SessionRequest{
+		{Template: "zulu", Tier: "new", WorkBeadID: "zulu-p0", BeadPriority: intPtr(0)},
+		{Template: "alpha", Tier: "new", SessionBeadID: "creating-alpha", WorkBeadID: "alpha-p2", BeadPriority: intPtr(2)},
+	}
+
+	result := applyNestedCaps(cfg, requests, nil, nil)
+	if len(result) != 1 || result[0].Template != "alpha" || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %#v, want already-started alpha create preserved", result)
+	}
+}
+
+func TestApplyNestedCaps_PreservesResumeBeforeInFlightCreate(t *testing.T) {
+	workspaceMax := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents: []config.Agent{
+			poolAgent("alpha", "", intPtr(1), 0),
+			poolAgent("zulu", "", intPtr(1), 0),
+		},
+	}
+	requests := []SessionRequest{
+		{Template: "alpha", Tier: "new", SessionBeadID: "creating-alpha"},
+		{Template: "zulu", Tier: "resume", SessionBeadID: "live-zulu", WorkBeadID: "zulu-p4", BeadPriority: intPtr(4)},
+	}
+
+	result := applyNestedCaps(cfg, requests, nil, nil)
+	if len(result) != 1 || result[0].Template != "zulu" || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %#v, want live zulu resume preserved before in-flight create", result)
 	}
 }
 
@@ -1428,7 +1522,7 @@ func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) 
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
 	}
 	requests := []SessionRequest{
-		{Template: "claude", Tier: "resume", SessionBeadID: "sess-1", BeadPriority: 10},
+		{Template: "claude", Tier: "resume", SessionBeadID: "sess-1", BeadPriority: intPtr(0)},
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-1"},
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
 	}

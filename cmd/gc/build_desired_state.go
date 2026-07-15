@@ -113,6 +113,8 @@ type scaleCheckDemand struct {
 	Count       int
 	WorkBeadIDs []string
 	Titles      map[string]string
+	Priorities  map[string]int
+	CreatedAt   map[string]time.Time
 	Packs       map[string]string
 	Workspaces  map[string]string
 	StoreRefs   map[string]string
@@ -1584,6 +1586,14 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 				entry.Titles = make(map[string]string)
 			}
 			entry.Titles[b.ID] = b.Title
+			if entry.Priorities == nil {
+				entry.Priorities = make(map[string]int)
+			}
+			entry.Priorities[b.ID] = beads.PriorityValue(b.Priority)
+			if entry.CreatedAt == nil {
+				entry.CreatedAt = make(map[string]time.Time)
+			}
+			entry.CreatedAt[b.ID] = b.CreatedAt
 			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
 				if entry.Packs == nil {
 					entry.Packs = make(map[string]string)
@@ -1609,7 +1619,33 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 			demand[template] = entry
 		}
 	}
+	for template, entry := range demand {
+		sortScaleCheckDemand(&entry)
+		demand[template] = entry
+	}
 	return counts, demand, partialTemplates, errs
+}
+
+func sortScaleCheckDemand(demand *scaleCheckDemand) {
+	sort.SliceStable(demand.WorkBeadIDs, func(i, j int) bool {
+		leftID, rightID := demand.WorkBeadIDs[i], demand.WorkBeadIDs[j]
+		leftPriority, ok := demand.Priorities[leftID]
+		if !ok {
+			leftPriority = beads.DefaultPriority
+		}
+		rightPriority, ok := demand.Priorities[rightID]
+		if !ok {
+			rightPriority = beads.DefaultPriority
+		}
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		leftCreatedAt, rightCreatedAt := demand.CreatedAt[leftID], demand.CreatedAt[rightID]
+		if !leftCreatedAt.Equal(rightCreatedAt) {
+			return leftCreatedAt.Before(rightCreatedAt)
+		}
+		return leftID < rightID
+	})
 }
 
 func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {
@@ -1625,6 +1661,12 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	}
 	if existing.Titles == nil && len(incoming.Titles) > 0 {
 		existing.Titles = make(map[string]string, len(incoming.Titles))
+	}
+	if existing.Priorities == nil && len(incoming.Priorities) > 0 {
+		existing.Priorities = make(map[string]int, len(incoming.Priorities))
+	}
+	if existing.CreatedAt == nil && len(incoming.CreatedAt) > 0 {
+		existing.CreatedAt = make(map[string]time.Time, len(incoming.CreatedAt))
 	}
 	if existing.Packs == nil && len(incoming.Packs) > 0 {
 		existing.Packs = make(map[string]string, len(incoming.Packs))
@@ -1642,6 +1684,12 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
 		if incoming.Titles != nil {
 			existing.Titles[id] = incoming.Titles[id]
+		}
+		if incoming.Priorities != nil {
+			existing.Priorities[id] = incoming.Priorities[id]
+		}
+		if incoming.CreatedAt != nil {
+			existing.CreatedAt[id] = incoming.CreatedAt[id]
 		}
 		if incoming.Packs != nil {
 			existing.Packs[id] = incoming.Packs[id]

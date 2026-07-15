@@ -159,12 +159,12 @@ resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
 canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
 the temporary migration predicate reads `gc.run_target=<target>` only on
 `gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
-work-query form appends `--sort oldest --limit=1` to the canonical probe
-and prints the first match, then filters the migration probe to roots with
-empty `gc.routed_to`. That is an intentional routed-queue policy:
-unassigned routed pool work is FIFO before priority, so newer
-high-priority work does not jump ahead of older ready work already queued
-for the same target. The count form unions canonical and migration
+work-query form appends `--sort hybrid --limit=20` to the canonical probe
+and prints the first ready match, then filters the migration probe to roots
+with empty `gc.routed_to`. The wider candidate window lets a blocked head
+fall through to ready work behind it. The routed queue uses priority-band
+FIFO: lower numeric priorities run first, with creation time and bead ID as
+deterministic tie-breakers within a band. The count form unions canonical and migration
 probes and deduplicates by bead ID before piping through `jq 'length'`.
 Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
@@ -260,7 +260,7 @@ regressions.
     worker and reconciler must also share the temporary migration predicate
     for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
     `gc.routed_to`; only the worker's first-row form adds native
-    `bd ready --sort oldest --limit=1` selection to the canonical probe.
+    `bd ready --sort hybrid --limit=20` selection to the canonical probe.
     Any pool-demand predicate change to one (added filter, modified target
     resolution, new state) MUST be reflected in the other. Diverging the two
     re-introduces the protocol-mismatch class — the reconciler
@@ -372,7 +372,7 @@ name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
 # Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
-#   --unassigned --exclude-type=epic --json --sort oldest --limit=1,
+#   --unassigned --exclude-type=epic --json --sort hybrid --limit=20,
 #   then a temporary gc.run_target workflow-root migration fallback
 ```
 
