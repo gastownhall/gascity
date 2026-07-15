@@ -863,11 +863,17 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 				"`find ~`",
 				"`find /Users`",
 				"`find $HOME`",
-				"`gc` / `bd`",
 			} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("%s missing %q", rel, want)
 				}
+			}
+			commandGuidance := "`gc` / `bd`"
+			if strings.Contains(rel, "packs/core/assets/prompts") {
+				commandGuidance = "`gc` introspection command"
+			}
+			if !strings.Contains(text, commandGuidance) {
+				t.Fatalf("%s missing %q", rel, commandGuidance)
 			}
 		})
 	}

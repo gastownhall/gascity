@@ -39,46 +39,25 @@ var engineeringTypes = map[string]bool{
 // partial=false and an empty feed-scope map reproduce the golden fixture; the
 // optional variadic params mirror the TS signature for downstream callers.
 func BuildRunSummary(beadList []beads.Bead, opts ...BuildOption) RunSummary {
+	summary, _ := buildRunSummary(beadList, opts...)
+	return summary
+}
+
+// BuildRunSummaryWithAllLanes returns the ordinary bounded summary together
+// with every projected lane before the historical display cap is applied.
+// Aggregate consumers can count complete lifecycle state without widening the
+// dashboard payload or rebuilding the projection.
+func BuildRunSummaryWithAllLanes(beadList []beads.Bead, opts ...BuildOption) (RunSummary, []RunLane) {
+	return buildRunSummary(beadList, opts...)
+}
+
+func buildRunSummary(beadList []beads.Bead, opts ...BuildOption) (RunSummary, []RunLane) {
 	cfg := buildConfig{feedScopes: map[string]RunFeedScope{}}
 	for _, o := range opts {
 		o(&cfg)
 	}
 
-	issues := make([]runIssue, len(beadList))
-	for i, b := range beadList {
-		issues[i] = fromBead(b)
-	}
-
-	// Group by run-root id, preserving first-seen order (mirrors JS Map order).
-	groups := map[string][]runIssue{}
-	var order []string
-	for _, issue := range issues {
-		rootID := runRootID(issue)
-		if _, ok := groups[rootID]; !ok {
-			order = append(order, rootID)
-		}
-		groups[rootID] = append(groups[rootID], issue)
-	}
-
-	// Keep only real run groups (drop dangling roots and non-run groups).
-	var runRootIDs []string
-	var laneIssues []runIssue
-	for _, rootID := range order {
-		groupIssues := groups[rootID]
-		if isDanglingRootGroup(rootID, groupIssues) || !isRunGroup(rootID, groupIssues) {
-			continue
-		}
-		runRootIDs = append(runRootIDs, rootID)
-		laneIssues = append(laneIssues, groupIssues...)
-	}
-
-	sortedLanes := make([]RunLane, 0, len(runRootIDs))
-	for _, rootID := range runRootIDs {
-		sortedLanes = append(sortedLanes, runLane(rootID, groups[rootID], cfg.feedScopes))
-	}
-	sort.SliceStable(sortedLanes, func(i, j int) bool {
-		return compareLanes(sortedLanes[i], sortedLanes[j]) < 0
-	})
+	sortedLanes, laneIssues := buildAllRunLanes(beadList, cfg.feedScopes)
 
 	// gascity-dashboard-4xcv: blocked lanes are split out of Active.
 	activeLanes := make([]RunLane, 0)
@@ -114,7 +93,46 @@ func BuildRunSummary(beadList []beads.Bead, opts ...BuildOption) RunSummary {
 	if cfg.partial {
 		summary.LanesPartial = true
 	}
-	return summary
+	return summary, sortedLanes
+}
+
+func buildAllRunLanes(beadList []beads.Bead, feedScopes map[string]RunFeedScope) ([]RunLane, []runIssue) {
+	issues := make([]runIssue, len(beadList))
+	for i, b := range beadList {
+		issues[i] = fromBead(b)
+	}
+
+	// Group by run-root id, preserving first-seen order (mirrors JS Map order).
+	groups := map[string][]runIssue{}
+	var order []string
+	for _, issue := range issues {
+		rootID := runRootID(issue)
+		if _, ok := groups[rootID]; !ok {
+			order = append(order, rootID)
+		}
+		groups[rootID] = append(groups[rootID], issue)
+	}
+
+	// Keep only real run groups (drop dangling roots and non-run groups).
+	var runRootIDs []string
+	var laneIssues []runIssue
+	for _, rootID := range order {
+		groupIssues := groups[rootID]
+		if isDanglingRootGroup(rootID, groupIssues) || !isRunGroup(rootID, groupIssues) {
+			continue
+		}
+		runRootIDs = append(runRootIDs, rootID)
+		laneIssues = append(laneIssues, groupIssues...)
+	}
+
+	sortedLanes := make([]RunLane, 0, len(runRootIDs))
+	for _, rootID := range runRootIDs {
+		sortedLanes = append(sortedLanes, runLane(rootID, groups[rootID], feedScopes))
+	}
+	sort.SliceStable(sortedLanes, func(i, j int) bool {
+		return compareLanes(sortedLanes[i], sortedLanes[j]) < 0
+	})
+	return sortedLanes, laneIssues
 }
 
 // RunFeedScope mirrors the TS RunFeedScope (feed-scope fallback entry).

@@ -307,6 +307,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		PartialErrors:       partialErrors,
 		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
+		ConditionalWrites:   s.conditionalWritesStatus(),
 		AgentDetails:        agentDetails,
 		RigDetails:          rigDetails,
 		NamedSessionDetails: namedSessionDetails,
@@ -316,6 +317,22 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 
 type cityBeadsDiagnosticProvider interface {
 	CityBeadsDiagnostic() *beads.BeadsDiagnostic
+}
+
+// conditionalWritesStatusProvider is implemented by the controller State to
+// expose its latched conditional-writes snapshot (§12.5). The State builds
+// the block because only it holds the boot-latched rollout flags, the drift
+// notices, and every controller-owned store handle.
+type conditionalWritesStatusProvider interface {
+	ConditionalWritesStatus() *StatusConditionalWrites
+}
+
+func (s *Server) conditionalWritesStatus() *StatusConditionalWrites {
+	provider, ok := s.state.(conditionalWritesStatusProvider)
+	if !ok {
+		return nil
+	}
+	return provider.ConditionalWritesStatus()
 }
 
 func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {

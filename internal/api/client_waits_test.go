@@ -40,10 +40,10 @@ func TestRouteMissingClassification(t *testing.T) {
 				if !IsRouteMissing(err) {
 					t.Errorf("IsRouteMissing=false for %v", err)
 				}
-				if !ShouldFallbackForRead(err) {
+				if !ShouldFallbackForRead(nil, err) {
 					t.Errorf("ShouldFallbackForRead=false for route-missing")
 				}
-				if r := FallbackReason(err); r != "route-missing" {
+				if r := FallbackReason(nil, err); r != "route-missing" {
 					t.Errorf("FallbackReason=%q, want route-missing", r)
 				}
 			}

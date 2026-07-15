@@ -1093,9 +1093,9 @@ func TestDoRigListJSONBuildsSessionProviderOnce(t *testing.T) {
 
 	var calls int
 	orig := rigListSessionProvider
-	rigListSessionProvider = func() runtime.Provider {
+	rigListSessionProvider = func() (runtime.Provider, error) {
 		calls++
-		return &fakeAdoptionProvider{}
+		return &fakeAdoptionProvider{}, nil
 	}
 	t.Cleanup(func() { rigListSessionProvider = orig })
 

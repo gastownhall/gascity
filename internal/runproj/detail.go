@@ -637,7 +637,7 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 // duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
 // newly-added status must be explicitly classified here (or the test fails).
 var (
-	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped"}
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped", "canceled"}
 	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
 )
 

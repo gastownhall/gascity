@@ -281,6 +281,15 @@ func TestSupervisorRequestAuditRecordsBoundedPayload(t *testing.T) {
 	if payload.Phase != supervisorRequestPhaseComplete {
 		t.Fatalf("phase = %q, want %q", payload.Phase, supervisorRequestPhaseComplete)
 	}
+	// G9: the audit record carries the server-minted X-GC-Request-Id that was
+	// also echoed to the client, so the two can be correlated.
+	minted := rec.Header().Get("X-GC-Request-Id")
+	if minted == "" {
+		t.Fatal("response is missing the minted X-GC-Request-Id header")
+	}
+	if payload.RequestID != minted {
+		t.Fatalf("payload request_id = %q, want the minted header %q", payload.RequestID, minted)
+	}
 }
 
 func TestSupervisorRequestAuditRecordsEventStreamStartBeforeClose(t *testing.T) {

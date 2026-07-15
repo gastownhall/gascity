@@ -19,8 +19,6 @@ func TestSubprocessConformance(t *testing.T) {
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		id := atomic.AddInt64(&counter, 1)
 		name := fmt.Sprintf("gc-subproc-conform-%d", id)
-		// Safety cleanup: stop any lingering process.
-		t.Cleanup(func() { _ = p.Stop(name) })
 		return p, runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),

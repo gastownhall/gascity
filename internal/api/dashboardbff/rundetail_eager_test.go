@@ -62,6 +62,26 @@ func TestPlaneStartEagerWarmsAllCities(t *testing.T) {
 	}
 }
 
+func TestPlaneStartEagerWarmsRegistryCityNames(t *testing.T) {
+	paths := map[string]string{
+		"alpha_beta": seedRunLog(t, "alpha_beta"),
+		"alpha.beta": seedRunLog(t, "alpha.beta"),
+	}
+	p := New(Deps{Resolver: fakeResolver{paths: paths}})
+	p.Start(t.Context())
+	t.Cleanup(p.Stop)
+
+	for name := range paths {
+		p.runTailers.mu.Lock()
+		tailer, ok := p.runTailers.cities[name]
+		p.runTailers.mu.Unlock()
+		if !ok {
+			t.Fatalf("registered city %q was not eager-started", name)
+		}
+		waitReady(t, tailer)
+	}
+}
+
 // TestPlaneStartEagerNilResolverNoop proves a nil resolver is a no-op: Start does
 // not panic and starts no tailers.
 func TestPlaneStartEagerNilResolverNoop(t *testing.T) {

@@ -2970,14 +2970,20 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		true,
 		sessionBeads,
 	)
-	// The config-change tick feeds the reconciler the typed row feed filtered by
-	// configured name (filterReconcileRowsByName), and its carrier is a
-	// rows-built snapshot (newSessionBeadSnapshotFromReconcileRows) — the same
-	// row-fed shape the main tick uses. retainScaleCheckPartialPoolDesired reads
-	// only OpenInfos() off it (verified), so a rows-built snapshot serves it.
-	filteredRows := filterReconcileRowsByName(updated, cfgNames)
+	// This targeted tick must include dynamically named pool sessions it just
+	// materialized. configuredSessionNamesWithSnapshot intentionally contains
+	// only named-session identities, so filtering by cfgNames alone leaves a new
+	// dispatcher in start-pending forever. desiredState is already restricted to
+	// control-dispatcher configs and is therefore the exact safe row domain.
+	reconcileNames := make(map[string]bool, len(desiredState))
+	for sessionName := range desiredState {
+		reconcileNames[sessionName] = true
+	}
+	// Feed the reconciler a typed row feed filtered to that exact domain; its
+	// carrier is the same rows-built snapshot shape the main tick uses.
+	filteredRows := filterReconcileRowsByName(updated, reconcileNames)
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
-	openInfos := filterSessionInfosByName(updated, cfgNames)
+	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
@@ -2996,7 +3002,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredRows,
 		filteredSnap,
 		desiredState,
-		cfgNames,
+		reconcileNames,
 		filteredCfg,
 		cr.sp,
 		cr.sessionsBeadStore().Store,

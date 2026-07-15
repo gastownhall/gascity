@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -3684,7 +3686,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 	}
 }
 
-func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing.T) {
+func TestBdStoreGetWithManagedRetryReopensAfterConnectionGenerationChanges(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv
@@ -3694,55 +3696,66 @@ func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing
 		recoverManagedBDCommand = origRecover
 	})
 
-	port := "3307"
-	attempts := 0
+	generation := 1
 	recoverCalls := 0
-	seenPorts := make([]string, 0, 2)
+	openedGenerations := make([]int, 0, 3)
+	runnerCalls := make([]int, 0, 3)
 
 	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
-		copied := map[string]string{}
-		for key, value := range env {
-			copied[key] = value
+		openedGeneration := 0
+		switch env["GC_DOLT_PORT"] {
+		case "3307":
+			openedGeneration = 1
+		case "3308":
+			openedGeneration = 2
+		default:
+			t.Fatalf("connection opener received unexpected port %q", env["GC_DOLT_PORT"])
 		}
+		openedGenerations = append(openedGenerations, openedGeneration)
+		openID := len(openedGenerations)
 		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			attempts++
-			seenPorts = append(seenPorts, copied["GC_DOLT_PORT"])
-			if attempts == 1 {
-				return nil, fmt.Errorf("server unreachable at 127.0.0.1:%s", copied["GC_DOLT_PORT"])
+			runnerCalls = append(runnerCalls, openID)
+			switch openID {
+			case 1:
+				return nil, fmt.Errorf("server unreachable at 127.0.0.1:3307")
+			case 2:
+				// Recovery has published generation 2, but this first connection
+				// still behaves like a stale pool. BdStore.Get must retry the
+				// managed runner, which opens a new generation-2 connection.
+				return nil, fmt.Errorf("begin read tx: invalid connection")
+			default:
+				return []byte(`[{"id":"fe-rebind","title":"rebound","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 			}
-			return []byte("ok"), nil
 		}
 	}
 	recoverManagedBDCommand = func(_ string) error {
 		recoverCalls++
-		port = "3308"
+		generation = 2
 		return nil
 	}
 
 	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
 		return map[string]string{
-			"GC_DOLT_PORT": port,
+			"GC_DOLT_PORT": strconv.Itoa(3306 + generation),
 		}
 	})
+	store := beads.NewBdStoreWithPrefix(t.TempDir(), runner, "fe")
 
-	out, err := runner(t.TempDir(), "bd", "list", "--json")
+	got, err := store.Get("fe-rebind")
 	if err != nil {
-		t.Fatalf("runner error = %v, want nil", err)
+		t.Fatalf("Get after connection generation changed: %v", err)
 	}
-	if string(out) != "ok" {
-		t.Fatalf("runner output = %q, want %q", out, "ok")
+	if got.ID != "fe-rebind" {
+		t.Fatalf("Get ID = %q, want fe-rebind", got.ID)
 	}
-	if attempts != 2 {
-		t.Fatalf("attempts = %d, want 2", attempts)
+	if want := []int{1, 2, 2}; !slices.Equal(openedGenerations, want) {
+		t.Fatalf("opened connection generations = %v, want %v", openedGenerations, want)
+	}
+	if want := []int{1, 2, 3}; !slices.Equal(runnerCalls, want) {
+		t.Fatalf("connection runner calls = %v, want %v", runnerCalls, want)
 	}
 	if recoverCalls != 1 {
 		t.Fatalf("recoverCalls = %d, want 1", recoverCalls)
-	}
-	if len(seenPorts) != 2 {
-		t.Fatalf("seenPorts = %v, want 2 attempts", seenPorts)
-	}
-	if seenPorts[0] != "3307" || seenPorts[1] != "3308" {
-		t.Fatalf("seenPorts = %v, want [3307 3308]", seenPorts)
 	}
 }
 
@@ -4451,6 +4464,48 @@ dolt.auto-start: false
 	if got, ok := env["BEADS_DOLT_SERVER_TLS"]; !ok || got != "1" {
 		t.Fatalf("BEADS_DOLT_SERVER_TLS = %q (present=%v), want %q: ambient hosted-gateway TLS must be carried to a legacy external rig native-open env", got, ok, "1")
 	}
+}
+
+func TestNativeDoltOpenEnvForScopeContextCancelsManagedRecovery(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "")
+	cityPath := t.TempDir()
+	writeManagedBdCityFixture(t, cityPath)
+
+	childPIDFile := filepath.Join(cityPath, "provider.pid")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `#!/bin/sh
+echo $$ > "$GC_TEST_CHILD_PID"
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_TEST_CHILD_PID", childPIDFile)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := nativeDoltOpenEnvForScopeContext(ctx, cityPath, nil, cityPath)
+		resultCh <- err
+	}()
+
+	pid := waitForProviderTestChildPID(t, childPIDFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("native env recovery error = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("native env recovery did not return after parent cancellation")
+	}
+	waitForProviderTestPIDExit(t, pid, "native env recovery")
 }
 
 // TestBdRuntimeEnvForRig_ExplicitLocalExternalRigClearsAmbientTLS is the
@@ -6053,4 +6108,60 @@ dolt.auto-start: false
 	if got, ok := env["BEADS_DOLT_SERVER_TLS"]; !ok || got != "" {
 		t.Fatalf("BEADS_DOLT_SERVER_TLS = %q (present=%v), want present and empty: ambient hosted-gateway TLS must not be re-injected on the dolt-resolution error fallback", got, ok)
 	}
+}
+
+// TestProjectGitHubTokenExecEnv covers the GitHub CLI auth passthrough for exec
+// orders. Merge orders (and other PR housekeeping) shell out to `gh`, which
+// authenticates from GH_TOKEN (preferred) or GITHUB_TOKEN. Both keys contain
+// "TOKEN" so execenv.IsSensitiveKey reports them sensitive and the curated
+// order-exec env never carries the controller's ambient token into the child
+// process — every `gh` call then fails auth. projectGitHubTokenExecEnv mirrors
+// the ambient token into the exec-order env map (like mirrorBeadsDoltEnv carries
+// the hosted-gateway credential command) without weakening redaction, since
+// IsSensitiveKey still masks the value in captured output and logs.
+func TestProjectGitHubTokenExecEnv(t *testing.T) {
+	t.Run("mirrors ambient GH_TOKEN and GITHUB_TOKEN", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "ghs_from_controller")
+		t.Setenv("GITHUB_TOKEN", "github_pat_from_controller")
+		env := map[string]string{}
+		projectGitHubTokenExecEnv(env)
+		if got := env["GH_TOKEN"]; got != "ghs_from_controller" {
+			t.Fatalf("GH_TOKEN = %q, want %q (from ambient)", got, "ghs_from_controller")
+		}
+		if got := env["GITHUB_TOKEN"]; got != "github_pat_from_controller" {
+			t.Fatalf("GITHUB_TOKEN = %q, want %q (from ambient)", got, "github_pat_from_controller")
+		}
+	})
+	t.Run("existing map value wins over ambient (order.env override)", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "ghs_ambient")
+		env := map[string]string{"GH_TOKEN": "ghs_order_scoped"}
+		projectGitHubTokenExecEnv(env)
+		if got := env["GH_TOKEN"]; got != "ghs_order_scoped" {
+			t.Fatalf("GH_TOKEN = %q, want %q (map value must win)", got, "ghs_order_scoped")
+		}
+	})
+	t.Run("absent when no token in the ambient env", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "")
+		t.Setenv("GITHUB_TOKEN", "")
+		env := map[string]string{}
+		projectGitHubTokenExecEnv(env)
+		if got, ok := env["GH_TOKEN"]; ok {
+			t.Fatalf("GH_TOKEN = %q, want unset (no ambient token)", got)
+		}
+		if got, ok := env["GITHUB_TOKEN"]; ok {
+			t.Fatalf("GITHUB_TOKEN = %q, want unset (no ambient token)", got)
+		}
+	})
+	t.Run("only the present token is projected", func(t *testing.T) {
+		t.Setenv("GH_TOKEN", "ghs_only")
+		t.Setenv("GITHUB_TOKEN", "")
+		env := map[string]string{}
+		projectGitHubTokenExecEnv(env)
+		if got := env["GH_TOKEN"]; got != "ghs_only" {
+			t.Fatalf("GH_TOKEN = %q, want %q", got, "ghs_only")
+		}
+		if got, ok := env["GITHUB_TOKEN"]; ok {
+			t.Fatalf("GITHUB_TOKEN = %q, want unset (empty ambient)", got)
+		}
+	})
 }

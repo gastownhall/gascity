@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -1180,7 +1181,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		}
 		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
 	} else {
-		m.dispatchWisp(childCtx, store, a, cityPath, trackingID, vars)
+		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars)
 	}
 }
 
@@ -1410,6 +1411,68 @@ func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) str
 	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or formulas v2 before routing it to a pool.", a.ScopedName(), a.Formula)
 }
 
+// applyOrderRecipeRouting decorates an order recipe before it is instantiated.
+// The resolved store target is authoritative: order pool/step targets describe
+// execution, while target.ScopeRoot describes the store that will own every
+// graph bead and therefore which control dispatcher can claim its controls.
+func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[string]string, target execStoreTarget, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	if recipe == nil {
+		return fmt.Errorf("order recipe is nil")
+	}
+	if !graphroute.IsCompiledGraphWorkflow(recipe) {
+		if strings.TrimSpace(pool) == "" {
+			return nil
+		}
+		return applyGraphRouting(recipe, nil, pool, vars, "", "", "", store, cityName, cityPath, cfg)
+	}
+	if cfg == nil {
+		return fmt.Errorf("formulas v2 order routing requires city config")
+	}
+
+	storeRef := workflowStoreRefForDir(target.ScopeRoot, cityPath, cityName, cfg)
+	if storeRef == "" {
+		return fmt.Errorf("formulas v2 order routing cannot identify store scope for %q", target.ScopeRoot)
+	}
+	scopeKind := strings.TrimSpace(target.ScopeKind)
+	scopeRef := strings.TrimSpace(target.RigName)
+	if scopeKind == "city" {
+		scopeRef = strings.TrimSpace(cityName)
+		if scopeRef == "" {
+			scopeRef = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+		}
+	}
+	if strings.TrimSpace(pool) != "" {
+		return applyGraphRouting(recipe, nil, pool, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
+	}
+
+	// With no order-level pool, every executable worker step must carry its own
+	// target. Controls derive their execution lane from the worker graph and are
+	// routed separately to the dispatcher that owns storeRef.
+	routeVars := graphroute.GraphWorkflowRouteVars(recipe, vars)
+	for i := range recipe.Steps {
+		step := &recipe.Steps[i]
+		if step.IsRoot || graphroute.IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) || graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
+			continue
+		}
+		if graphroute.GraphStepRouteTarget(step, routeVars) == "" {
+			return fmt.Errorf("formulas v2 order step %q has no routing target; set order pool or gc.run_target", step.ID)
+		}
+	}
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
+		recipe,
+		routeVars,
+		"",
+		scopeKind,
+		scopeRef,
+		storeRef,
+		graphroute.GraphRouteBinding{},
+		store,
+		cityName,
+		cfg,
+		cliGraphrouteDeps(cityPath),
+	)
+}
+
 func redactOrderEnvError(err error, env []string) string {
 	if err == nil {
 		return ""
@@ -1418,7 +1481,7 @@ func redactOrderEnvError(err error, env []string) string {
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
-func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, a orders.Order, cityPath, trackingID string, vars map[string]string) {
+func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	scoped := a.ScopedName()
 
 	if err := ctx.Err(); err != nil {
@@ -1497,13 +1560,18 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	// Decorate graph workflow recipes with routing metadata so child step
-	// beads get gc.routed_to set before instantiation.
-	if a.Pool != "" {
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
-			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
-			// Non-fatal — molecule still works, just without step-level routing.
-		}
+	// Route before instantiation. A routing failure must not leave an
+	// unreachable graph in the store while reporting the order as completed.
+	if err := applyOrderRecipeRouting(recipe, pool, vars, target, store, m.cityName, cityPath, m.cfg); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: err.Error(),
+		})
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		return
 	}
 
 	cookResult, err := molecule.Instantiate(ctx, store, recipe, molecule.Options{})

@@ -37,6 +37,37 @@ func (s listFailStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("list failed")
 }
 
+type routeRepairUpdateFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s routeRepairUpdateFailStore) Update(string, beads.UpdateOpts) error {
+	return s.err
+}
+
+type routeRepairCountingStore struct {
+	beads.Store
+	updates int
+}
+
+func (s *routeRepairCountingStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updates++
+	return s.Store.Update(id, opts)
+}
+
+type routeRepairSelectiveFailStore struct {
+	beads.Store
+	failIDs map[string]bool
+}
+
+func (s *routeRepairSelectiveFailStore) Update(id string, opts beads.UpdateOpts) error {
+	if s.failIDs[id] {
+		return errors.New("persistent route repair failure")
+	}
+	return s.Store.Update(id, opts)
+}
+
 type readyFailStore struct {
 	beads.Store
 	readyCalls int
@@ -4107,6 +4138,88 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 	}
 	if got := stored.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != wantWorkDir {
 		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
+	}
+}
+
+func TestRealizePoolDesiredSessionsLiveRetryPreservesLauncherWorkDir(t *testing.T) {
+	tests := []struct {
+		name          string
+		currentBeadID string
+	}{
+		{name: "worker marker still names prior attempt", currentBeadID: "fi-old"},
+		{name: "worker marker already names retry attempt", currentBeadID: "fi-new"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			launcherWorkDir := filepath.Join(t.TempDir(), "fi-old-write-review-report")
+			reusable, err := store.Create(beads.Bead{
+				Title:  "worker live retry",
+				Type:   sessionBeadType,
+				Status: "open",
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"template":                              "worker",
+					"agent_name":                            "worker-1",
+					"alias":                                 "worker-1",
+					"session_name":                          "worker-live-retry",
+					"state":                                 string(sessionpkg.StateAwake),
+					"pool_slot":                             "1",
+					poolManagedMetadataKey:                  boolMetadata(true),
+					sessionpkg.CurrentBeadIDKey:             tt.currentBeadID,
+					beadmeta.TriggerBeadIDMetadataKey:       "fi-old",
+					beadmeta.WorkDirMetadataKey:             launcherWorkDir,
+					beadmeta.LegacyWorkDirMetadataKey:       launcherWorkDir,
+					beadmeta.TriggerBeadStoreRefMetadataKey: "rig:fixture",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			snapshot := &sessionBeadSnapshot{}
+			snapshot.addInfo(sessiontest.SeedBead(t, reusable))
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = snapshot
+
+			retry := workBead("fi-new", "worker", reusable.ID, "in_progress", 1)
+			states := ComputePoolDesiredStates(cfg, []beads.Bead{retry}, snapshot.OpenInfos(), nil)
+			if len(states) != 1 || len(states[0].Requests) != 1 {
+				t.Fatalf("retry desired state = %#v, want one request", states)
+			}
+			request := states[0].Requests[0]
+			if request.Tier != "resume" || request.SessionBeadID != reusable.ID || request.WorkBeadID != retry.ID {
+				t.Fatalf("retry request = %#v, want concrete resume of %s for %s", request, reusable.ID, retry.ID)
+			}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], states[0], map[string]TemplateParams{}, &stderr)
+
+			stored, err := store.Get(reusable.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != retry.ID {
+				t.Fatalf("trigger bead metadata = %q, want %q", got, retry.ID)
+			}
+			if got := stored.Metadata[beadmeta.WorkDirMetadataKey]; got != launcherWorkDir {
+				t.Fatalf("gc.work_dir = %q, want live launcher path %q", got, launcherWorkDir)
+			}
+			if got := stored.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != launcherWorkDir {
+				t.Fatalf("work_dir = %q, want live launcher path %q", got, launcherWorkDir)
+			}
+		})
 	}
 }
 
@@ -11068,6 +11181,705 @@ func TestBuildDesiredState_OpenBlockedControlDispatcherWorkRetainsDemand(t *test
 	for _, desired := range result.State {
 		if desired.TemplateName != "core.control-dispatcher" {
 			t.Fatalf("desired TemplateName = %q, want core.control-dispatcher", desired.TemplateName)
+		}
+	}
+}
+
+func TestBuildDesiredState_RepairsCityRoutedRigControlWork(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	blocker, err := rigStore.Create(beads.Bead{
+		Title:  "blocking worker attempt",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	control, err := rigStore.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":                        "workflow-finalize",
+			"gc.routed_to":                   "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			"gc.control_dispatcher_fallback": "fixture/core.control-dispatcher->core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := rigStore.DepAdd(control.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city",
+		cityPath,
+		time.Now().UTC(),
+		cfg,
+		runtime.NewFake(),
+		cityStore,
+		map[string]beads.Store{"fixture": rigStore},
+		newSessionBeadSnapshot(nil),
+		nil,
+		io.Discard,
+	)
+
+	stored, err := rigStore.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get repaired control: %v", err)
+	}
+	if got := stored.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want fixture/core.control-dispatcher", got)
+	}
+	if got := stored.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]; got != "" {
+		t.Fatalf("stored gc.control_dispatcher_fallback = %q, want retired fallback marker cleared", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[fixture/core.control-dispatcher] = %d, want 1", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("ScaleCheckCounts[core.control-dispatcher] = %d, want 0", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state includes city dispatcher for rig-store control work: %+v", desired)
+		}
+	}
+}
+
+func TestBuildDesiredState_RepairsAliasedRigControlWorkOnlyOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	control, err := cityStore.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	// Legacy unscoped file mode opens the city view separately while every rig
+	// shares another cache over the same .gc/beads.json. Use a second physical
+	// handle for the rig view, and expose it through two rig candidates, so a
+	// pointer-only dedup cannot make this regression pass.
+	rigStore, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open aliased rig store: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "fixture", Path: t.TempDir()},
+			{Name: "other", Path: t.TempDir()},
+		},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "other",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city",
+		cityPath,
+		time.Now().UTC(),
+		cfg,
+		runtime.NewFake(),
+		cityStore,
+		map[string]beads.Store{"fixture": rigStore, "other": rigStore},
+		newSessionBeadSnapshot(nil),
+		nil,
+		io.Discard,
+	)
+
+	verificationStore, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open verification store: %v", err)
+	}
+	stored, err := verificationStore.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get repaired control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want fixture/core.control-dispatcher", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 1 {
+		t.Fatalf("rig dispatcher demand = %d, want 1", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher phantom demand = %d, want 0 for one aliased rig-owned bead", got)
+	}
+	if got := result.ScaleCheckCounts["other/core.control-dispatcher"]; got != 0 {
+		t.Fatalf("other rig dispatcher phantom demand = %d, want 0 for fixture-owned bead", got)
+	}
+}
+
+func TestRepairControlDispatcherRoutesDoesNotGuessUnscopedControlOwnership(t *testing.T) {
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "Finalize unscoped workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:     beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey: "core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{Name: config.ControlDispatcherAgentName, BindingName: "core"},
+			{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "fixture"},
+		},
+	}
+	work := []beads.Bead{control}
+	repairControlDispatcherRoutesForStoreScope(
+		t.TempDir(),
+		cfg,
+		work,
+		[]beads.Store{store},
+		[]string{"rig:fixture"},
+		io.Discard,
+	)
+
+	stored, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want unchanged without authoritative gc.root_store_ref", got)
+	}
+	if got := work[0].Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+		t.Fatalf("in-memory gc.routed_to = %q, want unchanged without authoritative gc.root_store_ref", got)
+	}
+}
+
+func TestBuildDesiredState_RepairsRigRoutedCityControlWork(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	control, err := cityStore.Create(beads.Bead{
+		Title:  "Finalize city workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), cityStore,
+		map[string]beads.Store{"fixture": rigStore}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	stored, err := cityStore.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get repaired control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want city route core.control-dispatcher", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 1 {
+		t.Fatalf("city dispatcher demand = %d, want 1", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 0 {
+		t.Fatalf("rig dispatcher demand = %d, want 0 for city-store control work", got)
+	}
+}
+
+func TestBuildDesiredState_DoesNotWakeRigDispatcherWhenCityRouteRepairFails(t *testing.T) {
+	cityPath := t.TempDir()
+	cityBase := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	control, err := cityBase.Create(beads.Bead{
+		Title:  "Finalize city workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	writeErr := errors.New("route repair unavailable")
+	cityStore := routeRepairUpdateFailStore{Store: cityBase, err: writeErr}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), cityStore,
+		map[string]beads.Store{"fixture": rigStore}, newSessionBeadSnapshot(nil), nil, &stderr,
+	)
+
+	stored, err := cityBase.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get unrepaired control: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("durable gc.routed_to = %q, want unchanged after failed repair", got)
+	}
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 0 {
+		t.Fatalf("rig dispatcher demand = %d, want 0 for unreachable city-store control work", got)
+	}
+	if !strings.Contains(stderr.String(), writeErr.Error()) {
+		t.Fatalf("stderr = %q, want route repair failure", stderr.String())
+	}
+}
+
+func TestBuildDesiredState_DoesNotWakeCityDispatcherForUnrepairableRigControlWork(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	control, err := rigStore.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	var stderr bytes.Buffer
+	result := buildDesiredStateWithSessionBeads(
+		"test-city",
+		t.TempDir(),
+		time.Now().UTC(),
+		cfg,
+		runtime.NewFake(),
+		cityStore,
+		map[string]beads.Store{"fixture": rigStore},
+		newSessionBeadSnapshot(nil),
+		nil,
+		&stderr,
+	)
+
+	stored, err := rigStore.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := stored.Metadata["gc.routed_to"]; got != "core.control-dispatcher" {
+		t.Fatalf("stored gc.routed_to = %q, want unchanged for operator repair", got)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("ScaleCheckCounts[core.control-dispatcher] = %d, want 0", got)
+	}
+	if !strings.Contains(stderr.String(), `control bead `+control.ID+` in rig store "fixture" has no configured control-dispatcher`) {
+		t.Fatalf("stderr missing actionable rig dispatcher error: %q", stderr.String())
+	}
+}
+
+func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.T) {
+	sharedID := "shared-control-id"
+	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: sharedID, Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow-finalize", "gc.routed_to": "core.control-dispatcher",
+		},
+	}}, nil)
+	rigStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: sharedID, Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow-finalize", "gc.routed_to": "city/core.control-dispatcher",
+		},
+	}}, nil)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "city", Path: t.TempDir()}},
+	}
+
+	work, _, refs := collectOpenUnassignedRoutedWork(
+		cfg,
+		cityStore,
+		map[string]beads.Store{"city": rigStore},
+		nil,
+		io.Discard,
+	)
+	if len(work) != 2 {
+		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
+	}
+	if len(refs) != 2 || refs[0] != "city:test-city" || refs[1] != "rig:city" {
+		t.Fatalf("store refs = %v, want [city:test-city rig:city]", refs)
+	}
+}
+
+func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+	}
+	var stderr bytes.Buffer
+	collectOpenUnassignedRoutedWork(
+		cfg,
+		listFailStore{},
+		map[string]beads.Store{"fixture": listFailStore{}},
+		nil,
+		&stderr,
+	)
+	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want canonical store diagnostic %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestRepairControlDispatcherRoutesSuppressesCrossScopeDemandOnWriteFailure(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+	}}
+	work := []beads.Bead{{
+		ID: "control-1", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}}
+	boom := errors.New("route write failed")
+	store := routeRepairUpdateFailStore{Store: beads.NewMemStore(), err: boom}
+	var stderr bytes.Buffer
+
+	repairControlDispatcherRoutesForStoreScope(
+		t.Name(),
+		cfg,
+		work,
+		[]beads.Store{store},
+		[]string{"fixture"},
+		&stderr,
+	)
+	if got := work[0].Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("in-memory gc.routed_to = %q, want suppressed until durable repair succeeds", got)
+	}
+	if !strings.Contains(stderr.String(), boom.Error()) {
+		t.Fatalf("stderr = %q, want write failure", stderr.String())
+	}
+}
+
+func TestRepairControlDispatcherRoutesClearsFallbackMarkerFromCanonicalRoute(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              config.ControlDispatcherAgentName,
+		BindingName:       "core",
+		Dir:               "fixture",
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		MaxActiveSessions: &maxActive,
+	}}}
+	const controlID = "control-1"
+	store := &routeRepairCountingStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: controlID, Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:                      beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:                  "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey:              "rig:fixture",
+			beadmeta.ControlDispatcherFallbackMetadataKey: "fixture/core.control-dispatcher->core.control-dispatcher",
+		},
+	}}, nil)}
+	work := []beads.Bead{{
+		ID: controlID, Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:                      beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:                  "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey:              "rig:fixture",
+			beadmeta.ControlDispatcherFallbackMetadataKey: "fixture/core.control-dispatcher->core.control-dispatcher",
+		},
+	}}
+
+	repairControlDispatcherRoutesForStoreScope(
+		t.Name(),
+		cfg,
+		work,
+		[]beads.Store{store},
+		[]string{"rig:fixture"},
+		io.Discard,
+	)
+
+	if store.updates != 1 {
+		t.Fatalf("route repair updates = %d, want one bounded marker cleanup", store.updates)
+	}
+	persisted, err := store.Get(controlID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got := persisted.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("persisted route = %q, want canonical rig route preserved", got)
+	}
+	if got := persisted.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]; got != "" {
+		t.Fatalf("persisted fallback marker = %q, want cleared", got)
+	}
+	if got := work[0].Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]; got != "" {
+		t.Fatalf("snapshot fallback marker = %q, want cleared", got)
+	}
+}
+
+func TestRepairControlDispatcherRoutesBoundsUpgradeWritesPerTick(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              config.ControlDispatcherAgentName,
+		BindingName:       "core",
+		Dir:               "fixture",
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		MaxActiveSessions: &maxActive,
+	}}}
+	count := controlDispatcherRouteRepairLimitPerTick + 1
+	work := make([]beads.Bead, 0, count)
+	stores := make([]beads.Store, 0, count)
+	refs := make([]string, 0, count)
+	seed := make([]beads.Bead, 0, count)
+	for i := 0; i < count; i++ {
+		bead := beads.Bead{
+			ID: fmt.Sprintf("control-%02d", i), Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		}
+		work = append(work, bead)
+		seed = append(seed, beads.Bead{
+			ID: bead.ID, Type: bead.Type, Status: bead.Status,
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		})
+		refs = append(refs, "fixture")
+	}
+	store := &routeRepairCountingStore{Store: beads.NewMemStoreFrom(1, seed, nil)}
+	for range count {
+		stores = append(stores, store)
+	}
+
+	repairControlDispatcherRoutesForStoreScope(t.Name(), cfg, work, stores, refs, io.Discard)
+	if store.updates != controlDispatcherRouteRepairLimitPerTick {
+		t.Fatalf("route repair updates = %d, want bounded %d", store.updates, controlDispatcherRouteRepairLimitPerTick)
+	}
+	deferredIndex := -1
+	for i := range work {
+		if work[i].Metadata["gc.routed_to"] == "" {
+			deferredIndex = i
+			break
+		}
+	}
+	if deferredIndex < 0 {
+		t.Fatal("expected one deferred snapshot route")
+	}
+	persisted, err := store.Get(work[deferredIndex].ID)
+	if err != nil {
+		t.Fatalf("get deferred control: %v", err)
+	}
+	if got := persisted.Metadata["gc.routed_to"]; got != "core.control-dispatcher" {
+		t.Fatalf("deferred durable route = %q, want unchanged for later retry", got)
+	}
+}
+
+func TestRepairControlDispatcherRoutesCursorIsIndependentAcrossCities(t *testing.T) {
+	const cityADomain = "/cities/alpha"
+	const cityBDomain = "/cities/beta"
+	for _, domain := range []string{cityADomain, cityBDomain} {
+		key := controlDispatcherRouteRepairDomainKey(domain)
+		controlDispatcherRouteRepairCursors.Delete(key)
+		t.Cleanup(func() { controlDispatcherRouteRepairCursors.Delete(key) })
+	}
+
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              config.ControlDispatcherAgentName,
+		BindingName:       "core",
+		Dir:               "fixture",
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		MaxActiveSessions: &maxActive,
+	}}}
+
+	const count = 2 * controlDispatcherRouteRepairLimitPerTick
+	seed := make([]beads.Bead, 0, count)
+	failIDs := make(map[string]bool, controlDispatcherRouteRepairLimitPerTick)
+	for i := range count {
+		id := fmt.Sprintf("control-%02d", i)
+		seed = append(seed, beads.Bead{
+			ID: id, Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		})
+		if i < controlDispatcherRouteRepairLimitPerTick {
+			failIDs[id] = true
+		}
+	}
+	cityAStore := &routeRepairSelectiveFailStore{
+		Store:   beads.NewMemStoreFrom(1, seed, nil),
+		failIDs: failIDs,
+	}
+	cityBSeed := make([]beads.Bead, 0, count)
+	for i := range count {
+		cityBSeed = append(cityBSeed, beads.Bead{
+			ID: fmt.Sprintf("control-%02d", i), Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		})
+	}
+	cityBStore := &routeRepairSelectiveFailStore{
+		Store:   beads.NewMemStoreFrom(1, cityBSeed, nil),
+		failIDs: failIDs,
+	}
+
+	repairPass := func(domain string, store beads.Store, count int) {
+		work := make([]beads.Bead, 0, count)
+		stores := make([]beads.Store, 0, count)
+		refs := make([]string, 0, count)
+		for i := range count {
+			bead, err := store.Get(fmt.Sprintf("control-%02d", i))
+			if err != nil {
+				t.Fatalf("load control %d: %v", i, err)
+			}
+			work = append(work, bead)
+			stores = append(stores, store)
+			refs = append(refs, "fixture")
+		}
+		repairControlDispatcherRoutesForStoreScope(domain, cfg, work, stores, refs, io.Discard)
+	}
+
+	for range 3 {
+		repairPass(cityADomain, cityAStore, count)
+		repairPass(cityBDomain, cityBStore, count)
+	}
+	for i := controlDispatcherRouteRepairLimitPerTick; i < count; i++ {
+		stored, err := cityAStore.Get(fmt.Sprintf("control-%02d", i))
+		if err != nil {
+			t.Fatalf("get later control %d: %v", i, err)
+		}
+		if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+			t.Fatalf("later control %d route = %q, want repaired despite interleaved city", i, got)
 		}
 	}
 }

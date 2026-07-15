@@ -7,6 +7,7 @@ var terminalStatuses = map[string]bool{
 	"done":      true,
 	"failed":    true,
 	"skipped":   true,
+	"canceled":  true,
 }
 
 // applyDisplayNodeStates promotes pending nodes to ready or blocked based on

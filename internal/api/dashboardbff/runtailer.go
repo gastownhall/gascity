@@ -135,6 +135,7 @@ type cityRunTailer struct {
 
 	mu      sync.RWMutex
 	summary runproj.RunSummary
+	census  runproj.CanonicalRunStatusCounts
 	marks   map[string]runproj.LaneProgressMark
 	beads   []beads.Bead
 	lastSeq uint64
@@ -306,8 +307,12 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		if err != nil {
 			return
 		}
-		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 && proj.Apply(fresh) {
-			st.marks = t.build(proj, st.marks, nil)
+		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 {
+			decodeMisses := proj.DecodeMisses()
+			changed := proj.Apply(fresh)
+			if changed || proj.DecodeMisses() > decodeMisses {
+				st.marks = t.build(proj, st.marks, nil)
+			}
 		}
 		st.activeInfo = info
 		st.offset = 0
@@ -335,7 +340,9 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		return
 	}
 	sessionChanged := containsSessionEvent(fresh)
-	if proj.Apply(fresh) {
+	decodeMisses := proj.DecodeMisses()
+	changed := proj.Apply(fresh)
+	if changed || proj.DecodeMisses() > decodeMisses {
 		st.marks = t.build(proj, st.marks, nil)
 	}
 	if sessionChanged {
@@ -413,10 +420,11 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	// a fresh first-seen-ordered slice of the immutable-after-decode bead values,
 	// so the published snapshot is safe to read concurrently.
 	beadSlice := runproj.FilterRunBeads(proj.Beads())
-	summary := runproj.BuildRunSummary(beadSlice)
-	if loadErr != nil {
-		// A read failure must surface as a partial snapshot, not a silently empty
-		// "no runs" view.
+	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(beadSlice)
+	census := runproj.CountCanonicalRunStatuses(beadSlice, censusLanes)
+	if loadErr != nil || proj.DecodeMisses() > 0 {
+		// A read failure or an undecodable bead event must surface as a partial
+		// snapshot, not a silently empty or undercounted "no runs" view.
 		summary.LanesPartial = true
 	}
 
@@ -432,6 +440,7 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 
 	t.mu.Lock()
 	t.summary = summary
+	t.census = census
 	t.marks = marks
 	t.beads = beadSlice
 	t.lastSeq = lastSeq
@@ -926,10 +935,16 @@ func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID str
 	writeError(w, http.StatusNotFound, "unknown run")
 }
 
-// cityRunTailer resolves the city to its run tailer, returning false for an
-// unknown city (so the handler can 404). Starting the fold loop is lazy.
+// cityRunTailer resolves the exact registered city name to its run tailer,
+// returning false for an unknown city. The resolver is authoritative and
+// returns the path directly, so registry-valid dots and underscores are safe
+// here even though the narrower dashboard deep-link grammar rejects them.
+// Starting the fold loop is lazy.
 func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
-	path, ok := p.resolveCityPath(name)
+	if name == "" || p.deps.Resolver == nil {
+		return nil, false
+	}
+	path, ok := p.deps.Resolver.CityPath(name)
 	if !ok {
 		return nil, false
 	}
@@ -965,7 +980,7 @@ func (p *Plane) eagerWarmTailers() {
 		return
 	}
 	for _, c := range p.deps.Resolver.Cities() {
-		if !ValidCityName(c.Name) || c.Path == "" {
+		if c.Name == "" || c.Path == "" {
 			continue
 		}
 		p.runTailers.ensure(c.Name, cityEventsPath(c.Path))

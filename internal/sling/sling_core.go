@@ -118,28 +118,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
-		check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
-			NoConvoy: opts.NoConvoy,
-		})
-		if check.Idempotent {
-			result.Idempotent = true
-			result.DryRun = opts.DryRun
-			result.BeadID = opts.BeadOrFormula
-			result.Method = "bead"
-			// Honor --nudge even when the route is already in place. The bead is
-			// routed to the target, but a warm pool slot may have missed its
-			// wake (its startup nudge was swallowed, or work was routed after it
-			// went idle). Re-slinging with --nudge must still deliver a wake;
-			// otherwise the idempotent short-circuit silently drops it and the
-			// slot sits idle on work it never began. The claim path is
-			// idempotent/CAS-safe, so a redundant nudge is harmless. Suppressed
-			// for dry-run, which must not mutate or signal anything.
-			if opts.Nudge && !opts.DryRun {
-				result.NudgeAgent = &a
-			}
+		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
 			return result, nil
 		}
-		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
 	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
@@ -178,6 +159,57 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	return result, nil
+}
+
+// resolveIdempotentShortCircuit runs the plain-bead pre-flight idempotency
+// check and reports whether the sling is a settled no-op. When it returns true,
+// result is populated for an early idempotent return; otherwise any bead-state
+// warnings are appended to result and the sling proceeds. An explicit --on
+// formula on a routed-but-unmoleculed root is not treated as idempotent, so the
+// formula still attaches. If the molecule-attachment probe cannot complete, the
+// fail-closed idempotent state is preserved and the probe failure is surfaced
+// as a bead warning rather than silently flipping into a mutating attach path.
+func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) bool {
+	check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
+		NoConvoy: opts.NoConvoy,
+	})
+	if check.Idempotent {
+		needsAttach, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
+		switch {
+		case probeErr != nil:
+			// The attachment probe failed, so we cannot prove the routed bead
+			// lacks a live molecule. Preserve the fail-closed idempotent result
+			// instead of risking a duplicate attachment, and surface the probe
+			// failure so it is not silently swallowed.
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+				"could not verify molecule attachment for %s; treating --on as an idempotent no-op: %v",
+				opts.BeadOrFormula, probeErr))
+		case needsAttach:
+			// The bead is routed to the target but carries no molecule — an
+			// earlier plain sling routed it raw. Do not treat --on as an
+			// idempotent no-op; fall through so the formula attaches.
+			check.Idempotent = false
+		}
+	}
+	if !check.Idempotent {
+		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
+		return false
+	}
+	result.Idempotent = true
+	result.DryRun = opts.DryRun
+	result.BeadID = opts.BeadOrFormula
+	result.Method = "bead"
+	// Honor --nudge even when the route is already in place. The bead is routed
+	// to the target, but a warm pool slot may have missed its wake (its startup
+	// nudge was swallowed, or work was routed after it went idle). Re-slinging
+	// with --nudge must still deliver a wake; otherwise the idempotent
+	// short-circuit silently drops it and the slot sits idle on work it never
+	// began. The claim path is idempotent/CAS-safe, so a redundant nudge is
+	// harmless. Suppressed for dry-run, which must not mutate or signal anything.
+	if opts.Nudge && !opts.DryRun {
+		result.NudgeAgent = &a
+	}
+	return true
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
@@ -219,6 +251,42 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+// onFormulaNeedsAttachment reports whether this is an --on sling whose target
+// bead the caller has already determined reads Idempotent (gc.routed_to ==
+// target, or pool-labeled) but that has no attached molecule yet. The
+// routed-idempotency check treats such a bead as a done no-op, but a bead can be
+// routed raw by an earlier plain sling; a later `--on <formula>` must still
+// attach the formula, or the repair root sits routed-but-unfanned. When a
+// molecule is already attached, --on stays idempotent (skip), and re-attach is
+// handled by the attachment path (CheckNoMoleculeChildren errors on a live
+// molecule; a stale one is burned).
+//
+// The returned error is non-nil only when the molecule-attachment probe could
+// not complete. In that case the result is (false, err): the caller cannot
+// prove the bead is unmoleculed, so it must preserve the fail-closed idempotent
+// state rather than clear it and risk minting a duplicate attachment.
+func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (bool, error) {
+	if opts.OnFormula == "" {
+		return false, nil
+	}
+	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
+	if err != nil {
+		return false, err
+	}
+	if hasMolecule {
+		return false, nil
+	}
+	// No molecule attached. Only override idempotency for an UNCLAIMED bead — the
+	// routed-raw footgun (gc.routed_to set, no assignee, no molecule). If a worker
+	// has already claimed it (assignee set), leave it idempotent rather than
+	// re-attaching a formula onto work in progress.
+	bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store)
+	if !ok {
+		return false, nil
+	}
+	return strings.TrimSpace(bead.Assignee) == "", nil
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {

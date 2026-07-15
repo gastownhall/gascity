@@ -7,15 +7,16 @@ import "github.com/gastownhall/gascity/internal/api/apierr"
 //
 // The scoped key is "POST:<path>:<key>" — namespaced by path so the same
 // Idempotency-Key value on two different endpoints within one city can't
-// collide. Every caller passes a static endpoint path (e.g. "/v0/agents"), so
-// this scoping is intra-city only; cross-city isolation does NOT come from the
-// key. It comes from each city owning a separate *Server, and therefore a
-// separate idem cache, built per city by getCityServer via New(state). A future
-// refactor that hoisted idem to a process-wide scope would silently reintroduce
-// cross-city key collisions despite this scoping. On a repeat with a completed
-// reservation it replays the cached typed body value; an in-flight repeat
-// returns apierr.IdempotencyInFlight (409); a same-key/different-body repeat
-// returns apierr.IdempotencyMismatch (422).
+// collide. Every city-scoped caller passes a static endpoint path (e.g.
+// "/v0/agents"), so this scoping is intra-city only; cross-city isolation does
+// NOT come from the key. It comes from each city owning a separate *Server,
+// and therefore a separate idem cache, built per city by getCityServer via
+// New(state). A future refactor that hoisted a per-city cache to a
+// process-wide scope would silently reintroduce cross-city key collisions
+// despite this scoping. On a repeat with a completed reservation it replays
+// the cached typed body value; an in-flight repeat returns
+// apierr.IdempotencyInFlight (409); a same-key/different-body repeat returns
+// apierr.IdempotencyMismatch (422).
 //
 // It ALWAYS releases the pending reservation when create() returns an error OR
 // panics (via defer), so no caller can leak a reservation — the defect the
@@ -26,7 +27,11 @@ import "github.com/gastownhall/gascity/internal/api/apierr"
 // return the domain body value to cache. Callers wrap that value in their
 // response envelope after withIdempotency returns, so envelope fields derived
 // from live state (e.g. the X-GC-Index event sequence) stay fresh on replay.
-func withIdempotency[T any](s *Server, path, key string, body any, create func() (T, error)) (T, error) {
+//
+// idem is the owning cache: per-city handlers pass s.idem (the per-city cache
+// described above); supervisor-scope handlers (POST /v0/city, where no per-city
+// Server exists yet) pass sm.idem, the SupervisorMux's own process-wide cache.
+func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, create func() (T, error)) (T, error) {
 	var zero T
 	if key == "" {
 		return create()
@@ -34,7 +39,7 @@ func withIdempotency[T any](s *Server, path, key string, body any, create func()
 	scopedKey := "POST:" + path + ":" + key
 	bodyHash := hashBody(body)
 
-	existing, found := s.idem.reserve(scopedKey, bodyHash)
+	existing, found := idem.reserve(scopedKey, bodyHash)
 	if found {
 		if existing.bodyHash != bodyHash {
 			return zero, apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with different request body")
@@ -57,7 +62,7 @@ func withIdempotency[T any](s *Server, path, key string, body any, create func()
 	settled := false
 	defer func() {
 		if !settled {
-			s.idem.unreserve(scopedKey)
+			idem.unreserve(scopedKey)
 		}
 	}()
 
@@ -66,6 +71,6 @@ func withIdempotency[T any](s *Server, path, key string, body any, create func()
 		return zero, err
 	}
 	settled = true
-	s.idem.storeResponse(scopedKey, bodyHash, v)
+	idem.storeResponse(scopedKey, bodyHash, v)
 	return v, nil
 }

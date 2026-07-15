@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -173,6 +174,11 @@ func TestProxyProcessHelper(t *testing.T) {
 	})
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
+			execenv.UsageMetricsDisableEnv:        os.Getenv(execenv.UsageMetricsDisableEnv),
+			"GC_DISABLE_USAGE_METRICS_COUNT":      fmt.Sprintf("%d", countProxyProcessHelperEnvKey(execenv.UsageMetricsDisableEnv)),
+			"BD_DISABLE_METRICS":                  os.Getenv("BD_DISABLE_METRICS"),
+			"OTEL_SERVICE_NAME":                   os.Getenv("OTEL_SERVICE_NAME"),
+			"UNRELATED_SERVICE_SENTINEL":          os.Getenv("UNRELATED_SERVICE_SENTINEL"),
 			"GC_CITY":                             os.Getenv("GC_CITY"),
 			"GC_CITY_PATH":                        os.Getenv("GC_CITY_PATH"),
 			"GC_CITY_RUNTIME_DIR":                 os.Getenv("GC_CITY_RUNTIME_DIR"),
@@ -194,6 +200,103 @@ func TestProxyProcessHelper(t *testing.T) {
 	err = srv.Serve(ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("serve: %v", err)
+	}
+}
+
+func countProxyProcessHelperEnvKey(key string) int {
+	count := 0
+	for _, entry := range os.Environ() {
+		entryKey, _, ok := strings.Cut(entry, "=")
+		if ok && entryKey == key {
+			count++
+		}
+	}
+	return count
+}
+
+func TestProxyProcessDisablesProductMetrics(t *testing.T) {
+	tests := []struct {
+		name        string
+		ambientGC   string
+		lateHostile bool
+	}{
+		{name: "hostile late duplicate is replaced", ambientGC: "hostile-ambient-value", lateHostile: true},
+		{name: "absent opt-out is added"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testProxyProcessDisablesProductMetrics(t, tc.ambientGC, tc.lateHostile)
+		})
+	}
+}
+
+func testProxyProcessDisablesProductMetrics(t *testing.T, ambientGC string, lateHostile bool) {
+	t.Helper()
+	t.Setenv("GC_SERVICE_HELPER", "1")
+	t.Setenv(execenv.UsageMetricsDisableEnv, ambientGC)
+	if ambientGC == "" {
+		if err := os.Unsetenv(execenv.UsageMetricsDisableEnv); err != nil {
+			t.Fatalf("unset %s: %v", execenv.UsageMetricsDisableEnv, err)
+		}
+	}
+	t.Setenv("BD_DISABLE_METRICS", "keep-beads-setting")
+	t.Setenv("OTEL_SERVICE_NAME", "keep-otel-setting")
+	previousExtraEnv := extraHelperEnv
+	extraHelperEnv = []string{
+		"GC_TESTENV_PASSTHROUGH=" + helperPassthroughForTests,
+		"UNRELATED_SERVICE_SENTINEL=keep-unrelated-setting",
+	}
+	if lateHostile {
+		extraHelperEnv = append(extraHelperEnv, execenv.UsageMetricsDisableEnv+"=0")
+	}
+	t.Cleanup(func() { extraHelperEnv = previousExtraEnv })
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{Services: []config.Service{{
+			Name: "bridge",
+			Kind: "proxy_process",
+			Process: config.ServiceProcessConfig{
+				Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+				HealthPath: "/healthz",
+			},
+		}}},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	defer mgr.Close() //nolint:errcheck // best-effort cleanup
+
+	req := httptest.NewRequest(http.MethodGet, "/svc/bridge/env", nil)
+	rec := httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, req); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var env map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode env: %v", err)
+	}
+	for key, want := range map[string]string{
+		execenv.UsageMetricsDisableEnv:   execenv.UsageMetricsDisableValue,
+		"GC_DISABLE_USAGE_METRICS_COUNT": "1",
+		"BD_DISABLE_METRICS":             "keep-beads-setting",
+		"OTEL_SERVICE_NAME":              "keep-otel-setting",
+		"UNRELATED_SERVICE_SENTINEL":     "keep-unrelated-setting",
+	} {
+		if env[key] != want {
+			t.Fatalf("helper env %s = %q, want %q", key, env[key], want)
+		}
 	}
 }
 

@@ -1802,6 +1802,40 @@ func (p *Provider) refreshAssignmentProjection(threadID string, envelope Startup
 	_ = p.dispatchThreadMeta(threadID, buildGCMetadata(next, providerName, nil))
 }
 
+// latestSeqRetryInitialBackoff is the first wait between LatestSeq retries; it
+// doubles each attempt. A package var so tests can shrink it.
+var latestSeqRetryInitialBackoff = 100 * time.Millisecond
+
+// latestSeqWithBackoff resolves the current head sequence, retrying a transient
+// read failure with context-aware exponential backoff before giving up. Watch
+// treats afterSeq=0 as "replay the entire retained history", so the head must be
+// resolved before watching; returning on the first hiccup would permanently
+// disable the session's only event-projection goroutine. It returns the context
+// error if canceled while waiting, or the last read error after exhausting the
+// attempt budget.
+func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (uint64, error) {
+	const maxAttempts = 5
+	backoff := latestSeqRetryInitialBackoff
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		seq, err := latest()
+		if err == nil {
+			return seq, nil
+		}
+		lastErr = err
+		if attempt == maxAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return 0, lastErr
+}
+
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
 	cityPath := cfg.Env["GC_CITY_PATH"]
 	if cityPath == "" {
@@ -1821,9 +1855,17 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
 	_ = cache.Prime(ctx)
 
-	afterSeq, err := recorder.LatestSeq()
+	// Resolve the head before watching: Watch now treats afterSeq=0 as "replay
+	// the entire retained history" (across archives), so defaulting to 0 here
+	// would flood the bead cache with the whole log. A transient LatestSeq error
+	// must not permanently kill this watcher — it is the session's only
+	// event-projection goroutine — so retry with context-aware backoff and log
+	// the terminal give-up so operators can tell a dead watcher from a healthy
+	// idle one.
+	afterSeq, err := latestSeqWithBackoff(ctx, recorder.LatestSeq)
 	if err != nil {
-		afterSeq = 0
+		fmt.Fprintf(os.Stderr, "t3bridge: event watcher for %q exiting — could not resolve latest seq: %v\n", providerName, err) //nolint:errcheck // best-effort debug logging
+		return
 	}
 	watcher, err := recorder.Watch(ctx, afterSeq)
 	if err != nil {

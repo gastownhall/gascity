@@ -66,6 +66,54 @@ func TestFactorySessionAndCatalogShareWorkerBoundary(t *testing.T) {
 	}
 }
 
+func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	waited := make(chan string, 1)
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		StaleKeyDetectionWaiter: func(_ context.Context, name string) error {
+			waited <- name
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	handle, err := factory.Session(SessionSpec{
+		Template: "probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    "--resume",
+			SessionIDFlag: "--session-id",
+		},
+	})
+	if err != nil {
+		t.Fatalf("factory.Session: %v", err)
+	}
+	info, err := handle.Create(context.Background(), CreateModeStarted)
+	if err != nil {
+		t.Fatalf("Create(started): %v", err)
+	}
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := handle.StartResolved(context.Background(), "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
+		t.Fatalf("StartResolved: %v", err)
+	}
+	select {
+	case got := <-waited:
+		if got != info.SessionName {
+			t.Fatalf("waiter session = %q, want %q", got, info.SessionName)
+		}
+	default:
+		t.Fatal("configured stale-key waiter was not called")
+	}
+}
+
 func TestFactoryAdapterUsesConfiguredSearchPaths(t *testing.T) {
 	factory, err := NewFactory(FactoryConfig{
 		Store:       beads.NewMemStore(),

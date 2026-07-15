@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -3054,6 +3055,153 @@ func writeSessionListTestCity(t *testing.T) string {
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	return cityDir
+}
+
+func TestSessionListProviderConstructionFailureReturnsThroughRun(t *testing.T) {
+	if scenario, markerPath, stdoutPath, stderrPath, ok := sessionListProviderFailureHelperArgs(os.Args); ok {
+		runSessionListProviderFailureHelper(t, scenario, markerPath, stdoutPath, stderrPath)
+		return
+	}
+
+	for _, tc := range []struct {
+		name       string
+		scenario   string
+		wantJSON   bool
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "text",
+			scenario:   "text",
+			wantStderr: "gc session list: constructing session provider: injected provider failure\n",
+		},
+		{
+			name:       "json",
+			scenario:   "json",
+			wantJSON:   true,
+			wantStderr: "gc session list: constructing session provider: injected provider failure",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			helperRoot := t.TempDir()
+			cityDir := filepath.Join(helperRoot, "city")
+			writeNamedSessionCityTOML(t, cityDir)
+			markerPath := filepath.Join(helperRoot, "returned-through-run")
+			stdoutPath := filepath.Join(helperRoot, "run-stdout")
+			stderrPath := filepath.Join(helperRoot, "run-stderr")
+			cmd := exec.Command(
+				os.Args[0],
+				"-test.run=^TestSessionListProviderConstructionFailureReturnsThroughRun$",
+				"--",
+				"session-list-provider-failure-helper",
+				tc.scenario,
+				markerPath,
+				stdoutPath,
+				stderrPath,
+			)
+			cmd.Dir = cityDir
+			cmd.Env = sanitizedBaseEnv(
+				"GC_BEADS=file",
+				"GC_BEADS_SCOPE_ROOT=",
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CEILING_DIRECTORIES="+helperRoot,
+				"GC_HOME="+filepath.Join(helperRoot, "gc-home"),
+				"GC_SESSION=broken",
+				"OTEL_SDK_DISABLED=true",
+			)
+			var processStdout, processStderr bytes.Buffer
+			cmd.Stdout = &processStdout
+			cmd.Stderr = &processStderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("helper did not return through run: %v; stdout=%q stderr=%q", err, processStdout.String(), processStderr.String())
+			}
+			if marker, err := os.ReadFile(markerPath); err != nil {
+				t.Fatalf("run-return marker missing: %v", err)
+			} else if got, want := string(marker), "returned\n"; got != want {
+				t.Fatalf("run-return marker = %q, want %q", got, want)
+			}
+			stdout, err := os.ReadFile(stdoutPath)
+			if err != nil {
+				t.Fatalf("read run stdout: %v", err)
+			}
+			stderr, err := os.ReadFile(stderrPath)
+			if err != nil {
+				t.Fatalf("read run stderr: %v", err)
+			}
+
+			if !tc.wantJSON {
+				if got := string(stdout); got != tc.wantStdout {
+					t.Fatalf("stdout = %q, want %q", got, tc.wantStdout)
+				}
+				if got := string(stderr); got != tc.wantStderr {
+					t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+				}
+				return
+			}
+
+			var output cliJSONErrorOutput
+			if err := json.Unmarshal(stdout, &output); err != nil {
+				t.Fatalf("stdout is not a JSON error: %v; stdout=%q", err, stdout)
+			}
+			if got, want := output.Error.Code, "session_provider_failed"; got != want {
+				t.Fatalf("JSON error code = %q, want %q", got, want)
+			}
+			if got := output.Error.Message; got != tc.wantStderr {
+				t.Fatalf("JSON error message = %q, want %q", got, tc.wantStderr)
+			}
+			if output.OK || output.Error.ExitCode != 1 {
+				t.Fatalf("JSON error = %#v, want ok=false exit_code=1", output)
+			}
+			var diagnostic cliJSONDiagnostic
+			if err := json.Unmarshal(stderr, &diagnostic); err != nil {
+				t.Fatalf("stderr is not a JSON diagnostic: %v; stderr=%q", err, stderr)
+			}
+			if got, want := diagnostic.Code, "session_provider_failed"; got != want {
+				t.Fatalf("JSON diagnostic code = %q, want %q", got, want)
+			}
+			if got := diagnostic.Message; got != tc.wantStderr {
+				t.Fatalf("JSON diagnostic message = %q, want %q", got, tc.wantStderr)
+			}
+		})
+	}
+}
+
+func sessionListProviderFailureHelperArgs(args []string) (string, string, string, string, bool) {
+	for index, arg := range args {
+		if arg == "--" && index+6 == len(args) && args[index+1] == "session-list-provider-failure-helper" {
+			return args[index+2], args[index+3], args[index+4], args[index+5], true
+		}
+	}
+	return "", "", "", "", false
+}
+
+func runSessionListProviderFailureHelper(t *testing.T, scenario, markerPath, stdoutPath, stderrPath string) {
+	t.Helper()
+	defer func() {
+		if err := os.WriteFile(markerPath, []byte("returned\n"), 0o600); err != nil {
+			t.Errorf("write run-return marker: %v", err)
+		}
+	}()
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	args := []string{"session", "list"}
+	if scenario == "json" {
+		args = append(args, "--json")
+	} else if scenario != "text" {
+		t.Fatalf("unknown helper scenario %q", scenario)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run exit code = %d, want 1", code)
+	}
+	if err := os.WriteFile(stdoutPath, stdout.Bytes(), 0o600); err != nil {
+		t.Fatalf("write run stdout: %v", err)
+	}
+	if err := os.WriteFile(stderrPath, stderr.Bytes(), 0o600); err != nil {
+		t.Fatalf("write run stderr: %v", err)
+	}
 }
 
 // okSessionsHandler serves a session list with one entry matching the test

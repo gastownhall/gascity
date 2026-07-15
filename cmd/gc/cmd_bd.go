@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -461,112 +462,19 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in
-// "--long" / "-s" form) for the given bd write-mutation subcommand.
-// Sourced from `bd <sub> --help` output (2026-06-10).
+// "--long" / "-s" form) for the given bd write-mutation subcommand. Backed
+// by internal/bdflags, the single source of truth shared with the `gc
+// lint` bd-flag validation check, so the two cannot drift apart.
 func bdSubcmdValueFlags(sub string) map[string]bool {
-	// Global flags shared by all bd subcommands that take a value.
-	global := map[string]bool{
-		"--actor": true, "--db": true, "--directory": true, "-C": true,
-		"--dolt-auto-commit": true,
-	}
-	var subFlags map[string]bool
-	switch sub {
-	case "update":
-		subFlags = map[string]bool{
-			"--acceptance": true,
-			"--add-label":  true, "--append-notes": true,
-			"-a": true, "--assignee": true,
-			"--await-id":  true,
-			"--body-file": true,
-			"--defer":     true,
-			"-d":          true, "--description": true,
-			"--design": true, "--design-file": true,
-			"--due": true,
-			"-e":    true, "--estimate": true,
-			"--external-ref": true,
-			"--metadata":     true,
-			"--notes":        true,
-			"--parent":       true,
-			"-p":             true, "--priority": true,
-			"--remove-label": true,
-			"--session":      true,
-			"--set-labels":   true,
-			"--set-metadata": true,
-			"-s":             true, "--status": true,
-			"-t": true, "--type": true,
-			"--title":          true,
-			"--spec-id":        true,
-			"--unset-metadata": true,
-		}
-	case "close":
-		subFlags = map[string]bool{
-			"-r": true, "--reason": true,
-			"--reason-file": true,
-			"--session":     true,
-		}
-	case "reopen":
-		subFlags = map[string]bool{
-			"-r": true, "--reason": true,
-		}
-	case "delete":
-		subFlags = map[string]bool{
-			"--from-file": true,
-		}
-	}
-	merged := make(map[string]bool, len(global)+len(subFlags))
-	for k := range global {
-		merged[k] = true
-	}
-	for k := range subFlags {
-		merged[k] = true
-	}
-	return merged
+	return bdflags.ValueFlags(sub)
 }
 
 // bdSubcmdBoolFlags returns the set of boolean (no-value) flag names for the
-// given bd write-mutation subcommand.
-// Sourced from `bd <sub> --help` output (2026-06-10).
+// given bd write-mutation subcommand. Backed by internal/bdflags, the
+// single source of truth shared with the `gc lint` bd-flag validation
+// check, so the two cannot drift apart.
 func bdSubcmdBoolFlags(sub string) map[string]bool {
-	// Global boolean flags shared by all bd subcommands.
-	global := map[string]bool{
-		"--global": true, "--ignore-schema-skew": true,
-		"--json": true, "--profile": true,
-		"-q": true, "--quiet": true,
-		"--readonly": true, "--sandbox": true,
-		"-v": true, "--verbose": true,
-		"-h": true, "--help": true,
-	}
-	var subFlags map[string]bool
-	switch sub {
-	case "update":
-		subFlags = map[string]bool{
-			"--allow-empty-description": true,
-			"--claim":                   true, "--ephemeral": true,
-			"--history": true, "--no-history": true,
-			"--persistent": true, "--stdin": true,
-		}
-	case "close":
-		subFlags = map[string]bool{
-			"--claim-next": true, "--continue": true,
-			"-f": true, "--force": true,
-			"--no-auto": true, "--suggest-next": true,
-		}
-	case "reopen":
-		subFlags = map[string]bool{}
-	case "delete":
-		subFlags = map[string]bool{
-			"--cascade": true, "--dry-run": true,
-			"-f": true, "--force": true,
-		}
-	}
-	merged := make(map[string]bool, len(global)+len(subFlags))
-	for k := range global {
-		merged[k] = true
-	}
-	for k := range subFlags {
-		merged[k] = true
-	}
-	return merged
+	return bdflags.BoolFlags(sub)
 }
 
 // bdMutationWriteID is a compatibility shim retained for callers that only

@@ -2286,7 +2286,7 @@ func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 				wantPort := fb.setup(t, cityDir)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -2417,7 +2417,7 @@ exit 1
 				writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 				writeExecutable(t, filepath.Join(binDir, "lsof"), tc.lsofBody)
@@ -2552,7 +2552,7 @@ exit 1
 				writeManagedRuntimeStateWithPID(t, cityDir, listener.Addr().(*net.TCPAddr).Port, 424242)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 				writeExecutable(t, filepath.Join(binDir, "lsof"), tc.lsofBody)
@@ -2644,7 +2644,7 @@ func TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed(t *testin
 			writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
 
 			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 			writeExecutable(t, filepath.Join(binDir, "sed"), fmt.Sprintf(`#!/bin/sh
@@ -2762,7 +2762,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -2840,7 +2840,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -2912,7 +2912,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -2981,7 +2981,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3025,7 +3025,7 @@ func TestReaperMailWispsSummaryFieldAlwaysPresent(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3111,7 +3111,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 			gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3211,7 +3211,7 @@ case "$*" in
 esac
 exit 0
 `)
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3358,7 +3358,7 @@ func TestReaperSQLReflectsCurrentSchema(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3455,7 +3455,7 @@ func TestReaperSkipsDependencyQueriesWithoutGenericDependencyTargets(t *testing.
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3506,7 +3506,7 @@ func TestReaperSkipsDependencyQueriesWithoutWispDependencyTable(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3555,7 +3555,7 @@ func TestReaperSplitSchemaQueriesUseSplitColumns(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3631,7 +3631,7 @@ func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3676,6 +3676,10 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
+	wantRoute := "bd --city " + canonicalCityDir + " prune --pattern gm-* --older-than 720h --force --json"
+	if !strings.Contains(string(gcData), wantRoute) {
+		t.Fatalf("reaper did not route session pruning through the explicit city scope %q:\n%s", wantRoute, gcData)
+	}
 	if !strings.Contains(string(gcData), "sessions-pruned:7") {
 		t.Fatalf("reaper summary did not report pruned sessions:\n%s", gcData)
 	}
@@ -3694,7 +3698,7 @@ func TestReaperPrunesTerminalSessionStatesWithGcSessionPrune(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$*" in
   "session prune --state drained --before 24h --json")
@@ -3744,7 +3748,7 @@ func TestReaperSessionStatePruneFailureEscalates(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$*" in
   "session prune --state drained --before 24h --json")
@@ -3798,7 +3802,7 @@ func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3858,7 +3862,7 @@ func TestReaperSessionPruneAnomalyEscalates(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3904,7 +3908,7 @@ func TestReaperSessionPruneMissingBdDegradesToZero(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3955,7 +3959,7 @@ esac
 exit 0
 `)
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4044,7 +4048,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4119,7 +4123,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4191,7 +4195,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4266,7 +4270,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4344,7 +4348,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4424,7 +4428,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4574,7 +4578,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4723,7 +4727,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4818,7 +4822,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4894,7 +4898,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4965,7 +4969,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5033,7 +5037,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5186,7 +5190,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5268,7 +5272,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5337,7 +5341,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5426,7 +5430,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5520,7 +5524,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5599,7 +5603,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5704,7 +5708,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5775,7 +5779,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5861,7 +5865,7 @@ exit 0
 printf 'pwd=%s beads=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5898,6 +5902,14 @@ exit 0
 	}
 	if strings.Contains(bdLogText, "beads="+ambientBeadsDir) {
 		t.Fatalf("reaper used ambient BEADS_DIR for city auto-close:\n%s", bdLogText)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	wantRoute := "bd --city " + canonicalCityDir + " close ga-city --reason stale:auto-closed by reaper"
+	if !strings.Contains(string(gcData), wantRoute) {
+		t.Fatalf("reaper did not route issue close through the explicit city scope %q:\n%s", wantRoute, gcData)
 	}
 }
 
@@ -5937,7 +5949,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6021,7 +6033,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6098,7 +6110,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6178,7 +6190,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6251,7 +6263,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6326,7 +6338,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6498,7 +6510,7 @@ func TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable(t *testing.T) {
 			gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6596,7 +6608,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6651,7 +6663,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6711,7 +6723,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -6772,7 +6784,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -6839,7 +6851,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -6892,7 +6904,7 @@ func runReaperCloseFixture(t *testing.T, fixture string) (doltLog string, gcLog 
 	gcLog = filepath.Join(t.TempDir(), "gc.log")
 
 	writeReaperCloseFixtureDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -7114,6 +7126,32 @@ case "$1" in
 esac
 exit 0
 `)
+}
+
+// writeMaintenanceGCStub installs a gc test double whose gc-bd branch
+// conforms to the wrapper boundary used by the shipped maintenance scripts.
+// The caller-provided body continues to define every non-bd command.
+func writeMaintenanceGCStub(t *testing.T, path, body string) {
+	t.Helper()
+	const shebang = "#!/bin/sh\n"
+	if !strings.HasPrefix(body, shebang) {
+		t.Fatalf("gc stub must start with %q", strings.TrimSpace(shebang))
+	}
+	const gcBDRoute = `if [ "${1:-}" = "bd" ]; then
+  if [ -n "${GC_CALL_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$GC_CALL_LOG"
+  fi
+  shift
+  if [ "${1:-}" = "--city" ]; then
+    city="$2"
+    shift 2
+    cd "$city" || exit 1
+    export BEADS_DIR="$city/.beads"
+  fi
+  exec bd "$@"
+fi
+`
+	writeExecutable(t, path, shebang+gcBDRoute+strings.TrimPrefix(body, shebang))
 }
 
 func mergeTestEnv(overrides map[string]string) []string {
@@ -10053,6 +10091,7 @@ func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
 	t.Helper()
 	binDir = t.TempDir()
 	bdLog = filepath.Join(t.TempDir(), "bd.log")
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 	env = map[string]string{
 		"BD_LOG":       bdLog,
 		"GC_CITY":      t.TempDir(),
@@ -10430,6 +10469,7 @@ EOF
     ;;
 esac
 `, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env = map[string]string{
 		"BD_LOG":       bdLog,
@@ -10664,6 +10704,7 @@ EOF
     ;;
 esac
 `, closedJSON, depsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env = map[string]string{
 		"BD_LOG":       bdLog,
@@ -10779,6 +10820,7 @@ JSON
 esac
 exit 0
 `, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env := map[string]string{
 		"BD_LOG":       bdLog,
@@ -10831,6 +10873,7 @@ JSON
 esac
 exit 0
 `, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	writeExecutable(t, filepath.Join(binDir, "date"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$DATE_LOG"
@@ -10938,6 +10981,7 @@ JSON
 esac
 exit 0
 `, closedJSON, depsForClosed1, depsForClosed2, depsForClosedInternal))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env := map[string]string{
 		"BD_LOG":       bdLog,

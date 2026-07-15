@@ -382,7 +382,18 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 
 func newRepoWithOriginHead(t *testing.T, branch string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return newRepoWithOriginHeadAt(t, t.TempDir(), branch)
+}
+
+// newRepoWithOriginHeadAt git-inits a repo at dir (created if absent) with
+// origin/HEAD pointing at branch. Use it when the repo must live under a
+// specific parent — e.g. inside the city dir, since the API rig-create now
+// contains rig paths to the city root.
+func newRepoWithOriginHeadAt(t *testing.T, dir, branch string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+branch)
 	return dir

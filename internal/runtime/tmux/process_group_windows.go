@@ -9,6 +9,17 @@ import (
 	"strings"
 )
 
+func processIsAlive(pid string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	if err != nil || n <= 0 {
+		return false
+	}
+	exists, err := processExists(n)
+	// Observation failures are not proof of exit. Conservatively keep the PID
+	// in the survivor set so cleanup retains its force-kill fallback.
+	return err != nil || exists
+}
+
 // getParentPID returns the parent process ID (PPID) for a given PID.
 // On Windows, this is not used for PGID verification, so we return empty string.
 func getParentPID(_ string) string {

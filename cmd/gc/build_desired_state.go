@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -575,6 +576,7 @@ func buildDesiredStateWithSessionBeads(
 
 		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
 		template := cfg.Agents[i].QualifiedName()
+		storeScopedControlDispatcher := cfg.Agents[i].Name == config.ControlDispatcherAgentName
 		runningSessions := 0
 		for _, si := range allOpenSessionInfos {
 			if isPoolManagedSessionInfo(si) && poolSessionIsLiveInfo(si) {
@@ -637,7 +639,7 @@ func buildDesiredStateWithSessionBeads(
 				// wake the pool. Same guard conditions apply: healthy own rig store,
 				// not city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
-				if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+				if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
@@ -646,7 +648,7 @@ func buildDesiredStateWithSessionBeads(
 				}
 				continue
 			}
-			if store != nil && isCold {
+			if store != nil && isCold && !storeScopedControlDispatcher {
 				for _, source := range activeStores {
 					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
 				}
@@ -691,12 +693,15 @@ func buildDesiredStateWithSessionBeads(
 			// double-count the same beads, since defaultScaleCheckCounts dedups
 			// per group, not across groups. Current store-map builders skip
 			// such rigs, so this is defense-in-depth against future callers.
-			if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+			// Control dispatchers are deliberately store-scoped: a rig copy cannot
+			// claim a route from the city store. Keep their cold-wake probe on the
+			// owning store instead of applying generic cross-store pool delivery.
+			if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue
 		}
-		if store != nil && isCold {
+		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
 			}
@@ -771,8 +776,9 @@ func buildDesiredStateWithSessionBeads(
 		// string, so the route must be canonicalized before demand is counted or
 		// the cold pool never wakes for it.
 		subPhaseStart = time.Now()
-		unassignedRoutedBeads, unassignedRoutedStores := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
+		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs := collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
 		// work, so the assigned-work snapshot is now stale for demand
 		// bucketing. Read the post-rewrite state from a fresh per-store
@@ -2926,12 +2932,35 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 	if workspace := packWorkspaceSlug(request); strings.TrimSpace(info.PackWorkspace) != workspace {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
+	// Same-trigger reconciles may omit the title suffix the launcher used, so
+	// preserve the recorded path. A live resume-mode session can also claim a
+	// retry bead without restarting; in that case the process remains in its
+	// existing cwd even though the trigger changes. The concrete session id and
+	// durable current-bead marker distinguish that continuation from an asleep,
+	// fresh, or otherwise reusable session that will start in a newly derived
+	// worktree.
 	if workDir != "" {
-		if strings.TrimSpace(info.WorkDirCanonical) != workDir {
-			metadata[beadmeta.WorkDirMetadataKey] = workDir
+		targetWorkDir := workDir
+		existingWorkDir := strings.TrimSpace(info.WorkDirCanonical)
+		if existingWorkDir == "" {
+			existingWorkDir = strings.TrimSpace(info.WorkDir)
 		}
-		if strings.TrimSpace(info.WorkDir) != workDir {
-			metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+		currentWorkBeadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
+		liveResumeContinuation := oldWorkBeadID != workBeadID &&
+			request.Tier == "resume" &&
+			request.SessionBeadID == info.ID &&
+			info.State == session.StateActive &&
+			info.WakeMode != "fresh" &&
+			currentWorkBeadID != "" &&
+			(currentWorkBeadID == oldWorkBeadID || currentWorkBeadID == workBeadID)
+		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
+			targetWorkDir = existingWorkDir
+		}
+		if strings.TrimSpace(info.WorkDirCanonical) != targetWorkDir {
+			metadata[beadmeta.WorkDirMetadataKey] = targetWorkDir
+		}
+		if strings.TrimSpace(info.WorkDir) != targetWorkDir {
+			metadata[beadmeta.LegacyWorkDirMetadataKey] = targetWorkDir
 		}
 	}
 	return metadata
@@ -4220,14 +4249,14 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 
 // collectOpenUnassignedRoutedWork gathers open, unassigned, pool-routed work from
 // the city store and every non-suspended rig store, index-aligned with the store
-// that owns each bead. It is the input collection for
+// and store ref that own each bead. It is the input collection for
 // canonicalizeLegacyBoundUnassignedRoutedWork: empty-assignee open work is dropped
 // by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
 // migration re-home needs its own scan. Active-only List queries are served from
 // the CachingStore in steady state, so this adds no backing-store round trip.
-func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store) {
+func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string) {
 	if cfg == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Work arm (unassigned-routed re-home scan): iterate the work-class
 	// candidate fan-out, labeling the city store "city" for the diagnostic
@@ -4236,14 +4265,23 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 
 	var workBeads []beads.Bead
 	var workStores []beads.Store
-	seen := make(map[string]struct{})
-	for _, source := range stores {
+	var workStoreRefs []string
+	seen := make(map[storeScopedBeadKey]struct{})
+	for sourceIndex, source := range stores {
 		if source.store == nil {
 			continue
 		}
+		storeRef := "rig:" + strings.TrimSpace(source.ref)
+		if sourceIndex == 0 {
+			cityName := strings.TrimSpace(cfg.Workspace.Name)
+			if cityName == "" {
+				cityName = "city"
+			}
+			storeRef = "city:" + cityName
+		}
 		open, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"})
 		if err != nil && !beads.IsPartialResult(err) {
-			fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s: List(open): %v\n", source.ref, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s: List(open): %v\n", storeRef, err) //nolint:errcheck
 			continue
 		}
 		for _, b := range open {
@@ -4253,15 +4291,274 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 			if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
 				continue
 			}
-			if _, ok := seen[b.ID]; ok {
+			if !rootStoreRefMatchesCandidate(b.Metadata[beadmeta.RootStoreRefMetadataKey], storeRef) {
 				continue
 			}
-			seen[b.ID] = struct{}{}
+			key := storeScopedBeadKey{StoreRef: storeRef, ID: b.ID}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
 			workBeads = append(workBeads, b)
 			workStores = append(workStores, source.store)
+			workStoreRefs = append(workStoreRefs, storeRef)
 		}
 	}
-	return workBeads, workStores
+	return workBeads, workStores, workStoreRefs
+}
+
+// rootStoreRefMatchesCandidate filters duplicate views of one physical graph
+// in legacy unscoped file-store mode. There, the city and every rig store can
+// all list the same row even though gc.root_store_ref still records its logical
+// owner. Canonical refs are authoritative: city-owned rows are collected only
+// through the city candidate and rig-owned rows only through their named rig.
+// Legacy rows without a canonical ref remain visible through every independent
+// store so same-ID beads in genuinely separate stores are not collapsed.
+func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
+	rootRig, rootScoped := storeref.ScopeRigContext(rootStoreRef)
+	if !rootScoped {
+		return true
+	}
+	candidateRig, candidateScoped := storeref.ScopeRigContext(candidateStoreRef)
+	return candidateScoped && candidateRig == rootRig
+}
+
+// Keep migration writes within the same budget used for other reconciler
+// recovery writes: each bd/Dolt mutation can take seconds and is followed by a
+// cache refresh, so a larger burst can starve session starts in the same tick.
+const controlDispatcherRouteRepairLimitPerTick = 5
+
+var controlDispatcherRouteRepairCursors sync.Map // map[string]*atomic.Uint64
+
+func controlDispatcherRouteRepairDomainKey(repairDomain string) string {
+	repairDomain = strings.TrimSpace(repairDomain)
+	if repairDomain == "" {
+		return "<default>"
+	}
+	return filepath.Clean(repairDomain)
+}
+
+func controlDispatcherRouteRepairCursorForDomain(repairDomain string) *atomic.Uint64 {
+	key := controlDispatcherRouteRepairDomainKey(repairDomain)
+	created := &atomic.Uint64{}
+	actual, _ := controlDispatcherRouteRepairCursors.LoadOrStore(key, created)
+	return actual.(*atomic.Uint64)
+}
+
+// repairControlDispatcherRoutesForStoreScope durably repairs open control work
+// whose persisted route names a dispatcher in a different store scope. Older
+// builds could stamp a city route on a rig-resident graph; rewriting the route
+// before demand evaluation lets the matching rig dispatcher start and claim it
+// without teaching claimers to reinterpret dishonest route metadata. Writes are
+// bounded per city pass so a large upgrade backlog cannot monopolize a
+// reconciler tick. Each city owns its rotating start offset, preventing either
+// a persistently bad row or another CityRuntime in the same supervisor from
+// starving later scopes. Deferred or failed cross-scope route repairs are
+// suppressed from this tick's demand snapshot and retried on later ticks;
+// marker-only cleanup leaves an already-canonical route eligible for demand.
+func repairControlDispatcherRoutesForStoreScope(
+	repairDomain string,
+	cfg *config.City,
+	workBeads []beads.Bead,
+	workStores []beads.Store,
+	workStoreRefs []string,
+	stderr io.Writer,
+) {
+	if cfg == nil || len(workBeads) == 0 {
+		return
+	}
+	if len(workBeads) != len(workStores) || len(workBeads) != len(workStoreRefs) {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "repairControlDispatcherRoutesForStoreScope: index-aligned input mismatch beads=%d stores=%d refs=%d\n", len(workBeads), len(workStores), len(workStoreRefs)) //nolint:errcheck
+		}
+		suppressControlDispatcherRoutes(workBeads)
+		return
+	}
+	repair := newControlDispatcherRouteRepair(cfg, stderr)
+	cursor := controlDispatcherRouteRepairCursorForDomain(repairDomain)
+	start := int((cursor.Add(controlDispatcherRouteRepairLimitPerTick) - controlDispatcherRouteRepairLimitPerTick) % uint64(len(workBeads)))
+	for offset := range workBeads {
+		i := (start + offset) % len(workBeads)
+		repair.repairBead(&workBeads[i], workStores[i], workStoreRefs[i])
+	}
+}
+
+// controlDispatcherRouteLookup memoizes whether a store scope has a configured
+// control-dispatcher and, if so, its qualified route.
+type controlDispatcherRouteLookup struct {
+	route string
+	ok    bool
+}
+
+// controlDispatcherRouteRepair carries the per-pass state for a bounded
+// cross-scope control-route repair sweep: per-scope route lookups are cached, a
+// store scope with no configured dispatcher is reported once, and the remaining
+// durable-write budget is tracked so a large upgrade backlog cannot monopolize a
+// reconciler tick.
+type controlDispatcherRouteRepair struct {
+	cfg                  *config.City
+	routeByScope         map[string]controlDispatcherRouteLookup
+	reportedMissingScope map[string]bool
+	writesRemaining      int
+	stderr               io.Writer
+}
+
+func newControlDispatcherRouteRepair(cfg *config.City, stderr io.Writer) *controlDispatcherRouteRepair {
+	return &controlDispatcherRouteRepair{
+		cfg:                  cfg,
+		routeByScope:         make(map[string]controlDispatcherRouteLookup),
+		reportedMissingScope: make(map[string]bool),
+		writesRemaining:      controlDispatcherRouteRepairLimitPerTick,
+		stderr:               stderr,
+	}
+}
+
+// repairBead realigns one control bead's persisted route with the dispatcher
+// that owns its store scope, clearing any stale fallback marker in the same
+// bounded write. Non-control, unscoped, and already-canonical beads are left
+// untouched. Store ownership, not the current route, selects the dispatcher: an
+// unscoped row cannot be repaired safely because #3765 itself stamped a valid
+// city route onto rig-owned controls, so gc.routed_to is not ownership evidence.
+// Graph v2 stamped gc.root_store_ref before that regression, so malformed/older
+// rows are left untouched instead of guessing a store.
+func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.Store, storeRef string) {
+	if !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
+		return
+	}
+	if _, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey]); !scoped {
+		return
+	}
+	route, ok := r.desiredRoute(bead, storeRef)
+	if !ok {
+		return
+	}
+	current := strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey])
+	needsRouteRepair := current != route
+	clearFallback := strings.TrimSpace(bead.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey]) != ""
+	if !needsRouteRepair && !clearFallback {
+		return
+	}
+	r.persist(bead, store, current, route, needsRouteRepair, clearFallback)
+}
+
+// desiredRoute returns the configured control-dispatcher route for the bead's
+// store scope, caching lookups per rig context. When no dispatcher is
+// configured it reports the gap once per scope and suppresses the bead's
+// cross-scope route from this tick's demand snapshot so it cannot create phantom
+// demand for a dispatcher that cannot read the store; the durable route is left
+// in place for operator diagnosis and a later config repair.
+func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef string) (string, bool) {
+	rigContext := controlDispatcherRigContextForStoreRef(storeRef)
+	lookup, cached := r.routeByScope[rigContext]
+	if !cached {
+		lookup.route, lookup.ok = configuredControlDispatcherRouteForScope(r.cfg, rigContext)
+		r.routeByScope[rigContext] = lookup
+	}
+	if lookup.ok {
+		return lookup.route, true
+	}
+	if !r.reportedMissingScope[rigContext] {
+		if r.stderr != nil {
+			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its store scope\n", bead.ID, controlDispatcherStoreRefLabel(storeRef)) //nolint:errcheck
+		}
+		r.reportedMissingScope[rigContext] = true
+	}
+	delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
+	return "", false
+}
+
+// persist durably rewrites one control bead's route and/or clears its fallback
+// marker within the per-pass write budget. The budget is consumed the moment a
+// repair is attempted, so a missing store or a failed write still spends a slot
+// and the rotating cursor gives later beads a turn on the next tick. When the
+// repair cannot be persisted this tick the pending route change is suppressed
+// from the demand snapshot and retried later while the durable route is
+// preserved.
+func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
+	if r.writesRemaining <= 0 {
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	r.writesRemaining--
+	if store == nil {
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	metadata := make(map[string]string, 2)
+	if needsRouteRepair {
+		metadata[beadmeta.RoutedToMetadataKey] = route
+	}
+	if clearFallback {
+		// #3463 stamped this marker together with the cross-store fallback. Clear
+		// its semantic value in the same bounded migration write, even when
+		// another recovery path already repaired the route itself.
+		metadata[beadmeta.ControlDispatcherFallbackMetadataKey] = ""
+	}
+	if err := store.Update(bead.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+		if r.stderr != nil {
+			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s route %q -> %q: %v\n", bead.ID, current, route, err) //nolint:errcheck
+		}
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	applyRouteRepairInMemory(bead, route, needsRouteRepair, clearFallback)
+}
+
+// applyRouteRepairInMemory mirrors a persisted route repair onto the in-memory
+// bead snapshot so this tick's demand calculation sees the canonical route. The
+// fallback marker is deleted from the snapshot rather than blanked, matching the
+// durable write's cleared value.
+func applyRouteRepairInMemory(bead *beads.Bead, route string, needsRouteRepair, clearFallback bool) {
+	if bead.Metadata == nil {
+		bead.Metadata = make(map[string]string)
+	}
+	if needsRouteRepair {
+		bead.Metadata[beadmeta.RoutedToMetadataKey] = route
+	}
+	if clearFallback {
+		delete(bead.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
+	}
+}
+
+// deferRouteRepair suppresses an un-persisted route change from this tick's
+// demand snapshot, leaving the durable route untouched for a later retry. A
+// fallback-only cleanup carries no pending route change and stays eligible for
+// demand.
+func deferRouteRepair(bead *beads.Bead, needsRouteRepair bool) {
+	if needsRouteRepair {
+		delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
+	}
+}
+
+func suppressControlDispatcherRoutes(workBeads []beads.Bead) {
+	for i := range workBeads {
+		if beadmeta.IsControlKind(strings.TrimSpace(workBeads[i].Metadata[beadmeta.KindMetadataKey])) {
+			delete(workBeads[i].Metadata, beadmeta.RoutedToMetadataKey)
+		}
+	}
+}
+
+func configuredControlDispatcherRouteForScope(cfg *config.City, rigContext string) (string, bool) {
+	if dispatcher, ok := config.ControlDispatcherForScope(cfg, rigContext); ok {
+		return dispatcher.QualifiedName(), true
+	}
+	return "", false
+}
+
+func controlDispatcherRigContextForStoreRef(storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
+		return ""
+	}
+	return strings.TrimPrefix(storeRef, "rig:")
+}
+
+func controlDispatcherStoreRefLabel(storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
+		return "the city store"
+	}
+	return fmt.Sprintf("rig store %q", controlDispatcherRigContextForStoreRef(storeRef))
 }
 
 func selectOrCreateDependencyPoolSessionBead(
