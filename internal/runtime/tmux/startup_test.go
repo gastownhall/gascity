@@ -1632,6 +1632,64 @@ func TestDoStartSession_PreStartFailureIsFatal(t *testing.T) {
 	assertCallSequence(t, ops, []string{"runSetupCommand"})
 }
 
+func TestDoRelaunchSession_PreStartRunsBeforeRespawn(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:  "claude",
+		WorkDir:  "/proj",
+		PreStart: []string{"setup-worktree"},
+	}
+
+	err := doRelaunchSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// pre_start runs after the alive-check (hasSession) and before respawn.
+	methods := ops.callMethods()
+	if len(methods) < 3 || methods[0] != "hasSession" || methods[1] != "runSetupCommand" || methods[2] != "respawnAgent" {
+		t.Fatalf("call prefix = %v, want [hasSession runSetupCommand respawnAgent ...]", methods)
+	}
+
+	pre := ops.calls[1]
+	if pre.command != "setup-worktree" {
+		t.Errorf("pre_start command = %q, want %q", pre.command, "setup-worktree")
+	}
+	if pre.timeout != DefaultConfig().SetupTimeout {
+		t.Errorf("pre_start timeout = %v, want %v", pre.timeout, DefaultConfig().SetupTimeout)
+	}
+}
+
+func TestDoRelaunchSession_PreStartFailureIsFatal(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult:   true,
+		runSetupCommandErr: errors.New("context canceled"),
+	}
+
+	cfg := runtime.Config{
+		Command:  "claude",
+		WorkDir:  "/proj",
+		PreStart: []string{"setup-worktree"},
+	}
+
+	err := doRelaunchSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "relaunch: running pre_start") {
+		t.Fatalf("error = %q, want relaunch: running pre_start", err)
+	}
+
+	// respawnAgent must never run when pre_start fails.
+	if containsMethod(ops.callMethods(), "respawnAgent") {
+		t.Errorf("respawnAgent was called; want it skipped on pre_start failure: %v", ops.callMethods())
+	}
+	assertCallSequence(t, ops, []string{"hasSession", "runSetupCommand"})
+}
+
 func TestRunSetupCommandIncludesStderrOnFailure(t *testing.T) {
 	ops := &tmuxStartOps{tm: &Tmux{}}
 
