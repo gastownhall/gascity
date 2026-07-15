@@ -798,6 +798,47 @@ func TestHandleSessionListPagination(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListEnrichesOnlyRequestedPage(t *testing.T) {
+	fs := newSessionFakeState(t)
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S2")
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S3")
+	counting := &getCountingStore{Store: fs.cityBeadStore}
+	fs.cityBeadStore = counting
+	fs.sp.Calls = nil
+
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?limit=1&peek=true"), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Total != 3 {
+		t.Fatalf("items/total = %d/%d, want 1/3", len(resp.Items), resp.Total)
+	}
+	peekCalls := 0
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Peek" {
+			peekCalls++
+		}
+	}
+	if peekCalls != 1 {
+		t.Fatalf("Peek calls = %d, want 1 for the requested page", peekCalls)
+	}
+	if got := counting.gets.Load(); got != 0 {
+		t.Fatalf("store.Get calls = %d, want 0 for the Huma session-list read model", got)
+	}
+}
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -916,6 +957,141 @@ func newHermeticCodexSessionSearchPath(t *testing.T) string {
 	return t.TempDir()
 }
 
+const codexTestContextWindow = 258_400
+
+// writeCanonicalCodexTelemetryRollout writes the three real Codex rollout
+// records needed by session telemetry: session_meta identifies the rollout,
+// turn_context carries the model, and event_msg/token_count carries the latest
+// prompt usage and provider-reported context window. Codex input_tokens already
+// includes cached_input_tokens, so cached tokens are deliberately non-zero to
+// catch callers that incorrectly add or subtract them when computing context
+// occupancy.
+func writeCanonicalCodexTelemetryRollout(t *testing.T, root string, ts time.Time, sessionKey, workDir, model string, inputTokens, cachedInputTokens int) {
+	t.Helper()
+
+	local := ts.In(time.Local)
+	dir := filepath.Join(root, local.Format("2006"), local.Format("01"), local.Format("02"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll Codex rollout dir: %v", err)
+	}
+	path := filepath.Join(dir, "rollout-"+local.Format("2006-01-02T15-04-05")+"-"+sessionKey+".jsonl")
+	outputTokens := 400
+	reasoningTokens := 100
+	lastTotalTokens := inputTokens + outputTokens
+	// Keep cumulative usage far above the current request so the assertions
+	// catch code that mistakes lifetime spend for current context occupancy.
+	cumulativeInputTokens := inputTokens + 600_000
+	cumulativeCachedInputTokens := cachedInputTokens + 300_000
+	cumulativeOutputTokens := outputTokens + 25_000
+	cumulativeTotalTokens := cumulativeInputTokens + cumulativeOutputTokens
+	lines := []string{
+		fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":%q,"timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.121.0","source":"cli","model_provider":"openai"}}`, ts.UTC().Format(time.RFC3339Nano), sessionKey, ts.UTC().Format(time.RFC3339Nano), workDir),
+		fmt.Sprintf(`{"timestamp":%q,"type":"turn_context","payload":{"turn_id":"019d9845-45f6-70d2-86e8-53d8a44a830f","cwd":%q,"current_date":%q,"timezone":"Etc/UTC","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"model":%q,"personality":"pragmatic"}}`, ts.Add(100*time.Millisecond).UTC().Format(time.RFC3339Nano), workDir, ts.Format("2006-01-02"), model),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d,"reasoning_output_tokens":%d,"total_tokens":%d},"last_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d,"reasoning_output_tokens":%d,"total_tokens":%d},"model_context_window":%d},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1776394093},"secondary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1776980893},"credits":null,"plan_type":"pro"}}}`, ts.Add(200*time.Millisecond).UTC().Format(time.RFC3339Nano), cumulativeInputTokens, cumulativeCachedInputTokens, cumulativeOutputTokens, reasoningTokens, cumulativeTotalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningTokens, lastTotalTokens, codexTestContextWindow),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile Codex rollout: %v", err)
+	}
+}
+
+func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := newHermeticCodexSessionSearchPath(t)
+	workDir := t.TempDir()
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+
+	type wantTelemetry struct {
+		info       session.Info
+		sessionKey string
+		model      string
+		pct        int
+	}
+	wants := []wantTelemetry{
+		{sessionKey: "019e9966-aaaa-7000-8000-26a2dd7e15b3", model: "gpt-5.4", pct: 10},
+		{sessionKey: "019e9966-bbbb-7000-8000-26a2dd7e15b3", model: "gpt-5.5", pct: 50},
+	}
+	inputTokens := []int{25_840, 129_200}
+	cachedInputTokens := []int{5_840, 29_200}
+	now := time.Now()
+	for i := range wants {
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+			Template: "myrig/worker",
+			Title:    fmt.Sprintf("Codex Chat %d", i+1),
+			Command:  "codex",
+			WorkDir:  workDir,
+			// The concrete configured name need not contain "codex"; the
+			// persisted provider_kind is the canonical transcript family.
+			Provider: "remote-openai",
+			Env:      nil,
+			Resume:   session.ProviderResume{},
+			Hints:    runtime.Config{},
+			ExtraMeta: map[string]string{
+				"session_origin": "manual",
+				"provider_kind":  "codex",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create Codex session %d: %v", i+1, err)
+		}
+		if err := mgr.PersistSessionKey(info.ID, wants[i].sessionKey); err != nil {
+			t.Fatalf("PersistSessionKey(%s): %v", info.ID, err)
+		}
+		wants[i].info = info
+		writeCanonicalCodexTelemetryRollout(t, searchBase, now, wants[i].sessionKey, workDir, wants[i].model, inputTokens[i], cachedInputTokens[i])
+	}
+
+	// Wrap only after all session setup so any Get call below belongs to the
+	// session-list read path under test, not fixture creation or key capture.
+	counting := &getCountingStore{Store: fs.cityBeadStore}
+	fs.cityBeadStore = counting
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions?template=myrig%2Fworker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != len(wants) {
+		t.Fatalf("got %d items, want %d: %#v", len(resp.Items), len(wants), resp.Items)
+	}
+	byID := make(map[string]sessionResponse, len(resp.Items))
+	for _, item := range resp.Items {
+		byID[item.ID] = item
+	}
+	for _, want := range wants {
+		got, ok := byID[want.info.ID]
+		if !ok {
+			t.Errorf("missing session %s in list response", want.info.ID)
+			continue
+		}
+		if !got.Running {
+			t.Errorf("session %s Running = false, want true", want.info.ID)
+		}
+		if got.Model != want.model {
+			t.Errorf("session %s Model = %q, want %q", want.info.ID, got.Model, want.model)
+		}
+		if got.ContextPct == nil || *got.ContextPct != want.pct {
+			t.Errorf("session %s ContextPct = %v, want %d", want.info.ID, got.ContextPct, want.pct)
+		}
+		if got.ContextWindow == nil || *got.ContextWindow != codexTestContextWindow {
+			t.Errorf("session %s ContextWindow = %v, want %d", want.info.ID, got.ContextWindow, codexTestContextWindow)
+		}
+	}
+	if got := counting.gets.Load(); got != 0 {
+		t.Fatalf("store.Get calls = %d, want 0 for keyed Codex session-list telemetry", got)
+	}
+}
+
 func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := newHermeticCodexSessionSearchPath(t)
@@ -933,17 +1109,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 		t.Fatalf("SessionKey = %q, want empty for codex provider without SessionIDFlag", info.SessionKey)
 	}
 
-	codexDir := filepath.Join(searchBase, "2026", "04", "18")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	codexPayload := strings.Join([]string{
-		fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir),
-		`{"type":"assistant","message":{"model":"gpt-5.5","usage":{"input_tokens":1000}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), []byte(codexPayload), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	writeCanonicalCodexTelemetryRollout(t, searchBase, time.Now(), "019e9966-cccc-7000-8000-26a2dd7e15b3", workDir, "gpt-5.5", 25_840, 5_840)
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/sessions?template=myrig%2Fworker"), nil)
 	rec := httptest.NewRecorder()
@@ -961,8 +1127,8 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	if len(resp.Items) != 1 || resp.Items[0].ID != info.ID {
 		t.Fatalf("items = %#v, want session %s", resp.Items, info.ID)
 	}
-	if resp.Items[0].Model != "" || resp.Items[0].ContextPct != nil {
-		t.Fatalf("session list used workdir-only Codex transcript discovery: model=%q context=%v", resp.Items[0].Model, resp.Items[0].ContextPct)
+	if got := resp.Items[0]; got.Model != "" || got.ContextPct != nil || got.ContextWindow != nil || got.Activity != "" {
+		t.Fatalf("session list used foreign workdir-only Codex telemetry: model=%q context_pct=%v context_window=%v activity=%q", got.Model, got.ContextPct, got.ContextWindow, got.Activity)
 	}
 }
 
@@ -980,17 +1146,7 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 		t.Fatalf("Create: %v", err)
 	}
 
-	codexDir := filepath.Join(searchBase, "2026", "04", "18")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	codexPayload := strings.Join([]string{
-		fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir),
-		`{"type":"assistant","message":{"model":"gpt-5.5","usage":{"input_tokens":1000}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), []byte(codexPayload), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	writeCanonicalCodexTelemetryRollout(t, searchBase, time.Now(), "019e9966-dddd-7000-8000-26a2dd7e15b3", workDir, "gpt-5.5", 25_840, 5_840)
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
 	rec := httptest.NewRecorder()
@@ -1008,6 +1164,12 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	}
 	if resp.Model != "gpt-5.5" {
 		t.Fatalf("model = %q, want gpt-5.5", resp.Model)
+	}
+	if resp.ContextPct == nil || *resp.ContextPct != 10 {
+		t.Fatalf("context_pct = %v, want 10", resp.ContextPct)
+	}
+	if resp.ContextWindow == nil || *resp.ContextWindow != codexTestContextWindow {
+		t.Fatalf("context_window = %v, want %d", resp.ContextWindow, codexTestContextWindow)
 	}
 }
 

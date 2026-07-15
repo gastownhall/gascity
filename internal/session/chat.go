@@ -1072,40 +1072,5 @@ func (m *Manager) KeyedTranscriptPath(id string, searchPaths []string) (string, 
 	if err != nil {
 		return "", err
 	}
-	workDir := b.Metadata["work_dir"]
-	if workDir == "" {
-		return "", nil
-	}
-	provider := strings.TrimSpace(b.Metadata["provider_kind"])
-	if provider == "" {
-		provider = strings.TrimSpace(b.Metadata["provider"])
-	}
-	if len(searchPaths) == 0 {
-		searchPaths = sessionlog.DefaultSearchPaths()
-	}
-	sessionKey := strings.TrimSpace(b.Metadata["session_key"])
-	// Codex is resolved here, before the generic keyed discovery below.
-	// workertranscript.DiscoverKeyedPath resolves codex with the newest-first,
-	// no-window resolver (FindCodexSessionFileByIDNoWindow), which is correct for
-	// history rendering but would silently mis-attribute a copied or stale
-	// duplicate rollout (same session uuid + workdir, e.g. an archived copy) on
-	// this 1:1 sidecar path by taking the newest suffix match. Sidecar
-	// attribution must refuse ambiguity, so codex uses the window-bounded,
-	// ambiguity-refusing identity lookup instead: a keyed miss, an ambiguous
-	// in-window match, or a duplicate outside the window returns "" with NO
-	// newest-wins fallback rather than a misattribution. The [CreatedAt, anchor]
-	// window bounds the scan; the anchor is the latest wake, falling back to
-	// bead creation. The session_key is the rollout uuid, captured by the
-	// SessionStart hook, exactly as invocation telemetry uses it.
-	if sessionKey != "" && sessionlog.ProviderFamily(provider) == "codex" {
-		anchor := b.CreatedAt
-		if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(b.Metadata["last_woke_at"])); err == nil {
-			anchor = woke
-		}
-		return sessionlog.FindCodexSessionFileByID(searchPaths, workDir, sessionKey, b.CreatedAt, anchor), nil
-	}
-	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey); path != "" {
-		return path, nil
-	}
-	return "", nil
+	return ResolveKeyedTranscriptPath(infoFromPersistedBead(b), searchPaths), nil
 }
