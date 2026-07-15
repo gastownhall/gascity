@@ -202,6 +202,17 @@ resource_owner = "the six isolated Make invocations are confined to TestProvider
 migration_target = "P0.1"
 expires = "2026-10-01"
 
+# A reviewed-hermetic-body row is narrower than a Small test declaration. It
+# proves that the exact untagged test body and statically reachable
+# receiverless same-package helpers contain none of the cataloged resources.
+# Package-level setup still determines the effective runnable size.
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestPrepareWaitWakeState_ResolvesRigDependencyBeads"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
 # Small-debt rows apply the exact Medium filter while the source-debt rows
 # above retain the raw anti-growth census.
 [[small_debt]]

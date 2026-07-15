@@ -22,6 +22,24 @@ explicit policy change that requires the same staged-diff council review as
 other test-infrastructure changes. The guard makes ordinary drift visible; it
 does not claim that self-modifying source can be cryptographically forbidden.
 
+`[[reviewed_hermetic_body]]` rows record a narrower fact than a Small-test
+classification: the exact untagged top-level test body and every statically
+resolved receiverless helper in the same package contain none of the resource
+identities cataloged below. A row is exact, code-owned, and stale-checked; it
+cannot use a wildcard, silently move to another test, or claim an effective
+Small size while package setup remains Medium. The checked call graph follows
+direct helper calls and references used as local function aliases across Go
+files in the same package, and terminates safely on cycles.
+
+This is intentionally not a universal hermeticity proof. Cross-package calls,
+method and interface dispatch, package-level callback indirection, and
+resources absent from the catalog remain manual-review boundaries. In
+particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` has a reviewed
+hermetic body but still runs as Medium because `cmd/gc` owns a process-mutating
+`TestMain`. `TestCmdSessionWait_AllowsRigDependencyBeads` remains the singular
+real managed-provider composition proof; the body review is not a reason to
+remove that boundary test.
+
 The canonical identity is package directory plus package clause plus top-level
 `Test`, `Benchmark`, `Fuzz`, or `TestMain` name. Nested function literals and
 subtests retain that top-level lexical owner. Methods, wrong signatures, and
@@ -123,6 +141,10 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | subprocess: 396 calls / 106 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+
+| Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
+| --- | --- | --- | --- |
+| `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
 
 ## Three tiers, clear boundaries
