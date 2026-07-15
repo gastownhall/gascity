@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -40,6 +41,40 @@ type waitSetStateResult struct {
 	ReadyWaitID string
 	Retried     bool
 	RetriedFrom string
+}
+
+type waitDependencyReader interface {
+	Get(string) (beads.Bead, error)
+}
+
+type waitDependencyReaderFunc func(string) (beads.Bead, error)
+
+func (f waitDependencyReaderFunc) Get(id string) (beads.Bead, error) {
+	return f(id)
+}
+
+type waitDependencyStoreSet []beads.Store
+
+func (s waitDependencyStoreSet) Get(id string) (beads.Bead, error) {
+	return storeref.Resolve(id, []beads.Store(s))
+}
+
+func newWaitDependencyStoreSet(cityStore beads.Store, rigStores map[string]beads.Store) waitDependencyStoreSet {
+	stores := make(waitDependencyStoreSet, 0, 1+len(rigStores))
+	if cityStore != nil {
+		stores = append(stores, cityStore)
+	}
+	rigNames := make([]string, 0, len(rigStores))
+	for name := range rigStores {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		if store := rigStores[name]; store != nil {
+			stores = append(stores, store)
+		}
+	}
+	return stores
 }
 
 func newWaitCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -845,10 +880,16 @@ func depsWaitReady(store beads.Store, wait sessionpkg.WaitInfo) bool {
 }
 
 func depsWaitReadyDetailed(store beads.Store, wait sessionpkg.WaitInfo) (bool, error) {
-	return depsWaitReadyDetailedForCity("", store, wait)
+	return depsWaitReadyDetailedFrom(store, wait)
 }
 
 func depsWaitReadyDetailedForCity(cityPath string, store beads.Store, wait sessionpkg.WaitInfo) (bool, error) {
+	return depsWaitReadyDetailedFrom(waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
+		return loadWaitDependencyBead(cityPath, store, depID)
+	}), wait)
+}
+
+func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpkg.WaitInfo) (bool, error) {
 	depIDs := wait.DepIDs
 	if len(depIDs) == 0 {
 		return false, nil
@@ -858,7 +899,7 @@ func depsWaitReadyDetailedForCity(cityPath string, store beads.Store, wait sessi
 	foundAny := false
 	var missingErr error
 	for _, depID := range depIDs {
-		dep, err := loadWaitDependencyBead(cityPath, store, depID)
+		dep, err := dependencies.Get(depID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				if mode != "any" {
@@ -941,10 +982,13 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return prepareWaitWakeStateForCityWithSnapshot(cityPath, cliSessionFrontDoor(store, cfg, cityPath), store, beads.NudgesStore{Store: store}, now, nil)
+	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
+		return loadWaitDependencyBead(cityPath, store, depID)
+	})
+	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, beads.NudgesStore{Store: store}, now, nil)
 }
 
-func prepareWaitWakeStateForCityWithSnapshot(cityPath string, sessFront *sessionpkg.Store, workStore beads.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1029,8 +1073,9 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, sessFront *session
 		if wait.Kind != "deps" {
 			continue
 		}
-		// Dependency beads are WORK class — read them from the work store.
-		ready, depErr := depsWaitReadyDetailedForCity(cityPath, workStore, wait)
+		// Dependency beads are WORK class and may live in a different scope
+		// from the session/wait coordination store.
+		ready, depErr := depsWaitReadyDetailedFrom(dependencies, wait)
 		if depErr != nil {
 			if errors.Is(depErr, beads.ErrNotFound) {
 				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {

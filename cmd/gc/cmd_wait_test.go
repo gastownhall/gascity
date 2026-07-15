@@ -39,6 +39,25 @@ type waitGetSpyStore struct {
 	getIDs []string
 }
 
+type waitPrefixedStore struct {
+	beads.Store
+	prefix string
+}
+
+func (s waitPrefixedStore) IDPrefix() string { return s.prefix }
+
+type waitDependencyGetErrorStore struct {
+	beads.Store
+	prefix string
+	err    error
+}
+
+func (s waitDependencyGetErrorStore) IDPrefix() string { return s.prefix }
+
+func (s waitDependencyGetErrorStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
+
 type waitListQueryCaptureStore struct {
 	beads.Store
 	queries []beads.ListQuery
@@ -2434,77 +2453,125 @@ func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
 }
 
 func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	hardErr := errors.New("rig store unavailable")
 
-	cityStore, err := openCityStoreAt(cityPath)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	rigStore, err := openStoreAtForCity(rigPath, cityPath)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
-	}
-	sessionBead, err := cityStore.Create(beads.Bead{
-		Title:  "worker session",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       "worker",
-			"continuation_epoch": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
-	}
-	dep, err := rigStore.Create(beads.Bead{Title: "rig dep"})
-	if err != nil {
-		t.Fatalf("create rig dep bead: %v", err)
-	}
-	wait, err := cityStore.Create(beads.Bead{
-		Title:  "wait:worker session",
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
-		Metadata: map[string]string{
-			"session_id":       sessionBead.ID,
-			"session_name":     "worker",
-			"kind":             "deps",
-			"state":            waitStatePending,
-			"dep_ids":          dep.ID,
-			"dep_mode":         "all",
-			"registered_epoch": "1",
-			"delivery_attempt": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create wait bead: %v", err)
-	}
-	if err := rigStore.Close(dep.ID); err != nil {
-		t.Fatalf("close rig dep bead: %v", err)
-	}
-	if got := beadPrefix(nil, dep.ID); got != "fe" {
-		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
-	}
-	cityStore, err = openCityStoreAt(cityPath)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(reload): %v", err)
-	}
+	for _, tc := range []struct {
+		name       string
+		depStatus  string
+		missing    bool
+		readErr    error
+		wantReady  bool
+		wantState  string
+		wantStatus string
+	}{
+		{name: "closed rig dependency becomes ready", depStatus: "closed", wantReady: true, wantState: waitStateReady, wantStatus: "open"},
+		{name: "open rig dependency remains pending", depStatus: "open", wantState: waitStatePending, wantStatus: "open"},
+		{name: "missing rig dependency fails the wait", missing: true, wantState: waitStateFailed, wantStatus: "closed"},
+		{name: "hard rig read error is preserved", readErr: hardErr, wantState: waitStatePending, wantStatus: "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const (
+				sessionID = "gcg-session-1"
+				waitID    = "gcg-wait-1"
+				depID     = "ga-dep-1"
+			)
+			cityStore := waitPrefixedStore{
+				Store: beads.NewMemStoreFrom(2, []beads.Bead{
+					{
+						ID:        sessionID,
+						Title:     "worker session",
+						Type:      sessionBeadType,
+						Status:    "open",
+						Labels:    []string{sessionBeadLabel},
+						CreatedAt: now.Add(-time.Minute),
+						UpdatedAt: now.Add(-time.Minute),
+						Revision:  1,
+						Metadata: map[string]string{
+							"session_name":       "worker",
+							"agent_name":         "worker",
+							"continuation_epoch": "1",
+						},
+					},
+					{
+						ID:        waitID,
+						Title:     "wait:worker session",
+						Type:      waitBeadType,
+						Status:    "open",
+						Labels:    []string{waitBeadLabel, "session:" + sessionID},
+						CreatedAt: now.Add(-time.Minute),
+						UpdatedAt: now.Add(-time.Minute),
+						Revision:  1,
+						Metadata: map[string]string{
+							"session_id":       sessionID,
+							"session_name":     "worker",
+							"kind":             "deps",
+							"state":            waitStatePending,
+							"dep_ids":          depID,
+							"dep_mode":         "all",
+							"registered_epoch": "1",
+							"delivery_attempt": "1",
+						},
+					},
+				}, nil),
+				prefix: "gcg",
+			}
 
-	readyWaitSet, err := prepareWaitWakeStateForCity(cityPath, cityStore, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("prepareWaitWakeStateForCity: %v", err)
-	}
-	if !readyWaitSet[sessionBead.ID] {
-		t.Fatalf("readyWaitSet missing session %s", sessionBead.ID)
-	}
-	updatedWait, err := cityStore.Get(wait.ID)
-	if err != nil {
-		t.Fatalf("store.Get(wait): %v", err)
-	}
-	if got := updatedWait.Metadata["state"]; got != waitStateReady {
-		t.Fatalf("wait state = %q, want %q", got, waitStateReady)
-	}
-	if updatedWait.Metadata["ready_at"] == "" {
-		t.Fatal("ready_at was not recorded")
+			var rigBeads []beads.Bead
+			if !tc.missing {
+				rigBeads = []beads.Bead{{
+					ID:        depID,
+					Title:     "rig dependency",
+					Type:      "task",
+					Status:    tc.depStatus,
+					CreatedAt: now.Add(-time.Minute),
+					UpdatedAt: now.Add(-time.Minute),
+					Revision:  1,
+				}}
+			}
+			var rigStore beads.Store = waitPrefixedStore{
+				Store:  beads.NewMemStoreFrom(len(rigBeads), rigBeads, nil),
+				prefix: "ga",
+			}
+			if tc.readErr != nil {
+				rigStore = waitDependencyGetErrorStore{Store: rigStore, prefix: "ga", err: tc.readErr}
+			}
+
+			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+				sessionFrontDoor(cityStore),
+				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}),
+				beads.NudgesStore{Store: cityStore},
+				now,
+				nil,
+			)
+			if tc.readErr != nil {
+				if !errors.Is(err, tc.readErr) {
+					t.Fatalf("prepareWaitWakeStateWithSnapshot error = %v, want %v", err, tc.readErr)
+				}
+			} else if err != nil {
+				t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+			}
+			if got := readyWaitSet[sessionID]; got != tc.wantReady {
+				t.Fatalf("readyWaitSet[%s] = %v, want %v", sessionID, got, tc.wantReady)
+			}
+
+			updatedWait, getErr := cityStore.Get(waitID)
+			if getErr != nil {
+				t.Fatalf("store.Get(wait): %v", getErr)
+			}
+			if got := updatedWait.Metadata["state"]; got != tc.wantState {
+				t.Fatalf("wait state = %q, want %q", got, tc.wantState)
+			}
+			if updatedWait.Status != tc.wantStatus {
+				t.Fatalf("wait status = %q, want %q", updatedWait.Status, tc.wantStatus)
+			}
+			if tc.wantState == waitStateReady && updatedWait.Metadata["ready_at"] == "" {
+				t.Fatal("ready_at was not recorded")
+			}
+			if tc.wantState == waitStateFailed && updatedWait.Metadata["last_error"] == "" {
+				t.Fatal("last_error was not recorded")
+			}
+		})
 	}
 }
 
