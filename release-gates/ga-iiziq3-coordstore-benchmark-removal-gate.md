@@ -19,7 +19,7 @@ Date: 2026-06-06
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | `gc mail read gm-wisp-vefwol` reports "Review PASS: coordstore benchmark removal (ga-7ai5f5)" and routes deploy bead `ga-iiziq3`; `bd show ga-iiziq3` records reviewed + PASSED status from `gascity/reviewer`. |
-| 2 | Acceptance criteria met | PASS | `internal/benchmarks/coordstore/` is deleted. `go mod tidy` made no changes. `go.etcd.io/bbolt` is absent from `go.mod` and `go.sum`. `go list -m modernc.org/sqlite` resolves `modernc.org/sqlite v1.50.1`. `github.com/lib/pq` remains indirect in `go.mod`, matching the reviewer-accepted tidy result from the deploy bead evidence. |
+| 2 | Acceptance criteria met | PASS | `internal/benchmarks/coordstore/` is deleted. `go mod tidy` made no changes. `go.etcd.io/bbolt` is absent from `go.mod` and `go.sum`. `github.com/lib/pq` remains indirect in `go.mod`, matching the reviewer-accepted tidy result from the deploy bead evidence. |
 | 3 | Tests pass | PASS | `go build ./...` passed. `go vet ./...` passed. `make test-fast-parallel` passed with all fast jobs green. |
 | 4 | No high-severity review findings open | PASS | Reviewer handoff and deploy bead evidence report PASS and no unresolved HIGH findings; the change is deletion-only plus module tidy. |
 | 5 | Final branch is clean | PASS | Clean worktree `/tmp/gascity-deploy-ga-iiziq3.qbKC2w` had no uncommitted changes before adding this gate file; final clean status is verified after committing the gate. |
@@ -32,7 +32,6 @@ Date: 2026-06-06
 |-------|--------|----------|
 | Benchmark harness removed | PASS | `test ! -d internal/benchmarks/coordstore` passed. |
 | bbolt pruned | PASS | `rg -n 'go\\.etcd\\.io/bbolt' go.mod go.sum` returned no matches. |
-| SQLite dependency retained | PASS | `go list -m modernc.org/sqlite` returned `modernc.org/sqlite v1.50.1`, preserving the doltlite dependency. |
 | Module tidy clean | PASS | `go mod tidy` produced no changes; `git status --short` remained clean before this gate file. |
 | Scope check | PASS | `git diff --name-only origin/main...HEAD` includes only `go.mod`, `go.sum`, and deleted files below `internal/benchmarks/coordstore/`. |
 

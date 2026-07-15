@@ -1,4 +1,4 @@
-//go:build gascity_native_beads
+//go:build gascity_doltlite_lib
 
 package beads
 
@@ -418,11 +418,7 @@ func TestDoltliteReadStoreHandlesNullDescription(t *testing.T) {
 // and UpdatedBefore list filters return only rows whose timestamps precede the
 // cutoff. Timestamps are seeded in the store's canonical SQLite text format
 // (doltliteSQLiteTime) because the before-filters compare with SQLite julianday()
-// and parse with parseTimeString, both of which require ISO-8601 text. Binding a
-// raw time.Time instead delegates formatting to the SQL driver:
-// github.com/mattn/go-sqlite3 emitted ISO text, but modernc.org/sqlite emits
-// time.Time.String() (e.g. "2026-06-01 07:00:00 +0000 UTC"), which julianday()
-// cannot parse — the filter would then drop every row. See ga-p7ipsu.
+// and parse with parseTimeString, both of which require ISO-8601 text.
 func TestDoltliteReadStoreBeforeFiltersRespectCutoff(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
@@ -663,7 +659,7 @@ func TestDoltliteReadStoreMetadataFilterFindsMatchBehindLimit(t *testing.T) {
 }
 
 func TestDoltliteMetadataFilterPredicatesMatchStringValues(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open(doltliteSQLDriverName, ":memory:")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -1349,7 +1345,7 @@ func newTestDoltliteReadStore(t *testing.T) (*DoltliteReadStore, func()) {
 		t.Fatalf("mkdir doltlite dir: %v", err)
 	}
 	dbPath := filepath.Join(dbDir, "hq.db")
-	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=10000")
+	db, err := sql.Open(doltliteSQLDriverName, dbPath+"?_busy_timeout=10000")
 	if err != nil {
 		t.Fatalf("open doltlite fixture db: %v", err)
 	}
@@ -1827,7 +1823,7 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 		t.Fatal("main database path not found")
 	}
 
-	writer, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+	writer, err := sql.Open(doltliteSQLDriverName, "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
 	if err != nil {
 		t.Fatalf("open writable doltlite db: %v", err)
 	}

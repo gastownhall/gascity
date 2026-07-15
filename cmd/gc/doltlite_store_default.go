@@ -1,4 +1,4 @@
-//go:build !gascity_native_beads
+//go:build !gascity_doltlite_lib
 
 package main
 

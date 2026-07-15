@@ -27,8 +27,7 @@ Already true before this branch:
 
 - The bead provider default remains `bd`, and an empty bd backend defaults to
   `dolt` (`cmd/gc/providers.go`, `docs/reference/config.md`).
-- `modernc.org/sqlite` was already present in `origin/main`'s dependency graph;
-  this branch does not add or remove SQLite provider code.
+- This branch does not add or remove SQLite provider code.
 - A default local Linux build is CGO-enabled (`go env CGO_ENABLED` -> `1`) and
   produced a dynamically linked binary with ICU/libc dependencies.
 
@@ -37,7 +36,7 @@ Already true before this branch:
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | `ga-kra05q` is a P0 mayor/operator-directed release handoff. No separate reviewer bead exists for `ga-kra05q`; the bead notes identify `238a56ae2` as the correct change and route it directly to deployer for a clean PR. |
-| 2 | Acceptance criteria met | PASS | Reaper default is false in code/schema/docs/tests. Default bead backend remains `bd` -> `dolt`; no modernc cutover is introduced. Default build verification shows CGO enabled and a dynamically linked binary. |
+| 2 | Acceptance criteria met | PASS | Reaper default is false in code/schema/docs/tests. Default bead backend remains `bd` -> `dolt`; no SQLite provider cutover is introduced. Default build verification shows CGO enabled and a dynamically linked binary. |
 | 3 | Tests pass | PASS | See test log below. |
 | 4 | No high-severity review findings open | PASS | No review bead or HIGH findings found for `ga-kra05q`; branch contains only the six requested files. |
 | 5 | Final branch is clean | PASS | Branch was clean after cherry-pick before adding this gate; final cleanliness verified after committing the gate. |
@@ -62,5 +61,4 @@ Changed: the worktree reaper default is now off.
 
 Already off/default-safe: bead storage defaults still select `bd` with a `dolt`
 backend unless explicitly configured otherwise. This branch does not deploy or
-cut over modernc/SQLite; the existing `modernc.org/sqlite` dependency remains
-unchanged from `origin/main`.
+cut over SQLite provider code.
