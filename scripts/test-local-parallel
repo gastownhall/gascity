@@ -7,7 +7,7 @@ usage() {
 usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 
 Environment:
-  LOCAL_TEST_JOBS        max concurrent jobs (default: detected CPU count)
+  LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
 USAGE
 }
@@ -33,14 +33,7 @@ gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
 # these vars at test-binary init in every covered package.
 unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 
-detect_cpus() {
-  nproc 2>/dev/null ||
-    getconf _NPROCESSORS_ONLN 2>/dev/null ||
-    sysctl -n hw.ncpu 2>/dev/null ||
-    printf '8\n'
-}
-
-local_jobs="${LOCAL_TEST_JOBS:-$(detect_cpus)}"
+local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
 
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then

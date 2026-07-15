@@ -2,13 +2,11 @@
 set -euo pipefail
 
 # Heavy `go test` fan-out runs here, at push time, instead of on every commit
-# (#3628). pre-commit was invoking `make test-fast-parallel`, whose
-# `xargs -P<nproc>` runner compiles ~2.8 GB test binaries per shard — on an
-# N-core host that is N concurrent compiles (~17 GB pressure, load >100,
-# I/O/compile storms and occasional livelocks on WSL) on EVERY commit.
-# GOFLAGS=-p=2 bounds build parallelism within one `go test` but not the outer
-# fan-out. Running the suite at push time fires it far less often, and only when
-# Go sources actually change.
+# (#3628). pre-commit previously invoked `make test-fast-parallel` on every
+# commit. Its outer shard fan-out can compile ~2.8 GiB test binaries per job,
+# so the canonical runner now derives concurrency from both CPU and available
+# memory while preserving an explicit LOCAL_TEST_JOBS override. Running the
+# suite at push time also fires it only when Go sources actually change.
 #
 # git feeds "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref
 # on stdin (see githooks(5)).
@@ -35,7 +33,6 @@ if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
 
-# Bound the local fan-out by default so the suite stays friendly on developer
-# machines; an explicit LOCAL_TEST_JOBS (and CI's Makefile default) still wins.
-export LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"
+# The Makefile and direct sharded runner share scripts/test-local-job-count as
+# their default policy. Do not shadow it here; an explicit override still wins.
 exec make test-fast-parallel

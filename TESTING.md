@@ -195,7 +195,10 @@ make test-integration-shards-parallel
 make test-local-full-parallel
 ```
 
-On large local machines, tune parallelism explicitly:
+By default, the local runners bound concurrency by both detected CPUs and
+available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
+If memory cannot be detected, they use three jobs. An explicit override always
+wins:
 
 ```bash
 LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
