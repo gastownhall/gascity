@@ -401,6 +401,11 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("creating input convoy for %s: %w", target.ID, err)
 	}
+	// Track the member co-resident (no member stores): the convoy and its one
+	// tracked item live in the same store. dispatch.findFinalizeGateConvoyStore
+	// relies on this — a gc.synthetic convoy is resolved without opening the
+	// source-workflow stores, so a cross-store member here would wedge the
+	// finalize gate. Keep synthetic input convoys co-resident.
 	if err := convoycore.TrackItem(store, created.ID, target.ID); err != nil {
 		return beads.Bead{}, fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
 	}

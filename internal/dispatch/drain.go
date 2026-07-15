@@ -1004,6 +1004,12 @@ func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, mem
 	return nil
 }
 
+// trackDrainMember keeps the synthetic drain-unit convoy co-resident with its
+// member: an unresolved (cross-store) member is flagged rather than tracked, and
+// a resolved member is tracked in the convoy's own store with no member stores.
+// findFinalizeGateConvoyStore relies on this co-residence to resolve a
+// gc.synthetic convoy without opening the source-workflow stores; tracking a
+// cross-store member here would wedge the finalize gate.
 func trackDrainMember(store beads.Store, unitConvoyID string, member beads.Bead) error {
 	if convoycore.IsUnresolvedTrackedItem(member) {
 		return store.SetMetadata(unitConvoyID, beadmeta.DrainMemberUnresolvedMetadataKey, "true")

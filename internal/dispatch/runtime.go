@@ -1634,27 +1634,61 @@ func resolveInputConvoyFinalizeGate(store beads.Store, bead beads.Bead, rootID s
 	return state, nil
 }
 
-// findFinalizeGateConvoyStore locates the store holding the input convoy
-// bead: the finalizer's own store first (convoy, issue, and workflow root are
-// co-resident on every single-store deployment), then each source-workflow
-// store when the caller wired the lister. The remaining stores are returned
-// as member-resolution probes so tracked members that live in a different
-// per-class store still materialize. A nil store with nil error means the
-// convoy was not found anywhere.
+// findFinalizeGateConvoyStore locates the store holding the input convoy bead
+// and the extra stores to probe for its tracked members. It resolves a
+// synthetic input convoy without ever opening the source-workflow stores:
+// CreateSingleItemInputConvoy stamps gc.synthetic and tracks its single member
+// in the same store, so a synthetic convoy is co-resident with a co-resident
+// member and needs no cross-store probes. That short-circuit is a correctness
+// guard, not only a cost one: the production lister errors whenever ANY rig
+// store is unavailable, so calling it unconditionally would wedge an
+// otherwise-complete co-resident finalizer on every serve cycle that an
+// unrelated rig is down. A non-synthetic convoy (a pre-existing convoy passed
+// through NormalizeInputConvoy) may track members in a different per-class
+// store, so it still opens the source-workflow stores: as member-resolution
+// probes when the convoy resolves co-resident, or as the search space when it
+// does not. A nil store with nil error means the convoy was not found anywhere.
+//
+// Invariant the synthetic short-circuit depends on: every gc.synthetic convoy
+// producer tracks its member co-resident with the convoy. The two producers
+// today are CreateSingleItemInputConvoy (internal/graphv2/invocation.go) and
+// ensureDrainUnitConvoy/trackDrainMember (drain.go, which flags an unresolved
+// member instead of tracking it cross-store). A synthetic convoy that tracked
+// a cross-store member would be dropped by the nil member-stores returned here
+// and wedge the gate; a producer that does that must gate on more than
+// gc.synthetic, or drop the short-circuit.
 func findFinalizeGateConvoyStore(store beads.Store, convoyID string, opts ProcessOptions) (beads.Store, []beads.Store, error) {
-	probeStores := []beads.Store{store}
-	if opts.SourceWorkflowStores != nil {
-		sourceStores, err := opts.SourceWorkflowStores()
-		if err != nil {
-			return nil, nil, err
+	primaryConvoy, primaryErr := store.Get(convoyID)
+	if primaryErr != nil && !errors.Is(primaryErr, beads.ErrNotFound) {
+		return nil, nil, primaryErr
+	}
+	if primaryErr == nil && strings.TrimSpace(primaryConvoy.Metadata[beadmeta.SyntheticMetadataKey]) == "true" {
+		return store, nil, nil
+	}
+	if opts.SourceWorkflowStores == nil {
+		if primaryErr == nil {
+			return store, nil, nil
 		}
-		for _, candidate := range sourceStores {
-			if candidate.Store != nil {
-				probeStores = append(probeStores, candidate.Store)
-			}
+		return nil, nil, nil
+	}
+	sourceStores, err := opts.SourceWorkflowStores()
+	if err != nil {
+		return nil, nil, err
+	}
+	probeStores := make([]beads.Store, 0, len(sourceStores)+1)
+	probeStores = append(probeStores, store) // primary at index 0, already probed above; a member probe on the not-found path, excluded on the co-resident path
+	for _, candidate := range sourceStores {
+		if candidate.Store != nil {
+			probeStores = append(probeStores, candidate.Store)
 		}
 	}
-	for i, candidate := range probeStores {
+	if primaryErr == nil {
+		// Non-synthetic convoy resolved co-resident; hand back the other stores
+		// as member-resolution probes for any cross-store tracked member.
+		return store, probeStores[1:], nil
+	}
+	for i := 1; i < len(probeStores); i++ {
+		candidate := probeStores[i]
 		if _, err := candidate.Get(convoyID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue

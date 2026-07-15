@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -10064,6 +10065,151 @@ func newGatedFinalizeFixture(t *testing.T, store beads.Store, issue beads.Bead) 
 	})
 	mustDepAdd(t, store, finalizer.ID, root.ID, "tracks")
 	return gatedFinalizeFixture{root: root, convoy: convoy, issue: createdIssue, finalizer: finalizer}
+}
+
+// findFinalizeGateConvoyStore resolves a synthetic input convoy without opening
+// the source-workflow stores (CreateSingleItemInputConvoy stamps gc.synthetic
+// and tracks its member co-resident), and still hands the source stores back as
+// member probes for a non-synthetic convoy that may track a cross-store member.
+func TestFindFinalizeGateConvoyStore(t *testing.T) {
+	t.Parallel()
+
+	syntheticConvoy := func(t *testing.T, store beads.Store) beads.Bead {
+		t.Helper()
+		return mustCreateWorkflowBead(t, store, beads.Bead{
+			Title:    "input convoy",
+			Type:     "convoy",
+			Metadata: map[string]string{"gc.synthetic": "true"},
+		})
+	}
+
+	t.Run("synthetic co-resident convoy skips the source-workflow lister", func(t *testing.T) {
+		primary := beads.NewMemStore()
+		convoy := syntheticConvoy(t, primary)
+		opts := ProcessOptions{SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			t.Fatal("SourceWorkflowStores opened for a synthetic co-resident convoy")
+			return nil, nil
+		}}
+		got, members, err := findFinalizeGateConvoyStore(primary, convoy.ID, opts)
+		if err != nil {
+			t.Fatalf("findFinalizeGateConvoyStore: %v", err)
+		}
+		if got != primary || len(members) != 0 {
+			t.Fatalf("got (store=%v, members=%d), want (primary, 0)", got, len(members))
+		}
+	})
+
+	// Regression for the wedge Codex flagged: the production lister errors when
+	// any unrelated rig is unavailable. A synthetic co-resident convoy must
+	// still resolve rather than propagate that error and stall the finalizer.
+	t.Run("synthetic convoy resolves even when the lister errors", func(t *testing.T) {
+		primary := beads.NewMemStore()
+		convoy := syntheticConvoy(t, primary)
+		opts := ProcessOptions{SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return nil, errors.New("rig unavailable")
+		}}
+		got, members, err := findFinalizeGateConvoyStore(primary, convoy.ID, opts)
+		if err != nil {
+			t.Fatalf("findFinalizeGateConvoyStore returned error for a synthetic convoy: %v", err)
+		}
+		if got != primary || len(members) != 0 {
+			t.Fatalf("got (store=%v, members=%d), want (primary, 0)", got, len(members))
+		}
+	})
+
+	// A non-synthetic convoy may track members in another store, so the fix must
+	// hand back the source stores as member probes and the cross-store member
+	// must still resolve terminal through convoy.Members.
+	t.Run("non-synthetic co-resident convoy keeps cross-store member resolution", func(t *testing.T) {
+		primary := beads.NewMemStore()
+		rig := beads.NewMemStore()
+		convoy := mustCreateWorkflowBead(t, primary, beads.Bead{Title: "input convoy", Type: "convoy"})
+		member := mustCreateWorkflowBead(t, rig, beads.Bead{Title: "tracked", Type: "task"})
+		if err := convoycore.TrackItem(primary, convoy.ID, member.ID, rig); err != nil {
+			t.Fatalf("TrackItem: %v", err)
+		}
+		opts := ProcessOptions{SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rig, StoreRef: "rig:test"}}, nil
+		}}
+		got, members, err := findFinalizeGateConvoyStore(primary, convoy.ID, opts)
+		if err != nil {
+			t.Fatalf("findFinalizeGateConvoyStore: %v", err)
+		}
+		if got != primary {
+			t.Fatalf("convoy store = %v, want primary", got)
+		}
+		resolved, err := convoycore.Members(got, convoy.ID, true, members...)
+		if err != nil {
+			t.Fatalf("Members: %v", err)
+		}
+		if len(resolved) != 1 || resolved[0].ID != member.ID {
+			t.Fatalf("resolved members = %+v, want the cross-store member %s", resolved, member.ID)
+		}
+		if resolved[0].Status == "unknown" {
+			t.Fatal("cross-store member unresolved (status unknown); member store was dropped")
+		}
+	})
+
+	t.Run("convoy in a source store resolves with the primary as a member probe", func(t *testing.T) {
+		primary := beads.NewMemStore()
+		source := beads.NewMemStore()
+		convoy := mustCreateWorkflowBead(t, source, beads.Bead{Title: "input convoy", Type: "convoy"})
+		opts := ProcessOptions{SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: source, StoreRef: "rig:test"}}, nil
+		}}
+		got, members, err := findFinalizeGateConvoyStore(primary, convoy.ID, opts)
+		if err != nil {
+			t.Fatalf("findFinalizeGateConvoyStore: %v", err)
+		}
+		if got != source {
+			t.Fatalf("convoy store = %v, want source", got)
+		}
+		foundPrimary := false
+		for _, m := range members {
+			if m == primary {
+				foundPrimary = true
+			}
+		}
+		if !foundPrimary {
+			t.Fatal("primary store missing from member probes")
+		}
+	})
+
+	t.Run("absent convoy returns nil store", func(t *testing.T) {
+		primary := beads.NewMemStore()
+		opts := ProcessOptions{SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: beads.NewMemStore(), StoreRef: "rig:test"}}, nil
+		}}
+		got, _, err := findFinalizeGateConvoyStore(primary, "gc-nope", opts)
+		if err != nil {
+			t.Fatalf("findFinalizeGateConvoyStore: %v", err)
+		}
+		if got != nil {
+			t.Fatal("convoy store non-nil for an absent convoy")
+		}
+	})
+
+	// A hard (non-ErrNotFound) primary-store error propagates immediately and
+	// skips both the synthetic check and the lister: a store that cannot answer
+	// must fail the gate, not silently fall through to a cross-store search.
+	t.Run("hard primary-store error propagates before the lister", func(t *testing.T) {
+		primary := getErrorStore{Store: beads.NewMemStore(), failID: "gc-boom", err: errors.New("store unavailable")}
+		listerCalled := false
+		opts := ProcessOptions{SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			listerCalled = true
+			return nil, nil
+		}}
+		got, _, err := findFinalizeGateConvoyStore(primary, "gc-boom", opts)
+		if err == nil {
+			t.Fatal("expected the hard primary-store error to propagate")
+		}
+		if got != nil {
+			t.Fatal("convoy store should be nil on a hard primary-store error")
+		}
+		if listerCalled {
+			t.Fatal("lister opened despite a hard primary-store error")
+		}
+	})
 }
 
 // The gate: while the tracked issue is open the finalizer is pending and the
