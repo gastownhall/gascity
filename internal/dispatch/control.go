@@ -1755,6 +1755,13 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 	}); err != nil {
 		return err
 	}
+	return verifyClosed(store, beadID)
+}
+
+// verifyClosed re-reads beadID and, if the store did not honor a Status:closed
+// write inline, closes it explicitly. Shared by updateMetadataAndClose and its
+// revision-fenced sibling so both agree on the close-confirmation tail.
+func verifyClosed(store beads.Store, beadID string) error {
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return fmt.Errorf("verifying close of %s: %w", beadID, err)
@@ -1763,6 +1770,109 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 		return nil
 	}
 	return store.Close(beadID)
+}
+
+// fencedCloseMaxAttempts bounds the re-read loop in fencedUpdateMetadataAndClose.
+// Only benign revision churn (e.g. a denormalized is_blocked recompute bumping
+// the row) forces a retry; a concurrent terminal close is resolved by preserve,
+// not retry. A handful of attempts is far more than any real interleave needs.
+const fencedCloseMaxAttempts = 8
+
+// fencedUpdateMetadataAndClose closes beadID and stamps metadata, but refuses to
+// overwrite a DIFFERENT outcome another writer already recorded terminally. It is
+// the revision-fenced sibling of updateMetadataAndClose, used on the shared
+// workflow finalize close path where a concurrent POST /runs/{id}/cancel can
+// close the run root as canceled between the finalizer's outcome read and its
+// close (the cancel-vs-finalize TOCTOU). preserved is true only when a foreign
+// terminal outcome was left intact and the requested overwrite was skipped;
+// callers gate follow-on outcome propagation (e.g. closeSourceBeadChain) on it.
+//
+// Idempotent retry vs foreign preserve: processWorkflowFinalize closes the root
+// before the finalizer specifically so a crash between those two closes retries
+// cleanly. On that retry the root is already closed with the SAME outcome this
+// pass recomputes — that is our own prior write, not a competing one, so it
+// returns preserved=false and the caller still runs its post-close cleanup. Only
+// a recorded outcome that DIFFERS from the requested one (canceled vs pass|fail)
+// is a genuine foreign preserve.
+//
+// Policy: the fence is obtained through beads.ResolveConditionalWriter, the
+// single sanctioned composition point of operator policy (the factory-stamped
+// beads.conditional_writes mode) and per-store capability — the same seam
+// syncControlEpochToAttempt and the drain reservations use. At resolve time,
+// require mode over an incapable store fails closed (propagates the resolve
+// error); off mode (today's default) and auto mode over an incapable store
+// return a nil writer and take the unconditional close, still guarded by the
+// pre-write terminal re-read, which narrows — does not eliminate — the residual
+// race window. A mid-flight ErrConditionalWriteUnsupported latch (capability lost
+// after resolve) is NOT downgraded to an unconditional write here: it propagates
+// as a transient error so the finalizer retries and the next resolve re-applies
+// policy, so require mode is never silently bypassed.
+//
+// The requested outcome is reused verbatim across retries rather than recomputed:
+// the only writer that competes for a workflow root here is run-cancel (resolved
+// by preserve), and the finalize outcome is derived from already-terminal
+// blocker steps, so no reachable interleave changes it.
+func fencedUpdateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) (preserved bool, err error) {
+	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
+	if resolveErr != nil {
+		return false, fmt.Errorf("fenced close of %s: %w", beadID, resolveErr)
+	}
+	requested := strings.TrimSpace(metadata[beadmeta.OutcomeMetadataKey])
+	var lastRevision int64
+	for attempt := 0; attempt < fencedCloseMaxAttempts; attempt++ {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			return false, err
+		}
+		lastRevision = bead.Revision
+		// The preserve/idempotent decision is keyed on gc.outcome, so it only
+		// applies when the caller actually requested one. A caller that closes
+		// with other metadata (requested == "") must never be short-circuited by
+		// an unrelated recorded outcome; it falls through to a normal fenced write.
+		if requested != "" && bead.Status == "closed" {
+			if recorded := strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]); recorded != "" {
+				if recorded != requested {
+					// A different terminal outcome (e.g. a concurrent run-cancel)
+					// already won — preserve it instead of overwriting.
+					return true, nil
+				}
+				// Our own outcome from a crashed prior attempt — idempotent
+				// retry, not a foreign preserve. Report false so the caller still
+				// completes its post-close cleanup (spec sidecars, source chain).
+				return false, nil
+			}
+		}
+		if writer == nil {
+			// off mode, or auto over an incapable store: the pre-write terminal
+			// check above still refuses to overwrite a foreign outcome; this
+			// narrows — does not eliminate — the residual race window.
+			return false, updateMetadataAndClose(store, beadID, metadata)
+		}
+		status := "closed"
+		switch err := writer.UpdateIfMatch(beadID, bead.Revision, beads.UpdateOpts{
+			Status:   &status,
+			Metadata: metadata,
+		}); {
+		case err == nil:
+			return false, verifyClosed(store, beadID)
+		case beads.IsPreconditionFailed(err):
+			continue // revision moved; re-read and re-evaluate
+		default:
+			// Every other error propagates, including a mid-flight
+			// ErrConditionalWriteUnsupported latch: it must NOT fall back to an
+			// unconditional close here, or require mode would be silently
+			// violated. It is classified transient (IsTransientControllerError),
+			// so the finalizer stays open and the next resolve applies policy —
+			// auto degrades to the legacy path, require refuses fail-closed. This
+			// matches the syncControlEpochToAttempt precedent, which likewise
+			// propagates non-precondition CAS errors rather than downgrading.
+			return false, err
+		}
+	}
+	// Persistent revision churn kept us from a clean fenced shot. This is a
+	// level-triggered re-entry class (recognized by IsTransientControllerError),
+	// not a terminal disposition: the finalizer stays open and retries next cycle.
+	return false, &beads.CASRetriesExhaustedError{ID: beadID, Key: beadmeta.OutcomeMetadataKey, Attempts: fencedCloseMaxAttempts, LastRevision: lastRevision}
 }
 
 // Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,

@@ -832,9 +832,10 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// next serve cycle will retry. Source-chain propagation is preflighted first
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
-	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
+	rootOutcomePreserved, err := fencedSetOutcomeAndClose(store, rootID, outcome)
+	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
+			if _, closeErr := fencedSetOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
 				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
 			}
 			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
@@ -844,12 +845,17 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
-	if outcome == beadmeta.OutcomePass {
+	// Skip pass-propagation to parent source beads when a concurrent run-cancel
+	// already recorded the root as terminal: the authoritative run outcome is not
+	// this finalizer's pass, so closing the "Adopt PR"-style parents would leave a
+	// canceled run looking merged. A clean cancel leaves those parents open; the
+	// raced path must match it.
+	if outcome == beadmeta.OutcomePass && !rootOutcomePreserved {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))
 		}
 	}
-	if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
+	if _, err := fencedSetOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err))
 	}
 
@@ -1509,6 +1515,15 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	return updateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
+}
+
+// fencedSetOutcomeAndClose is the revision-fenced sibling of setOutcomeAndClose,
+// used on the shared workflow finalize close path so a concurrent run-cancel that
+// already closed the target as canceled is not overwritten. preserved is true
+// when an existing terminal outcome was left intact. See
+// fencedUpdateMetadataAndClose for the mechanism.
+func fencedSetOutcomeAndClose(store beads.Store, beadID, outcome string) (preserved bool, err error) {
+	return fencedUpdateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
 }
 
 // ReconcileClosedScopeMember re-reads a just-closed bead and delegates to
