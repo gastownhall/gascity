@@ -13,10 +13,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-const summaryLimit = 10
+const (
+	timingArtifactSchema = 1
+	summaryLimit         = 10
+)
 
 type outputFormat uint8
 
@@ -24,6 +28,18 @@ const (
 	formatMarkdown outputFormat = iota
 	formatJSON
 )
+
+type runOptions struct {
+	format          outputFormat
+	roots           []string
+	historyPath     string
+	runEnvelopePath string
+	retainRuns      int
+	formatSet       bool
+	historySet      bool
+	envelopeSet     bool
+	retentionSet    bool
+}
 
 type artifact struct {
 	Schema     int            `json:"schema"`
@@ -59,23 +75,33 @@ type artifactUnit struct {
 // Run loads timing artifacts from args, writes a deterministic Markdown or
 // JSON summary to stdout, and returns a process-style exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
-	format, roots, err := parseRunArgs(args)
+	options, err := parseRunArgs(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "timing summary: %v\n", err)
 		return 2
 	}
-	if len(roots) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: test-timing-summary <artifact-root> [<artifact-root> ...]")
+	if len(options.roots) == 0 {
+		_, _ = fmt.Fprintln(stderr, "usage: test-timing-summary [options] <artifact-root> [<artifact-root> ...]")
 		return 2
 	}
 
-	snapshot, err := BuildSnapshot(roots)
+	var snapshot Snapshot
+	if options.historySet {
+		envelope, decodeErr := decodeRunEnvelope(options.runEnvelopePath)
+		if decodeErr != nil {
+			err = decodeErr
+		} else {
+			snapshot, err = UpdateHistory(options.historyPath, envelope, options.retainRuns, options.roots)
+		}
+	} else {
+		snapshot, err = BuildSnapshot(options.roots)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "timing summary: %v\n", err)
 		return 1
 	}
 
-	if format == formatJSON {
+	if options.format == formatJSON {
 		if err := json.NewEncoder(stdout).Encode(snapshot); err != nil {
 			_, _ = fmt.Fprintf(stderr, "timing summary: write output: %v\n", err)
 			return 1
@@ -89,40 +115,99 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func parseRunArgs(args []string) (outputFormat, []string, error) {
-	format := formatMarkdown
-	roots := make([]string, 0, len(args))
-	formatSet := false
+func parseRunArgs(args []string) (runOptions, error) {
+	options := runOptions{format: formatMarkdown, roots: make([]string, 0, len(args))}
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
-		var value string
-		switch {
-		case argument == "--format":
-			if index+1 >= len(args) {
-				return 0, nil, errors.New("--format requires a value")
-			}
-			index++
-			value = args[index]
-		case strings.HasPrefix(argument, "--format="):
-			value = strings.TrimPrefix(argument, "--format=")
-		default:
-			roots = append(roots, argument)
+		name, value, recognized, consumedNext, err := parseRunFlag(args, index)
+		if err != nil {
+			return runOptions{}, err
+		}
+		if !recognized {
+			options.roots = append(options.roots, argument)
 			continue
 		}
-		if formatSet {
-			return 0, nil, errors.New("--format may be specified only once")
+		if consumedNext {
+			index++
 		}
-		formatSet = true
-		switch value {
-		case "markdown":
-			format = formatMarkdown
-		case "json":
-			format = formatJSON
-		default:
-			return 0, nil, fmt.Errorf("unsupported format %q", value)
+		switch name {
+		case "--format":
+			if options.formatSet {
+				return runOptions{}, errors.New("--format may be specified only once")
+			}
+			options.formatSet = true
+			switch value {
+			case "markdown":
+				options.format = formatMarkdown
+			case "json":
+				options.format = formatJSON
+			default:
+				return runOptions{}, fmt.Errorf("unsupported format %q", value)
+			}
+		case "--update-history":
+			if options.historySet {
+				return runOptions{}, errors.New("--update-history may be specified only once")
+			}
+			options.historySet = true
+			options.historyPath = value
+		case "--run-envelope":
+			if options.envelopeSet {
+				return runOptions{}, errors.New("--run-envelope may be specified only once")
+			}
+			options.envelopeSet = true
+			options.runEnvelopePath = value
+		case "--retain-runs":
+			if options.retentionSet {
+				return runOptions{}, errors.New("--retain-runs may be specified only once")
+			}
+			options.retentionSet = true
+			retainRuns, parseErr := strconv.Atoi(value)
+			if parseErr != nil || retainRuns <= 0 {
+				return runOptions{}, errors.New("--retain-runs must be a positive integer")
+			}
+			options.retainRuns = retainRuns
 		}
 	}
-	return format, roots, nil
+	mutationFlags := 0
+	for _, set := range []bool{options.historySet, options.envelopeSet, options.retentionSet} {
+		if set {
+			mutationFlags++
+		}
+	}
+	if mutationFlags != 0 && mutationFlags != 3 {
+		return runOptions{}, errors.New("--update-history, --run-envelope, and --retain-runs must be specified together")
+	}
+	return options, nil
+}
+
+func parseRunFlag(args []string, index int) (name, value string, recognized, consumedNext bool, err error) {
+	argument := args[index]
+	for _, candidate := range []string{"--format", "--update-history", "--run-envelope", "--retain-runs"} {
+		if argument == candidate {
+			if index+1 >= len(args) || args[index+1] == "" || isRunFlag(args[index+1]) {
+				return "", "", true, false, fmt.Errorf("%s requires a value", candidate)
+			}
+			return candidate, args[index+1], true, true, nil
+		}
+		prefix := candidate + "="
+		if strings.HasPrefix(argument, prefix) {
+			value := strings.TrimPrefix(argument, prefix)
+			if value == "" {
+				return "", "", true, false, fmt.Errorf("%s requires a value", candidate)
+			}
+			return candidate, value, true, false, nil
+		}
+	}
+	return "", "", false, false, nil
+}
+
+func isRunFlag(argument string) bool {
+	for _, candidate := range []string{"--format", "--update-history", "--run-envelope", "--retain-runs"} {
+		if argument == candidate || strings.HasPrefix(argument, candidate+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func loadArtifacts(roots []string) ([]artifact, int, error) {
@@ -203,7 +288,7 @@ func decodeArtifact(path string) (artifact, error) {
 	if envelope.Schema == nil {
 		return artifact{}, fmt.Errorf("validate %s: schema is required", path)
 	}
-	if *envelope.Schema != 1 {
+	if *envelope.Schema != timingArtifactSchema {
 		return artifact{}, fmt.Errorf("validate %s: unsupported schema %d", path, *envelope.Schema)
 	}
 

@@ -330,6 +330,176 @@ func TestRunRejectsInvalidFormatArguments(t *testing.T) {
 	}
 }
 
+func TestRunRequiresMutationArgumentsTogether(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "update history only", args: []string{"--update-history", "history.json", "artifacts"}},
+		{name: "run envelope only", args: []string{"--run-envelope", "run.json", "artifacts"}},
+		{name: "retention only", args: []string{"--retain-runs", "5", "artifacts"}},
+		{name: "missing retention", args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "artifacts"}},
+		{name: "missing run envelope", args: []string{"--update-history", "history.json", "--retain-runs", "5", "artifacts"}},
+		{name: "missing update history", args: []string{"--run-envelope", "run.json", "--retain-runs", "5", "artifacts"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, exitCode := runSummary(tc.args...)
+			if exitCode != 2 || stdout != "" {
+				t.Fatalf("Run(%q) = stdout %q stderr %q exit %d", tc.args, stdout, stderr, exitCode)
+			}
+			for _, want := range []string{"--update-history", "--run-envelope", "--retain-runs", "must be specified together"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("Run(%q) stderr does not contain %q: %s", tc.args, want, stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRejectsRepeatedMutationArguments(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "update history",
+			args: []string{"--update-history", "history.json", "--update-history=other.json", "--run-envelope", "run.json", "--retain-runs", "5", "artifacts"},
+			want: "--update-history may be specified only once",
+		},
+		{
+			name: "run envelope",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--run-envelope=other.json", "--retain-runs", "5", "artifacts"},
+			want: "--run-envelope may be specified only once",
+		},
+		{
+			name: "retention",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs", "5", "--retain-runs=10", "artifacts"},
+			want: "--retain-runs may be specified only once",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, exitCode := runSummary(tc.args...)
+			if exitCode != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("Run(%q) = stdout %q stderr %q exit %d; want stderr containing %q", tc.args, stdout, stderr, exitCode, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidRetainRunsArguments(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing value",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "artifacts", "--retain-runs"},
+			want: "--retain-runs requires a value",
+		},
+		{
+			name: "empty value",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs=", "artifacts"},
+			want: "--retain-runs requires a value",
+		},
+		{
+			name: "zero",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs", "0", "artifacts"},
+			want: "--retain-runs must be a positive integer",
+		},
+		{
+			name: "negative",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs=-1", "artifacts"},
+			want: "--retain-runs must be a positive integer",
+		},
+		{
+			name: "fractional",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs", "1.5", "artifacts"},
+			want: "--retain-runs must be a positive integer",
+		},
+		{
+			name: "non-numeric",
+			args: []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs", "many", "artifacts"},
+			want: "--retain-runs must be a positive integer",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, exitCode := runSummary(tc.args...)
+			if exitCode != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("Run(%q) = stdout %q stderr %q exit %d; want stderr containing %q", tc.args, stdout, stderr, exitCode, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsRecognizedOptionAsSpaceFormValue(t *testing.T) {
+	t.Parallel()
+
+	args := []string{
+		"--update-history", "--format=json",
+		"--run-envelope", "run.json",
+		"--retain-runs", "5",
+		"missing-artifacts",
+	}
+	stdout, stderr, exitCode := runSummary(args...)
+	if exitCode != 2 || stdout != "" || !strings.Contains(stderr, "--update-history requires a value") {
+		t.Fatalf("Run(%q) = stdout %q stderr %q exit %d; want a usage error for an option used as a value", args, stdout, stderr, exitCode)
+	}
+}
+
+func TestRunMutationRequiresArtifactRoot(t *testing.T) {
+	t.Parallel()
+
+	args := []string{"--update-history", "history.json", "--run-envelope", "run.json", "--retain-runs", "5"}
+	stdout, stderr, exitCode := runSummary(args...)
+	if exitCode != 2 || stdout != "" || !strings.Contains(stderr, "usage:") {
+		t.Fatalf("Run(%q) = stdout %q stderr %q exit %d", args, stdout, stderr, exitCode)
+	}
+}
+
+func TestRunUpdatesHistoryFromEnvelopeFile(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	databasePath := filepath.Join(t.TempDir(), "timing-history.json")
+	envelopePath := filepath.Join(t.TempDir(), "run-envelope.json")
+	envelope := historyRunEnvelope("50", "sha-50", "2026-07-15T13:00:00Z")
+	writeArtifact(t, root, "timing.json", historyArtifact(envelope, "shard-a", []timingUnit{{
+		UnitID: "internal/example:TestCLI", Kind: "test",
+		Package: "github.com/gastownhall/gascity/internal/example", Test: "TestCLI",
+		Outcome: "pass", DurationSeconds: 1.25,
+	}}))
+	if err := os.WriteFile(envelopePath, mustJSON(t, envelope), 0o600); err != nil {
+		t.Fatalf("write run envelope: %v", err)
+	}
+
+	stdout, stderr, exitCode := runSummary(
+		"--update-history", databasePath,
+		"--run-envelope="+envelopePath,
+		"--retain-runs", "10",
+		"--format=json",
+		root,
+	)
+	if exitCode != 0 || stderr != "" {
+		t.Fatalf("Run mutation = stdout %q stderr %q exit %d", stdout, stderr, exitCode)
+	}
+	snapshot := decodeHistorySnapshot(t, stdout)
+	unit := findHistoryUnit(t, findHistoryProfile(t, snapshot, 32), "internal/example:TestCLI")
+	if unit.Passes != 1 || historyFloat(t, unit.DurationSecondsP95) != 1.25 {
+		t.Fatalf("mutated snapshot unit = %+v, want one 1.25s pass", unit)
+	}
+	if _, err := os.Stat(databasePath); err != nil {
+		t.Fatalf("history database was not published: %v", err)
+	}
+}
+
 type timingArtifactFixture struct {
 	Schema     int          `json:"schema"`
 	ShardID    string       `json:"shard_id"`

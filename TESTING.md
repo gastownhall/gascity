@@ -274,7 +274,8 @@ SHA of the final successful observation in canonical artifact-identity order;
 schema v1 has no trustworthy timestamp, so this field is deterministic but not
 a claim about chronological recency.
 
-Schema v1 does not record the event, ref, or workflow conclusion, so the tool
+Timing artifact schema v1 does not record the event, ref, or workflow
+conclusion, so the tool
 cannot prove protected-branch provenance. The caller must supply artifacts
 from successful `main` push runs. The JSON snapshot is workflow-neutral input,
 not a protected store or planner decision. An observed p75 with fewer than five
@@ -283,7 +284,38 @@ planner-authoritative. The seven-day artifact retention window is not a
 protected historical timing database, and this one-shot builder does not prune
 observations. Renamed tests remain separate histories.
 
-In schema v1, `commit_sha` is the exact Git revision checked out and tested
+The storage-boundary mutation mode persists caller-authenticated cohorts
+without merging report snapshots:
+
+```bash
+go run ./scripts/test-timing-summary.go \
+  --update-history timing-history-db-v1.json \
+  --run-envelope trusted-run-v1.json \
+  --retain-runs 50 \
+  --format=json \
+  /path/to/this-run-artifacts > timing-history-v1.json
+```
+
+All three mutation flags are required together, and retention has no hidden
+default. The versioned run envelope names the repository, event, ref, workflow,
+run ID, run attempt, tested SHA, conclusion, and RFC3339 completion time. The
+database stores each envelope and artifact once, then stores normalized
+pass/fail/skip samples by artifact reference. Replaying identical artifacts is
+therefore a byte-for-byte no-op; conflicting copies or envelope metadata fail
+before the existing database changes. Retention removes whole oldest cohorts
+by parsed completion time and recomputes snapshot statistics and the 5/20
+authority thresholds from the retained evidence. Publication uses a synced
+temporary sibling and atomic rename.
+
+This command validates envelope shape and checks each timing artifact's
+`workflow`, `run_id`, `run_attempt`, and `tested_sha` against it. It does not
+authenticate who supplied the envelope, prove that the cohort contains every
+expected shard, serialize multiple writers, publish `ci-metrics`, or make the
+result planner-authoritative. Those are responsibilities of the later trusted
+default-branch workflow. Until that workflow lands, use the database as
+deterministic storage-boundary evidence only.
+
+In timing artifact schema v1, `commit_sha` is the exact Git revision checked out and tested
 (`GITHUB_SHA`). On `pull_request` runs, GitHub sets it to the synthetic merge
 commit, not the contributor branch head. Consumers must not interpret it as
 source/head identity. A future schema that needs both identities must add
