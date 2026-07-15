@@ -769,6 +769,428 @@ func TestTerminateManagedDoltStartedProcessUnregistersFailedStartup(t *testing.T
 	}
 }
 
+// TestTerminateManagedDoltStartedProcessSkipsReusedPID is the PR #4004 review
+// follow-up regression. startManagedDoltSQLServer now reaps a failed dolt child
+// with a background cmd.Wait(), which frees the numeric PID. A same-attempt
+// startup-failure cleanup must therefore verify the PID's start identity before
+// signaling, or it could SIGTERM/SIGKILL an unrelated process that reused the
+// PID after the child exited. With a snapshot that disagrees with the re-read
+// identity, the cleanup must skip the signal and leave the reused process alive.
+func TestTerminateManagedDoltStartedProcessSkipsReusedPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+
+	// A real, unrelated process standing in for the one that reused the PID.
+	// It must still be alive after the cleanup runs.
+	victim := exec.Command("sleep", "60")
+	if err := victim.Start(); err != nil {
+		t.Fatalf("start victim: %v", err)
+	}
+	victimPID := victim.Process.Pid
+	t.Cleanup(func() {
+		_ = victim.Process.Kill()
+		_ = victim.Wait()
+	})
+
+	// Snapshot taken at start says ticks=1111; the live PID re-reads as 2222 —
+	// a different process incarnation, so the cleanup must not signal it.
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	managedDoltTestReadStartIdentity = func(int) string { return "" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	terminateManagedDoltStartedProcess(managedDoltStartedProcess{PID: victimPID, StartTimeTicks: 1111})
+
+	// Give any erroneous SIGTERM time to land before asserting survival.
+	time.Sleep(200 * time.Millisecond)
+	if !pidAlive(victimPID) {
+		t.Fatalf("terminateManagedDoltStartedProcess signaled reused PID %d; production identity guard not enforced", victimPID)
+	}
+}
+
+// TestTerminateManagedDoltStartedProcessSignalsWhenIdentityMatches asserts the
+// happy-path side of the same guard: when the re-read start identity matches the
+// snapshot, the dolt child we actually started is still terminated.
+func TestTerminateManagedDoltStartedProcessSignalsWhenIdentityMatches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	childPID := child.Process.Pid
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 5555 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	terminateManagedDoltStartedProcess(managedDoltStartedProcess{PID: childPID, StartTimeTicks: 5555})
+
+	// terminateManagedDoltPID waits for the SIGTERM to land (sleep dies on it),
+	// so the child must be gone once the cleanup returns.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(childPID) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("terminateManagedDoltStartedProcess did not signal matching PID %d; identity guard wrongly skipped it", childPID)
+}
+
+// TestTerminateManagedDoltStartedProcessSkipsReusedPIDBeforeSIGKILL is the
+// PR #4004 attempt-4 regression: the entry identity guard is not sufficient on
+// its own. terminateManagedDoltPID SIGTERMs, waits out the grace, then escalates
+// to SIGKILL by bare PID, so a child that exits and has its PID reused *during*
+// the grace must be re-verified before the forced kill. This drives the real
+// cleanup with an identity that matches at the SIGTERM check and mismatches at
+// the SIGKILL re-check, against a process that ignores SIGTERM so the escalation
+// is actually reached.
+func TestTerminateManagedDoltStartedProcessSkipsReusedPIDBeforeSIGKILL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	city, _ := raceTestCity(t, "[workspace]\nname = \"reuse-test\"\n\n[daemon]\ndolt_stop_timeout = \"100ms\"\n")
+	dataDir := filepath.Join(city, ".beads", "dolt")
+	pid := startSigtermIgnoringProcess(t, dataDir)
+
+	// The snapshot is ticks=1111. The live PID re-reads as 1111 on the first
+	// check (before SIGTERM: still our child) then 2222 afterwards (before the
+	// SIGKILL escalation: our child exited and the PID was reused mid-grace).
+	var reads int
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 {
+		reads++
+		if reads == 1 {
+			return 1111
+		}
+		return 2222
+	}
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	oldLog := managedDoltCleanupLogf
+	var logged []string
+	managedDoltCleanupLogf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { managedDoltCleanupLogf = oldLog })
+
+	terminateManagedDoltStartedProcess(managedDoltStartedProcess{CityPath: city, PID: pid, StartTimeTicks: 1111})
+
+	if reads < 2 {
+		t.Fatalf("identity re-read %d time(s); the SIGKILL escalation must re-verify identity (want >= 2)", reads)
+	}
+	if !pidAlive(pid) {
+		t.Fatal("startup cleanup SIGKILLed a PID reused during the SIGTERM grace; escalation guard not enforced")
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "SIGKILL") || !strings.Contains(logged[0], strconv.Itoa(pid)) {
+		t.Fatalf("expected exactly one SIGKILL-skip log naming pid %d, got %v", pid, logged)
+	}
+}
+
+// TestTerminateManagedDoltStartedProcessForceKillsWhenIdentityStable is the
+// happy-path companion: when the start identity stays stable across the whole
+// termination, the SIGKILL escalation must still fire on a process that ignores
+// SIGTERM. This proves the escalation guard does not break the legacy forced
+// kill for our own wedged child.
+func TestTerminateManagedDoltStartedProcessForceKillsWhenIdentityStable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	city, _ := raceTestCity(t, "[workspace]\nname = \"stable-test\"\n\n[daemon]\ndolt_stop_timeout = \"100ms\"\n")
+	dataDir := filepath.Join(city, ".beads", "dolt")
+	pid := startSigtermIgnoringProcess(t, dataDir)
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 3333 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	terminateManagedDoltStartedProcess(managedDoltStartedProcess{CityPath: city, PID: pid, StartTimeTicks: 3333})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for pidAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pidAlive(pid) {
+		t.Fatal("startup cleanup did not SIGKILL a stable-identity child that ignored SIGTERM")
+	}
+}
+
+// TestScopeWatchdogTerminateSkipsReusedWatchdogPID proves the PR #4004 attempt-4
+// watchdog guard: the parent reaps the scope watchdog with a background Wait(),
+// so its PID can be freed and reused too. When the watchdog's own snapshot no
+// longer matches the live PID, cleanup must skip signaling it — while a dolt PID
+// whose snapshot still matches is signaled normally.
+func TestScopeWatchdogTerminateSkipsReusedWatchdogPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+
+	// doltChild's snapshot matches the mocked re-read (2222), so it is signaled
+	// (a sleep dies on SIGTERM).
+	doltChild := exec.Command("sleep", "60")
+	if err := doltChild.Start(); err != nil {
+		t.Fatalf("start dolt child: %v", err)
+	}
+	doltChildPID := doltChild.Process.Pid
+	t.Cleanup(func() {
+		_ = doltChild.Process.Kill()
+		_ = doltChild.Wait()
+	})
+
+	// watchdogVictim stands in for an unrelated process that reused the watchdog
+	// PID after the parent reaped it; its snapshot (1111) disagrees with the live
+	// re-read (2222), so cleanup must leave it alone.
+	watchdogVictim := exec.Command("sleep", "60")
+	if err := watchdogVictim.Start(); err != nil {
+		t.Fatalf("start watchdog victim: %v", err)
+	}
+	watchdogVictimPID := watchdogVictim.Process.Pid
+	t.Cleanup(func() {
+		_ = watchdogVictim.Process.Kill()
+		_ = watchdogVictim.Wait()
+	})
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	managedDoltTestReadStartIdentity = func(int) string { return "" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	terminateManagedDoltStartedProcess(managedDoltStartedProcess{
+		PID:                    doltChildPID,
+		StartTimeTicks:         2222,
+		WatchdogPID:            watchdogVictimPID,
+		WatchdogStartTimeTicks: 1111,
+	})
+
+	// The dolt child's SIGTERM lands (a zombie reads as not-alive) once cleanup
+	// returns.
+	if pidAlive(doltChildPID) {
+		t.Fatalf("cleanup did not signal matching dolt pid %d", doltChildPID)
+	}
+	// Give any erroneous watchdog SIGTERM time to land before asserting survival.
+	time.Sleep(200 * time.Millisecond)
+	if !pidAlive(watchdogVictimPID) {
+		t.Fatalf("cleanup signaled reused watchdog pid %d; watchdog identity guard not enforced", watchdogVictimPID)
+	}
+}
+
+// TestManagedDoltWatchdogStartLineRoundTrip pins the scope watchdog's stdout
+// handshake protocol (PR #4004 F1 follow-up): the PID and OS start identity must
+// survive format→parse so the parent can guard PID reuse. The identity is a
+// `ps -o lstart=` string that contains spaces, which the tab delimiter must not
+// split, and a legacy bare-PID line must still parse (zero identity).
+func TestManagedDoltWatchdogStartLineRoundTrip(t *testing.T) {
+	cases := []struct {
+		name     string
+		pid      int
+		ticks    uint64
+		identity string
+	}{
+		{"ticks only", 4321, 998877, ""},
+		{"identity with spaces", 4321, 0, "Mon Jul  7 01:23:45 2026"},
+		{"both present", 51, 12, "Tue Jul  8 09:00:01 2026"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := formatManagedDoltWatchdogStartLine(tc.pid, tc.ticks, tc.identity)
+			if strings.ContainsAny(line, "\n") {
+				t.Fatalf("handshake line must be single-line, got %q", line)
+			}
+			pid, ticks, identity, err := parseManagedDoltWatchdogStartLine(line)
+			if err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			if pid != tc.pid || ticks != tc.ticks || identity != tc.identity {
+				t.Fatalf("round-trip = (pid %d, ticks %d, identity %q), want (%d, %d, %q)",
+					pid, ticks, identity, tc.pid, tc.ticks, tc.identity)
+			}
+		})
+	}
+
+	t.Run("legacy bare pid line", func(t *testing.T) {
+		pid, ticks, identity, err := parseManagedDoltWatchdogStartLine("7788\n")
+		if err != nil {
+			t.Fatalf("parse legacy line: %v", err)
+		}
+		if pid != 7788 || ticks != 0 || identity != "" {
+			t.Fatalf("legacy parse = (pid %d, ticks %d, identity %q), want (7788, 0, \"\")", pid, ticks, identity)
+		}
+	})
+
+	t.Run("invalid pid errors", func(t *testing.T) {
+		for _, bad := range []string{"", "  ", "0", "-3", "notapid"} {
+			if _, _, _, err := parseManagedDoltWatchdogStartLine(bad); err == nil {
+				t.Errorf("parseManagedDoltWatchdogStartLine(%q) = nil error, want error", bad)
+			}
+		}
+	})
+}
+
+// TestScopeWatchdogTerminateSkipsReusedDoltPIDButSignalsWatchdog is the PR #4004
+// F1 regression: the production scope-watchdog start path now reports the dolt
+// child's start identity, so a startup-failure cleanup must skip a reused dolt
+// PID exactly like the direct-spawn path — while still signaling the watchdog
+// whose own snapshot still matches. It rebuilds the started process through the
+// real handshake reader so the test exercises the scope path's identity plumbing
+// end to end.
+func TestScopeWatchdogTerminateSkipsReusedDoltPIDButSignalsWatchdog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+
+	// doltVictim stands in for an unrelated process that reused the dolt child's
+	// numeric PID after the scope watchdog reaped it; it must survive cleanup.
+	doltVictim := exec.Command("sleep", "60")
+	if err := doltVictim.Start(); err != nil {
+		t.Fatalf("start dolt victim: %v", err)
+	}
+	doltVictimPID := doltVictim.Process.Pid
+	t.Cleanup(func() {
+		_ = doltVictim.Process.Kill()
+		_ = doltVictim.Wait()
+	})
+
+	// watchdogVictim stands in for the still-tracked scope watchdog, which
+	// cleanup always signals regardless of the dolt PID-reuse guard.
+	watchdogVictim := exec.Command("sleep", "60")
+	if err := watchdogVictim.Start(); err != nil {
+		t.Fatalf("start watchdog victim: %v", err)
+	}
+	watchdogVictimPID := watchdogVictim.Process.Pid
+	t.Cleanup(func() {
+		_ = watchdogVictim.Process.Kill()
+		_ = watchdogVictim.Wait()
+	})
+
+	// Rebuild the started process exactly as startManagedDoltSQLServerWithScopeWatchdog
+	// does: parse the watchdog's stdout handshake, which now carries the identity
+	// (ticks=1111) snapshotted before the child could be reaped.
+	line := formatManagedDoltWatchdogStartLine(doltVictimPID, 1111, "")
+	pid, ticks, ident, err := readManagedDoltScopeWatchdogStart(strings.NewReader(line+"\n"), watchdogVictimPID)
+	if err != nil {
+		t.Fatalf("read scope watchdog start: %v", err)
+	}
+	if pid != doltVictimPID || ticks != 1111 {
+		t.Fatalf("handshake round-trip pid=%d ticks=%d, want pid=%d ticks=1111", pid, ticks, doltVictimPID)
+	}
+	started := managedDoltStartedProcess{
+		PID:            pid,
+		WatchdogPID:    watchdogVictimPID,
+		StartTimeTicks: ticks,
+		StartIdentity:  ident,
+		// The watchdog's own snapshot matches the mocked re-read (2222) below, so
+		// its guard passes and cleanup still signals it — only the dolt PID is
+		// treated as reused.
+		WatchdogStartTimeTicks: 2222,
+	}
+
+	// The live PID re-reads as a different incarnation (2222 != 1111), so the
+	// dolt PID must be treated as reused and left alone.
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	managedDoltTestReadStartIdentity = func(int) string { return "" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	terminateManagedDoltStartedProcess(started)
+
+	// terminateManagedDoltPID waits for the watchdog's SIGTERM to land, so it is
+	// gone (a zombie reads as not-alive) once cleanup returns.
+	if pidAlive(watchdogVictimPID) {
+		t.Fatalf("scope cleanup did not signal watchdog pid %d", watchdogVictimPID)
+	}
+	// Give any erroneous SIGTERM to the dolt PID time to land before asserting.
+	time.Sleep(200 * time.Millisecond)
+	if !pidAlive(doltVictimPID) {
+		t.Fatalf("scope cleanup signaled reused dolt pid %d; scope-path identity guard not enforced", doltVictimPID)
+	}
+}
+
+// TestTerminateManagedDoltStartedProcessLogsIdentityMismatchSkip covers the
+// PR #4004 F2 observability fix: when the guard declines to signal a reused PID,
+// cleanup records the decision so an operator can tell the guard fired rather
+// than that cleanup killed the child.
+func TestTerminateManagedDoltStartedProcessLogsIdentityMismatchSkip(t *testing.T) {
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	oldLog := managedDoltCleanupLogf
+	var logged []string
+	managedDoltCleanupLogf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { managedDoltCleanupLogf = oldLog })
+
+	// Snapshot 1111 disagrees with the re-read 2222: PID reused, terminate skipped.
+	terminateManagedDoltStartedProcess(managedDoltStartedProcess{PID: 424242, StartTimeTicks: 1111})
+
+	if len(logged) != 1 {
+		t.Fatalf("expected exactly one cleanup log line, got %d: %v", len(logged), logged)
+	}
+	if !strings.Contains(logged[0], "424242") || !strings.Contains(logged[0], "identity changed") {
+		t.Fatalf("cleanup log %q missing pid or reason", logged[0])
+	}
+}
+
+// TestManagedDoltStartedPIDIdentityMatchesUnconfirmedReRead documents the
+// PR #4004 F3 boundary: only the identity precedence mirrors the production
+// reaper, while an unconfirmed re-read (the snapshot is present but the live
+// process yields no identity) intentionally keeps the legacy terminate default,
+// because the ensuing signal to a vanished PID is a harmless ESRCH no-op.
+func TestManagedDoltStartedPIDIdentityMatchesUnconfirmedReRead(t *testing.T) {
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	cases := []struct {
+		name        string
+		started     managedDoltStartedProcess
+		reReadTicks uint64
+		reReadIdent string
+		want        bool
+	}{
+		{"ticks match terminates", managedDoltStartedProcess{PID: 1, StartTimeTicks: 10}, 10, "", true},
+		{"ticks mismatch skips", managedDoltStartedProcess{PID: 1, StartTimeTicks: 10}, 11, "", false},
+		{"ticks unconfirmed terminates", managedDoltStartedProcess{PID: 1, StartTimeTicks: 10}, 0, "", true},
+		{"identity match terminates", managedDoltStartedProcess{PID: 1, StartIdentity: "A"}, 0, "A", true},
+		{"identity mismatch skips", managedDoltStartedProcess{PID: 1, StartIdentity: "A"}, 0, "B", false},
+		{"identity unconfirmed terminates", managedDoltStartedProcess{PID: 1, StartIdentity: "A"}, 0, "", true},
+		{"no snapshot terminates", managedDoltStartedProcess{PID: 1}, 0, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			managedDoltTestReadStartTimeTicks = func(int) uint64 { return tc.reReadTicks }
+			managedDoltTestReadStartIdentity = func(int) string { return tc.reReadIdent }
+			if got := managedDoltStartedPIDIdentityMatches(tc.started); got != tc.want {
+				t.Errorf("managedDoltStartedPIDIdentityMatches = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReapManagedDoltTestProcessesTerminatesRegisteredChildren(t *testing.T) {
 	withManagedDoltTestMode(t, true)
 	clearManagedDoltTestProcessRegistry(t)

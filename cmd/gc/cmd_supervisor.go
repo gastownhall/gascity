@@ -310,6 +310,90 @@ var supervisorLoadConfig = supervisor.LoadConfig
 // the escalation.
 const supervisorHardExitCodeRepeatedShutdown = 130
 
+// supervisorExitCodePortInUse is returned when the API port is already bound
+// by another supervisor. Only one supervisor may own the port machine-wide, so
+// a collision means this process is a duplicate install. The generated systemd
+// unit lists this code in RestartPreventExitStatus so the duplicate exits once
+// with a clear diagnostic instead of crash-looping on the shared port forever.
+const supervisorExitCodePortInUse = 3
+
+// supervisorAddrInUse reports whether err indicates the listen address was
+// already bound (EADDRINUSE) — the signature of a second supervisor competing
+// for the shared API port, as opposed to any other listen failure.
+func supervisorAddrInUse(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// supervisorPortInUseMessage returns the loud, actionable diagnostic emitted
+// when the API port is already held by another gc supervisor (confirmed by
+// supervisorRespondingGCSupervisor). It names the address and both remedies
+// so a duplicate install fails legibly instead of emitting an opaque "bind:
+// address already in use" on every restart.
+//
+// The restart-behavior line is platform-conditioned: on systemd,
+// RestartPreventExitStatus (see supervisorExitCodePortInUse) actually stops
+// the restart loop, but launchd's KeepAlive has no per-exit-code equivalent —
+// any nonzero exit is "Crashed" and gets restarted regardless — so claiming
+// "without restart" on darwin would be false.
+func supervisorPortInUseMessage(addr, configPath string) string {
+	restartBehavior := "This instance is a duplicate and is exiting without restart."
+	if supervisorRuntimeGOOS == "darwin" {
+		restartBehavior = "This instance is a duplicate. launchd will keep restarting it " +
+			"regardless of exit code (macOS has no RestartPreventExitStatus equivalent) " +
+			"until you resolve the collision below."
+	}
+	return fmt.Sprintf(
+		"gc supervisor: API address %s is already in use.\n"+
+			"Another gc supervisor already owns this port — only one supervisor may run per machine.\n"+
+			"%s To resolve, either:\n"+
+			"  - stop the other supervisor (gc supervisor stop) before starting this one, or\n"+
+			"  - give this supervisor its own port: set [supervisor] port = <N> in %s\n",
+		addr, restartBehavior, configPath)
+}
+
+// supervisorHealthProbeTimeout bounds how long we wait for a /health response
+// when confirming that an EADDRINUSE binder is actually another gc
+// supervisor. Short enough to not stall startup on a dead or foreign binder.
+// Overridable for tests.
+var supervisorHealthProbeTimeout = 2 * time.Second
+
+// supervisorRespondingGCSupervisor reports whether the process bound to addr
+// answers like a gc supervisor. Overridable for tests.
+//
+// EADDRINUSE only proves *something* is bound to addr — it does not prove
+// that something is another gc supervisor. The genuine same-GC_HOME
+// duplicate is already caught earlier by acquireSupervisorLock's exclusive
+// flock, so by the time we reach the port collision, the binder is either a
+// different user's gc supervisor (a true duplicate) or an unrelated foreign
+// process that happens to hold the shared port. Only a positive /health
+// identification justifies the exit-3 duplicate path (and, on systemd,
+// refusing to restart); anything else falls through to the current
+// self-healing exit-1 behavior so a transient or foreign binder recovers via
+// normal restart instead of a sticky outage.
+var supervisorRespondingGCSupervisor = func(addr string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), supervisorHealthProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/health", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort close
+	if resp.StatusCode/100 != 2 {
+		return false
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body); err != nil {
+		return false
+	}
+	return body.Status == "ok"
+}
+
 // supervisorHardExit terminates the supervisor immediately. It intentionally
 // bypasses graceful cleanup and may leave managed sessions or child processes
 // alive for operator recovery. Overridable for tests.
@@ -1270,11 +1354,40 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
 	}
 	// Gate city-config mutations on a signed write grant when configured. Fail
-	// closed at boot if write-auth is required but no key is set, so the
+	// closed at boot if write-auth is required but no key is set, or if a
+	// non-loopback + allow_mutations bind has no key and no ack knob (G10), so the
 	// multi-city supervisor cannot silently serve mutations unguarded.
-	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); err != nil {
+	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired, api.WriteAuthBindContext{
+		NonLocal:        nonLocal,
+		AllowMutations:  supCfg.Supervisor.AllowMutations,
+		AllowUnverified: supCfg.Supervisor.WriteAuthAllowUnverified,
+	}); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	// Gate city reads on a signed read grant when configured. Fail closed at boot
+	// if read-auth is required but no key is set, so the supervisor cannot
+	// silently serve reads unguarded.
+	if err := api.InstallReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
+	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
+	// the standalone controller seam) so an operator sees the read surface needs a
+	// network front. grantGated and readAuthInstalled are resolved the same way
+	// InstallWriteAuth/InstallReadAuth did; a read-auth verifier suppresses the
+	// warning because the read plane is then authenticated.
+	if nonLocal && supCfg.Supervisor.AllowMutations {
+		grantGated := false
+		if v, verr := api.ResolveWriteAuthVerifier(supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); verr == nil && v != nil {
+			grantGated = true
+		}
+		readAuthInstalled := false
+		if v, verr := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); verr == nil && v != nil {
+			readAuthInstalled = true
+		}
+		warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
 	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same
@@ -1285,10 +1398,14 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: dashboard: %v\n", dashErr) //nolint:errcheck
 		return 1
 	}
-	if dashboardPlane != nil {
-		dashboardPlane.Start(ctx)
-		defer dashboardPlane.Stop()
+	dashboardMounted := dashboardPlane != nil
+	if dashboardPlane == nil {
+		// The typed run census is available even when the embedded dashboard is
+		// disabled. Keep its incremental plane unmounted in that posture.
+		dashboardPlane = newRunCensusPlane(apiMux, registry)
 	}
+	dashboardPlane.Start(ctx)
+	defer dashboardPlane.Stop()
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1305,6 +1422,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	addr := net.JoinHostPort(bind, strconv.Itoa(port))
 	apiLis, apiErr := net.Listen("tcp", addr)
 	if apiErr != nil {
+		if supervisorAddrInUse(apiErr) && supervisorRespondingGCSupervisor(addr) {
+			fmt.Fprint(stderr, supervisorPortInUseMessage(addr, supervisor.ConfigPath())) //nolint:errcheck
+			return supervisorExitCodePortInUse
+		}
 		fmt.Fprintf(stderr, "gc supervisor: api: listen %s failed: %v\n", addr, apiErr) //nolint:errcheck
 		return 1
 	}
@@ -1324,13 +1445,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.Shutdown(shutCtx) //nolint:errcheck
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
-	if dashboardPlane != nil {
-		dashTag := ""
-		if readOnly {
-			dashTag = "  [read-only]"
-		}
-		fmt.Fprintf(stdout, "Dashboard:  %s/%s\n", dashboardLoopbackBaseURL(bind, port), dashTag) //nolint:errcheck
-	}
+	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
@@ -1879,7 +1994,7 @@ func reconcileCities(
 			providerName := effectiveProviderName(cfg.Session.Provider)
 			ctx := sessionProviderContextForCity(cfg, path, providerName)
 			snapshot := loadProviderSessionSnapshot(ctx)
-			resolvedSP, err := newSessionProviderFromContextWithError(ctx, snapshot)
+			resolvedSP, err := newSessionProviderFromContext(ctx, snapshot)
 			if err != nil {
 				return err
 			}
@@ -2005,6 +2120,14 @@ func reconcileCities(
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
+
+		// G13 §6 sweep-before-serve: reconcile this city's orphan in_flight
+		// rig-create idem records before it is published into the registry (and
+		// thus before the SupervisorMux can route a rig-create/sling request to
+		// it), so a same-id retry can never re-clone over un-torn-down debris.
+		if err := cs.sweepOrphanRigProvisions(cityCtx); err != nil {
+			fmt.Fprintf(stderr, "api: rig-create boot sweep (%s): %v\n", cityName, err) //nolint:errcheck // best-effort stderr
+		}
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

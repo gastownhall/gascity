@@ -322,7 +322,7 @@ const decodeRunSummary = objectDecoder<RunSummary>('run summary', (record, url) 
   requireObjectField(record, url, 'run summary', 'runCounts');
   requireObjectField(record, url, 'run summary', 'census');
 });
-const decodeFormulaRunDetail = objectDecoder<FormulaRunDetail>(
+export const decodeFormulaRunDetail = objectDecoder<FormulaRunDetail>(
   'formula run detail',
   (record, url) => {
     requireStringField(record, url, 'formula run detail', 'runId');
@@ -421,6 +421,14 @@ export const api = {
   // 503 — surfaced to callers as ApiClientError (status + reason).
   runDetail(runId: string): Promise<FormulaRunDetail> {
     return request('GET', cityPath(`/runs/${encodeURIComponent(runId)}/detail`), decodeFormulaRunDetail);
+  },
+  // The per-run SSE detail stream (BFF plane). It pushes the whole
+  // FormulaRunDetail as a snapshot frame on connect and again whenever the
+  // fold changes this run's bytes, so the client renders each frame with zero
+  // refetch. Same-origin path off cityPath — the browser resolves it against
+  // the current origin, matching the credentials the GET uses.
+  runDetailStreamUrl(runId: string): string {
+    return cityPath(`/runs/${encodeURIComponent(runId)}/detail/stream`);
   },
 };
 

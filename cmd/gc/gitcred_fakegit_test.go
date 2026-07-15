@@ -57,6 +57,9 @@ func TestImportHeadCommitClassifiesAuthFailure(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(gitcred.EnvCredentialsFile, "")
 	t.Setenv(gitcred.EnvCredentialCommand, "")
+	// Clear the ambient GitHub token so the built-in github.com default stays inert.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 
 	// Unmatched: no rule → still classified (auth required), Matched=false.
 	_, err := defaultImportHeadCommit(city, "https://github.com/gascity/gas-city-inc")
@@ -78,6 +81,9 @@ func TestImportHeadCommitClassifiesMatchedAuthFailure(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(gitcred.EnvCredentialsFile, "")
 	t.Setenv(gitcred.EnvCredentialCommand, "")
+	// Clear the ambient GitHub token so the built-in github.com default stays inert.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	writeCityCredRule(t, city, "[[credential]]\nmatch=\"github.com/gascity\"\nhelper=\"echo tok\"\n")
 
 	_, err := defaultImportHeadCommit(city, "https://github.com/gascity/gas-city-inc")
@@ -99,6 +105,9 @@ func TestImportHeadCommitInjectsCredentialHelperArgv(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(gitcred.EnvCredentialsFile, "")
 	t.Setenv(gitcred.EnvCredentialCommand, "")
+	// Clear the ambient GitHub token so the built-in github.com default stays inert.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	writeCityCredRule(t, city, "[[credential]]\nmatch=\"github.com/gascity\"\nhelper=\"printf 'ghp_roundtrip\\\\n'\"\n")
 
 	// The "ok" fake git records its argv and exits 0. defaultImportHeadCommit

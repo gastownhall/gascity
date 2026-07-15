@@ -21,9 +21,17 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrMetadataParse is returned when a bead exists but its stored metadata
+// cannot be decoded into the Store object model.
+var ErrMetadataParse = errors.New("bead metadata parse")
+
 // ErrCacheUnavailable is returned by cache-only read handles when the cache
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
+
+// ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
+// projection stops when the caller's context is canceled.
+var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 
 // ErrStoreClosed is returned when a caller uses a bead store after its backing
 // handle has been closed.
@@ -36,6 +44,12 @@ var ErrParentProjectionSuperseded = errors.New("parent projection superseded by 
 // ErrConditionalReleaseUnsupported reports that a store cannot atomically
 // release an assignment based on the current status and assignee.
 var ErrConditionalReleaseUnsupported = errors.New("conditional assignment release unsupported")
+
+// ErrConditionalWriteUnsupported reports that this store (or the bd behind it)
+// cannot perform conditional writes. Latching it per store instance is the
+// capability veto: no code path in internal/beads converts it into an
+// unconditional write. See ConditionalWriter for the full contract.
+var ErrConditionalWriteUnsupported = errors.New("conditional writes unsupported")
 
 // ErrBDSilentFallback reports that a bd-backed store operation saw bd exit
 // successfully after falling back to on-disk JSONL auto-import mode. BdStore
@@ -90,6 +104,20 @@ type Bead struct {
 	// store did not provide the projection and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// Revision is the store-internal optimistic-concurrency token for
+	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
+	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
+	// bead-event payload): the OpenAPI spec and generated clients are
+	// byte-untouched until the Stage-4 wire promotion flips this tag to
+	// json:"revision,omitempty". Because json:"-" also skips decode, stores are
+	// responsible for populating it internally by their own means — BdStore
+	// stamps it from bd's machine JSON via the bdIssue envelope (pre-#4682 bd
+	// omits it, leaving 0); the native Mem/File stores maintain it per bead, and
+	// FileStore must persist it out of band because json:"-" keeps it out of the
+	// on-disk []Bead too. A revision observed through a caching layer may lag its
+	// backing store until reconcile or CAS-failure eviction; callers read it only
+	// through ConditionalWriter (equality-only; see the revision contract).
+	Revision int64 `json:"-"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -111,6 +139,180 @@ type UpdateOpts struct {
 // the expected snapshot.
 type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
+}
+
+// ConditionalWriter is implemented by stores that can apply a write only when
+// the caller's snapshot of the bead is still current. It is an optional store
+// capability, discovered like ConditionalAssignmentReleaser: type-assert on the
+// resolved store (or use ConditionalWriterFor), never on a wrapper.
+//
+// REVISION CONTRACT (normative — RunConditionalWriterConformance executes this
+// table against every implementing store, including real bd under the
+// integration build tag):
+//
+//   - Every bead carries an opaque int64 revision. Callers may test it only for
+//     equality; arithmetic, ordering across beads, and gap inference are all
+//     undefined.
+//   - Every USER-VISIBLE mutation of this bead bumps the revision: field
+//     updates, label add/remove, metadata writes (any key), assign, close,
+//     reopen, delete. Reads never bump.
+//   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
+//     maintains a denormalized is_blocked column on the issue row that other
+//     beads' dependency/close/route writes recompute (the same reason bd pins
+//     updated_at during that recompute); whether such a derived-state rewrite
+//     bumps the revision is backend-dependent and callers must not rely on
+//     either answer. This is why every consumer treats PreconditionFailedError
+//     as a re-read trigger, never as a conclusion about what changed.
+//   - A bead's revision is monotonically increasing for the lifetime of the bead
+//     and is never reused.
+//
+// GRANULARITY CONTRACT: consumers may assume NEITHER value-level nor
+// revision-level conflict semantics. Backends differ — sqlite and the native
+// library implement CompareAndSetMetadataKey as server-side value-CAS (an
+// unrelated-key write does not conflict); BdStore emulates it over --if-revision
+// (an unrelated-key write CAN produce a spurious retry internally). Callers get
+// the value-CAS RESULT either way, but must not build timing or interference
+// assumptions on top of it.
+type ConditionalWriter interface {
+	// UpdateIfMatch applies opts only if the bead's revision equals
+	// expectedRevision; otherwise it returns *PreconditionFailedError.
+	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
+	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
+	// otherwise it returns *PreconditionFailedError.
+	CloseIfMatch(id string, expectedRevision int64) error
+	// DeleteIfMatch deletes the bead only if its revision equals
+	// expectedRevision; otherwise it returns *PreconditionFailedError.
+	DeleteIfMatch(id string, expectedRevision int64) error
+
+	// CompareAndSetMetadataKey atomically sets metadata[key] = next iff the
+	// current value equals expected. expected == "" matches a key that is absent
+	// OR present with the empty value (the two states are indistinguishable to
+	// callers; release paths write "" to clear). Returns (true, nil) on swap,
+	// (false, nil) on a genuine value mismatch (the caller lost), and (false,
+	// err) for everything else.
+	CompareAndSetMetadataKey(id, key, expected, next string) (bool, error)
+}
+
+// ErrEmptyConditionalUpdate reports an UpdateIfMatch with no fields to apply.
+// The three in-tree implementations diverged here (bd cannot express an empty
+// fenced update; the native stores validated-and-bumped), so the contract is
+// pinned as invalid input: an empty fenced update neither evaluates the fence
+// nor bumps the revision on ANY store.
+var ErrEmptyConditionalUpdate = errors.New("conditional update: empty UpdateOpts (nothing to apply)")
+
+// isEmptyUpdateOpts reports whether opts carries no mutation at all.
+func isEmptyUpdateOpts(o UpdateOpts) bool {
+	return o.Title == nil && o.Status == nil && o.Type == nil && o.Priority == nil &&
+		o.Description == nil && o.ParentID == nil && o.Assignee == nil &&
+		len(o.Labels) == 0 && len(o.RemoveLabels) == 0 && len(o.Metadata) == 0
+}
+
+// ConditionalWriterHandleProvider exposes a conditional-write handle for stores
+// whose capability depends on wrapped runtime state.
+type ConditionalWriterHandleProvider interface {
+	ConditionalWriterHandle() (ConditionalWriter, bool)
+}
+
+// ConditionalWriterFor returns the conditional-write capability for store when
+// one is available. It preserves ordinary ConditionalWriter implementations and
+// lets wrappers expose a delegated handle without claiming the interface
+// globally — mirroring GraphApplyFor. It does NOT unwrap the class_store.go
+// typed wrappers (WorkStore, GraphStore, …): those embed the Store interface, so
+// optional capabilities are not promoted through them and a direct assertion on
+// the wrapper fails. A caller holding a typed class wrapper must pass its
+// unwrapped .Store field to this helper, exactly as with GraphApplyFor.
+func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if writer, ok := store.(ConditionalWriter); ok {
+		return writer, true
+	}
+	if provider, ok := store.(ConditionalWriterHandleProvider); ok {
+		return provider.ConditionalWriterHandle()
+	}
+	return nil, false
+}
+
+// PreconditionFailedError reports that a conditional write was rejected because
+// the bead's revision moved (bd exit 9 / the store's WHERE clause matched no
+// row). Expected/Current come from the backend's machine JSON when parseable and
+// are zero otherwise; Raw preserves the backend body for forensics.
+type PreconditionFailedError struct {
+	ID       string
+	Expected int64
+	Current  int64
+	Raw      string
+}
+
+// Error reports the bead and the expected/current revisions.
+func (e *PreconditionFailedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional write on %s: precondition failed (expected revision %d, current %d)",
+		e.ID, e.Expected, e.Current)
+}
+
+// IsPreconditionFailed reports whether err is or wraps a *PreconditionFailedError.
+func IsPreconditionFailed(err error) bool {
+	var pfe *PreconditionFailedError
+	return errors.As(err, &pfe)
+}
+
+// GateRefusalError reports that the backend refused THIS conditional write for a
+// policy reason (e.g. bd's close-authority guard) rather than a revision
+// mismatch. It is per-write and never latches the store incapable.
+type GateRefusalError struct {
+	ID   string
+	Verb string
+	Code string // machine body code, "" if absent
+	Raw  string
+}
+
+// Error reports the refused verb, bead, and policy code.
+func (e *GateRefusalError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional %s on %s refused by gate (code %q)", e.Verb, e.ID, e.Code)
+}
+
+// IsGateRefusal reports whether err is or wraps a *GateRefusalError.
+func IsGateRefusal(err error) bool {
+	var gre *GateRefusalError
+	return errors.As(err, &gre)
+}
+
+// CASRetriesExhaustedError reports that BdStore's bounded metadata-CAS emulation
+// ran out of attempts under cross-key revision interference. It is distinct from
+// PreconditionFailedError: the caller did NOT lose the value race; the store
+// could not get a clean shot. Consumers back off and re-enter level-triggered.
+type CASRetriesExhaustedError struct {
+	ID, Key      string
+	Attempts     int
+	LastRevision int64
+}
+
+// Error reports the bead, key, attempt budget, and last revision observed.
+func (e *CASRetriesExhaustedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional metadata CAS on %s[%s] exhausted %d attempts (last revision %d)",
+		e.ID, e.Key, e.Attempts, e.LastRevision)
+}
+
+// IsCASRetriesExhausted reports whether err is or wraps a *CASRetriesExhaustedError.
+func IsCASRetriesExhausted(err error) bool {
+	var cre *CASRetriesExhaustedError
+	return errors.As(err, &cre)
+}
+
+// IsConditionalWriteUnsupported reports whether err is or wraps
+// ErrConditionalWriteUnsupported.
+func IsConditionalWriteUnsupported(err error) bool {
+	return errors.Is(err, ErrConditionalWriteUnsupported)
 }
 
 // AtomicTxStore is implemented by stores whose Tx commits the whole callback
@@ -440,6 +642,14 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+}
+
+// ContextReadyReader is an optional Ready capability for deadline-sensitive
+// callers. Implementations must stop all work started by ReadyContext before
+// returning after ctx cancellation; callers may treat ErrCacheUnavailable as a
+// partial read and ErrReadyContextUnsupported as a capability veto.
+type ContextReadyReader interface {
+	ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error)
 }
 
 // StorageClass selects the physical bead storage tier for adapters that

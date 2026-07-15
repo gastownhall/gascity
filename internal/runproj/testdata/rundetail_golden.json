@@ -53,7 +53,8 @@
       "ready": 1,
       "completed": 3,
       "active": 1
-    }
+    },
+    "terminal": false
   },
   "phase": "review",
   "stages": [

@@ -326,8 +326,12 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	cycle.configRevision = "rev-trace-2"
 	cycle.syncArms(armNow, cfg)
 
+	startInfo, err := sessionFrontDoor(store).Get(startBead.ID)
+	if err != nil {
+		t.Fatalf("load start session info: %v", err)
+	}
 	startCand := startCandidate{
-		session: &startBead,
+		info: startInfo,
 		tp: TemplateParams{
 			TemplateName: "repo/worker",
 			SessionName:  "worker-1",
@@ -383,13 +387,9 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		drainTracker,
 		sp,
 		store,
-		drainLookup,
-		[]beads.Bead{drainBead},
+		infoLookupFromBeadLookup(drainLookup),
 		wakeEvals,
 		cfg,
-		map[string]int{},
-		nil,
-		nil,
 		clock.Real{},
 		cycle,
 	)
@@ -723,7 +723,11 @@ func createCanonicalPoolSession(t *testing.T, store beads.Store, cfgAgent *confi
 	if err != nil {
 		t.Fatalf("create pool session: %v", err)
 	}
-	return session
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get pool session bead: %v", err)
+	}
+	return stored
 }
 
 func traceFieldInt(v any) int {

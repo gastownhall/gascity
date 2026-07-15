@@ -382,18 +382,19 @@ func (h *SessionHandle) ensureSessionID() (string, error) {
 }
 
 func (h *SessionHandle) createDeferredLocked() (sessionpkg.Info, error) {
-	info, err := h.manager.CreateAliasedBeadOnlyNamedWithMetadata(
-		h.session.Alias,
-		h.session.ExplicitName,
-		h.session.Template,
-		h.session.Title,
-		h.session.Command,
-		h.session.WorkDir,
-		h.session.Provider,
-		h.session.Transport,
-		h.session.Resume,
-		cloneStringMap(h.session.Metadata),
-	)
+	info, err := h.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly:     true,
+		Alias:        h.session.Alias,
+		ExplicitName: h.session.ExplicitName,
+		Template:     h.session.Template,
+		Title:        h.session.Title,
+		Command:      h.session.Command,
+		WorkDir:      h.session.WorkDir,
+		Provider:     h.session.Provider,
+		Transport:    h.session.Transport,
+		Resume:       h.session.Resume,
+		ExtraMeta:    cloneStringMap(h.session.Metadata),
+	})
 	if err != nil {
 		return sessionpkg.Info{}, err
 	}
@@ -402,21 +403,20 @@ func (h *SessionHandle) createDeferredLocked() (sessionpkg.Info, error) {
 }
 
 func (h *SessionHandle) createStartedLocked(ctx context.Context) (sessionpkg.Info, error) {
-	info, err := h.manager.CreateAliasedNamedWithTransportAndMetadata(
-		ctx,
-		h.session.Alias,
-		h.session.ExplicitName,
-		h.session.Template,
-		h.session.Title,
-		h.session.Command,
-		h.session.WorkDir,
-		h.session.Provider,
-		h.session.Transport,
-		cloneStringMap(h.session.Env),
-		h.session.Resume,
-		cloneRuntimeConfig(h.session.Hints),
-		cloneStringMap(h.session.Metadata),
-	)
+	info, err := h.manager.CreateSession(ctx, sessionpkg.CreateOptions{
+		Alias:        h.session.Alias,
+		ExplicitName: h.session.ExplicitName,
+		Template:     h.session.Template,
+		Title:        h.session.Title,
+		Command:      h.session.Command,
+		WorkDir:      h.session.WorkDir,
+		Provider:     h.session.Provider,
+		Transport:    h.session.Transport,
+		Env:          cloneStringMap(h.session.Env),
+		Resume:       h.session.Resume,
+		Hints:        cloneRuntimeConfig(h.session.Hints),
+		ExtraMeta:    cloneStringMap(h.session.Metadata),
+	})
 	if err != nil {
 		return sessionpkg.Info{}, err
 	}
@@ -431,11 +431,11 @@ func (h *SessionHandle) currentSessionID() string {
 }
 
 func (h *SessionHandle) startCommand(id string) (string, error) {
-	info, b, err := h.manager.GetWithBead(id)
+	info, pr, err := sessionRecordViaManager(h.manager, id)
 	if err != nil {
 		return "", err
 	}
-	if firstProviderSessionStart(info.State, b.Metadata) &&
+	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
 		command := strings.TrimSpace(info.Command)

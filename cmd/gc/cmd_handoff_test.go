@@ -74,7 +74,7 @@ func TestHandoffSuccess(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, rec, dops, nil, "mayor", "mayor",
+	code := doHandoff(store, store, rec, dops, nil, "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -327,7 +327,7 @@ func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
 	rec := events.NewFake()
 	var stderr bytes.Buffer
 
-	code := doHandoffAuto(store, rec, "mayor", []string{"context cycle"}, "codex", errWriter{}, &stderr)
+	code := doHandoffAuto(store, store, rec, "mayor", []string{"context cycle"}, "codex", errWriter{}, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -428,7 +428,7 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	dops.restartRequested["mayor"] = true
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, rec, dops, func() error {
+	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
 		persistCalled = true
 		return nil
 	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
@@ -501,7 +501,7 @@ func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 		t.Fatalf("set configured_named_mode: %v", err)
 	}
 
-	outcome := doHandoffWithOutcome(store, rec, dops, nil, "mayor", "mayor",
+	outcome := doHandoffWithOutcome(store, store, rec, dops, nil, "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 1 {
 		t.Fatalf("code = %d, want 1", outcome.code)
@@ -541,7 +541,7 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, rec, dops, func() error {
+	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
 		persistCalled = true
 		return nil
 	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
@@ -571,7 +571,7 @@ func TestHandoffWithMessage(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
+	code := doHandoff(store, store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
 		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
 		&stdout, &stderr)
 	if code != 0 {
@@ -697,7 +697,7 @@ func TestHandoffRemoteRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "deacon", "deacon", "mayor",
+	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
 		[]string{"Context refresh", "Check beads for current state"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -775,7 +775,7 @@ func TestHandoffRemoteNamedOnDemandSkipsKill(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "mayor", "mayor", "deacon",
+	code := doHandoffRemote(store, store, rec, sp, "mayor", "mayor", "deacon",
 		[]string{"Context refresh", "Please pick this up manually"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -815,7 +815,7 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	rec := events.NewFake()
 	sp := runtime.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, rec, sp, "deacon", "deacon", "human",
+	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "human",
 		[]string{"Please check on PR #42"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())

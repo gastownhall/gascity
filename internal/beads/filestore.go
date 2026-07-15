@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,6 +17,86 @@ type fileData struct {
 	Seq   int    `json:"seq"`
 	Beads []Bead `json:"beads"`
 	Deps  []Dep  `json:"deps,omitempty"`
+	// Revisions persists each bead's ConditionalWriter revision out of band,
+	// because Bead.Revision is json:"-" and never survives the on-disk []Bead.
+	// Without this, every reloadFromDisk (which runs before each write in
+	// cross-process flock mode) would reset all revisions to 0, breaking the
+	// monotonic-never-reused contract. Absent (legacy files) ≡ all zero.
+	Revisions map[string]int64 `json:"revisions,omitempty"`
+	// RevisionsSealed marks a file written by a revisions-aware binary. An
+	// OLDER binary's full rewrite drops both this marker and the revisions
+	// map while keeping the beads — the exact state in which fresh-from-zero
+	// revisions would REUSE previously issued tokens and break the
+	// monotonic-never-reused contract. Loading an unsealed file with beads
+	// therefore re-seeds every revision at a deterministic floor far above
+	// any counter a prior writer could have issued (see
+	// applyBeadRevisionsSealed).
+	RevisionsSealed bool `json:"revisions_sealed,omitempty"`
+}
+
+// beadRevisions extracts the out-of-band revision map for persistence. Zero
+// revisions are omitted (absent ≡ 0 on reload), so legacy files round-trip.
+func beadRevisions(beads []Bead) map[string]int64 {
+	revs := make(map[string]int64, len(beads))
+	for _, b := range beads {
+		if b.Revision != 0 {
+			revs[b.ID] = b.Revision
+		}
+	}
+	if len(revs) == 0 {
+		return nil
+	}
+	return revs
+}
+
+// applyBeadRevisions stamps persisted revisions back onto beads decoded from
+// disk, whose Revision fields are all 0 because of the json:"-" tag. Beads with
+// no entry keep revision 0, matching files that predate the revisions map.
+func applyBeadRevisions(beads []Bead, revs map[string]int64) {
+	if len(revs) == 0 {
+		return
+	}
+	for i := range beads {
+		if r, ok := revs[beads[i].ID]; ok {
+			beads[i].Revision = r
+		}
+	}
+}
+
+// revisionContinuityFloor is the minimum re-seed value for revisions on an
+// unsealed file. Any prior writer issued small per-mutation counters, so a
+// floor around 2^40 (≈10^12) can never collide with a previously issued
+// token, while staying far below int64 overflow for subsequent +1 bumps.
+const revisionContinuityFloor = int64(1) << 40
+
+// applyBeadRevisionsSealed applies the persisted revisions and, when the file
+// is UNSEALED but carries beads (a pre-revisions legacy file, or a file an
+// older binary rewrote — dropping the revisions map and the seal), re-seeds
+// every bead's revision at a deterministic floor derived from the file's own
+// timestamps. Determinism matters: the seed must be identical across
+// processes and repeated reloads of the same bytes, or the reload-before-
+// write path would invent a new revision on every pass and spuriously fail
+// in-flight fences. The floor guarantees no previously issued token is ever
+// reused; per-bead monotonicity resumes with ordinary +1 bumps from there.
+func applyBeadRevisionsSealed(fd *fileData) {
+	applyBeadRevisions(fd.Beads, fd.Revisions)
+	if fd.RevisionsSealed || len(fd.Beads) == 0 {
+		return
+	}
+	seed := revisionContinuityFloor
+	for _, b := range fd.Beads {
+		if v := b.UpdatedAt.UnixNano(); !b.UpdatedAt.IsZero() && v > seed {
+			seed = v
+		}
+		if v := b.CreatedAt.UnixNano(); !b.CreatedAt.IsZero() && v > seed {
+			seed = v
+		}
+	}
+	for i := range fd.Beads {
+		if fd.Beads[i].Revision < seed {
+			fd.Beads[i].Revision = seed
+		}
+	}
 }
 
 // FileStore is a file-backed Store implementation. It embeds a MemStore for
@@ -84,6 +165,7 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
+	applyBeadRevisionsSealed(&fd)
 	store := &FileStore{
 		MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps),
 		fs:       fs,
@@ -120,6 +202,7 @@ func (fs *FileStore) reloadFromDisk() error {
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return fmt.Errorf("reloading file store: %w", err)
 	}
+	applyBeadRevisionsSealed(&fd)
 	fs.restoreFrom(fd.Seq, fd.Beads, fd.Deps)
 	return nil
 }
@@ -436,6 +519,18 @@ func (fs *FileStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	return fs.MemStore.Ready(query...)
 }
 
+// ReadyContext vetoes ContextReadyReader for FileStore. Refreshing the JSON
+// file is context-blind, so the promoted MemStore method would falsely promise
+// cancellation and would skip the required on-disk refresh entirely.
+func (fs *FileStore) ReadyContext(ctx context.Context, _ ...ReadyQuery) ([]Bead, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("reading ready beads from file store: %w", ErrReadyContextUnsupported)
+}
+
 // Children reloads the on-disk store before listing child beads.
 func (fs *FileStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
@@ -576,7 +671,7 @@ func (fs *FileStore) save() error {
 	seq, beads, deps := fs.snapshot()
 	fs.mu.Unlock()
 
-	fd := fileData{Seq: seq, Beads: beads, Deps: deps}
+	fd := fileData{Seq: seq, Beads: beads, Deps: deps, Revisions: beadRevisions(beads), RevisionsSealed: true}
 	data, err := json.MarshalIndent(fd, "", "  ")
 	if err != nil {
 		return fmt.Errorf("saving file store: %w", err)

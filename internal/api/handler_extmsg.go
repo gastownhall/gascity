@@ -110,7 +110,7 @@ func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) s
 	if store.Store == nil {
 		return extmsgHandleLabel(fallback)
 	}
-	source, ok := session.NewInfoStore(store).ExtmsgHandleSource(resolvedID)
+	source, ok := session.NewStore(store).ExtmsgHandleSource(resolvedID)
 	if !ok || source == "" {
 		return extmsgHandleLabel(fallback)
 	}

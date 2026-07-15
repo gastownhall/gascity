@@ -287,22 +287,23 @@ func TestSetupPackCityWritesExpectedLayout(t *testing.T) {
 func TestIsCredentialHelperInvocation(t *testing.T) {
 	cases := []struct {
 		name string
-		argv []string
+		args []string
 		want bool
 	}{
-		{"git invokes get", []string{"gc", "git-credential", "get"}, true},
-		{"absolute path store", []string{"/usr/local/bin/gc", "git-credential", "store"}, true},
-		{"leading boolean flag", []string{"gc", "--json", "git-credential", "get"}, true},
-		{"import install", []string{"gc", "import", "install"}, false},
-		{"import credential add", []string{"gc", "import", "credential", "add", "github.com"}, false},
-		{"plain status", []string{"gc", "status"}, false},
-		{"bare gc", []string{"gc"}, false},
-		{"empty argv", []string{}, false},
+		{"git invokes get", []string{"git-credential", "get"}, true},
+		{"scoped store", []string{"--city", "/tmp/city", "git-credential", "store"}, true},
+		{"scope consumes helper", []string{"--city", "git-credential", "get"}, false},
+		{"terminated helper", []string{"--", "git-credential", "get"}, false},
+		{"unknown leading flag", []string{"--json", "git-credential", "get"}, false},
+		{"import install", []string{"import", "install"}, false},
+		{"import credential add", []string{"import", "credential", "add", "github.com"}, false},
+		{"plain status", []string{"status"}, false},
+		{"bare gc", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isCredentialHelperInvocation(tc.argv); got != tc.want {
-				t.Errorf("isCredentialHelperInvocation(%v) = %v, want %v", tc.argv, got, tc.want)
+			if got := isCredentialHelperInvocation(tc.args); got != tc.want {
+				t.Errorf("isCredentialHelperInvocation(%v) = %v, want %v", tc.args, got, tc.want)
 			}
 		})
 	}
@@ -338,11 +339,11 @@ func TestGitCredentialInvocationSkipsPackDiscovery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	oldArgs := os.Args
-	os.Args = []string{"gc", "git-credential", "get"}
-	t.Cleanup(func() { os.Args = oldArgs })
-
-	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	root := newRootCmdWithOptions(
+		&bytes.Buffer{},
+		&bytes.Buffer{},
+		rootCommandOptionsForArgs([]string{"git-credential", "get"}),
+	)
 	if findSubcommand(root, "backstage") != nil {
 		t.Fatal("git-credential invocation must skip pack-command discovery (its config load self-deadlocks a credentialed import)")
 	}

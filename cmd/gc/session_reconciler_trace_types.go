@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -113,6 +115,21 @@ const (
 	TraceSiteLifecycleDrainAdvance          TraceSiteCode = "lifecycle.drain.advance"
 	TraceSiteSupervisorFSPressure           TraceSiteCode = "supervisor.fs_pressure"
 	TraceSiteTraceControl                   TraceSiteCode = "trace.control"
+
+	TraceSiteReconcilerPreserveConfiguredNamed   TraceSiteCode = "reconciler.session.preserve_configured_named"
+	TraceSiteReconcilerPendingCreatePreserved    TraceSiteCode = "reconciler.session.pending_create_preserved"
+	TraceSiteReconcilerCloseFailedCreate         TraceSiteCode = "reconciler.session.close_failed_create"
+	TraceSiteReconcilerDrainAck                  TraceSiteCode = "reconciler.session.drain_ack"
+	TraceSiteReconcilerTerminalProviderError     TraceSiteCode = "reconciler.session.terminal_provider_error"
+	TraceSiteReconcilerMaxSessionAge             TraceSiteCode = "reconciler.session.max_session_age"
+	TraceSiteReconcilerLiveDrift                 TraceSiteCode = "reconciler.session.live_drift"
+	TraceSiteReconcilerCircuitOpen               TraceSiteCode = "reconciler.session.circuit_open"
+	TraceSiteReconcilerCircuitTrip               TraceSiteCode = "reconciler.session.circuit_trip"
+	TraceSiteReconcilerProviderHealthGate        TraceSiteCode = "reconciler.session.provider_health_gate"
+	TraceSiteReconcilerBeadReassignCycle         TraceSiteCode = "reconciler.session.bead_reassign_cycle"
+	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
+	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
+	TraceSiteLifecycleShutdownPreserveSessions   TraceSiteCode = "lifecycle.shutdown.preserve_sessions"
 )
 
 type TraceReasonCode string
@@ -150,6 +167,33 @@ const (
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
+
+	TraceReasonRateLimit                     TraceReasonCode = "rate_limit"
+	TraceReasonPendingCreate                 TraceReasonCode = "pending_create"
+	TraceReasonPreserve                      TraceReasonCode = "preserve"
+	TraceReasonConfigDriftAttachmentError    TraceReasonCode = "config_drift_attachment_error"
+	TraceReasonConfigDriftAttached           TraceReasonCode = "config_drift_attached"
+	TraceReasonConfigDriftRecentlyAttached   TraceReasonCode = "config_drift_recently_attached"
+	TraceReasonPending                       TraceReasonCode = "pending"
+	TraceReasonAcknowledged                  TraceReasonCode = "acknowledged"
+	TraceReasonMinFloorIdleWorker            TraceReasonCode = "min_floor_idle_worker"
+	TraceReasonLiveDrift                     TraceReasonCode = "live_drift"
+	TraceReasonCircuitOpen                   TraceReasonCode = "circuit_open"
+	TraceReasonCircuitTrip                   TraceReasonCode = "circuit_trip"
+	TraceReasonProviderRed                   TraceReasonCode = "provider_red"
+	TraceReasonHealClearedStaleLease         TraceReasonCode = "heal_cleared_stale_lease"
+	TraceReasonPendingCreateRecoveryInFlight TraceReasonCode = "pending_create_recovery_in_flight"
+	TraceReasonPendingCreateRebuildFailed    TraceReasonCode = "pending_create_rebuild_failed"
+	TraceReasonPendingCreateCommitFailed     TraceReasonCode = "pending_create_commit_failed"
+	TraceReasonPendingCreateHealed           TraceReasonCode = "pending_create_healed"
+	TraceReasonAssignedWork                  TraceReasonCode = "assigned_work"
+	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
+	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
+	TraceReasonStart                         TraceReasonCode = "start"
+
+	TraceReasonMaxSessionAge TraceReasonCode = "max_session_age"
+	TraceReasonUserHold      TraceReasonCode = "user_hold"
+	TraceReasonQuarantine    TraceReasonCode = "quarantine"
 )
 
 type TraceOutcomeCode string
@@ -194,6 +238,47 @@ const (
 	// current FingerprintVersion (older or future binary). No drain, no
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
+
+	TraceOutcomeRollbackDeferred    TraceOutcomeCode = "rollback_deferred"
+	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
+	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"
+	TraceOutcomeCancelPending       TraceOutcomeCode = "cancel_pending"
+	TraceOutcomeCancelAssignedWork  TraceOutcomeCode = "cancel_assigned_work"
+	TraceOutcomeCancelReconcilerAck TraceOutcomeCode = "cancel_reconciler_ack"
+	TraceOutcomeStopPending         TraceOutcomeCode = "stop_pending"
+	TraceOutcomeDeferredConfirm     TraceOutcomeCode = "deferred_confirm"
+	TraceOutcomeExempt              TraceOutcomeCode = "exempt"
+	TraceOutcomeRestartInPlace      TraceOutcomeCode = "restart_in_place"
+	TraceOutcomeDeferredPending     TraceOutcomeCode = "deferred_pending"
+	TraceOutcomeRepairInPlace       TraceOutcomeCode = "repair_in_place"
+	TraceOutcomeFailedCreate        TraceOutcomeCode = "failed_create"
+	TraceOutcomeStartInFlight       TraceOutcomeCode = "start_in_flight"
+	TraceOutcomeRespawnSkipped      TraceOutcomeCode = "respawn_skipped"
+	TraceOutcomeRelaunch            TraceOutcomeCode = "relaunch"
+	TraceOutcomeClear               TraceOutcomeCode = "clear"
+	TraceOutcomeUnhealthy           TraceOutcomeCode = "unhealthy"
+	TraceOutcomeRestart             TraceOutcomeCode = "restart"
+	TraceOutcomeScheduled           TraceOutcomeCode = "scheduled"
+	TraceOutcomeHoldDeferred        TraceOutcomeCode = "hold_deferred"
+	TraceOutcomeHeld                TraceOutcomeCode = "held"
+	TraceOutcomeHealed              TraceOutcomeCode = "healed"
+
+	TraceOutcomeResolutionFailed    TraceOutcomeCode = "resolution_failed"
+	TraceOutcomeStartErrorConverged TraceOutcomeCode = "start_error_converged"
+	TraceOutcomeSessionInitializing TraceOutcomeCode = "session_initializing"
+	TraceOutcomeStartEnqueued       TraceOutcomeCode = "start_enqueued"
+	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
+	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
+	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
+
+	// TraceOutcomeSkippedLivenessError marks a destructive reconciler action
+	// (pending-create rollback, failed-create close, drain-ack finalize, or
+	// orphan close) skipped this tick because the runtime liveness probe
+	// returned an observation error. providerAlive=false then means
+	// "observation unavailable", not "confirmed dead", so the level-triggered
+	// loop fails closed and re-observes next tick rather than orphaning a
+	// possibly-live session (#3872-family).
+	TraceOutcomeSkippedLivenessError TraceOutcomeCode = "skipped_liveness_error"
 )
 
 type TraceCompletionStatus string
@@ -219,9 +304,7 @@ type TraceEvaluationStatus string
 const (
 	TraceEvaluationEligible          TraceEvaluationStatus = "eligible"
 	TraceEvaluationDependencyBlocked TraceEvaluationStatus = "dependency_blocked"
-	TraceEvaluationCapRejected       TraceEvaluationStatus = "cap_rejected"
 	TraceEvaluationStorePartial      TraceEvaluationStatus = "store_partial"
-	TraceEvaluationMissingTemplate   TraceEvaluationStatus = "missing_template"
 	TraceEvaluationSkipped           TraceEvaluationStatus = "skipped"
 )
 
@@ -255,28 +338,6 @@ const (
 	TraceArmSourceManual TraceArmSource = "manual"
 	TraceArmSourceAuto   TraceArmSource = "auto"
 )
-
-type TraceTextBlob struct {
-	Value         string `json:"value"`
-	OriginalBytes int    `json:"original_bytes"`
-	StoredBytes   int    `json:"stored_bytes"`
-	Truncated     bool   `json:"truncated"`
-}
-
-func NewTraceTextBlob(value string, maxBytes int) TraceTextBlob {
-	b := []byte(value)
-	blob := TraceTextBlob{
-		Value:         value,
-		OriginalBytes: len(b),
-		StoredBytes:   len(b),
-	}
-	if maxBytes > 0 && len(b) > maxBytes {
-		blob.Value = string(b[:maxBytes])
-		blob.StoredBytes = maxBytes
-		blob.Truncated = true
-	}
-	return blob
-}
 
 type SessionReconcilerTraceRecord struct {
 	TraceSchemaVersion    int                     `json:"trace_schema_version"`
@@ -360,69 +421,37 @@ func (r *SessionReconcilerTraceRecord) ensureFields() {
 
 func (r SessionReconcilerTraceRecord) clone() SessionReconcilerTraceRecord {
 	if len(r.CausedByRecordIDs) > 0 {
-		r.CausedByRecordIDs = append([]string(nil), r.CausedByRecordIDs...)
+		r.CausedByRecordIDs = slices.Clone(r.CausedByRecordIDs)
 	}
 	if len(r.TemplatesTouched) > 0 {
-		r.TemplatesTouched = append([]string(nil), r.TemplatesTouched...)
+		r.TemplatesTouched = slices.Clone(r.TemplatesTouched)
 	}
 	if len(r.AutoArmsTriggered) > 0 {
-		r.AutoArmsTriggered = append([]string(nil), r.AutoArmsTriggered...)
+		r.AutoArmsTriggered = slices.Clone(r.AutoArmsTriggered)
 	}
 	if len(r.DropReasonCounts) > 0 {
-		cp := make(map[string]int, len(r.DropReasonCounts))
-		for k, v := range r.DropReasonCounts {
-			cp[k] = v
-		}
-		r.DropReasonCounts = cp
+		r.DropReasonCounts = maps.Clone(r.DropReasonCounts)
 	}
 	if len(r.DecisionCounts) > 0 {
-		cp := make(map[string]int, len(r.DecisionCounts))
-		for k, v := range r.DecisionCounts {
-			cp[k] = v
-		}
-		r.DecisionCounts = cp
+		r.DecisionCounts = maps.Clone(r.DecisionCounts)
 	}
 	if len(r.OperationCounts) > 0 {
-		cp := make(map[string]int, len(r.OperationCounts))
-		for k, v := range r.OperationCounts {
-			cp[k] = v
-		}
-		r.OperationCounts = cp
+		r.OperationCounts = maps.Clone(r.OperationCounts)
 	}
 	if len(r.MutationCounts) > 0 {
-		cp := make(map[string]int, len(r.MutationCounts))
-		for k, v := range r.MutationCounts {
-			cp[k] = v
-		}
-		r.MutationCounts = cp
+		r.MutationCounts = maps.Clone(r.MutationCounts)
 	}
 	if len(r.ReasonCounts) > 0 {
-		cp := make(map[string]int, len(r.ReasonCounts))
-		for k, v := range r.ReasonCounts {
-			cp[k] = v
-		}
-		r.ReasonCounts = cp
+		r.ReasonCounts = maps.Clone(r.ReasonCounts)
 	}
 	if len(r.OutcomeCounts) > 0 {
-		cp := make(map[string]int, len(r.OutcomeCounts))
-		for k, v := range r.OutcomeCounts {
-			cp[k] = v
-		}
-		r.OutcomeCounts = cp
+		r.OutcomeCounts = maps.Clone(r.OutcomeCounts)
 	}
 	if len(r.DemandSummary) > 0 {
-		cp := make(map[string]any, len(r.DemandSummary))
-		for k, v := range r.DemandSummary {
-			cp[k] = v
-		}
-		r.DemandSummary = cp
+		r.DemandSummary = maps.Clone(r.DemandSummary)
 	}
 	if len(r.Fields) > 0 {
-		cp := make(map[string]any, len(r.Fields))
-		for k, v := range r.Fields {
-			cp[k] = v
-		}
-		r.Fields = cp
+		r.Fields = maps.Clone(r.Fields)
 	}
 	return r
 }
@@ -538,168 +567,6 @@ func normalizedTraceTemplate(v string) string {
 		return ""
 	}
 	return strings.TrimSpace(filepath.Clean(v))
-}
-
-func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
-	raw = strings.TrimSpace(raw)
-	switch raw {
-	case "reconciler.session.unknown_state":
-		return TraceSiteReconcilerUnknownState, ""
-	case "reconciler.session.pending_create":
-		return TraceSiteReconcilerPendingCreate, ""
-	case "reconciler.session.wake":
-		return TraceSiteReconcilerWakeDecision, ""
-	case "reconciler.session.drain":
-		return TraceSiteReconcilerDrainDecision, ""
-	}
-	switch TraceSiteCode(raw) {
-	case TraceSiteUnknown,
-		TraceSiteScaleCheckExec,
-		TraceSiteCycleStart,
-		TraceSiteCycleFinish,
-		TraceSiteConfigReload,
-		TraceSiteControllerTickPhase,
-		TraceSiteDesiredStateBuild,
-		TraceSiteDemandSnapshot,
-		TraceSiteOrderDispatch,
-		TraceSitePoolDemandCompute,
-		TraceSiteSessionSnapshot,
-		TraceSiteSessionSync,
-		TraceSiteSessionReconcileBuildDeps,
-		TraceSiteSessionReconcileHealRetire,
-		TraceSiteSessionReconcileTopoOrder,
-		TraceSiteSessionReconcileCircuitBreaker,
-		TraceSiteSessionReconcileForwardPass,
-		TraceSiteSessionReconcileAwakeSet,
-		TraceSiteSessionReconcileWakeSleep,
-		TraceSiteSessionReconcileStartExecution,
-		TraceSiteSessionReconcileDrainAdvance,
-		TraceSitePoolAgentCap,
-		TraceSitePoolRigCap,
-		TraceSitePoolWorkspaceCap,
-		TraceSitePoolAccept,
-		TraceSitePoolMinFill,
-		TraceSitePoolInFlightReuse,
-		TraceSitePoolWakeKnownIdentity,
-		TraceSitePoolNewDemandCap,
-		TraceSiteReconcilerUnknownState,
-		TraceSiteReconcilerOrphaned,
-		TraceSiteReconcilerCloseOrphan,
-		TraceSiteReconcilerPendingCreate,
-		TraceSiteReconcilerConfigDrift,
-		TraceSiteReconcilerIdleDrain,
-		TraceSiteReconcilerIdleTimeout,
-		TraceSiteReconcilerResetStalled,
-		TraceSiteReconcilerProgressStallExempt,
-		TraceSiteReconcilerWakeDecision,
-		TraceSiteReconcilerDrainDecision,
-		TraceSiteDrainStale,
-		TraceSiteDrainComplete,
-		TraceSiteDrainCancel,
-		TraceSiteDrainTimeout,
-		TraceSiteMutationBeadMetadata,
-		TraceSiteMutationRuntimeMeta,
-		TraceSiteLifecycleStartRollback,
-		TraceSiteLifecycleStartFailed,
-		TraceSiteLifecycleStartRun,
-		TraceSiteLifecycleStartPrepare,
-		TraceSiteLifecycleStartExecute,
-		TraceSiteLifecycleStartCommit,
-		TraceSiteLifecycleDrainBegin,
-		TraceSiteLifecycleDrainAdvance,
-		TraceSiteSupervisorFSPressure,
-		TraceSiteTraceControl:
-		return TraceSiteCode(raw), ""
-	default:
-		return TraceSiteUnknown, raw
-	}
-}
-
-func normalizeTraceReasonCode(raw string) (TraceReasonCode, string) {
-	raw = strings.TrimSpace(raw)
-	switch raw {
-	case "config-drift":
-		return TraceReasonConfigDrift, ""
-	case "store-partial":
-		return TraceReasonStorePartial, ""
-	case "no-wake-reason":
-		return TraceReasonNoWakeReason, ""
-	}
-	switch TraceReasonCode(raw) {
-	case TraceReasonUnknown,
-		TraceReasonNoDemand,
-		TraceReasonNoMatchingSession,
-		TraceReasonDependencyBlocked,
-		TraceReasonStorePartial,
-		TraceReasonConfigDrift,
-		TraceReasonIdle,
-		TraceReasonPendingCreateRollback,
-		TraceReasonWakeFailureIncremented,
-		TraceReasonQuarantineEntered,
-		TraceReasonUnknownStateSkipped,
-		TraceReasonTemplateMissing,
-		TraceReasonNoEffectTemplateMatch,
-		TraceReasonAutoArmSuppressed,
-		TraceReasonRetained,
-		TraceReasonExpired,
-		TraceReasonAgentCap,
-		TraceReasonRigCap,
-		TraceReasonWorkspaceCap,
-		TraceReasonCap,
-		TraceReasonMinFill,
-		TraceReasonInFlightReuse,
-		TraceReasonWake,
-		TraceReasonIdleTimeout,
-		TraceReasonStaleGeneration,
-		TraceReasonSuspended,
-		TraceReasonOrphaned,
-		TraceReasonDrainTimeout,
-		TraceReasonStoreQueryPartial,
-		TraceReasonNoWakeReason,
-		TraceReasonFSPressure,
-		TraceReasonResetStalled:
-		return TraceReasonCode(raw), ""
-	default:
-		return TraceReasonUnknown, raw
-	}
-}
-
-func normalizeTraceOutcomeCode(raw string) (TraceOutcomeCode, string) {
-	switch TraceOutcomeCode(strings.TrimSpace(raw)) {
-	case TraceOutcomeUnknown,
-		TraceOutcomeComplete,
-		TraceOutcomePartial,
-		TraceOutcomeApplied,
-		TraceOutcomeNoChange,
-		TraceOutcomeFailed,
-		TraceOutcomeSuccess,
-		TraceOutcomeDeferredByWakeBudget,
-		TraceOutcomeSessionExists,
-		TraceOutcomeSessionExistsConverged,
-		TraceOutcomeBlockedOnDependencies,
-		TraceOutcomeProviderError,
-		TraceOutcomePanicRecovered,
-		TraceOutcomeDeadlineExceeded,
-		TraceOutcomeCanceled,
-		TraceOutcomeSlowStorageDegraded,
-		TraceOutcomeLowSpaceDegraded,
-		TraceOutcomePromotionPartialContext,
-		TraceOutcomeAccepted,
-		TraceOutcomeRejected,
-		TraceOutcomeSkipped,
-		TraceOutcomeDrain,
-		TraceOutcomeClosed,
-		TraceOutcomeRollback,
-		TraceOutcomeDeferredAttached,
-		TraceOutcomeDeferredActive,
-		TraceOutcomeStop,
-		TraceOutcomeStartCandidate,
-		TraceOutcomeRetry,
-		TraceOutcomeCancel:
-		return TraceOutcomeCode(strings.TrimSpace(raw)), ""
-	default:
-		return TraceOutcomeUnknown, strings.TrimSpace(raw)
-	}
 }
 
 func newTraceID(prefix string) string {

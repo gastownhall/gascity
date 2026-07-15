@@ -2565,3 +2565,42 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 		t.Fatalf("claim result = %+v, want drain/claims_errored", result)
 	}
 }
+
+// TestFilterUnreadyHookCandidatesExcludesClosedBeads guards against upstream
+// Dolt status-index drift where bd list --status=open returns closed beads
+// (gcy-1on). filterUnreadyHookCandidates must strip them before they reach the
+// agent hook output.
+func TestFilterUnreadyHookCandidatesExcludesClosedBeads(t *testing.T) {
+	now := time.Now()
+	input := `[{"id":"gc-closed","status":"closed","title":"Already done"},{"id":"gc-open","status":"open","title":"Real work"}]`
+	got := filterUnreadyHookCandidates(input, now)
+
+	var items []map[string]any
+	if err := json.Unmarshal([]byte(got), &items); err != nil {
+		t.Fatalf("unmarshal result: %v; raw=%q", err, got)
+	}
+	if len(items) != 1 {
+		t.Fatalf("filterUnreadyHookCandidates returned %d items, want 1; got %q", len(items), got)
+	}
+	if id, _ := items[0]["id"].(string); id != "gc-open" {
+		t.Fatalf("remaining bead id = %q, want gc-open", id)
+	}
+}
+
+// TestFilterUnreadyHookCandidatesExcludesClosedBeadsFromReworkDrift verifies
+// that a closed bead with started_at set (the rework probe shape) is stripped
+// even when it carries gc.routed_to, simulating the phantom-witness-escalation
+// scenario from gcy-1on.
+func TestFilterUnreadyHookCandidatesExcludesClosedBeadsFromReworkDrift(t *testing.T) {
+	now := time.Now()
+	input := `[{"id":"gcy-oqf","status":"closed","started_at":"2026-06-01T00:00:00Z","metadata":{"gc.routed_to":"gascity-source/gastown.refinery"}}]`
+	got := filterUnreadyHookCandidates(input, now)
+
+	var items []map[string]any
+	if err := json.Unmarshal([]byte(got), &items); err != nil {
+		t.Fatalf("unmarshal result: %v; raw=%q", err, got)
+	}
+	if len(items) != 0 {
+		t.Fatalf("filterUnreadyHookCandidates returned %d items for closed bead, want 0; got %q", len(items), got)
+	}
+}

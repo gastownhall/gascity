@@ -1,13 +1,21 @@
 package runproj
 
 import (
+	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// ErrRunNotFound is the sentinel wrapped by SnapshotForRun (and everything
+// built on it) when the requested run root is absent from the folded beads —
+// the run is truly unknown to the projection, as opposed to present but
+// unprojectable (UnsupportedRunError). Callers branch on it with errors.Is;
+// the dashboard BFF uses it to grant a just-slung run's deep link a warming
+// grace window instead of a terminal 404.
+var ErrRunNotFound = errors.New("run not found")
 
 // snapshotScanCount counts every snapshotForRun invocation. It exists so a test
 // can prove the single-scan entry points fold a run exactly once (the detail
@@ -30,7 +38,7 @@ type RunSnapshot struct {
 // BuildRunDetailFromSnapshot consume. version and eventSeq parameterize the
 // snapshot identity (the golden passes 1/100; the live tailer passes a real
 // version and its LastSeq cursor). It returns an error only when the run root is
-// absent from beadList.
+// absent from beadList; that error wraps ErrRunNotFound.
 func SnapshotForRun(beadList []beads.Bead, runID string, version int, eventSeq int64) (RunSnapshot, error) {
 	raw, err := snapshotForRun(beadList, runID, version, eventSeq)
 	if err != nil {
@@ -218,20 +226,11 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		}
 	}
 	if rootIdx < 0 {
-		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
+		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q: %w", rootID, ErrRunNotFound)
 	}
 	root := beadList[rootIdx]
 
-	var members []beads.Bead
-	for i := range beadList {
-		b := beadList[i]
-		if b.ID == rootID ||
-			b.ParentID == rootID ||
-			b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID ||
-			strings.HasPrefix(b.ID, rootID+".") {
-			members = append(members, b)
-		}
-	}
+	members := RunMembers(beadList, rootID)
 
 	snapBeads := make([]runSnapshotBead, 0, len(members))
 	for i := range members {
@@ -628,7 +627,43 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 		StreamableSessionIDs:   streamableSessionIDs,
 		StatusCounts:           visibleStatuses,
 		AllStatusCounts:        allStatuses,
+		Terminal:               deriveRunTerminal(visibleStatuses, visibleCount),
 	}
+}
+
+// terminalRunNodeStatuses and nonTerminalRunNodeStatuses partition every
+// RunNodeStatus value (shared/src/run-detail.ts) into its terminality class.
+// This is the single Go-side source of the taxonomy the client used to
+// duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
+// newly-added status must be explicitly classified here (or the test fails).
+var (
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped", "canceled"}
+	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
+)
+
+// deriveRunTerminal reports whether the run has reached a terminal state, using
+// the visible-node status census. It matches the retired client isTerminalProgress
+// fold exactly: terminal iff there is at least one visible node, no visible node
+// sits in a non-terminal status, and the terminal-status tally covers every
+// visible node.
+func deriveRunTerminal(visibleStatuses nodeStatusCounts, visibleCount int) bool {
+	if visibleCount <= 0 {
+		return false
+	}
+	if sumStatusCounts(visibleStatuses, nonTerminalRunNodeStatuses) > 0 {
+		return false
+	}
+	return sumStatusCounts(visibleStatuses, terminalRunNodeStatuses) >= visibleCount
+}
+
+// sumStatusCounts totals the counts of the given statuses (absent statuses
+// contribute zero), mirroring the client's `?? 0` reduction.
+func sumStatusCounts(counts nodeStatusCounts, statuses []string) int {
+	total := 0
+	for _, status := range statuses {
+		total += counts.counts[status]
+	}
+	return total
 }
 
 // runSnapshotSequenceOf renders the snapshot-sequence union. Port of TS

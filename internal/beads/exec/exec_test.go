@@ -1456,3 +1456,44 @@ esac
 		t.Fatalf("list args missing type filter: %s", argsText)
 	}
 }
+
+func TestListWithSeekAfterDoesNotForwardLimitBeforeClientFilter(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{
+		Type:  "task",
+		Sort:  beads.SortCreatedDesc,
+		Limit: 7,
+		SeekAfter: &beads.SeekBoundary{
+			CreatedAt: time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
+			ID:        "gc-9",
+		},
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	// The script cannot express the compound (created_at, id) boundary; a
+	// script-side limit would cut rows before the Go-side seek filter runs.
+	if strings.Contains(argsText, "--limit=7") {
+		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
+	}
+}

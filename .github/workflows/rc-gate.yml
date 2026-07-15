@@ -382,11 +382,20 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
+      - name: Verify release output is ignored
+        run: make check-release-dist-ignore
       - name: Run GoReleaser snapshot
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
         with:
           version: "~> v2"
           args: release --snapshot --clean
+      - name: Verify release binary metadata
+        run: |
+          set -euo pipefail
+          expected_commit="$(git rev-parse HEAD)"
+          scripts/verify-release-binary-metadata.sh \
+            dist/gascity_linux_amd64_v1/gc \
+            "$expected_commit"
       - name: Upload GoReleaser dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

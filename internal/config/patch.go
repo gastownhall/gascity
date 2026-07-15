@@ -428,6 +428,21 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 }
 
 func applyAgentPatchFields(a *Agent, p *AgentPatch) {
+	applyAgentMutation(a, p, SessionSleepSourceAgentPatch)
+}
+
+// applyAgentMutation applies the overridable fields of an AgentPatch to an
+// agent. Agent patches and rig-scoped agent overrides share this single merge
+// body: applyAgentOverride adapts an AgentOverride into an AgentPatch (via
+// toAgentPatch) and delegates here, so the two override paths can never
+// silently diverge field-by-field. sleepSource records which config layer
+// supplied SleepAfterIdle (SessionSleepSourceAgentPatch for patches,
+// SessionSleepSourceRigOverride for rig overrides).
+//
+// TestApplyAgentPatchCoversAllFields and TestApplyAgentOverrideCoversAllFields
+// enforce that every overridable field is wired in here (and, for the override
+// path, copied by toAgentPatch); a missed field fails the build.
+func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
 	}
@@ -481,7 +496,7 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
-		a.SleepAfterIdleSource = "agent_patch"
+		a.SleepAfterIdleSource = sleepSource
 	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)

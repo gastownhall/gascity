@@ -95,6 +95,53 @@ func TestMailboxAddressesCodec(t *testing.T) {
 	}
 }
 
+// TestMailboxAddressesIncludingRuntimeNameCodec pins the API-dup semantics that
+// MailboxAddressesIncludingRuntimeName preserves: unlike MailboxAddresses (the
+// CLI fork, tested above), it appends session_name UNCONDITIONALLY (last),
+// keeping runtime session mailboxes reachable via API reads (bf576b04a).
+func TestMailboxAddressesIncludingRuntimeNameCodec(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want []string
+	}{
+		{
+			name: "session_name appended last even when other addresses resolve",
+			bead: beads.Bead{
+				ID: "sess-1",
+				Metadata: map[string]string{
+					"alias":         "mayor",
+					"alias_history": "deacon,mayor,polecat",
+					"session_name":  "sn-1",
+				},
+			},
+			want: []string{"mayor", "sess-1", "deacon", "polecat", "sn-1"},
+		},
+		{
+			name: "session_name deduped against primary",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "sn-1"}},
+			want: []string{"sn-1"},
+		},
+		{
+			name: "id only",
+			bead: beads.Bead{ID: "sess-1"},
+			want: []string{"sess-1"},
+		},
+		{
+			name: "empty everything",
+			bead: beads.Bead{},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MailboxAddressesIncludingRuntimeName(tt.bead); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("MailboxAddressesIncludingRuntimeName = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtmsgHandleSourceCodec(t *testing.T) {
 	tests := []struct {
 		name string
@@ -126,9 +173,9 @@ func TestExtmsgHandleSourceCodec(t *testing.T) {
 	}
 }
 
-// TestInfoStoreMailboxAddressReadOnly proves the front-door read methods load
+// TestStoreMailboxAddressReadOnly proves the front-door read methods load
 // the session bead and apply the codec without emitting any bead writes.
-func TestInfoStoreMailboxAddressReadOnly(t *testing.T) {
+func TestStoreMailboxAddressReadOnly(t *testing.T) {
 	b := sessionBeadFixture("sess-1", "open", map[string]string{
 		"alias":         "mayor",
 		"alias_history": "deacon",
@@ -136,7 +183,7 @@ func TestInfoStoreMailboxAddressReadOnly(t *testing.T) {
 	})
 	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
 	rec := beadstest.NewRecordingStore(mem)
-	is := NewInfoStore(beads.SessionStore{Store: rec})
+	is := NewStore(beads.SessionStore{Store: rec})
 
 	addr, err := is.MailboxAddress("sess-1")
 	if err != nil {
@@ -159,14 +206,14 @@ func TestInfoStoreMailboxAddressReadOnly(t *testing.T) {
 	}
 }
 
-// TestInfoStoreExtmsgHandleSource proves the extmsg handle read method loads
+// TestStoreExtmsgHandleSource proves the extmsg handle read method loads
 // the bead, applies the alias/session_name codec, signals not-found via ok, and
 // emits no bead writes.
-func TestInfoStoreExtmsgHandleSource(t *testing.T) {
+func TestStoreExtmsgHandleSource(t *testing.T) {
 	b := sessionBeadFixture("sess-1", "open", map[string]string{"session_name": "sn-1"})
 	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
 	rec := beadstest.NewRecordingStore(mem)
-	is := NewInfoStore(beads.SessionStore{Store: rec})
+	is := NewStore(beads.SessionStore{Store: rec})
 
 	source, ok := is.ExtmsgHandleSource("sess-1")
 	if !ok {
@@ -185,12 +232,12 @@ func TestInfoStoreExtmsgHandleSource(t *testing.T) {
 	}
 }
 
-// TestInfoStoreMailboxAddressNotFound proves a missing session bead surfaces
+// TestStoreMailboxAddressNotFound proves a missing session bead surfaces
 // the verbatim Get error (beads.ErrNotFound-wrapped), matching the raw mail
 // path which returned store.Get's error directly.
-func TestInfoStoreMailboxAddressNotFound(t *testing.T) {
+func TestStoreMailboxAddressNotFound(t *testing.T) {
 	mem := beads.NewMemStore()
-	is := NewInfoStore(beads.SessionStore{Store: mem})
+	is := NewStore(beads.SessionStore{Store: mem})
 	if _, err := is.MailboxAddress("nope"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("err = %v, want beads.ErrNotFound", err)
 	}

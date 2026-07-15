@@ -2,7 +2,9 @@ package nudgequeue
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +213,227 @@ func TestRollbackEnqueueEmitsByteIdenticalWrites(t *testing.T) {
 	}
 }
 
+// TestSweepStaleEmitsByteIdenticalWrites proves SweepStale stamps the exact
+// five-key gc-swept terminal map and then closes the bead — the byte-identical
+// contract for the prior inline stamp+close block in cmd/gc/nudge_mail_sweep.go.
+func TestSweepStaleEmitsByteIdenticalWrites(t *testing.T) {
+	st, rec := newRecordingNudgeStore(t)
+	beadID, _, err := st.Save(sampleNudgeItem())
+	if err != nil {
+		t.Fatalf("Save err = %v", err)
+	}
+	rec.Reset()
+
+	now := time.Date(2026, 6, 2, 9, 30, 0, 0, time.UTC)
+	const closeReason = "nudge gc-swept: stale nudge bead past gc retention window"
+	if err := st.SweepStale(beadID, closeReason, now); err != nil {
+		t.Fatalf("SweepStale err = %v", err)
+	}
+
+	batches := rec.CallsForOp("SetMetadataBatch")
+	if len(batches) != 1 {
+		t.Fatalf("SetMetadataBatch calls = %d, want 1", len(batches))
+	}
+	wantUpdate := map[string]string{
+		"state":           "gc-swept",
+		"terminal_reason": "gc-swept-stale",
+		"commit_boundary": "gc-swept",
+		"terminal_at":     "2026-06-02T09:30:00Z",
+		"close_reason":    closeReason,
+	}
+	if !reflect.DeepEqual(batches[0].Metadata, wantUpdate) {
+		t.Errorf("update map mismatch:\n got=%#v\nwant=%#v", batches[0].Metadata, wantUpdate)
+	}
+	if batches[0].ID != beadID {
+		t.Errorf("SetMetadataBatch id = %q, want %q", batches[0].ID, beadID)
+	}
+	closes := rec.CallsForOp("Close")
+	if len(closes) != 1 || closes[0].ID != beadID {
+		t.Errorf("Close calls = %+v, want one close of %q", closes, beadID)
+	}
+}
+
+// failingSetMetadataBatchStore wraps a beads.Store but fails every
+// SetMetadataBatch, so a test can prove SweepStale skips Close when the metadata
+// write fails.
+type failingSetMetadataBatchStore struct {
+	beads.Store
+	err error
+}
+
+func (f failingSetMetadataBatchStore) SetMetadataBatch(string, map[string]string) error {
+	return f.err
+}
+
+// TestSweepStaleSetMetadataFailureSkipsClose proves a failed SetMetadataBatch
+// returns a bead-ID-bearing error and never reaches Close, preserving the sweep's
+// current continue-without-close semantics.
+func TestSweepStaleSetMetadataFailureSkipsClose(t *testing.T) {
+	rec := beadstest.NewRecordingStore(beads.NewMemStore())
+	failing := failingSetMetadataBatchStore{Store: rec, err: errors.New("batch boom")}
+	st := NewStore(beads.NudgesStore{Store: failing})
+
+	err := st.SweepStale("nb-fail", "nudge gc-swept: stale nudge bead past gc retention window", time.Now().UTC())
+	if err == nil {
+		t.Fatalf("SweepStale err = nil, want non-nil on SetMetadataBatch failure")
+	}
+	if !strings.Contains(err.Error(), "nb-fail") || !strings.Contains(err.Error(), "set metadata") {
+		t.Errorf("err = %q, want it to contain the bead id and \"set metadata\"", err)
+	}
+	if n := len(rec.CallsForOp("Close")); n != 0 {
+		t.Errorf("Close calls = %d, want 0 (SetMetadataBatch failure must skip Close)", n)
+	}
+}
+
+// TestSweepStaleNilStoreIsNoOp pins the nil-safety contract shared by every Store
+// method: a nil *Store and a Store over a nil embedded store both no-op.
+func TestSweepStaleNilStoreIsNoOp(t *testing.T) {
+	const reason = "nudge gc-swept: stale nudge bead past gc retention window"
+	now := time.Now().UTC()
+
+	var s *Store // nil receiver: shadow bead store unavailable
+	if err := s.SweepStale("gc-1", reason, now); err != nil {
+		t.Errorf("SweepStale on nil store = %v, want nil no-op", err)
+	}
+	empty := NewStore(beads.NudgesStore{}) // Store over a nil embedded store
+	if err := empty.SweepStale("gc-1", reason, now); err != nil {
+		t.Errorf("SweepStale on nil embedded store = %v, want nil no-op", err)
+	}
+}
+
+// listCaptureNudgeStore records every List query and returns a fixed candidate
+// set, so a test can pin the exact query shape StaleShadowsBefore emits and drive
+// the decode/live-exclusion logic against a controlled bead set. Non-List ops
+// delegate to the embedded store.
+type listCaptureNudgeStore struct {
+	beads.Store
+	queries []beads.ListQuery
+	result  []beads.Bead
+	err     error
+}
+
+func (s *listCaptureNudgeStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, q)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.result, nil
+}
+
+// TestNudgeShadowOpenFromBeadStatus proves NudgeShadow.Open is bead-authoritative:
+// true only for a bead whose Status is "open", replacing the caller's b.Status
+// crack.
+func TestNudgeShadowOpenFromBeadStatus(t *testing.T) {
+	if got := decodeNudgeItem(beads.Bead{Status: "open"}); !got.Open {
+		t.Error("Open = false for an open bead, want true")
+	}
+	if got := decodeNudgeItem(beads.Bead{Status: "closed"}); got.Open {
+		t.Error("Open = true for a closed bead, want false")
+	}
+	if got := decodeNudgeItem(beads.Bead{}); got.Open {
+		t.Error("Open = true for a bead with empty status, want false")
+	}
+}
+
+// TestNudgeShadowCloseReasonDecode proves the shadow codec reads back the
+// bead-lifecycle close_reason (the reason forwarded to `bd close --reason`), so
+// callers assert it off the typed view instead of cracking bead metadata.
+func TestNudgeShadowCloseReasonDecode(t *testing.T) {
+	const reason = "nudge rollback: enqueue transaction failed"
+	got := decodeNudgeItem(beads.Bead{
+		Status:   "closed",
+		Metadata: map[string]string{"close_reason": reason},
+	})
+	if got.CloseReason != reason {
+		t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+	}
+	if empty := decodeNudgeItem(beads.Bead{}); empty.CloseReason != "" {
+		t.Errorf("CloseReason = %q, want empty when close_reason absent", empty.CloseReason)
+	}
+}
+
+// TestStaleShadowsBeforeQueryShape pins the byte-identical retention-sweep query
+// StaleShadowsBefore emits — the same gc:nudge label, CreatedBefore cutoff,
+// oldest-first sort, and both-tier read the prior StaleCandidatesBefore used.
+// The negative limit is normalized to 0 (unbounded) before it reaches the store.
+func TestStaleShadowsBeforeQueryShape(t *testing.T) {
+	capture := &listCaptureNudgeStore{Store: beads.NewMemStore()}
+	st := NewStore(beads.NudgesStore{Store: capture})
+	cutoff := time.Date(2026, 6, 2, 9, 0, 0, 0, time.UTC)
+
+	if _, err := st.StaleShadowsBefore(cutoff, -1, nil); err != nil {
+		t.Fatalf("StaleShadowsBefore err = %v", err)
+	}
+	if len(capture.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1", len(capture.queries))
+	}
+	want := beads.ListQuery{
+		Label:         nudgeBeadLabel,
+		CreatedBefore: cutoff,
+		Limit:         0,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	}
+	if !reflect.DeepEqual(capture.queries[0], want) {
+		t.Errorf("query = %#v, want %#v", capture.queries[0], want)
+	}
+}
+
+// TestStaleShadowsBeforeDecodesAndExcludesLive proves StaleShadowsBefore returns
+// typed shadows in candidate order (oldest-first), carries the open/terminal
+// status via NudgeShadow.Open, and drops any candidate whose durable nudge id is
+// in the live flock-queue exclusion set — the behavior the cmd/gc sweep loop used
+// to inline as DecodeShadow + b.Status + the liveIDs check.
+func TestStaleShadowsBeforeDecodesAndExcludesLive(t *testing.T) {
+	capture := &listCaptureNudgeStore{
+		Store: beads.NewMemStore(),
+		result: []beads.Bead{
+			{ID: "nb-a", Status: "open", Metadata: map[string]string{"nudge_id": "a"}},
+			{ID: "nb-b", Status: "closed", Metadata: map[string]string{"nudge_id": "b"}},
+			{ID: "nb-c", Status: "open", Metadata: map[string]string{"nudge_id": "c"}},
+		},
+	}
+	st := NewStore(beads.NudgesStore{Store: capture})
+
+	shadows, err := st.StaleShadowsBefore(time.Now(), 10, map[string]bool{"c": true})
+	if err != nil {
+		t.Fatalf("StaleShadowsBefore err = %v", err)
+	}
+	if len(shadows) != 2 {
+		t.Fatalf("shadows = %d, want 2 (live nudge c excluded)", len(shadows))
+	}
+	if shadows[0].BeadID != "nb-a" || shadows[0].ID != "a" || !shadows[0].Open {
+		t.Errorf("shadows[0] = %+v, want open nb-a/a", shadows[0])
+	}
+	if shadows[1].BeadID != "nb-b" || shadows[1].ID != "b" || shadows[1].Open {
+		t.Errorf("shadows[1] = %+v, want closed nb-b/b", shadows[1])
+	}
+}
+
+// TestStaleShadowsBeforePropagatesListError proves a store List failure surfaces
+// to the caller (which wraps it as a fatal listing error).
+func TestStaleShadowsBeforePropagatesListError(t *testing.T) {
+	capture := &listCaptureNudgeStore{Store: beads.NewMemStore(), err: errors.New("list boom")}
+	st := NewStore(beads.NudgesStore{Store: capture})
+	if _, err := st.StaleShadowsBefore(time.Now(), 0, nil); err == nil {
+		t.Fatal("StaleShadowsBefore err = nil, want the store List error propagated")
+	}
+}
+
+// TestStaleShadowsBeforeNilStoreIsNoOp pins the shared nil-safety contract for the
+// new read: a nil *Store and a Store over a nil embedded store both return no
+// shadows without touching a store.
+func TestStaleShadowsBeforeNilStoreIsNoOp(t *testing.T) {
+	var s *Store // nil receiver: shadow bead store unavailable
+	if shadows, err := s.StaleShadowsBefore(time.Now(), 0, nil); err != nil || shadows != nil {
+		t.Errorf("StaleShadowsBefore on nil store = (%v,%v), want (nil,nil)", shadows, err)
+	}
+	empty := NewStore(beads.NudgesStore{}) // Store over a nil embedded store
+	if shadows, err := empty.StaleShadowsBefore(time.Now(), 0, nil); err != nil || shadows != nil {
+		t.Errorf("StaleShadowsBefore on nil embedded store = (%v,%v), want (nil,nil)", shadows, err)
+	}
+}
+
 // TestFindReturnsTypedShadow proves Find returns a decoded NudgeShadow (open
 // bead) and FindIncludingTerminal reads the controller-stamped terminal fields
 // off a closed bead.
@@ -374,11 +597,5 @@ func TestNilStoreIsNoOp(t *testing.T) {
 	}
 	if shadow, ok, err := s.FindIncludingTerminal(item.ID); err != nil || ok {
 		t.Errorf("FindIncludingTerminal on nil store = (%+v,%v,%v), want (zero,false,nil)", shadow, ok, err)
-	}
-	if b, ok, err := s.FindBead(item.ID); err != nil || ok || b.ID != "" {
-		t.Errorf("FindBead on nil store = (%+v,%v,%v), want (zero,false,nil)", b, ok, err)
-	}
-	if b, ok, err := s.FindBeadIncludingTerminal(item.ID); err != nil || ok || b.ID != "" {
-		t.Errorf("FindBeadIncludingTerminal on nil store = (%+v,%v,%v), want (zero,false,nil)", b, ok, err)
 	}
 }

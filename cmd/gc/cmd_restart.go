@@ -153,10 +153,20 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	rec := openCityRecorder(stderr)
 	store, _ := openCityStoreAt(cityPath)
-	return doRigRestart(sp, rec, store, cfg, rigAgents, rigName, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
+	// Every store consumer in doRigRestart is session-class (session-name
+	// lookups, pool session-ref resolution, runtime running-observation, and the
+	// session-runtime stop/kill in stopTargetsBounded), so route the whole flow
+	// through the session coordination-class store for relocation-safety — the
+	// same whole-store route as gc stop.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	return doRigRestart(sp, rec, sessStore, cfg, rigAgents, rigName, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
 }
 
 // doRigRestart kills sessions for all agents in a rig. The reconciler will

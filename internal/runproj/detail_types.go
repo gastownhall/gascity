@@ -248,6 +248,11 @@ type FormulaRunProgress struct {
 	StreamableSessionIDs   []string            `json:"streamableSessionIds"`
 	StatusCounts           nodeStatusCounts    `json:"statusCounts"`
 	AllStatusCounts        nodeStatusCounts    `json:"allStatusCounts"`
+	// Terminal reports whether every visible node has reached a terminal
+	// status. It is the single source of the status-terminality taxonomy
+	// (see terminalRunNodeStatuses / nonTerminalRunNodeStatuses); the client
+	// renders it instead of re-deriving the taxonomy in TypeScript.
+	Terminal bool `json:"terminal"`
 }
 
 // FormulaRunDetail is the run-detail DTO. Port of TS FormulaRunDetail. Field

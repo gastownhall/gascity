@@ -25,6 +25,16 @@ func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runti
 }
 
 func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
+	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
+}
+
+func workerFactoryWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
 		searchPaths      []string
@@ -66,14 +76,15 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:                 store,
-		Provider:              sp,
-		CityPath:              cityPath,
-		SearchPaths:           searchPaths,
-		UsageSink:             usageSinkForCity(cfg, cityPath),
-		ResolveTransport:      resolveTransport,
-		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
-		Pricing:               cfg.PricingRegistry(),
+		Store:                   store,
+		Provider:                sp,
+		CityPath:                cityPath,
+		SearchPaths:             searchPaths,
+		UsageSink:               usageSinkForCity(cfg, cityPath),
+		ResolveTransport:        resolveTransport,
+		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		StaleKeyDetectionWaiter: waiter,
+		Pricing:                 cfg.PricingRegistry(),
 	})
 }
 
@@ -371,7 +382,18 @@ func resolvedWorkerSessionConfigWithConfig(
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, id, nil)
+}
+
+func workerHandleForSessionWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	id string,
+	waiter session.StaleKeyDetectionWaiter,
+) (worker.Handle, error) {
+	factory, err := workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, waiter)
 	if err != nil {
 		return nil, err
 	}
@@ -392,8 +414,8 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if bead, _, err := session.ResolveSessionBeadByExactID(store, target); err == nil {
-			return factory.SessionByLoadedBead(bead)
+		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+			return factory.SessionByRecord(info, pr)
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
 			return factory.SessionByID(id)

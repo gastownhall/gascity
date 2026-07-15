@@ -48,6 +48,7 @@ const (
 	RequestOperationSessionCreate  = "session.create"
 	RequestOperationSessionMessage = "session.message"
 	RequestOperationSessionSubmit  = "session.submit"
+	RequestOperationRigCreate      = "rig.create"
 )
 
 // --- Typed async request result payloads ---
@@ -104,6 +105,35 @@ type SessionSubmitSucceededPayload struct {
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
 func (SessionSubmitSucceededPayload) IsEventPayload() {}
+
+// RigCreateSucceededPayload is emitted on request.result.rig.create — the
+// terminal success of a server-side async rig add (POST /v0/city/{n}/rigs with
+// a git_url). It carries the correlation id plus the resolved rig identity a
+// watcher needs to confirm the provision without a follow-up GET.
+type RigCreateSucceededPayload struct {
+	RequestID     string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Rig           string `json:"rig" doc:"Rig name that was provisioned."`
+	Prefix        string `json:"prefix" doc:"Resolved session-name prefix."`
+	DefaultBranch string `json:"default_branch" doc:"Resolved mainline branch."`
+}
+
+// IsEventPayload marks RigCreateSucceededPayload as an events.Payload variant.
+func (RigCreateSucceededPayload) IsEventPayload() {}
+
+// RigProvisionProgressPayload is emitted on rig.provision.progress, one per
+// provisioning step. RequestID lets watchers filter a single async rig-add on
+// the shared city stream. Step/Detail/Warn are a 1:1 projection of
+// rig.ProvisionStep.
+type RigProvisionProgressPayload struct {
+	RequestID string `json:"request_id,omitempty" doc:"Correlation ID from the 202 response (empty on sync 201 provisions)."`
+	Rig       string `json:"rig" doc:"Rig name being provisioned."`
+	Step      string `json:"step" doc:"Provisioning step that completed (clone, beads-init, packs, config, routes, …)."`
+	Detail    string `json:"detail,omitempty" doc:"Human-readable step detail."`
+	Warn      bool   `json:"warn,omitempty" doc:"True when the step reports a warn-and-continue condition."`
+}
+
+// IsEventPayload marks RigProvisionProgressPayload as an events.Payload variant.
+func (RigProvisionProgressPayload) IsEventPayload() {}
 
 // WebhookReceivedPayload is the webhook.received event body — emitted on every
 // accepted, authentic delivery (dispatched, deduped, or no-match). It doubles as
@@ -163,7 +193,7 @@ func (ProjectIdentityStampedPayload) IsEventPayload() {}
 // operation that fails. The operation enum identifies which operation.
 type RequestFailedPayload struct {
 	RequestID    string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit" doc:"Which operation failed."`
+	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
 	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
 	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
 }
@@ -209,6 +239,7 @@ type SupervisorRequestPayload struct {
 	Host            string `json:"host,omitempty" doc:"Canonical Host header without port."`
 	OriginAllowed   bool   `json:"origin_allowed" doc:"Whether the Origin header, if present, matched CORS policy."`
 	Phase           string `json:"phase" enum:"start,complete" doc:"Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only."`
+	RequestID       string `json:"request_id,omitempty" doc:"The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line."`
 }
 
 // IsEventPayload marks SupervisorRequestPayload as an events.Payload variant.
@@ -505,6 +536,69 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// BeadDeadAssigneeReopenedPayload is the typed payload for
+// bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
+// routed work bead whose assignee no longer maps to any open session bead —
+// the owning session closed/retired while the bead stayed assigned, so it sat
+// open+routed but unclaimable. The reconciler clears DeadAssignee (empty-string
+// clear) so the RoutedTo pool can reclaim BeadID; the payload makes the repair
+// observable for eval/audit (mirrors BeadClaimRejectedPayload).
+type BeadDeadAssigneeReopenedPayload struct {
+	BeadID       string `json:"bead_id" doc:"ID of the reopened work bead (also the envelope Subject)."`
+	DeadAssignee string `json:"dead_assignee,omitempty" doc:"The assignee identity that resolved to no open session bead, cleared by the reopen."`
+	RoutedTo     string `json:"routed_to,omitempty" doc:"The gc.routed_to target the bead stays routed to after the reopen, when set."`
+}
+
+// IsEventPayload marks BeadDeadAssigneeReopenedPayload as an events.Payload variant.
+func (BeadDeadAssigneeReopenedPayload) IsEventPayload() {}
+
+// BeadDeadAssigneeReopenedPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. DeadAssignee and RoutedTo are emitted only
+// when non-empty.
+func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) json.RawMessage {
+	b, _ := json.Marshal(BeadDeadAssigneeReopenedPayload{
+		BeadID:       beadID,
+		DeadAssignee: deadAssignee,
+		RoutedTo:     routedTo,
+	})
+	return b
+}
+
+// SessionUnknownStatePayload carries the machine-readable context for a
+// session.unknown_state event: a session bead whose metadata state the
+// reconciler does not recognize and therefore skips (forward-compatible
+// rollback). The envelope Message renders the same facts as operator text;
+// this payload is the machine contract so subscribers can correlate the stuck
+// bead, compute how long it has been unrecognized, and distinguish the
+// first-sight emission from the past-threshold escalation.
+type SessionUnknownStatePayload struct {
+	SessionID   string `json:"session_id" doc:"Canonical session bead ID for the unrecognized-state session (also the envelope Subject)."`
+	SessionName string `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	State       string `json:"state" doc:"The raw, unrecognized metadata state value the reconciler skipped."`
+	FirstSeen   string `json:"first_seen,omitempty" doc:"RFC3339 timestamp the reconciler first observed this unrecognized state; the escalation clock counts from here."`
+	Escalated   bool   `json:"escalated" doc:"False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold."`
+}
+
+// IsEventPayload marks SessionUnknownStatePayload as an events.Payload variant.
+func (SessionUnknownStatePayload) IsEventPayload() {}
+
+// SessionUnknownStatePayloadJSON builds the JSON wire form for attachment to an
+// events.Event.Payload field. SessionName and FirstSeen are emitted only when
+// set.
+func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstSeen time.Time, escalated bool) json.RawMessage {
+	p := SessionUnknownStatePayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		State:       state,
+		Escalated:   escalated,
+	}
+	if !firstSeen.IsZero() {
+		p.FirstSeen = firstSeen.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -520,6 +614,7 @@ func init() {
 	events.RegisterPayload(events.BeadUpdated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
+	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;
@@ -539,6 +634,7 @@ func init() {
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
@@ -557,6 +653,8 @@ func init() {
 	events.RegisterPayload(events.RequestResultSessionCreate, SessionCreateSucceededPayload{})
 	events.RegisterPayload(events.RequestResultSessionMessage, SessionMessageSucceededPayload{})
 	events.RegisterPayload(events.RequestResultSessionSubmit, SessionSubmitSucceededPayload{})
+	events.RegisterPayload(events.RequestResultRigCreate, RigCreateSucceededPayload{})
+	events.RegisterPayload(events.RigProvisionProgress, RigProvisionProgressPayload{})
 	events.RegisterPayload(events.RequestFailed, RequestFailedPayload{})
 
 	// Non-terminal city lifecycle events (diagnostics only).

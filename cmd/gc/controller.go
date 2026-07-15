@@ -269,7 +269,12 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 		})
 		return
 	}
-	if err := resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+	// Route the session circuit-breaker reset through the session
+	// coordination-class store so a [beads.classes.sessions] relocation reaches
+	// this socket-command path. No-refresh loader: this runs inside the running
+	// controller (packs already materialized); nil cfg → cliSessionStore identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err := resetSessionCircuitBreakerState(cliSessionStore(store, cfg, cityPath), sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
 			Outcome: "failed",
 			Error:   err.Error(),
@@ -1338,6 +1343,15 @@ func runController(
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
+	// G13 §6 sweep-before-serve: reconcile orphan in_flight rig-create idem
+	// records (their goroutines did not survive this restart) BEFORE the API mux
+	// starts serving, so a same-id retry can never re-clone over un-torn-down
+	// debris. Best-effort — a partial-teardown failure is logged and leaves that
+	// one record un-retryable, never blocking startup.
+	if err := cs.sweepOrphanRigProvisions(ctx); err != nil {
+		fmt.Fprintf(stderr, "api: rig-create boot sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+
 	// Start API server if configured. Standalone city mode wraps the
 	// single city in a SupervisorMux so every endpoint is served at its
 	// real scoped path (/v0/city/{cityName}/...) — matching the
@@ -1354,13 +1368,46 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
+		cityResolver := &singleCityStateResolver{state: cs}
+		apiMux := api.NewSupervisorMux(cityResolver, nil, readOnly, "controller", commit, time.Now())
 		apiMux.WithAnyHostAllowed()
+		censusPlane := newRunCensusPlane(apiMux, cityResolver)
+		censusPlane.Start(ctx)
+		defer censusPlane.Stop()
 		// Gate city-config mutations on a signed write grant when configured.
-		// Fail closed at boot if write-auth is required but no key is set.
-		if err := api.InstallWriteAuth(apiMux, cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); err != nil {
+		// Fail closed at boot if write-auth is required but no key is set, or if a
+		// non-loopback + allow_mutations bind has no key and no ack knob (G10).
+		if err := api.InstallWriteAuth(apiMux, cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired, api.WriteAuthBindContext{
+			NonLocal:        nonLocal,
+			AllowMutations:  cfg.API.AllowMutations,
+			AllowUnverified: cfg.API.WriteAuthAllowUnverified,
+		}); err != nil {
 			fmt.Fprintf(stderr, "api: write-auth: %v\n", err) //nolint:errcheck
 			return 1
+		}
+		// Gate city reads on a signed read grant when configured. Fail closed at
+		// boot if read-auth is required but no key is set.
+		if err := api.InstallReadAuth(apiMux, cfg.API.ReadAuthVerifyKey, cfg.API.ReadAuthRequired); err != nil {
+			fmt.Fprintf(stderr, "api: read-auth: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		// G23: a hardened bind (non-loopback + allow_mutations) previously booted
+		// silent. Emit the loud unauthenticated-read-plane warning so an operator
+		// cannot stand one up without seeing that the read surface needs a network
+		// front. grantGated and readAuthInstalled are resolved the same way
+		// InstallWriteAuth/InstallReadAuth did (both already succeeded, so a
+		// configured key is valid); a read-auth verifier suppresses the warning
+		// because the read plane is then authenticated.
+		if nonLocal && cfg.API.AllowMutations {
+			grantGated := false
+			if v, verr := api.ResolveWriteAuthVerifier(cfg.API.WriteAuthVerifyKey, cfg.API.WriteAuthRequired); verr == nil && v != nil {
+				grantGated = true
+			}
+			readAuthInstalled := false
+			if v, verr := api.ResolveReadAuthVerifier(cfg.API.ReadAuthVerifyKey, cfg.API.ReadAuthRequired); verr == nil && v != nil {
+				readAuthInstalled = true
+			}
+			warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
 		}
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)

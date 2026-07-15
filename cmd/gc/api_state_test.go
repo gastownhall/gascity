@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -864,7 +865,7 @@ func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	cs.pokeCh = make(chan struct{}, 1)
 	cs.configDirty = &atomic.Bool{}
 
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1")}); err != nil {
 		t.Fatalf("CreateRig: %v", err)
 	}
 
@@ -881,6 +882,62 @@ func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	}
 }
 
+// TestControllerStateCreateRigRejectsDuplicateName pins the API's
+// ErrAlreadyExists (409) contract that the retired configedit CreateRig test
+// covered: a second CreateRig with an already-registered name must fail rather
+// than re-add, whether the second path matches the first or differs, and must
+// not append a duplicate [[rigs]] entry to city.toml. This drives the real
+// controllerState.CreateRig with a non-nil cs.cfg (loaded via newControllerState
+// and refreshed by the first create), so the name guard is actually reached
+// rather than skipped on a nil config.
+func TestControllerStateCreateRigRejectsDuplicateName(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	firstPath := filepath.Join(cityDir, "rig1")
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: firstPath}); err != nil {
+		t.Fatalf("first CreateRig: %v", err)
+	}
+	// The first create must have refreshed cs.cfg so the pre-lock name guard is
+	// armed with a non-nil config; without that the duplicate would slip past.
+	if got := cs.Config(); got == nil || len(got.Rigs) != 1 || got.Rigs[0].Name != "rig1" {
+		t.Fatalf("Config() rigs = %+v, want exactly rig1 after first create", got.Rigs)
+	}
+
+	// Same name, same path.
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: firstPath}); !errors.Is(err, configedit.ErrAlreadyExists) {
+		t.Fatalf("duplicate CreateRig (same path) err = %v, want ErrAlreadyExists", err)
+	}
+	// Same name, different path — the guard keys on name, not path.
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1-alt")}); !errors.Is(err, configedit.ErrAlreadyExists) {
+		t.Fatalf("duplicate CreateRig (different path) err = %v, want ErrAlreadyExists", err)
+	}
+
+	// City config still holds exactly one rig, and city.toml has a single
+	// [[rigs]] block — no duplicate was appended by the rejected creates.
+	if got := cs.Config(); got == nil || len(got.Rigs) != 1 {
+		t.Fatalf("Config() rigs = %+v, want exactly one rig after rejected duplicates", got.Rigs)
+	}
+	raw, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("read city.toml: %v", err)
+	}
+	if n := strings.Count(string(raw), "[[rigs]]"); n != 1 {
+		t.Fatalf("city.toml has %d [[rigs]] entries, want 1:\n%s", n, raw)
+	}
+}
+
 func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -894,7 +951,7 @@ func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
-	rigDir := newRepoWithOriginHead(t, "master")
+	rigDir := newRepoWithOriginHeadAt(t, filepath.Join(cityDir, "rig1"), "master")
 	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: rigDir}); err != nil {
 		t.Fatalf("CreateRig: %v", err)
 	}
@@ -905,6 +962,31 @@ func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	}
 	if got.Rigs[0].DefaultBranch != "master" {
 		t.Fatalf("DefaultBranch = %q, want %q", got.Rigs[0].DefaultBranch, "master")
+	}
+}
+
+// TestControllerStateCreateRigRejectsOutOfCityPath pins the sync-path city-root
+// containment: the API rig-create is a server-side MkdirAll + store write, so an
+// absolute out-of-city path or a "../"-escaping path must be refused (with
+// ErrValidation → 4xx) before any filesystem side effect. The local CLI reaches
+// rig.Provision directly and is intentionally not constrained this way.
+func TestControllerStateCreateRigRejectsOutOfCityPath(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	for _, p := range []string{filepath.Join(t.TempDir(), "escape"), "../escape"} {
+		if err := cs.CreateRig(config.Rig{Name: "evil", Path: p}); !errors.Is(err, configedit.ErrValidation) {
+			t.Errorf("CreateRig(path=%q) err = %v, want ErrValidation", p, err)
+		}
+	}
+	if got := cs.Config(); got != nil && len(got.Rigs) != 0 {
+		t.Fatalf("a rejected rig leaked into config: %+v", got.Rigs)
 	}
 }
 
@@ -947,13 +1029,6 @@ func TestControllerStateCreateRigDetectsDefaultBranchForRelativePath(t *testing.
 	}
 	if got.Rigs[0].DefaultBranch != "trunk" {
 		t.Fatalf("DefaultBranch = %q, want %q", got.Rigs[0].DefaultBranch, "trunk")
-	}
-}
-
-func TestDetectRigDefaultBranchSkipsEmptyPath(t *testing.T) {
-	got := detectRigDefaultBranch(t.TempDir(), config.Rig{Name: "rig1"})
-	if got.DefaultBranch != "" {
-		t.Fatalf("DefaultBranch = %q, want empty for empty rig path", got.DefaultBranch)
 	}
 }
 
@@ -1019,7 +1094,9 @@ func TestControllerStateMutationRollsBackWhenRefreshFails(t *testing.T) {
 	cs.pokeCh = make(chan struct{}, 1)
 	cs.configDirty = &atomic.Bool{}
 
-	err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()})
+	// In-city path so containment passes and the refresh-failure path (the thing
+	// this test exercises) is actually reached, not short-circuited.
+	err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1")})
 	if err == nil {
 		t.Fatal("CreateRig should fail when refreshing the updated snapshot fails")
 	}
@@ -2084,7 +2161,7 @@ func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
 	replacement := beads.NewMemStore()
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: replacement}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2108,7 +2185,7 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2144,7 +2221,7 @@ func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T)
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, 200*time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2176,7 +2253,7 @@ func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2905,6 +2982,10 @@ interval = "24h"
 }
 
 func TestControllerStateMutationsPokeController(t *testing.T) {
+	// The "create rig" row now exercises real rig.Provision through CreateRig;
+	// GC_BEADS=file routes its store init down the cheap file-provider arm
+	// instead of spawning managed Dolt. Other rows are unaffected.
+	t.Setenv("GC_BEADS", "file")
 	cases := []struct {
 		name    string
 		initial func(*config.City)
@@ -3091,7 +3172,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 		{
 			name: "create rig",
 			mutate: func(cs *controllerState) error {
-				return cs.CreateRig(config.Rig{Name: "rig2", Path: t.TempDir(), Prefix: "r2"})
+				return cs.CreateRig(config.Rig{Name: "rig2", Path: filepath.Join(cs.cityPath, "rig2"), Prefix: "r2"})
 			},
 			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
@@ -3420,7 +3501,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	ep := newBlockingLatestEventProvider()
 	var storeOpened atomic.Bool
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		storeOpened.Store(true)
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
@@ -3462,7 +3543,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3518,7 +3599,7 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3569,7 +3650,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3705,6 +3786,7 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 
 	return &controllerState{
 		editor:      configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityPath:    cityDir,
 		pokeCh:      make(chan struct{}, 1),
 		configDirty: &atomic.Bool{},
 	}, tomlPath

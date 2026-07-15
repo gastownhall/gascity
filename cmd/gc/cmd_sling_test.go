@@ -382,7 +382,18 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 
 func newRepoWithOriginHead(t *testing.T, branch string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return newRepoWithOriginHeadAt(t, t.TempDir(), branch)
+}
+
+// newRepoWithOriginHeadAt git-inits a repo at dir (created if absent) with
+// origin/HEAD pointing at branch. Use it when the repo must live under a
+// specific parent — e.g. inside the city dir, since the API rig-create now
+// contains rig paths to the city root.
+func newRepoWithOriginHeadAt(t *testing.T, dir, branch string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+branch)
 	return dir
@@ -1497,7 +1508,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get claimed bead: %v", err)
 	}
-	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, []beads.Bead{{
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, sessionInfosFromBeads([]beads.Bead{{
 		ID:     polecatSession,
 		Status: "open",
 		Type:   sessionBeadType,
@@ -1505,7 +1516,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 			"template":     "saitoc/polecat",
 			"session_name": polecatSession,
 		},
-	}}, map[string]int{"saitoc/polecat": 0})
+	}}), map[string]int{"saitoc/polecat": 0})
 	if len(states) != 1 || len(states[0].Requests) != 1 {
 		t.Fatalf("resume states = %#v, want one polecat resume request", states)
 	}

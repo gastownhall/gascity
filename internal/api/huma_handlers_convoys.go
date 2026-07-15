@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -68,16 +68,16 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	stores := s.state.BeadStores()
@@ -87,7 +87,10 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	for _, rigName := range rigNames {
 		store := stores[rigName]
 		pa.attempt()
-		list, err := store.List(beads.ListQuery{Type: "convoy"})
+		// Explicit sort: with SortDefault the CachingStore returns
+		// map-iteration order, and keyset paging needs one deterministic
+		// total order (#3208 — the same fix the bead list carries).
+		list, err := store.List(beads.ListQuery{Type: "convoy", Sort: beads.SortCreatedDesc})
 		if err != nil {
 			pa.record("rig "+rigName, err)
 			continue
@@ -102,27 +105,18 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	if convoys == nil {
 		convoys = []beads.Bead{}
 	}
+	// The cross-rig concatenation is not globally ordered; impose the one
+	// (created_at DESC, id DESC) total order keyset pages cut against.
+	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
+	sortKeysetDesc(convoys, beadKey)
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	if !pp.IsPaging {
-		total := len(convoys)
-		if pp.Limit < len(convoys) {
-			convoys = convoys[:pp.Limit]
-		}
-		return &ListOutput[beads.Bead]{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body: ListBody[beads.Bead]{
-				Items:         convoys,
-				Total:         total,
-				Partial:       pa.partial(),
-				PartialErrors: pa.messages(),
-			},
-		}, nil
-	}
-
-	page, total, nextCursor := paginate(convoys, pp)
+	// A truncated response always carries next_cursor — cursor-less requests
+	// previously truncated silently, making the remainder unfetchable (the
+	// #3208 defect class the bead list already fixed).
+	page, total, hasMore := resolveKeysetPage(convoys, beadKey, seek, limit)
+	nextCursor := mintKeysetNextCursor(page, beadKey, hasMore)
 	if page == nil {
 		page = []beads.Bead{}
 	}
@@ -154,9 +148,9 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 		snapshot, err := s.buildWorkflowSnapshot(id, "", "", index)
 		if err != nil {
 			if errors.Is(err, errWorkflowNotFound) {
-				return nil, huma.Error404NotFound("workflow " + id + " not found")
+				return nil, apierr.WorkflowNotFound.Msg("workflow " + id + " not found")
 			}
-			return nil, huma.Error500InternalServerError("workflow snapshot failed")
+			return nil, apierr.Internal.Msg("workflow snapshot failed")
 		}
 		return &IndexOutput[convoyGetResponse]{
 			Index:     index,
@@ -173,15 +167,15 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Type != "convoy" {
-			return nil, huma.Error404NotFound("bead " + id + " is not a convoy")
+			return nil, apierr.ConvoyNotFound.Msg("bead " + id + " is not a convoy")
 		}
 
 		children, err := convoycore.Members(store, id, true)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if children == nil {
 			children = []beads.Bead{}
@@ -205,44 +199,54 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("convoy " + id + " not found")
+	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
 // humaHandleConvoyCreate is the Huma-typed handler for POST /v0/convoys.
 // Title required via struct tag on ConvoyCreateInput.
 func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateInput) (*IndexOutput[beads.Bead], error) {
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")
-	}
-
-	// Pre-validate all items exist before creating the convoy.
-	for _, itemID := range input.Body.Items {
-		if _, err := store.Get(itemID); err != nil {
-			return nil, storeError(err)
-		}
-	}
-
-	convoy, err := store.Create(beads.Bead{
-		Title: input.Body.Title,
-		Type:  "convoy",
-	})
-	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
-	}
-
-	// Link child items to convoy one at a time. On first failure, roll
-	// back previously-created tracks deps and THEN delete the new convoy.
-	applied := make([]string, 0, len(input.Body.Items))
-	for _, itemID := range input.Body.Items {
-		if err := convoycore.TrackItem(store, convoy.ID, itemID); err != nil {
-			rollbackConvoyTracks(store, convoy.ID, applied, "convoy.create")
-			if delErr := store.Delete(convoy.ID); delErr != nil {
-				log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", convoy.ID, delErr)
+	// Idempotency: create at most once per Idempotency-Key. Item validation,
+	// the convoy bead create, and the link loop (with its rollback) all live in
+	// the closure so a failed create releases the reservation for retry.
+	convoy, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			return nil, huma.Error500InternalServerError("failed to link item " + itemID + ": " + err.Error())
-		}
-		applied = append(applied, itemID)
+
+			// Pre-validate all items exist before creating the convoy.
+			for _, itemID := range input.Body.Items {
+				if _, err := store.Get(itemID); err != nil {
+					return beads.Bead{}, storeError(err)
+				}
+			}
+
+			created, err := store.Create(beads.Bead{
+				Title: input.Body.Title,
+				Type:  "convoy",
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
+			}
+
+			// Link child items to convoy one at a time. On first failure, roll
+			// back previously-created tracks deps and THEN delete the new convoy.
+			applied := make([]string, 0, len(input.Body.Items))
+			for _, itemID := range input.Body.Items {
+				if err := convoycore.TrackItem(store, created.ID, itemID); err != nil {
+					rollbackConvoyTracks(store, created.ID, applied, "convoy.create")
+					if delErr := store.Delete(created.ID); delErr != nil {
+						log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", created.ID, delErr)
+					}
+					return beads.Bead{}, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
+				}
+				applied = append(applied, itemID)
+			}
+			return created, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
 	return &IndexOutput[beads.Bead]{
@@ -264,10 +268,10 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Type != "convoy" {
-			return nil, huma.Error400BadRequest("bead " + id + " is not a convoy")
+			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 		// Pre-validate all items exist before linking.
 		for _, itemID := range input.Body.Items {
@@ -279,7 +283,7 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		for _, itemID := range input.Body.Items {
 			if err := convoycore.TrackItem(store, id, itemID); err != nil {
 				rollbackConvoyTracks(store, id, applied, "convoy.add")
-				return nil, huma.Error500InternalServerError("failed to link item " + itemID + ": " + err.Error())
+				return nil, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
 			}
 			applied = append(applied, itemID)
 		}
@@ -287,7 +291,7 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		resp.Body.Status = "updated"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("convoy " + id + " not found")
+	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
 // humaHandleConvoyRemove is the Huma-typed handler for POST /v0/convoy/{id}/remove.
@@ -301,10 +305,10 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Type != "convoy" {
-			return nil, huma.Error400BadRequest("bead " + id + " is not a convoy")
+			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 		// Pre-validate all items exist and belong to this convoy via either
 		// legacy parent-child membership or the current tracks dependency.
@@ -313,16 +317,16 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 			item, gerr := store.Get(itemID)
 			if gerr != nil {
 				if errors.Is(gerr, beads.ErrNotFound) {
-					return nil, huma.Error404NotFound("item " + itemID + " not found")
+					return nil, apierr.BeadNotFound.Msg("item " + itemID + " not found")
 				}
-				return nil, huma.Error500InternalServerError(gerr.Error())
+				return nil, apierr.Internal.Msg(gerr.Error())
 			}
 			hadTrack, terr := convoycore.HasTrack(store, id, itemID)
 			if terr != nil {
-				return nil, huma.Error500InternalServerError(terr.Error())
+				return nil, apierr.Internal.Msg(terr.Error())
 			}
 			if item.ParentID != id && !hadTrack {
-				return nil, huma.Error400BadRequest("item " + itemID + " does not belong to convoy " + id)
+				return nil, apierr.InvalidRequest.Msg("item " + itemID + " does not belong to convoy " + id)
 			}
 			snapshots[itemID] = convoyMembershipSnapshot{
 				ParentID: item.ParentID,
@@ -337,7 +341,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 			if snapshot.HadTrack {
 				if err := convoycore.UntrackItem(store, id, itemID); err != nil {
 					rollbackConvoyMembershipRemoval(store, id, applied, snapshots, "convoy.remove")
-					return nil, huma.Error500InternalServerError("failed to unlink item " + itemID + ": " + err.Error())
+					return nil, apierr.Internal.Msg("failed to unlink item " + itemID + ": " + err.Error())
 				}
 			}
 			if snapshot.ParentID == id {
@@ -348,7 +352,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 						}
 					}
 					rollbackConvoyMembershipRemoval(store, id, applied, snapshots, "convoy.remove")
-					return nil, huma.Error500InternalServerError("failed to unlink item " + itemID + ": " + err.Error())
+					return nil, apierr.Internal.Msg("failed to unlink item " + itemID + ": " + err.Error())
 				}
 			}
 			applied = append(applied, itemID)
@@ -357,7 +361,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 		resp.Body.Status = "updated"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("convoy " + id + " not found")
+	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
 func rollbackConvoyTracks(store beads.Store, convoyID string, applied []string, op string) {
@@ -410,15 +414,15 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Type != "convoy" {
-			return nil, huma.Error400BadRequest("bead " + id + " is not a convoy")
+			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 
 		children, err := convoycore.Members(store, id, true)
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 
 		total := len(children)
@@ -441,7 +445,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("convoy " + id + " not found")
+	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
 // humaHandleConvoyClose is the Huma-typed handler for POST /v0/convoy/{id}/close.
@@ -456,19 +460,19 @@ func (s *Server) humaHandleConvoyClose(_ context.Context, input *ConvoyCloseInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Type != "convoy" {
-			return nil, huma.Error400BadRequest("bead " + id + " is not a convoy")
+			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 		if err := store.Close(id); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("convoy " + id + " not found")
+	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
 // humaHandleConvoyDelete is the Huma-typed handler for DELETE /v0/convoy/{id}.
@@ -489,19 +493,19 @@ func (s *Server) humaHandleConvoyDelete(_ context.Context, input *ConvoyDeleteIn
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Type != "convoy" {
-			return nil, huma.Error400BadRequest("bead " + id + " is not a convoy")
+			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 		if err := store.Close(id); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("convoy " + id + " not found")
+	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
 // humaDeleteWorkflow handles workflow convoy deletion through the Huma handler.
@@ -576,7 +580,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 	}
 
 	if !found {
-		return nil, huma.Error404NotFound("workflow " + workflowID + " not found")
+		return nil, apierr.WorkflowNotFound.Msg("workflow " + workflowID + " not found")
 	}
 
 	resp := &OKResponse{}
@@ -584,12 +588,13 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 	return resp, nil
 }
 
-// storeError converts a bead store error into the appropriate Huma error.
+// storeError converts a bead store error into an apierr problem. It runs during
+// convoy create/add item pre-validation, so a not-found is a missing member bead.
 func storeError(err error) error {
 	if errors.Is(err, beads.ErrNotFound) {
-		return huma.Error404NotFound(err.Error())
+		return apierr.BeadNotFound.Msg(err.Error())
 	}
-	return huma.Error500InternalServerError(err.Error())
+	return apierr.Internal.Msg(err.Error())
 }
 
 // humaHandleWorkflowGet is the Huma-typed handler for GET /v0/workflow/{workflow_id}.
@@ -597,21 +602,21 @@ func storeError(err error) error {
 func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInput) (*IndexOutput[workflowSnapshotResponse], error) {
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
-		return nil, huma.Error400BadRequest("convoy id is required")
+		return nil, apierr.InvalidRequest.Msg("convoy id is required")
 	}
 
 	scopeKind, scopeRef, scopeErr := parseOptionalWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	index := s.latestIndex()
 
 	snapshot, err := s.buildWorkflowSnapshot(workflowID, scopeKind, scopeRef, index)
 	if err != nil {
 		if errors.Is(err, errWorkflowNotFound) {
-			return nil, huma.Error404NotFound("workflow " + workflowID + " not found")
+			return nil, apierr.WorkflowNotFound.Msg("workflow " + workflowID + " not found")
 		}
-		return nil, huma.Error500InternalServerError("workflow snapshot failed")
+		return nil, apierr.Internal.Msg("workflow snapshot failed")
 	}
 
 	return &IndexOutput[workflowSnapshotResponse]{
@@ -628,7 +633,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 ) {
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
-		return nil, huma.Error400BadRequest("convoy id is required")
+		return nil, apierr.InvalidRequest.Msg("convoy id is required")
 	}
 
 	scopeKind := strings.TrimSpace(input.ScopeKind)
@@ -755,7 +760,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	}
 
 	if !found {
-		return nil, huma.Error404NotFound("workflow " + workflowID + " not found")
+		return nil, apierr.WorkflowNotFound.Msg("workflow " + workflowID + " not found")
 	}
 
 	return &struct {

@@ -22,13 +22,21 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func mainExitCode(args []string, stdout, stderr io.Writer) int {
+	if handled, code := privateProductMetricsEntrypoint(args); handled {
+		return code
+	}
+	return run(args, stdout, stderr)
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal
@@ -122,18 +130,56 @@ var cityFlag string
 // Empty means "discover from cwd or omit."
 var rigFlag string
 
+type cliTelemetryShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+var initializeCLITelemetry = func(ctx context.Context, serviceName, serviceVersion string) (cliTelemetryShutdowner, error) {
+	provider, err := telemetry.Init(ctx, serviceName, serviceVersion)
+	if provider == nil {
+		return nil, err
+	}
+	return provider, err
+}
+
+var setCLIProcessOTELAttrs = telemetry.SetProcessOTELAttrs
+
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	if args == nil {
+		args = []string{}
+	}
+	lifecycle := openProductMetricsInvocationLifecycle(args)
+	defer lifecycle.Close()
+	return runWithRootCommandOptionsAndLifecycle(args, stdout, stderr, rootCommandOptionsForArgs(args), lifecycle)
+}
+
+// runWithRootCommandOptions preserves an explicit eager/lazy construction
+// seam for package tests while production always derives options from its
+// injected args. It must never fill options from ambient os.Args.
+func runWithRootCommandOptions(args []string, stdout, stderr io.Writer, options rootCommandOptions) int {
+	if args == nil {
+		args = []string{}
+	}
+	lifecycle := openProductMetricsInvocationLifecycle(args)
+	defer lifecycle.Close()
+	return runWithRootCommandOptionsAndLifecycle(args, stdout, stderr, options, lifecycle)
+}
+
+func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle) int {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
+	contextFlag, cityURLFlag, cityNameFlag = "", "", ""
 	defer func() {
 		cityFlag = prevCityFlag
 		rigFlag = prevRigFlag
+		contextFlag, cityURLFlag, cityNameFlag = prevContextFlag, prevCityURLFlag, prevCityNameFlag
 	}()
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
-	provider, err := telemetry.Init(context.Background(), "gascity", version)
+	provider, err := initializeCLITelemetry(context.Background(), "gascity", version)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: telemetry init: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -143,16 +189,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 			defer cancel()
 			_ = provider.Shutdown(ctx)
 		}()
-		telemetry.SetProcessOTELAttrs()
+		setCLIProcessOTELAttrs()
 	}
-
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
 	var observedStdout *countingWriter
-	root := newRootCmd(execStdout, stderr)
-	if args == nil {
-		args = []string{}
+	options.invocationArgs = append([]string(nil), args...)
+	root := newRootCmdWithOptions(execStdout, stderr, options)
+	root.SetArgs(args)
+	root.SetOut(execStdout)
+	root.SetErr(stderr)
+	if options.discoverPackCommands {
+		materializePackCommandTreeForArgs(root, args, execStdout, stderr)
 	}
+	lifecycleBinding := bindProductMetricsInvocationLifecycle(root, args, lifecycle)
+	classification := lifecycleBinding.classification
+	lifecycle.prepareNotice(classification, stderr)
 	bufferJSONExecution := shouldBufferJSONExecution(root, args)
 	reportJSONFailure := shouldReportJSONExecutionError(root, args)
 	if bufferJSONExecution {
@@ -161,27 +213,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		observedStdout = &countingWriter{target: stdout}
 		execStdout.target = observedStdout
 	}
-	root.SetArgs(args)
-	root.SetOut(execStdout)
-	root.SetErr(stderr)
-	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
-		return code
+	if earlyAction, ok := prepareJSONEarlyAction(root, args); ok {
+		earlyOutcome := resolveProductMetricsEarlyOutcome(earlyAction, classification)
+		lifecycle.attemptEarlyOutcome(earlyOutcome)
+		if handled, code := executeProductMetricsEarlyOutcome(earlyOutcome, earlyAction, stdout, stderr); handled {
+			return code
+		}
 	}
-	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
-		return code
-	}
-	if err := root.Execute(); err != nil {
-		code := commandExitCode(err)
+	executedCommand, executeErr := root.ExecuteC()
+	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
+	if executeErr != nil {
+		code := commandExitCode(executeErr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
-				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(executeErr), code)
 			}
 		} else if reportJSONFailure && observedStdout.BytesWritten() == 0 {
-			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(executeErr), code)
 		}
 		return code
 	}
@@ -206,6 +258,15 @@ func commandFailureMessage(err error) string {
 
 // newRootCmd creates the root cobra command with all subcommands.
 func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
+	return newRootCmdWithOptions(stdout, stderr, rootCommandOptions{
+		discoverPackCommands:      true,
+		eagerPackCommandDiscovery: true,
+	})
+}
+
+// newRootCmdWithOptions constructs the built-in command tree and optionally
+// performs city/pack discovery selected from injected invocation arguments.
+func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "gc",
 		Short:         "Gas City CLI — orchestration-builder for multi-agent workflows",
@@ -213,13 +274,21 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		SilenceUsage:  true,
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if packCommandFlagsHaveEmptyExplicitScope(cmd) {
+				attemptProductMetricsForCommand(cmd)
+				fmt.Fprintln(stderr, "gc: --city and --rig require non-empty values") //nolint:errcheck // best-effort stderr
+				printCommandUsage(stderr, cmd)
+				return errExit
+			}
 			if len(args) == 0 {
 				return cmd.Help()
 			}
 			// Lazy fallback: if eager discovery missed a pack command
 			// (e.g. config changed after binary started), try one more time.
-			if tryPackCommandFallback(args, stdout, stderr) {
-				return nil
+			packAction := resolvePackCommandFallback(args, stdout, stderr)
+			packOutcome := executeProductMetricsPackAction(cmd, packAction)
+			if packAction.selected {
+				return packOutcome.err()
 			}
 			fmt.Fprintf(stderr, "gc: unknown command %q\n\n", args[0]) //nolint:errcheck // best-effort stderr
 			printCommandUsage(stderr, cmd)
@@ -234,6 +303,12 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
+	root.PersistentFlags().StringVar(&contextFlag, "context", "",
+		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
+	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
+		"operate a REMOTE city at this base URL (https; requires --city-name)")
+	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
+		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
@@ -277,6 +352,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newSkillCmd(stdout, stderr),
 		newMcpCmd(stdout, stderr),
 		newInternalCmd(stdout, stderr),
+		newMetricsCmd(stdout, stderr),
 		newPerfCmd(stdout, stderr),
 		newVersionCmd(stdout, stderr),
 		newDashboardCmd(stdout, stderr),
@@ -284,6 +360,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newRegisterCmd(stdout, stderr),
 		newUnregisterCmd(stdout, stderr),
 		newCitiesCmd(stdout, stderr),
+		newContextCmd(stdout, stderr),
 		newSupervisorCmd(stdout, stderr),
 		newSessionCmd(stdout, stderr),
 		newConvergeCmd(stdout, stderr),
@@ -299,12 +376,26 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newAnalyzeCmd(stdout, stderr),
 		newCostsCmd(stdout, stderr),
 		newGitCredentialCmd(stdout, stderr),
+		newLoginCmd(stdout, stderr),
+		newWhoamiCmd(stdout, stderr),
+		newLogoutCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
 
+	// Cobra materializes its public help and completion commands lazily. Force
+	// them while pack discovery is still disabled so the finite built-in
+	// product-metrics census sees the same tree on every machine. Set the
+	// writers first: Cobra captures them in the generated handlers.
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	materializeProductMetricsCobraDefaults(root)
+	applyProductionProductMetricsCommandCensus(root)
+
 	// Best-effort: discover pack CLI commands if we're inside a city.
-	registerPackCommands(root, stdout, stderr)
+	if options.discoverPackCommands && options.eagerPackCommandDiscovery {
+		registerPackCommands(root, options.invocationArgs, stdout, stderr)
+	}
 
 	installArgUsageErrors(root, stderr)
 	installFlagGroupUsageErrors(root, stderr)
@@ -313,7 +404,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
-	if cmd.Args != nil {
+	if cmd.Args != nil && cmd.Annotations[cobraForcedDefaultAnnotation] != "true" {
 		argsValidator := cmd.Args
 		cmd.Args = func(cmd *cobra.Command, args []string) error {
 			if err := argsValidator(cmd, args); err != nil {
@@ -355,6 +446,7 @@ func installFlagGroupUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 }
 
 func printCommandUsageError(stderr io.Writer, cmd *cobra.Command, err error) {
+	attemptProductMetricsForCommand(cmd)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: %v\n\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -422,8 +514,9 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 
 // resolvedContext holds the result of city+rig resolution.
 type resolvedContext struct {
-	CityPath string // absolute path to city root
-	RigName  string // rig name (empty if not in a rig context)
+	CityPath string        // absolute path to city root (empty when Remote is set)
+	RigName  string        // rig name (empty if not in a rig context)
+	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an
@@ -434,6 +527,14 @@ type resolvedContext struct {
 func resolveCommandContext(args []string) (resolvedContext, error) {
 	if len(args) == 0 {
 		return resolveContext()
+	}
+	// A positional city/rig argument targets a LOCAL city; combined with a remote
+	// FLAG (--city-url/--context) — the same explicit tier — it must not silently
+	// shadow the requested remote city, so reject that loudly. A remote ENV
+	// selector is lower precedence than the positional (flag > env), so it is
+	// shadowed rather than conflicting (Decision 4).
+	if remoteFlagPresent() {
+		return resolvedContext{}, remotePositionalConflictErr(args[0])
 	}
 	// A name-shaped positional may be a registered city name or a local rig
 	// directory. Route it through the shared name resolver, which consults the
@@ -457,17 +558,71 @@ func resolveCommandCity(args []string) (string, error) {
 // resolveContext resolves the city and optional rig context using a fixed
 // priority chain, each stage delegated to a helper that reports whether it
 // handled the request so the chain stops at the first match:
+//  0. remote target: --city-url/--context flag or GC_CITY_URL/GC_CITY_CONTEXT
+//     (resolveRemoteTarget)
 //  1. --city / --rig flags                  (resolveContextFromFlags)
 //  2. explicit city env + GC_RIG            (resolveContextFromCityEnv)
 //  3. GC_DIR / cwd discovery and walk-up    (resolveContextFromDir)
+//  4. sticky default context                (resolveStickyDefaultTarget)
+//
+// Steps 0 and 4 select a REMOTE city (Decision 4): an explicit remote flag/env
+// beats every local tier, while the sticky default is subordinate to local
+// discovery.
+//
+// resolveContext is the LOCAL-ONLY entry point: it applies the capability gate,
+// erroring on a remote target. Every command that only operates a local city
+// (via resolveCity/resolveCommandCity or a direct call) uses it and is therefore
+// refused loudly under a remote target — it can never silently fall back to a
+// local store. Remote-capable READ commands call resolveContextAllowRemote
+// directly and route through the remote transport (resolveReadRoute).
 func resolveContext() (resolvedContext, error) {
+	ctx, err := resolveContextAllowRemote()
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ctx.Remote != nil {
+		return resolvedContext{}, errRemoteNotSupportedYet()
+	}
+	return ctx, nil
+}
+
+// resolveContextAllowRemote is the raw priority-chain resolver. It returns a
+// remote target (resolvedContext.Remote) when one is selected, WITHOUT the
+// capability gate — so only a remote-aware caller that routes through the remote
+// transport should use it. Every other caller uses resolveContext, which gates.
+func resolveContextAllowRemote() (resolvedContext, error) {
+	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
+	// surfaces here regardless.
+	if target, handled, err := resolveRemoteTarget(); err != nil {
+		return resolvedContext{}, err
+	} else if handled {
+		return resolvedContext{Remote: target}, nil
+	}
 	if ctx, handled, err := resolveContextFromFlags(); handled {
 		return ctx, err
 	}
 	if ctx, handled, err := resolveContextFromCityEnv(); handled {
 		return ctx, err
 	}
-	return resolveContextFromDir()
+	ctx, err := resolveContextFromDir()
+	if err == nil {
+		return ctx, nil
+	}
+	// Step 4: no local city discoverable — fall back to the sticky default
+	// context, if any (subordinate to local discovery, per Decision 4).
+	if target, ok, derr := resolveStickyDefaultTarget(); derr != nil {
+		return resolvedContext{}, derr
+	} else if ok {
+		// Honor GC_NO_API on the sticky-default tier too: the explicit flag/env
+		// tiers guard it inside resolveRemoteSelection, and the escape hatch
+		// ("never route through the API") must apply consistently rather than be
+		// silently ignored for a sticky-default remote target.
+		if gerr := guardNoAPI(readRemoteSelection()); gerr != nil {
+			return resolvedContext{}, gerr
+		}
+		return resolvedContext{Remote: target}, nil
+	}
+	return resolvedContext{}, err
 }
 
 // resolveContextFromFlags resolves context from the explicit --city and --rig
@@ -1182,6 +1337,16 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false)
+}
+
+// openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
+// conditional-writes mode supplied by the caller instead of re-resolved from
+// the on-disk config. Controller-owned reopens use it to carry the
+// boot-latched mode: re-resolving from disk on a reload would flip the city
+// store's write discipline mid-process while rig stores keep the boot mode —
+// exactly the mixed-writer state the process latch exists to prevent.
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1196,16 +1361,22 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
-		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
+	mode := resolvedConditionalWritesMode(cfg)
+	if haveMode {
+		mode = modeOverride
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:        scopeRoot,
-		CityPath:         runtimeCityPath,
-		Provider:         provider,
-		PreflightChecker: newBeadsPreflightChecker(runtimeCityPath, provider),
-		Logger:           slog.Default(),
+		ScopeRoot:         scopeRoot,
+		CityPath:          runtimeCityPath,
+		Provider:          provider,
+		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
+		Logger:            slog.Default(),
+		ConditionalWrites: mode,
+		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
+			flags, resolved := resolvedConditionalWritesFlags(cfg)
+			return lazyConditionalWritesDegradeEmitter(
+				runtimeCityPath, conditionalWritesStoreID(scopeRoot, runtimeCityPath), flags, resolved)
+		}(),
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
@@ -1223,7 +1394,23 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+			// Reopen hook for the native read-path reconnect: the store's cached
+			// open env pins the managed Dolt port as of open time, which is dead
+			// after a hard-kill/rebind. Re-resolve the CURRENT env on every
+			// reconnect — nativeDoltOpenEnvForScope re-reads the live port and
+			// triggers managed-Dolt recovery/restart when the server is down
+			// (allowRecovery=true), mirroring how each bd subprocess re-resolves
+			// the port per command — then re-open against the live server via the
+			// direct native path (which bypasses the factory preflight/identity
+			// gate, so an absent scope project_id cannot block the reconnect).
+			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				if rerr != nil {
+					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
+				}
+				return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
 		},
 	})
 	if err != nil {

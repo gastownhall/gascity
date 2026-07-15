@@ -228,6 +228,82 @@ func TestProcessDrainSeparateTopologicallyOrdersMembersBeforeCreation(t *testing
 	assertHasBlockingDep(t, mem, manifest.Rows[1].ItemRootID, manifest.Rows[0].ItemRootID)
 }
 
+// TestOrderDrainMembersByDependenciesRoutesMemberDepsToOwningStore proves the
+// two-store shape: when a drain's convoy members live in a separate per-class
+// store (supplied via ProcessOptions.MemberStores), member dependency ordering
+// reads each member's edges from the member's OWNING store, not the ambient
+// graph store the drain control runs in. A dependency edge is co-resident with
+// its source bead, so reverting orderDrainMembersByDependencies to a bare
+// store.DepList makes the (empty) ambient store report no blocker and the
+// ordering silently collapses to insertion order — this is the regression
+// canary for the member-dep cross-store routing.
+func TestOrderDrainMembersByDependenciesRoutesMemberDepsToOwningStore(t *testing.T) {
+	ambient := beads.NewMemStore() // the drain control's graph store — holds no members
+	memberStore := beads.NewMemStore()
+
+	blocker, err := memberStore.Create(beads.Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	dependent, err := memberStore.Create(beads.Bead{Title: "dependent", Type: "task"})
+	if err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	// dependent blocks-on blocker; the edge lives only in the member store.
+	mustDepAdd(t, memberStore, dependent.ID, blocker.ID, "blocks")
+
+	// Pass members in reverse (dependency) order so a no-op ordering would leave
+	// them unchanged; correct ordering must move the blocker ahead of the dependent.
+	ordered, err := orderDrainMembersByDependencies(ambient, []beads.Bead{dependent, blocker}, ProcessOptions{MemberStores: []beads.Store{memberStore}})
+	if err != nil {
+		t.Fatalf("orderDrainMembersByDependencies: %v", err)
+	}
+	if len(ordered) != 2 || ordered[0].ID != blocker.ID || ordered[1].ID != dependent.ID {
+		got := make([]string, 0, len(ordered))
+		for _, b := range ordered {
+			got = append(got, b.ID)
+		}
+		t.Fatalf("order = %v, want blocker %s before dependent %s (member deps must route to the member store)", got, blocker.ID, dependent.ID)
+	}
+}
+
+// TestDrainProjectedBlockerIDsRoutesMemberDepsToOwningStore proves
+// drainProjectedBlockerIDs reads a member's outbound dependency edges from the
+// member's owning store when the member lives in a separate per-class store, and
+// projects an in-manifest blocker onto the blocker's item root. Reverting to a
+// bare store.DepList makes the empty ambient store report no blockers, so this
+// is the regression canary for the projected-blocker cross-store routing.
+func TestDrainProjectedBlockerIDsRoutesMemberDepsToOwningStore(t *testing.T) {
+	ambient := beads.NewMemStore()
+	memberStore := beads.NewMemStore()
+
+	blocker, err := memberStore.Create(beads.Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	dependent, err := memberStore.Create(beads.Bead{Title: "dependent", Type: "task"})
+	if err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	mustDepAdd(t, memberStore, dependent.ID, blocker.ID, "blocks")
+
+	manifest := drainManifest{
+		Version: 1,
+		Rows: []drainManifestRow{
+			{Index: 0, MemberID: blocker.ID, ItemRootID: "root-blocker"},
+			{Index: 1, MemberID: dependent.ID, ItemRootID: "root-dependent"},
+		},
+	}
+
+	blockerIDs, err := drainProjectedBlockerIDs(ambient, dependent.ID, manifest, ProcessOptions{MemberStores: []beads.Store{memberStore}})
+	if err != nil {
+		t.Fatalf("drainProjectedBlockerIDs: %v", err)
+	}
+	if len(blockerIDs) != 1 || blockerIDs[0] != "root-blocker" {
+		t.Fatalf("blockerIDs = %v, want [root-blocker] (member deps routed to member store, projected onto the blocker's item root)", blockerIDs)
+	}
+}
+
 func TestProcessDrainSeparateSucceedsForEmptyInputConvoy(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()

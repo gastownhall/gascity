@@ -387,3 +387,68 @@ func TestProxyProcessStartReapsOrphanedDuplicates(t *testing.T) {
 		t.Fatalf("LocalState = %q, want ready (reason=%q)", status.LocalState, status.Reason)
 	}
 }
+
+func TestParentIsSubreaper(t *testing.T) {
+	tests := []struct {
+		name         string
+		subreaperPID int
+		ppid         int
+		want         bool
+	}{
+		{name: "init always counts", subreaperPID: 0, ppid: 1, want: true},
+		{name: "init counts even with subreaper set", subreaperPID: 900, ppid: 1, want: true},
+		{name: "systemd --user subreaper counts", subreaperPID: 900, ppid: 900, want: true},
+		{name: "live supervisor pid does not count", subreaperPID: 900, ppid: 1234, want: false},
+		{name: "no subreaper detected -> only init", subreaperPID: 0, ppid: 900, want: false},
+		{name: "subreaper pid 1 is ignored as a subreaper key", subreaperPID: 1, ppid: 1234, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := orphanIdentity{subreaperPID: tt.subreaperPID}
+			if got := id.parentIsSubreaper(tt.ppid); got != tt.want {
+				t.Fatalf("parentIsSubreaper(%d) with subreaperPID=%d = %v, want %v", tt.ppid, tt.subreaperPID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectUserSubreaperPID(t *testing.T) {
+	// Ancestry: self(500) -> shell(400) -> systemd --user(900) -> systemd(1).
+	t.Run("finds systemd --user manager", func(t *testing.T) {
+		parents := map[int]int{500: 400, 400: 900, 900: 1}
+		comms := map[int]string{400: "bash", 900: "systemd", 1: "systemd"}
+		parentOf := func(pid int) (int, error) { return parents[pid], nil }
+		commOf := func(pid int) string { return comms[pid] }
+		if got := detectUserSubreaperPIDWith(500, parentOf, commOf); got != 900 {
+			t.Fatalf("detectUserSubreaperPID = %d, want 900", got)
+		}
+	})
+
+	t.Run("plain init host returns 0", func(t *testing.T) {
+		// self(500) -> supervisor(400) -> init(1); only systemd is pid 1.
+		parents := map[int]int{500: 400, 400: 1}
+		comms := map[int]string{400: "gc", 1: "systemd"}
+		parentOf := func(pid int) (int, error) { return parents[pid], nil }
+		commOf := func(pid int) string { return comms[pid] }
+		if got := detectUserSubreaperPIDWith(500, parentOf, commOf); got != 0 {
+			t.Fatalf("detectUserSubreaperPID = %d, want 0 (no user subreaper)", got)
+		}
+	})
+
+	t.Run("unreadable parent returns 0", func(t *testing.T) {
+		parentOf := func(int) (int, error) { return 0, fmt.Errorf("no /proc") }
+		commOf := func(int) string { return "" }
+		if got := detectUserSubreaperPIDWith(500, parentOf, commOf); got != 0 {
+			t.Fatalf("detectUserSubreaperPID = %d, want 0", got)
+		}
+	})
+
+	t.Run("cyclic ancestry terminates", func(t *testing.T) {
+		// Malformed /proc reporting a cycle must not loop forever.
+		parentOf := func(int) (int, error) { return 700, nil }
+		commOf := func(int) string { return "notsystemd" }
+		if got := detectUserSubreaperPIDWith(700, parentOf, commOf); got != 0 {
+			t.Fatalf("detectUserSubreaperPID = %d, want 0", got)
+		}
+	})
+}

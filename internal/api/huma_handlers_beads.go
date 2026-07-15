@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -27,15 +27,20 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
+	// The cursor is a versioned keyset token carrying the (created_at, id)
+	// boundary of the last row served — stable under the concurrent writes an
+	// active work ledger guarantees, where the old integer offsets skipped or
+	// duplicated rows.
+	seek, err := beadListSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	// all=true reads bypass the CachingStore (closed history lives only in
@@ -79,17 +84,23 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// O(history) even though the caller only wants a recency-bounded page
 	// (gascity#3253). When every store can Count the query exactly, push the
 	// page bound down so each store returns only the rows this page needs and
-	// source Total from a hydration-free Count instead of len(full history) —
-	// the build collapses to O(limit) at the store boundary while the response
-	// shape (a created_at-desc prefix plus an accurate Total and next_cursor)
-	// is unchanged. Scoped to the single-assignee all=true hot path; if any
-	// store cannot Count the query, keep the full-scan path so Total and
-	// ordering stay correct (the Count fallback contract from #3211).
+	// source Total from a hydration-free Count instead of len(full history).
+	// This collapses the FIRST page (no seek boundary) to O(limit) at the store
+	// boundary via each backend's native LIMIT; a seeked cursor page disables
+	// that native limit and hydrates matching history before the Go-side seek
+	// filter (see query.SeekAfter), trading O(limit) fetches for exactness on a
+	// deep walk. The response shape (a created_at-desc prefix plus an accurate
+	// Total and next_cursor) is unchanged. Scoped to the single-assignee all=true
+	// hot path; if any store cannot Count the query, keep the full-scan path so
+	// Total and ordering stay correct (the Count fallback contract from #3211).
 	boundedMode := false
 	boundedFetch := 0
 	var boundedCounts map[string]int
 	if input.All && !dedupe && len(assigneeTerms) == 1 {
-		boundedFetch = pp.Offset + pp.Limit
+		// limit+1: the seek boundary rides on each store query and is enforced
+		// Go-side, so a store returns only rows after the boundary — one extra
+		// row is the has-more signal (Counts are un-seeked totals and cannot tell).
+		boundedFetch = limit + 1
 		boundedMode, boundedCounts = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
 	}
 
@@ -115,8 +126,16 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			}
 			if boundedMode {
 				// Each store need only return enough rows to cover this page;
-				// the cross-rig merge below cuts the exact global prefix.
+				// the cross-rig merge below cuts the exact global prefix. On the
+				// first page (seek == nil) the native LIMIT makes the per-store
+				// fetch O(limit). On a seeked cursor page the boundary is enforced
+				// Go-side (backends disable their native limit — see SeekAfter in
+				// query.go), so the store hydrates matching history and the fetch
+				// is O(matching history), not O(limit); the Go-side filter+sort+
+				// limit then cut the exact page. That is the deliberate price of a
+				// tie-break identical to the in-memory sort.
 				query.Limit = boundedFetch
+				query.SeekAfter = seek
 			}
 			pa.attempt()
 			list, err := store.List(query)
@@ -177,34 +196,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	// A non-cursor request is offset-0 paging: a truncated first page carries
-	// the continuation cursor too, otherwise the remainder of a limit-bounded
-	// read is unfetchable by design (#3208).
-	var page []beads.Bead
-	var total int
-	var nextCursor string
-	if boundedMode {
-		// Total is the exact Count summed over the rigs whose List actually
-		// returned rows, not len(all) (which holds only the bounded prefix) and
-		// not the upfront count of every rig: a rig counted then dropped at List
-		// time is removed from boundedCounts above, so Total tracks reachable
-		// rows and next_cursor still points at the real remainder (gascity#3253).
-		for _, n := range boundedCounts {
-			total += n
-		}
-		if pp.Offset < len(all) {
-			end := pp.Offset + pp.Limit
-			if end > len(all) {
-				end = len(all)
-			}
-			page = all[pp.Offset:end]
-		}
-		if pp.Offset+pp.Limit < total {
-			nextCursor = encodeCursor(pp.Offset + pp.Limit)
-		}
-	} else {
-		page, total, nextCursor = paginate(all, pp)
-	}
+	// A non-cursor request is first-page paging: a truncated first page
+	// carries the continuation cursor too, otherwise the remainder of a
+	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
+	// keyset boundary of the last row served.
+	page, total, hasMore := resolveBeadListPage(all, seek, limit, boundedMode, boundedCounts, pa.partial())
+	nextCursor := mintNextCursor(page, hasMore)
 	if page == nil {
 		page = []beads.Bead{}
 	}
@@ -223,6 +220,93 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		CacheAgeS: cacheAge,
 		Body:      body,
 	}, nil
+}
+
+// beadListSeek decodes the GET /v0/beads pagination cursor into a keyset seek
+// boundary. An empty cursor is first-page paging (nil boundary, no error). Any
+// other non-empty value — garbage, a legacy offset cursor, or a wrong-kind
+// token — is a typed 400 rather than a silent restart at page 1, which
+// duplicated rows under the old integer-offset scheme.
+func beadListSeek(cursor string) (*beads.SeekBoundary, error) {
+	if cursor == "" {
+		return nil, nil
+	}
+	c, err := decodeKeysetCursor(cursor)
+	if err != nil || c.Kind != cursorKindCreatedID {
+		return nil, apierr.InvalidCursor.Msg("cursor is not a valid pagination token; re-fetch the first page")
+	}
+	return &beads.SeekBoundary{CreatedAt: c.CreatedAt, ID: c.ID}, nil
+}
+
+// resolveBeadListPage cuts the response page, Total, and has-more flag from the
+// merged result set, which is already in the global (created_at DESC, id DESC)
+// order the store fan-out produced. It performs no I/O.
+//
+// In boundedMode `all` is the limit+1 overfetch prefix and boundedCounts holds
+// the exact per-rig un-seeked Counts, so Total is their sum (constant across a
+// walk) and the extra overfetched row is the has-more signal. A degraded
+// (partial) rig can fall short of that signal, so a non-empty partial page
+// force-mints a resume cursor to keep the walk going past the degradation
+// (gascity#3253). Otherwise `all` is the complete un-seeked set: Total is its
+// length and the page is the contiguous suffix strictly after the Go-side seek
+// boundary.
+func resolveBeadListPage(all []beads.Bead, seek *beads.SeekBoundary, limit int, boundedMode bool, boundedCounts map[string]int, partial bool) (page []beads.Bead, total int, hasMore bool) {
+	if boundedMode {
+		for _, n := range boundedCounts {
+			total += n
+		}
+		if len(all) > limit {
+			hasMore = true
+			all = all[:limit]
+		}
+		page = all
+		if partial && len(page) > 0 {
+			hasMore = true
+		}
+		return page, total, hasMore
+	}
+	// Full-scan path: `all` is the COMPLETE un-seeked set read in one shot, so
+	// `end < len(all)` is the honest has-more. The bounded branch's
+	// partial→force-resume is intentionally NOT mirrored here: a full-scan
+	// request re-reads every rig un-seeked, so a degraded rig reproduces the
+	// same withheld rows on the next request and a resume cursor cannot recover
+	// them — unlike bounded mode, where each page is an independent per-rig
+	// bounded read that can recover on a later page (gascity#3253).
+	total = len(all)
+	start := 0
+	if seek != nil {
+		for start < len(all) && !seek.After(all[start], beads.SortCreatedDesc) {
+			start++
+		}
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[start:end], total, end < len(all)
+}
+
+// mintNextCursor returns the keyset continuation cursor for a truncated page:
+// the (created_at, id) boundary of the last row served. An exhausted or empty
+// page mints nothing, which the client reads as walk-complete.
+//
+// The resume key is (created_at, id) while the fan-out's identity key is
+// (rig, id): this assumes (created_at, id) is globally unique across the merged
+// rigs. That holds for distinct-store rigs; the only collision is the
+// documented legacy file-mode aliasing of the city and rig stores, where twins
+// would make the page boundary position-dependent (benign today — a true
+// duplicate). A future globally-non-unique ID scheme would need a wider resume
+// key here.
+func mintNextCursor(page []beads.Bead, hasMore bool) string {
+	if !hasMore || len(page) == 0 {
+		return ""
+	}
+	last := page[len(page)-1]
+	return encodeKeysetCursor(keysetCursor{
+		Kind:      cursorKindCreatedID,
+		CreatedAt: last.CreatedAt,
+		ID:        last.ID,
+	})
 }
 
 // beadListBoundedTotal returns the exact per-rig bead counts for the all=true
@@ -345,7 +429,10 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
 	rootID := input.RootID
 	if rootID == "" {
-		return nil, huma.Error400BadRequest("rootID is required")
+		// Defensive: the {rootID} path segment is required, so the router never
+		// dispatches here with an empty id. Unreachable in practice, hence the op
+		// does not declare a 400 in its error contract.
+		return nil, apierr.InvalidRequest.Msg("rootID is required")
 	}
 
 	var root beads.Bead
@@ -356,19 +443,19 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		root = b
 		foundStore = store
 		break
 	}
 	if foundStore == nil {
-		return nil, huma.Error404NotFound("bead " + rootID + " not found")
+		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 
 	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	beadIndex := make(map[string]beads.Bead, len(graphBeads))
 	for _, b := range graphBeads {
@@ -377,7 +464,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 	deps, depPartial := collectWorkflowDeps(foundStore, beadIndex)
 	if depPartial {
-		return nil, huma.Error500InternalServerError("listing bead graph dependencies failed")
+		return nil, apierr.Internal.Msg("listing bead graph dependencies failed")
 	}
 	deps = mergeWorkflowDeps(deps, parentEdges)
 
@@ -406,7 +493,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		return &IndexOutput[beads.Bead]{
 			Index:     s.latestIndex(),
@@ -414,7 +501,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			Body:      b,
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
@@ -426,14 +513,14 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		children, err := store.List(beads.ListQuery{
 			ParentID: id,
 			Sort:     beads.SortCreatedAsc,
 		})
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		children = appendMetadataAttachedChildren(store, parent, children)
 		if children == nil {
@@ -444,7 +531,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			Body:  BeadDepsResponse{Children: children},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // BeadDepsResponse is the response shape for GET /v0/bead/{id}/deps.
@@ -455,63 +542,43 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/beads:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, huma.Error422UnprocessableEntity("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: run the create at most once per Idempotency-Key. The helper
+	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
+	// released on any error, so every fallible step lives in the closure.
+	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			if existing.pending {
-				return nil, huma.Error409Conflict("in_flight: request with this Idempotency-Key is already in progress")
+			assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			if err != nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
 			}
-			// Replay cached typed response (Fix 3l).
-			if b, ok := replayAs[beads.Bead](existing); ok {
-				return &IndexOutput[beads.Bead]{
-					Index: s.latestIndex(),
-					Body:  b,
-				}, nil
+			created, err := store.Create(beads.Bead{
+				Title:       input.Body.Title,
+				Type:        input.Body.Type,
+				Priority:    input.Body.Priority,
+				Assignee:    assignee,
+				Description: input.Body.Description,
+				Labels:      input.Body.Labels,
+				ParentID:    input.Body.Parent,
+				Metadata:    input.Body.Metadata,
+				DeferUntil:  input.Body.DeferUntil,
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
 			}
-		}
-	}
-
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")
-	}
-	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			// Some stores return a minimal create envelope and require a
+			// follow-up read for the canonical persisted bead state.
+			if persisted, getErr := store.Get(created.ID); getErr == nil {
+				created = persisted
+			}
+			return created, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error400BadRequest(err.Error())
+		return nil, err
 	}
-
-	b, err := store.Create(beads.Bead{
-		Title:       input.Body.Title,
-		Type:        input.Body.Type,
-		Priority:    input.Body.Priority,
-		Assignee:    assignee,
-		Description: input.Body.Description,
-		Labels:      input.Body.Labels,
-		ParentID:    input.Body.Parent,
-		Metadata:    input.Body.Metadata,
-		DeferUntil:  input.Body.DeferUntil,
-	})
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error500InternalServerError(err.Error())
-	}
-
-	// Some stores return a minimal create envelope and require a follow-up
-	// read for the canonical persisted bead state.
-	if persisted, getErr := store.Get(b.ID); getErr == nil {
-		b = persisted
-	}
-	s.idem.storeResponse(idemKey, bodyHash, b)
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
@@ -527,19 +594,19 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadReopen is the Huma-typed handler for POST /v0/bead/{id}/reopen.
@@ -552,19 +619,19 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Status != "closed" {
-			return nil, huma.Error409Conflict("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+			return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 		}
 		if err := store.Reopen(id); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "reopened"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
@@ -575,11 +642,11 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		// Once Get succeeded in this store, treat Update-ErrNotFound as a
 		// concurrent-delete race rather than "try the next store" — the bead
@@ -587,16 +654,16 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		// that happens to share the ID prefix.
 		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		return &IndexOutput[map[string]string]{
 			Index: s.latestIndex(),
 			Body:  map[string]string{"status": "assigned", "assignee": assignee},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadUpdate is the Huma-typed handler for POST /v0/bead/{id}/update
@@ -638,12 +705,12 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if body.Assignee != nil {
 			assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 			if err != nil {
-				return nil, huma.Error400BadRequest(err.Error())
+				return nil, apierr.InvalidRequest.Msg(err.Error())
 			}
 			opts.Assignee = &assignee
 		}
@@ -657,17 +724,17 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		// the mutation to a different store that happens to share the ID.
 		if err := store.Update(id, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
 			if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
 				if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
 					if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-						return nil, huma.Error409Conflict("conflict: bead " + id + " was reparented concurrently")
+						return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
 					}
-					return nil, huma.Error500InternalServerError(err.Error())
+					return nil, apierr.Internal.Msg(err.Error())
 				}
 			}
 		}
@@ -675,7 +742,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		resp.Body.Status = "updated"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
@@ -689,17 +756,17 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }

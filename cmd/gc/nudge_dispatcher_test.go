@@ -118,7 +118,7 @@ func TestDispatchAllQueuedNudgesNoOpInLegacyMode(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	cfg := &config.City{Daemon: config.DaemonConfig{}} // legacy default
-	delivered, err := dispatchAllQueuedNudges(dir, cfg, nil, nil, newSessionBeadSnapshot(nil))
+	delivered, err := dispatchAllQueuedNudges(dir, cfg, nil, nil, nil, newSessionBeadSnapshot(nil))
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestDispatchAllQueuedNudgesEmptyQueue(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	dir := t.TempDir()
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, newSessionBeadSnapshot(nil))
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, nil, newSessionBeadSnapshot(nil))
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestDispatchAllQueuedNudgesSkipsNotYetDue(t *testing.T) {
 		},
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, runtime.NewFake(), snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
-	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
 
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, fake, snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, store.Store, fake, snapshot)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{created})
 
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, fake, snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, store, fake, snapshot)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestDispatchAllQueuedNudgesSkipsACPSessionWhenNotRunning(t *testing.T) {
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
 	// Fake has no started session, so IsRunning("worker-session") is false.
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, runtime.NewFake(), snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
-	delivered, err := dispatchAllQueuedNudges(dir, nil, nil, nil, newSessionBeadSnapshot(nil))
+	delivered, err := dispatchAllQueuedNudges(dir, nil, nil, nil, nil, newSessionBeadSnapshot(nil))
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}

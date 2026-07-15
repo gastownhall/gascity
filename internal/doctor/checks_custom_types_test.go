@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
 )
 
 func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
@@ -139,9 +141,9 @@ func TestMergeCustomTypes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mergeCustomTypes(tc.current, tc.required)
+			got := contract.MergeCustomTypes(tc.current, tc.required)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("mergeCustomTypes(%v, %v) = %v, want %v",
+				t.Errorf("contract.MergeCustomTypes(%v, %v) = %v, want %v",
 					tc.current, tc.required, got, tc.want)
 			}
 		})

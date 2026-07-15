@@ -28,29 +28,23 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		return items, err
 	}
 
-	c.mu.RLock()
-	state := c.state
-	if state == cacheLive || state == cachePartial {
-		primePartialErr := c.primePartialErr
-		if len(c.dirty) > 0 {
-			c.mu.RUnlock()
-			return c.backing.List(liveListQuery(query))
-		}
-		if primePartialErr != nil {
-			c.mu.RUnlock()
-			return c.backing.List(liveListQuery(query))
-		}
-		// PrimeActive loads the full active set (open + in_progress), so
-		// active-only queries are complete even before the history prime finishes.
-		cached := make([]Bead, 0, len(c.beads))
+	// Active-bead path: serve from cache after a bounded per-ID refresh of any
+	// dirty rows. PrimeActive loads the full active set (open + in_progress),
+	// so active-only queries are complete even before the history prime
+	// finishes. On overlay error the read takes the old full-scan fallback.
+	var cached []Bead
+	if err := c.readCacheWithOverlay(c.cacheServableLocked, func(suppressed map[string]struct{}) {
+		cached = make([]Bead, 0, len(c.beads))
 		for _, b := range c.beads {
+			if _, gone := suppressed[b.ID]; gone {
+				continue
+			}
 			if !query.Matches(b) {
 				continue
 			}
 			cached = append(cached, cloneBead(b))
 		}
-		c.mu.RUnlock()
-
+	}); err == nil {
 		finish := func(items []Bead, err error) ([]Bead, error) {
 			sortBeadsForQuery(items, query.Sort)
 			if query.Limit > 0 && len(items) > query.Limit {
@@ -93,7 +87,6 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		}
 		return finish(cached, err)
 	}
-	c.mu.RUnlock()
 	return c.backing.List(liveListQuery(query))
 }
 
@@ -118,20 +111,18 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
 	}
 	if !query.Live && query.ParentID == "" && !query.IncludesClosed() {
-		c.mu.RLock()
-		cacheClean := (c.state == cacheLive || c.state == cachePartial) &&
-			len(c.dirty) == 0 && c.primePartialErr == nil
-		if cacheClean {
-			n := 0
-			for _, b := range c.beads {
-				if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
-					n++
-				}
-			}
-			c.mu.RUnlock()
+		n, ok, err := c.cachedCountContext(ctx, query, excludeTypes)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
 			return n, nil
 		}
-		c.mu.RUnlock()
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 	}
 	counter, ok := c.backing.(Counter)
 	if !ok {
@@ -140,9 +131,58 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
 }
 
+// cachedCountContext serves only a clean active snapshot. Dirty overlays use
+// context-blind Store.Get calls, so a deadline-sensitive Count delegates those
+// cases to the backing Counter instead. Lock acquisition and the scan both
+// observe ctx, ensuring a cache writer cannot strand the caller's goroutine.
+func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, excludeTypes []string) (int, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if !c.mu.TryRLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !c.mu.TryRLock() {
+			select {
+			case <-ctx.Done():
+				return 0, false, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+	defer c.mu.RUnlock()
+
+	if !c.cacheServableLocked() || len(c.dirty) > 0 {
+		return 0, false, nil
+	}
+	var n int
+	for _, b := range c.beads {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
+			n++
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
 // CachedList returns query results from the in-memory cache only. The boolean
 // reports whether the cache was initialized and clean enough to answer without
 // touching the backing store.
+//
+// This strict cache-only handle intentionally keeps the conservative
+// "dirty ⇒ decline" contract: it must answer without any backing I/O and
+// without serving a row it is not certain matches the backing. The bounded
+// per-ID dirty overlay (readCacheWithOverlay) applies only to the read paths
+// that already fall back to the backing store (List/Count/Ready), where a
+// refresh-and-serve is invisible to callers.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if query.IncludesClosed() {
 		return nil, false
@@ -230,16 +270,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
-		c.beads[item.ID] = cloneBead(item)
-		if beadCarriesDependencyFields(item) {
-			c.deps[item.ID] = depsFromBeadFields(item)
-		}
-		delete(c.dirty, item.ID)
-		delete(c.deletedSeq, item.ID)
-		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
-			delete(c.beadSeq, item.ID)
-			delete(c.localBeadAt, item.ID)
-		}
+		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
@@ -251,16 +286,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
-		c.beads[id] = bead
-		if beadCarriesDependencyFields(bead) {
-			c.deps[id] = depsFromBeadFields(bead)
-		}
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		if !recentLocalMutation(c.localBeadAt[id], now) {
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-		}
+		c.absorbFreshLocked(id, bead, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 	}
 	for id := range removedParents {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -269,12 +299,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		c.evictLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -283,16 +308,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
-		c.beads[id] = bead
-		if beadCarriesDependencyFields(bead) {
-			c.deps[id] = depsFromBeadFields(bead)
-		}
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		if !recentLocalMutation(c.localBeadAt[id], now) {
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
-		}
+		c.absorbFreshLocked(id, bead, now, absorbOpts{
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearGuarded,
+			clearDirty: true,
+		})
 	}
 	for id := range removedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -301,12 +321,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		delete(c.beads, id)
-		delete(c.deps, id)
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		c.evictLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -424,11 +439,11 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
 			}
-			c.beads[id] = cloneBead(fresh)
-			c.deps[id] = depsFromBeadFields(fresh)
-			delete(c.dirty, id)
-			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
+			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+				depsMode:   depsFromFields,
+				seqMode:    seqClearBeadSeqOnly,
+				clearDirty: true,
+			})
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -450,52 +465,77 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}
-	c.mu.RLock()
-	if c.state == cacheLive && c.depsComplete {
-		if len(c.dirty) > 0 {
-			c.mu.RUnlock()
-			return c.backing.Ready(query...)
-		}
-		if c.primePartialErr != nil {
-			c.mu.RUnlock()
-			return c.backing.Ready(query...)
-		}
-		statusByID := make(map[string]string, len(c.beads))
-		depsByID := make(map[string][]Dep, len(c.deps))
-		openBeads := make([]Bead, 0, len(c.beads))
-		now := time.Now().UTC()
-		for _, b := range c.beads {
-			statusByID[b.ID] = b.Status
-			if IsReadyCandidate(b, now) {
-				openBeads = append(openBeads, cloneBead(b))
+	var (
+		statusByID map[string]string
+		depsByID   map[string][]Dep
+		openBeads  []Bead
+	)
+	// Ready requires a fully live cache with complete dependency coverage; the
+	// overlay refreshes any dirty rows first, then computes readiness from the
+	// cache. On overlay error the read takes the old full backing.Ready scan.
+	if err := c.readCacheWithOverlay(
+		func() bool { return c.state == cacheLive && c.depsComplete && c.primePartialErr == nil },
+		func(suppressed map[string]struct{}) {
+			statusByID = make(map[string]string, len(c.beads))
+			openBeads = make([]Bead, 0, len(c.beads))
+			now := time.Now().UTC()
+			for _, b := range c.beads {
+				if _, gone := suppressed[b.ID]; gone {
+					continue
+				}
+				statusByID[b.ID] = b.Status
+				if IsReadyCandidate(b, now) {
+					openBeads = append(openBeads, cloneBead(b))
+				}
 			}
-		}
-		for _, b := range openBeads {
-			deps := cloneDeps(c.deps[b.ID])
-			depsByID[b.ID] = deps
-		}
-		c.mu.RUnlock()
-
-		var result []Bead
-		for _, b := range openBeads {
-			if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
-				result = append(result, cloneBead(b))
+			depsByID = make(map[string][]Dep, len(openBeads))
+			for _, b := range openBeads {
+				depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 			}
-		}
-		// c.beads is a map, so the scan above yields a different order per
-		// call; impose the canonical ready order so cache-served results
-		// match the SQL-backed ready readers (#3208).
-		sortBeadsReadyOrder(result)
-		return result, nil
+		},
+	); err != nil {
+		return c.backing.Ready(query...)
 	}
-	c.mu.RUnlock()
-	return c.backing.Ready(query...)
+
+	var result []Bead
+	for _, b := range openBeads {
+		if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
+			result = append(result, cloneBead(b))
+		}
+	}
+	// c.beads is a map, so the scan above yields a different order per
+	// call; impose the canonical ready order so cache-served results
+	// match the SQL-backed ready readers (#3208).
+	sortBeadsReadyOrder(result)
+	return result, nil
+}
+
+// ReadyContext answers only from the dependency-complete active cache. It
+// deliberately does not fall back to the context-blind backing Ready method:
+// deadline-sensitive callers must receive ErrCacheUnavailable instead of
+// abandoning database work after their context expires.
+func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := c.cachedReadyCompleteOnly(ctx, readyQueryFromArgs(query))
+	if err != nil {
+		return rows, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // CachedReady returns ready beads from the in-memory active read model.
 // The boolean reports whether the cache was initialized enough to answer
 // without touching the backing store. Unlike Ready, this can answer from a
 // partial active cache only when each open bead has known dependency coverage.
+//
+// Like CachedList, this strict cache-only handle keeps the conservative
+// "dirty ⇒ decline" contract so a caller relying on cache-only semantics never
+// observes a row refreshed behind its back or a stale ready candidate (#2210).
 func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

@@ -21,7 +21,10 @@ import (
 // are preserved).
 var (
 	// sessionsCacheTTL bounds how long a cached sessions read is served before a
-	// refetch. A var (not a const) so tests can shorten it.
+	// refetch. A var (not a const) so tests can shorten it — but it is captured
+	// by newRunTailerManager at construction (the sessions compute can run on
+	// the tailer loop's detached prime goroutine, where a live read of this var
+	// would race with a test mutating it), so set it BEFORE building the plane.
 	sessionsCacheTTL = 3 * time.Second
 	// formulaCacheTTL bounds how long a successfully-compiled formula detail is
 	// served. Compiled formulas change rarely (an authored TOML edit), so this is
@@ -303,6 +306,24 @@ func (c *singleFlightCache[K, V]) lastGoodOrZero(key K) (V, uint64, bool) {
 	}
 	var zero V
 	return zero, 0, false
+}
+
+// invalidate forces the next get for key to recompute — and bump the version —
+// even within its TTL, while preserving the last-good value (for serve-stale)
+// and the monotonic version. It expires the entry rather than deleting it so the
+// version counter keeps advancing (a delete would reset it to zero and could
+// collide with a memo key). Used to eagerly refresh an enrichment the moment an
+// out-of-band signal says it changed (e.g. a session.* event in the tail),
+// rather than waiting for the TTL to lapse. A no-op if the key is absent.
+func (c *singleFlightCache[K, V]) invalidate(key K) {
+	c.mu.Lock()
+	if e, ok := c.entries[key]; ok {
+		// ttl 0 makes the fresh-hit check (time.Since(computed) < ttl) always
+		// false, so the next get recomputes. An in-flight compute is unaffected —
+		// it publishes and bumps the version as usual.
+		e.ttl = 0
+	}
+	c.mu.Unlock()
 }
 
 // ── Cached payload shapes ─────────────────────────────────────────────────

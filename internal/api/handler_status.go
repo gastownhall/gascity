@@ -307,6 +307,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		PartialErrors:       partialErrors,
 		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
+		ConditionalWrites:   s.conditionalWritesStatus(),
 		AgentDetails:        agentDetails,
 		RigDetails:          rigDetails,
 		NamedSessionDetails: namedSessionDetails,
@@ -316,6 +317,22 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 
 type cityBeadsDiagnosticProvider interface {
 	CityBeadsDiagnostic() *beads.BeadsDiagnostic
+}
+
+// conditionalWritesStatusProvider is implemented by the controller State to
+// expose its latched conditional-writes snapshot (§12.5). The State builds
+// the block because only it holds the boot-latched rollout flags, the drift
+// notices, and every controller-owned store handle.
+type conditionalWritesStatusProvider interface {
+	ConditionalWritesStatus() *StatusConditionalWrites
+}
+
+func (s *Server) conditionalWritesStatus() *StatusConditionalWrites {
+	provider, ok := s.state.(conditionalWritesStatusProvider)
+	if !ok {
+		return nil
+	}
+	return provider.ConditionalWritesStatus()
 }
 
 func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
@@ -446,39 +463,46 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		return snapshot
 	}
 
-	// A throwaway, ctx-bound clone of store when it's bd-CLI-backed: on
-	// timeout below, canceling reqCtx kills an in-flight bd child instead
-	// of abandoning it to run past this function's return (gascity
-	// ga-cdmx6x). ScopedStoreLike answers (nil, nil) for non-bd-CLI
-	// backends, which have no subprocess to leak — those keep reading
-	// through store directly, unchanged.
+	// reqCtx bounds the scoped-store read below; defer cancel() fires on
+	// every return path (including the time.After timeout), killing an
+	// in-flight bd child instead of leaking it past this function's budget
+	// (gascity ga-cdmx6x).
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	readStore := store
-	if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
-		snapshot.partialErrors = []string{fmt.Sprintf("sessions: resolving scoped store: %v", err)}
-		return snapshot
-	} else if scoped != nil {
-		readStore = scoped
-	}
 
 	type snapshotResult struct {
-		rows          []beads.Bead
+		infos         []session.Info
 		partialErrors []string
 		err           error
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		rows, partialErrors, err := sessionReadModelRows(readStore)
-		done <- snapshotResult{rows: rows, partialErrors: partialErrors, err: err}
+		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
+		// ScopedStoreLike hands back a bd-CLI-backed clone reqCtx can cancel,
+		// or (nil, nil) for non-bd backends (native/file/mem) — those read
+		// through store unchanged. Its resolution (bd env / managed-dolt
+		// connection state) is synchronous and can block on a mutex the
+		// reconcile loop holds without honoring reqCtx; kept before the select
+		// it hung the whole handler past its read budget, dragging the
+		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
+		// as the read bounds it.
+		readStore := store
+		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
+			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+			return
+		} else if scoped != nil {
+			readStore = scoped
+		}
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
-	var rows []beads.Bead
+	var infos []session.Info
 	var partialErrors []string
 	var err error
 	select {
 	case result := <-done:
-		rows = result.rows
+		infos = result.infos
 		partialErrors = result.partialErrors
 		err = result.err
 	case <-time.After(statusStoreReadTimeout):
@@ -494,16 +518,16 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
 
-	seenSessionName := make(map[string]bool, len(rows))
-	for _, b := range rows {
-		if b.Status == "closed" {
+	seenSessionName := make(map[string]bool, len(infos))
+	for _, sessInfo := range infos {
+		if sessInfo.Closed {
 			continue
 		}
 		info := statusSessionInfo{
-			sessionName: strings.TrimSpace(b.Metadata["session_name"]),
-			agentName:   strings.TrimSpace(b.Metadata["agent_name"]),
-			template:    strings.TrimSpace(b.Metadata["template"]),
-			state:       statusSessionState(b),
+			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
+			agentName:   strings.TrimSpace(sessInfo.AgentName),
+			template:    strings.TrimSpace(sessInfo.Template),
+			state:       statusSessionStateInfo(sessInfo),
 		}
 		if info.sessionName == "" {
 			continue
@@ -525,67 +549,187 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 
 // statusWorkResult is one store's contribution to the work counts.
 type statusWorkResult struct {
-	wc   workCounts
-	errs []string
+	wc       workCounts
+	readyIDs []string
+	errs     []string
 }
 
-// statusWorkCounts tallies open/ready/in_progress work across all rig
-// stores. Stores exposing beads.Counter answer without hydrating rows —
-// the caching layer counts matches in memory when its cache is clean
-// (#1896) — with the per-store timeout canceling any delegated backing
-// query instead of leaking a goroutine that pins a connection.
-// Stores without a Counter (or whose Counter cannot answer the query
-// shape) keep the legacy hydrating List path. Stores are queried
-// concurrently; results aggregate in deterministic rig order.
+// statusWorkCounts tallies persisted open/in_progress work across BeadStores
+// and federates canonical Ready work exactly like GET /beads/ready: the city
+// store first, then BeadStores excluding the CityName alias. Stores exposing
+// beads.Counter answer persisted counts without hydrating rows — the caching
+// layer counts matches in memory when its cache is clean (#1896). Stores are
+// queried concurrently; results aggregate in deterministic city/rig order.
 func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
-	// store is counted exactly once.
+	// store's persisted statuses are counted exactly once.
 	rigNames := sortedRigNames(stores)
-	results := make([]statusWorkResult, len(rigNames))
+	type workQuery struct {
+		label         string
+		store         beads.Store
+		includeStored bool
+		includeReady  bool
+	}
+	queries := make([]workQuery, 0, len(rigNames)+1)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		queries = append(queries, workQuery{
+			label:        "city",
+			store:        cityStore,
+			includeReady: true,
+		})
+	}
+	cityName := s.state.CityName()
+	for _, rigName := range rigNames {
+		queries = append(queries, workQuery{
+			label:         "rig " + rigName,
+			store:         stores[rigName],
+			includeStored: true,
+			includeReady:  rigName != cityName,
+		})
+	}
+
+	results := make([]statusWorkResult, len(queries))
 	var wg sync.WaitGroup
-	for i, rigName := range rigNames {
+	for i, query := range queries {
 		wg.Add(1)
-		go func(i int, rigName string, store beads.Store) {
+		go func(i int, query workQuery) {
 			defer wg.Done()
-			results[i] = statusStoreWorkCounts(ctx, s.state, rigName, store)
-		}(i, rigName, stores[rigName])
+			results[i] = statusStoreWorkCountsFor(
+				ctx,
+				s.state,
+				query.label,
+				query.store,
+				query.includeStored,
+				query.includeReady,
+			)
+		}(i, query)
 	}
 	wg.Wait()
 
 	var wc workCounts
 	var errs []string
+	seenReady := make(map[string]bool)
 	for _, r := range results {
 		wc.Open += r.wc.Open
-		wc.Ready += r.wc.Ready
 		wc.InProgress += r.wc.InProgress
+		for _, id := range r.readyIDs {
+			if seenReady[id] {
+				continue
+			}
+			seenReady[id] = true
+			wc.Ready++
+		}
 		errs = append(errs, r.errs...)
 	}
 	return wc, errs
 }
 
-// statusStoreWorkCounts counts one store's work beads, preferring the
-// hydration-free Counter path. Operational count failures (timeouts,
-// connection errors) report a partial error without retrying via List —
-// the List scan would hit the same backend and pay the timeout again.
+// statusStoreWorkCounts counts one store's persisted open/in-progress work
+// and independently derives ready work through the canonical live Ready
+// projection. Both reads share one per-store deadline. Operational Count
+// failures report a partial error without retrying via List — the List scan
+// would hit the same backend — but do not discard a successful Ready result.
 func statusStoreWorkCounts(ctx context.Context, state State, rigName string, store beads.Store) statusWorkResult {
+	return statusStoreWorkCountsFor(ctx, state, "rig "+rigName, store, true, true)
+}
+
+func statusStoreWorkCountsFor(
+	ctx context.Context,
+	state State,
+	label string,
+	store beads.Store,
+	includeStored bool,
+	includeReady bool,
+) statusWorkResult {
+	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+
+	type storedResult struct {
+		wc  workCounts
+		err error
+	}
+	type readyResult struct {
+		rows []beads.Bead
+		err  error
+	}
+	storedDone := make(chan storedResult, 1)
+	stored := &storedResult{}
+	if includeStored {
+		stored = nil
+		go func() {
+			wc, err := statusStoredWorkCounts(ctx, state, store)
+			storedDone <- storedResult{wc: wc, err: err}
+		}()
+	}
+	ready := &readyResult{}
+	if includeReady {
+		// ContextReadyReader and ScopedStoreLike both guarantee cleanup before
+		// returning after cancellation. Invoke this branch synchronously so the
+		// coordinator cannot return while scoped resolution is still cleaning up.
+		rows, err := statusReadyStoreWithTimeout(ctx, state, store)
+		ready = &readyResult{rows: rows, err: err}
+	}
+
+	for stored == nil {
+		select {
+		case value := <-storedDone:
+			stored = &value
+			storedDone = nil
+		case <-ctx.Done():
+			// Prefer a result that completed at the deadline boundary. The channel
+			// is buffered, so a context-blind legacy operation can finish later
+			// without blocking on its abandoned result send.
+			if stored == nil {
+				select {
+				case value := <-storedDone:
+					stored = &value
+					storedDone = nil
+				default:
+				}
+			}
+			if stored == nil {
+				err := ctx.Err()
+				if errors.Is(err, context.DeadlineExceeded) {
+					err = fmt.Errorf("stored counts timed out: %w", err)
+				}
+				stored = &storedResult{err: err}
+			}
+		}
+	}
+
+	result := statusWorkResult{wc: stored.wc}
+	if stored.err != nil {
+		result.errs = append(result.errs, fmt.Sprintf("%s work: %v", label, stored.err))
+	}
+	if ready.err != nil {
+		result.errs = append(result.errs, fmt.Sprintf("%s work ready: %v", label, ready.err))
+	}
+	if ready.err == nil || (beads.IsPartialResult(ready.err) && len(ready.rows) > 0) {
+		result.wc.Ready = len(ready.rows)
+		result.readyIDs = make([]string, 0, len(ready.rows))
+		for _, row := range ready.rows {
+			result.readyIDs = append(result.readyIDs, row.ID)
+		}
+	}
+	return result
+}
+
+// statusStoredWorkCounts counts the persisted open/in-progress buckets,
+// preferring the hydration-free Counter path and falling back to List only
+// when Count explicitly reports that the query shape is unsupported.
+func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store) (workCounts, error) {
 	if counter, ok := store.(beads.Counter); ok {
 		wc, err := statusCountWork(ctx, counter)
-		if err == nil {
-			return statusWorkResult{wc: wc}
-		}
-		if !errors.Is(err, beads.ErrCountUnsupported) {
-			return statusWorkResult{errs: []string{fmt.Sprintf("rig %s work: %v", rigName, err)}}
+		if err == nil || !errors.Is(err, beads.ErrCountUnsupported) {
+			return wc, err
 		}
 	}
 
 	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
-	var result statusWorkResult
-	if err != nil {
-		result.errs = append(result.errs, fmt.Sprintf("rig %s work: %v", rigName, err))
-		if !beads.IsPartialResult(err) || len(list) == 0 {
-			return result
-		}
+	var wc workCounts
+	if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
+		return wc, err
 	}
 	for _, b := range list {
 		if slices.Contains(statusWorkExcludedTypes, b.Type) {
@@ -593,37 +737,29 @@ func statusStoreWorkCounts(ctx context.Context, state State, rigName string, sto
 		}
 		switch b.Status {
 		case "in_progress":
-			result.wc.InProgress++
-		case "ready":
-			result.wc.Ready++
+			wc.InProgress++
 		case "open":
-			result.wc.Open++
+			wc.Open++
 		}
 	}
-	return result
+	return wc, err
 }
 
-// statusCountWork fills the work-count buckets via beads.Counter. One
-// shared statusStoreReadTimeout window bounds all three bucket queries —
-// the same per-store budget the legacy single-List path had, though the
-// three queries consume it serially — and derives from ctx, so a slow
-// backend query is canceled (releasing its connection) rather than
-// abandoned.
+// statusCountWork fills the persisted work-count buckets via beads.Counter.
+// Readiness is not a stored status; statusStoreWorkCounts derives it through
+// Ready instead. The caller supplies the shared per-store deadline.
 func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, error) {
-	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
-	defer cancel()
 	var wc workCounts
 	for _, bucket := range []struct {
 		status string
 		dst    *int
 	}{
 		{"open", &wc.Open},
-		{"ready", &wc.Ready},
 		{"in_progress", &wc.InProgress},
 	} {
 		n, err := counter.Count(ctx, beads.ListQuery{Status: bucket.status, AllowScan: true}, statusWorkExcludedTypes...)
 		if err != nil {
-			return workCounts{}, err
+			return wc, err
 		}
 		*bucket.dst = n
 	}
@@ -643,11 +779,8 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	readStore := store
-	if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
-		return nil, fmt.Errorf("resolving scoped store: %w", err)
-	} else if scoped != nil {
-		readStore = scoped
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
 	}
 	type listResult struct {
 		rows []beads.Bead
@@ -655,15 +788,80 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 	done := make(chan listResult, 1)
 	go func() {
+		// Resolve the ctx-bound scoped store INSIDE the timed goroutine so a
+		// slow, ctx-blind resolution (a store mutex held by the reconcile
+		// loop) is bounded by the same request deadline as the list instead of
+		// hanging the handler synchronously (gc-08qgn).
+		readStore := store
+		if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
+			done <- listResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+			return
+		} else if scoped != nil {
+			readStore = scoped
+		}
 		rows, err := readStore.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()
 	select {
 	case result := <-done:
 		return result.rows, result.err
-	case <-time.After(statusStoreReadTimeout):
-		return nil, fmt.Errorf("list timed out after %s", statusStoreReadTimeout)
+	case <-reqCtx.Done():
+		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("list timed out: %w", reqCtx.Err())
+		}
+		return nil, reqCtx.Err()
 	}
+}
+
+// statusReadyStoreWithTimeout reads the same live canonical Ready projection
+// as GET /beads/ready. Policy-aware stores retain their tier behavior through
+// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
+// cancellation cannot leak a child beyond the status request.
+func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
+	var capabilityErr error
+	if reader, ok := store.(beads.ContextReadyReader); ok {
+		rows, err := reader.ReadyContext(reqCtx)
+		if !errors.Is(err, beads.ErrReadyContextUnsupported) {
+			return rows, statusReadyError(err)
+		}
+		capabilityErr = err
+	}
+
+	// ScopedStoreLike is part of the context-aware read contract: resolution
+	// must finish its own cleanup before returning after reqCtx cancellation.
+	// Keep it synchronous so the status deadline cannot abandon a resolver
+	// goroutine after the response has returned.
+	scoped, err := state.ScopedStoreLike(reqCtx, store)
+	if err != nil {
+		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
+	}
+	if scoped == nil {
+		if capabilityErr == nil {
+			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
+		}
+		return nil, capabilityErr
+	}
+
+	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
+	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
+	// needed to enforce the deadline.
+	rows, err := beads.HandlesFor(scoped).Live.Ready()
+	return rows, statusReadyError(err)
+}
+
+func statusReadyError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("ready timed out: %w", err)
+	}
+	return err
 }
 
 func statusMailCountWithTimeout(mp interface {
@@ -736,8 +934,11 @@ func statusSessionQualifiedName(cityName, sessTmpl string, info statusSessionInf
 	return agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 }
 
-func statusSessionState(b beads.Bead) session.State {
-	state := session.State(strings.TrimSpace(b.Metadata["state"]))
+// statusSessionStateInfo maps the raw persisted state metadata (Info.MetadataState,
+// not the closed-blanked Info.State) onto the display state the status snapshot
+// reports, folding the awake/drained aliases exactly as the retired bead form did.
+func statusSessionStateInfo(info session.Info) session.State {
+	state := session.State(strings.TrimSpace(info.MetadataState))
 	switch state {
 	case "awake":
 		return session.StateActive

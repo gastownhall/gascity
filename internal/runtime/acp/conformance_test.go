@@ -42,7 +42,6 @@ func TestACPConformance(t *testing.T) {
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		id := atomic.AddInt64(&counter, 1)
 		name := fmt.Sprintf("gc-acp-conform-%d", id)
-		t.Cleanup(func() { _ = p.Stop(name) })
 		return p, runtime.Config{
 			Command: binPath,
 			WorkDir: t.TempDir(),

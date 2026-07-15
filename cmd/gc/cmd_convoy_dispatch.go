@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -227,7 +228,10 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 				return decorateDrainItemRecipe(recipe, source, store, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
 		case "retry-eval":
-			sp := dispatchControlSessionProvider()
+			sp, err := dispatchControlSessionProvider()
+			if err != nil {
+				return err
+			}
 			opts.RecycleSession = func(subject beads.Bead) error {
 				if strings.TrimSpace(subject.Assignee) == "" {
 					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
@@ -236,7 +240,10 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
-			sp := dispatchControlSessionProvider()
+			sp, err := dispatchControlSessionProvider()
+			if err != nil {
+				return err
+			}
 			opts.RecycleSession = func(subject beads.Bead) error {
 				if strings.TrimSpace(subject.Assignee) == "" {
 					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
@@ -432,7 +439,9 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 		return openStoreAtForCity(storePath, cityPath)
 	}
 	if samePath(scopeRoot, cityPath) {
-		return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+		return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
+			return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+		})
 	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -441,13 +450,17 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
 			if samePath(rigPath, scopeRoot) {
-				return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+				return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
+					return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+				})
 			}
 		}
 	}
 	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
 	// still need write-capable bd commands with auto-export suppressed.
-	return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+	return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
+		return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+	})
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,
@@ -564,6 +577,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	if routingRigContext == "" {
 		routingRigContext = graphroute.GraphRouteRigContext(defaultRoute.QualifiedName)
 	}
+	storeRigContext, storeScoped := storeref.ScopeRigContext(source.Metadata[beadmeta.RootStoreRefMetadataKey])
 	controlRoutes := map[string]graphRouteBinding{}
 	controlRouteFor := func(rigContext string) (graphRouteBinding, error) {
 		rigContext = strings.TrimSpace(rigContext)
@@ -619,7 +633,9 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		}
 		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			controlRigContext := graphRouteBindingRigContext(binding)
-			if controlRigContext == "" {
+			if storeScoped {
+				controlRigContext = storeRigContext
+			} else if controlRigContext == "" {
 				controlRigContext = routingRigContext
 			}
 			controlRoute, err := controlRouteFor(controlRigContext)
@@ -756,6 +772,12 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 	}
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
+	}
+	if rootStoreRef := strings.TrimSpace(source.Metadata[beadmeta.RootStoreRefMetadataKey]); rootStoreRef != "" {
+		// Dynamically attached steps live in the source graph store. Overwrite a
+		// stale template value before routing so gc.routed_to and the store ref
+		// molecule.Attach persists cannot disagree.
+		step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 	}
 	if scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey]); scopeRef != "" && step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		step.Metadata[beadmeta.ScopeRefMetadataKey] = scopeRef
@@ -1409,6 +1431,36 @@ func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
 		deleted++
 	}
 	return deleted, errs
+}
+
+// deleteWorkflowBeadsBatch removes exactly the given ids using the store's
+// batched delete when the backend implements beads.BatchDeleter (one
+// `bd delete … --force` per chunk, which orphans external dependents and lets
+// the schema's ON DELETE CASCADE drop the deleted beads' own edge rows), and
+// otherwise deletes each bead individually. On the sqlite/Dolt graph store this
+// collapses an O(subprocess-per-edge) closure teardown into O(chunks), which
+// keeps a large wisp-GC purge from blocking the controller tick for minutes.
+// It is not dependent-recursive: beads outside the collected closure that
+// depend on a deleted bead are preserved.
+func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if cd, ok := store.(beads.BatchDeleter); ok {
+		// A policy/capability wrapper advertises BatchDeleter to forward it, but
+		// reports ErrBatchDeleteUnsupported when its own backing lacks the
+		// capability; treat that as "not batchable" and fall through to the
+		// per-bead path rather than surfacing it as a delete failure.
+		if err := cd.DeleteBatch(ids); !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			return err
+		}
+	}
+	for _, id := range ids {
+		if err := deleteWorkflowBead(store, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func deleteWorkflowBead(store beads.Store, id string) error {

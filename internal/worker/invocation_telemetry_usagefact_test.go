@@ -28,7 +28,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManager(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -193,7 +193,7 @@ func TestModelUsageFact(t *testing.T) {
 	// stamped by the claim hook; modelUsageFact reads it into Fact.StepID.
 	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.active_work_bead": "mol.finalize"}}
 
-	priced := modelUsageFact(u, bead, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
+	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
 	if priced.Kind != usage.KindModel {
 		t.Fatalf("kind = %q", priced.Kind)
 	}
@@ -233,7 +233,7 @@ func TestModelUsageFact(t *testing.T) {
 	}
 
 	// Unpriced collapses cost to zero regardless of the cost argument.
-	unp := modelUsageFact(u, bead, "session-1", "w", "claude", 0.02, false, now)
+	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now)
 	if !unp.Unpriced || unp.CostUSDEstimate != 0 {
 		t.Fatalf("unpriced fact must zero the cost and set the flag: %+v", unp)
 	}

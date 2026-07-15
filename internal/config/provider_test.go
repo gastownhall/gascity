@@ -795,7 +795,7 @@ func TestProviderSessionCreateTransportBuiltinMimoCodeStaysOnCLIByDefault(t *tes
 			rp: ResolvedProvider{
 				Name:        "mimocode",
 				Command:     "mimo",
-				Args:        []string{"--never-ask-questions"},
+				Args:        []string{"--never-ask"},
 				SupportsACP: true,
 				ACPArgs:     []string{"acp"},
 			},
@@ -806,7 +806,7 @@ func TestProviderSessionCreateTransportBuiltinMimoCodeStaysOnCLIByDefault(t *tes
 				Name:            "custom-mimocode",
 				BuiltinAncestor: "mimocode",
 				Command:         "mimo",
-				Args:            []string{"--never-ask-questions"},
+				Args:            []string{"--never-ask"},
 				SupportsACP:     true,
 				ACPArgs:         []string{"acp"},
 			},
@@ -825,7 +825,7 @@ func TestProviderSessionCreateTransportBuiltinMimoCodeStaysOnCLIByDefault(t *tes
 			if got := ResolveSessionCreateTransport("acp", &rp); got != "acp" {
 				t.Fatalf("ResolveSessionCreateTransport(acp) = %q, want acp", got)
 			}
-			if got := rp.CommandString(); got != "mimo --never-ask-questions" {
+			if got := rp.CommandString(); got != "mimo --never-ask" {
 				t.Fatalf("CommandString() = %q, want headless MiMo CLI command", got)
 			}
 			if got := rp.ACPCommandString(); got != "mimo acp" {

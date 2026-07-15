@@ -50,7 +50,7 @@ func newInvocationTelemetryHandle(t *testing.T) (*SessionHandle, *beads.MemStore
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManager(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -501,7 +501,7 @@ func newFamilyTelemetryHandle(t *testing.T, profile Profile, provider, command s
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManager(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},

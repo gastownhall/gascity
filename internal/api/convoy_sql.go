@@ -480,18 +480,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	storeRef := chosen.info.ref
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {
-		beadResponses = append(beadResponses, workflowBeadResponse{
-			ID:            bead.ID,
-			Title:         bead.Title,
-			Status:        workflowStatus(bead),
-			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
-			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
-			Assignee:      strings.TrimSpace(bead.Assignee),
-			Metadata:      cloneStringMap(bead.Metadata),
-		})
+		beadResponses = append(beadResponses, workflowBeadResponseFromBead(bead))
 	}
 
 	snapshot := &workflowSnapshotResponse{

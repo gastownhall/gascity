@@ -211,7 +211,11 @@ func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) er
 	}
 	// Escape backticks in identifiers to prevent injection (` → ``).
 	safe := strings.ReplaceAll(name, "`", "``")
-	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE `%s`", safe)) //nolint:gosec // G201: identifier-escaped
+	// IF EXISTS keeps the drop idempotent: teardown/rollback is documented as
+	// "best-effort and idempotent (a re-crash mid-sweep re-runs cleanly)", so a
+	// drop that already succeeded before a marker write failed must not error the
+	// next sweep and wedge the record — a database-not-found is success here.
+	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", safe)) //nolint:gosec // G201: identifier-escaped
 	return err
 }
 

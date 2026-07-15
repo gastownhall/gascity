@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -46,20 +45,11 @@ type slingResponse struct {
 	AttachedBeadID string   `json:"attached_bead_id,omitempty"`
 	Mode           string   `json:"mode,omitempty"`
 	Warnings       []string `json:"warnings,omitempty"`
+	DashboardURL   string   `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
+	Run            *RunRef  `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
 }
 
 var apiSlingStderr = func() io.Writer { return os.Stderr }
-
-// controlDispatcherRuntimeMissing reports whether the named control-dispatcher
-// agent's session is asleep with reason runtime-missing. It powers the rig→city
-// control-dispatcher fallback (#3454) on the API sling graph-routing path.
-//
-// Session beads are city-scoped, so it reads the server's already-open city
-// bead store directly — never openCityStoreAt — which keeps it off the
-// managed-Dolt spawn path and therefore leak-guard-safe on the sling hot path.
-func (s *Server) controlDispatcherRuntimeMissing(qualifiedName string) bool {
-	return session.RuntimeMissingInStore(s.state.CityBeadStore(), qualifiedName)
-}
 
 // execSling calls the intent-based Sling API directly. The Huma handler
 // humaHandleSling performs all validation before calling this.
@@ -104,12 +94,11 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},
-		Runner:                          s.slingRunner(),
-		Router:                          apiBeadRouter{server: s, store: store},
-		Resolver:                        apiAgentResolver{},
-		Branches:                        apiBranchResolver{cityPath: s.state.CityPath()},
-		Notify:                          &apiNotifier{state: s.state},
-		ControlDispatcherRuntimeMissing: s.controlDispatcherRuntimeMissing,
+		Runner:   s.slingRunner(),
+		Router:   apiBeadRouter{server: s, store: store},
+		Resolver: apiAgentResolver{},
+		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
+		Notify:   &apiNotifier{state: s.state},
 		Tracer: func(format string, args ...any) {
 			fmt.Fprintf(apiSlingStderr(), format+"\n", args...) //nolint:errcheck
 		},

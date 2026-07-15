@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -192,6 +194,56 @@ func TestDiscordEd25519_ReplayWindowClampedToMax(t *testing.T) {
 	})
 	if res.OK {
 		t.Fatalf("a pack replay_window=1000h must be clamped to %s; a delivery past the max must be rejected", maxReplayWindow)
+	}
+}
+
+// The Discord event type is derived from the verified interaction body's type so
+// a rule can select a non-PING interaction (e.g. application_command).
+func TestDiscordEd25519_EventTypeFromBody(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	ts := "1700000200"
+	cases := map[string]string{
+		`{"type":2,"data":{"name":"fix"}}`: "application_command",
+		`{"type":3}`:                       "message_component",
+		`{"type":5}`:                       "modal_submit",
+		`{"type":1}`:                       "ping",
+	}
+	v, _ := New("discord-ed25519", config.WebhookVerify{}, Options{})
+	for body, want := range cases {
+		res, err := v.Verify(context.Background(), VerifyRequest{
+			Body: []byte(body), Secret: pub,
+			Header: hdr(discordSignatureHeader, discordSig(priv, ts, []byte(body)), discordTimestampHeader, ts),
+			Now:    discordClockAt(1_700_000_200),
+		})
+		if err != nil {
+			t.Fatalf("Verify(%s): %v", body, err)
+		}
+		if !res.OK {
+			t.Fatalf("Verify(%s) not OK: %q", body, res.Reason)
+		}
+		if res.EventType != want {
+			t.Errorf("body %s EventType = %q, want %q", body, res.EventType, want)
+		}
+	}
+}
+
+// Regression: a far-future signed timestamp must be rejected (the clamp-underflow
+// path that a naive abs(skew) > window check would silently pass).
+func TestDiscordEd25519_FarFutureTimestampRejected(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	ts := fmt.Sprintf("%d", int64(math.MaxInt64))
+	body := []byte(`{"type":2}`)
+	v, _ := New("discord-ed25519", config.WebhookVerify{}, Options{})
+	res, err := v.Verify(context.Background(), VerifyRequest{
+		Body: body, Secret: pub,
+		Header: hdr(discordSignatureHeader, discordSig(priv, ts, body), discordTimestampHeader, ts),
+		Now:    discordClockAt(1_700_000_000),
+	})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if res.OK {
+		t.Fatal("a far-future signed timestamp must be rejected")
 	}
 }
 

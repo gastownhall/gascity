@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // gitProbe is the slice of internal/git.Git used by the worker-dir
@@ -117,12 +118,98 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	return true
 }
 
+// pruneAgentHomeWorktreeIfSafeInfo is the session.Info form of
+// pruneAgentHomeWorktreeIfSafe: the worker_dir read routes through
+// session.WorkerDirFromInfo (the canonical→legacy Info fallback equivalent to
+// contract.WorkerDirFromMetadata), the rig-root lookup reads Info.Template via
+// lookupRigRootForSessionInfo, and the log line reads Info.SessionNameMetadata —
+// every safety gate and the removal itself are unchanged. Byte-identical to the
+// raw form, which survives for its test callers.
+func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
+	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
+		return
+	}
+	workerDir := strings.TrimSpace(sessionpkg.WorkerDirFromInfo(info))
+	if workerDir == "" {
+		return
+	}
+	if !filepath.IsAbs(workerDir) {
+		return
+	}
+
+	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
+		return
+	}
+
+	if _, err := os.Stat(filepath.Join(workerDir, ".git")); err != nil {
+		return
+	}
+
+	gp := newGitProbe(workerDir)
+	if !gp.IsRepo() {
+		return
+	}
+	if gp.HasUncommittedWork() {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
+		return
+	}
+	hasUnpushed, err := gp.HasUnpushedCommitsResult()
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unpushed probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return
+	}
+	if hasUnpushed {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
+		return
+	}
+	hasStashes, err := gp.HasStashesResult()
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return
+	}
+	if hasStashes {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
+		return
+	}
+
+	rigRoot := lookupRigRootForSessionInfo(info, cfg)
+	if rigRoot == "" {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
+		return
+	}
+	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck
+}
+
 // lookupRigRootForSession returns the filesystem path of the rig that owns
 // the given session bead, derived from the qualified template metadata
 // ("<rig>/<template>"). Returns "" when the rig cannot be identified or
 // has no configured path.
 func lookupRigRootForSession(session beads.Bead, cfg *config.City) string {
 	qt := strings.TrimSpace(session.Metadata["template"])
+	slash := strings.IndexByte(qt, '/')
+	if slash <= 0 {
+		return ""
+	}
+	rigName := qt[:slash]
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == rigName {
+			return strings.TrimSpace(cfg.Rigs[i].Path)
+		}
+	}
+	return ""
+}
+
+// lookupRigRootForSessionInfo is the session.Info form of
+// lookupRigRootForSession: it reads the qualified template off Info.Template (the
+// verbatim raw mirror of b.Metadata["template"]), so the rig resolution is
+// byte-identical to the raw form.
+func lookupRigRootForSessionInfo(info sessionpkg.Info, cfg *config.City) string {
+	qt := strings.TrimSpace(info.Template)
 	slash := strings.IndexByte(qt, '/')
 	if slash <= 0 {
 		return ""

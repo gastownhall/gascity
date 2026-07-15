@@ -78,37 +78,37 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 func ComputePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
-	sessionBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
@@ -122,26 +122,26 @@ func computePoolDesiredStates(
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	namedSessionBeadIDs := make(map[string]bool)
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, sb := range sessionInfos {
+		if sb.Closed {
 			continue
 		}
-		if sessionHasProviderTerminalError(sb) {
+		if sessionHasProviderTerminalErrorInfo(sb) {
 			continue
 		}
-		template := strings.TrimSpace(normalizedSessionTemplate(sb, cfg))
+		template := strings.TrimSpace(normalizedSessionTemplateInfo(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
 		}
-		if isNamedSessionBead(sb) {
+		if isNamedSessionInfo(sb) {
 			namedSessionBeadIDs[sb.ID] = true
 		}
 	}
 
-	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionBeads)
+	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionInfos)
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
@@ -229,10 +229,10 @@ func computePoolDesiredStates(
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 			if trace != nil {
-				trace.recordDecision(string(TraceSitePoolWakeKnownIdentity), template, "", "assigned_work", "scheduled", traceRecordPayload{
+				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 					"tier":      "wake-known-identity",
 					"work_bead": wb.ID,
-				}, nil, "")
+				})
 			}
 		}
 	}
@@ -246,7 +246,7 @@ func computePoolDesiredStates(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionBeads, resumeSessionBeadIDs)
+	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
@@ -273,12 +273,12 @@ func computePoolDesiredStates(
 			inFlight := inFlightNewRequests[template]
 			inFlightCount := minInt(len(inFlight), newCount)
 			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
-				trace.recordDecision(string(TraceSitePoolInFlightReuse), template, "", string(TraceReasonInFlightReuse), "accepted", traceRecordPayload{
+				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
 					"scale_check":   scaleCount,
 					"in_flight":     len(inFlight),
 					"reused":        inFlightCount,
 					"anonymous_new": newCount - inFlightCount,
-				}, nil, "")
+				})
 			}
 			for j := 0; j < inFlightCount; j++ {
 				req := inFlight[j]
@@ -329,7 +329,7 @@ func computePoolDesiredStates(
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
 }
 
-func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionBeads []beads.Bead) map[string]struct{} {
+func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
 	held := make(map[string]struct{})
 	if cfg == nil {
 		return held
@@ -340,20 +340,20 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionBeads []beads
 			continue
 		}
 		template := agent.QualifiedName()
-		for _, sb := range sessionBeads {
+		for _, sb := range sessionInfos {
 			// None of these own the canonical alias: a closed or drained named
 			// session released it at close via the retire path, a pool-managed bead
 			// never held it, and a failed-create bead released it via
 			// failedCreateIdentityReleased (names.go). Counting any as a live holder
 			// would suppress demand while the alias is actually free, hanging routed
 			// work.
-			if sb.Status == "closed" || isPoolManagedSessionBead(sb) || isDrainedSessionBead(sb) || isFailedCreateSessionBead(sb) {
+			if sb.Closed || isPoolManagedSessionInfo(sb) || isDrainedSessionInfo(sb) || isFailedCreateSessionInfo(sb) {
 				continue
 			}
-			if strings.TrimSpace(sb.Metadata["state"]) == "asleep" {
+			if strings.TrimSpace(sb.MetadataState) == "asleep" {
 				continue
 			}
-			if strings.TrimSpace(sb.Metadata["alias"]) == template {
+			if strings.TrimSpace(sb.Alias) == template {
 				held[template] = struct{}{}
 				break
 			}
@@ -362,14 +362,14 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionBeads []beads
 	return held
 }
 
-func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
+func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
 	requests := make(map[string][]SessionRequest)
-	sortedSessionBeads := append([]beads.Bead(nil), sessionBeads...)
-	sort.SliceStable(sortedSessionBeads, func(i, j int) bool {
-		if !sortedSessionBeads[i].CreatedAt.Equal(sortedSessionBeads[j].CreatedAt) {
-			return sortedSessionBeads[i].CreatedAt.Before(sortedSessionBeads[j].CreatedAt)
+	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
+	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
+		if !sortedSessionInfos[i].CreatedAt.Equal(sortedSessionInfos[j].CreatedAt) {
+			return sortedSessionInfos[i].CreatedAt.Before(sortedSessionInfos[j].CreatedAt)
 		}
-		return sortedSessionBeads[i].ID < sortedSessionBeads[j].ID
+		return sortedSessionInfos[i].ID < sortedSessionInfos[j].ID
 	})
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -377,46 +377,49 @@ func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resume
 			continue
 		}
 		template := agent.QualifiedName()
-		for _, sb := range sortedSessionBeads {
-			if sb.ID == "" || sb.Status == "closed" {
+		for _, sb := range sortedSessionInfos {
+			if sb.ID == "" || sb.Closed {
 				continue
 			}
-			if sessionHasProviderTerminalError(sb) {
+			if sessionHasProviderTerminalErrorInfo(sb) {
 				continue
 			}
 			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
 				continue
 			}
-			if !isEphemeralSessionBeadForAgent(sb, agent) || !isPoolManagedSessionBead(sb) {
+			if !isEphemeralSessionInfoForAgent(sb, agent) || !isPoolManagedSessionInfo(sb) {
 				continue
 			}
-			if normalizedSessionTemplate(sb, cfg) != template {
+			if normalizedSessionTemplateInfo(sb, cfg) != template {
 				continue
 			}
-			if !poolSessionConsumesNewDemand(sb) {
+			if !poolSessionConsumesNewDemandInfo(sb) {
 				continue
 			}
 			requests[template] = append(requests[template], SessionRequest{
 				Template:       template,
 				Tier:           "new",
 				SessionBeadID:  sb.ID,
-				WorkBeadID:     strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadIDMetadataKey]),
-				WorkStoreRef:   strings.TrimSpace(sb.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]),
-				BrainParentSID: strings.TrimSpace(sb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
+				WorkStoreRef:   strings.TrimSpace(sb.TriggerBeadStoreRef),
+				BrainParentSID: strings.TrimSpace(sb.BrainParentSID),
 			})
 		}
 	}
 	return requests
 }
 
-func poolSessionConsumesNewDemand(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == boolMetadata(true) {
+// poolSessionConsumesNewDemandInfo reports whether a pool session already
+// represents spent "new" demand: it holds an active pending_create_claim, or
+// its raw state is creating/start-pending. It reads PendingCreateClaim and the
+// raw MetadataState. This pure desired-state pass has no reconciler clock:
+// creating sessions still represent already-spent new demand; lifecycle code
+// owns stale-creating recovery with its clock-aware predicate.
+func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
+	if info.PendingCreateClaim {
 		return true
 	}
-	// This pure desired-state pass has no reconciler clock. Creating sessions
-	// still represent already-spent new demand; lifecycle code owns stale
-	// creating recovery with its clock-aware predicate.
-	state := strings.TrimSpace(session.Metadata["state"])
+	state := strings.TrimSpace(info.MetadataState)
 	return state == "creating" || state == string(sessionpkg.StateStartPending)
 }
 
@@ -448,7 +451,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		}
 		if site, reason, payload, rejected := usage.rejection(req, limits); rejected {
 			if trace != nil {
-				trace.recordDecision(site, template, "", reason, "rejected", payload, nil, "")
+				trace.RecordDecision(site, reason, TraceOutcomeRejected, template, "", payload)
 			}
 			continue
 		}
@@ -456,9 +459,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		// Accept.
 		accepted[template] = append(accepted[template], req)
 		if trace != nil {
-			trace.recordDecision("reconciler.pool.accept", template, "", "cap", "accepted", traceRecordPayload{
+			trace.RecordDecision(TraceSitePoolAccept, TraceReasonCap, TraceOutcomeAccepted, template, "", traceRecordPayload{
 				"tier": req.Tier,
-			}, nil, "")
+			})
 		}
 		usage.accept(req, limits)
 	}
@@ -485,11 +488,11 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 			}
 			accepted[template] = append(accepted[template], req)
 			if trace != nil {
-				trace.recordDecision("reconciler.pool.min_fill", template, "", "min_fill", "accepted", traceRecordPayload{
+				trace.RecordDecision(TraceSitePoolMinFill, TraceReasonMinFill, TraceOutcomeAccepted, template, "", traceRecordPayload{
 					"min":     minSess,
 					"current": usage.agentCount[template],
 					"tier":    "new",
-				}, nil, "")
+				})
 			}
 			usage.accept(req, limits)
 		}
@@ -623,10 +626,10 @@ func (u nestedCapUsage) isDuplicateSessionRequest(req SessionRequest) bool {
 	return req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
 }
 
-func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (string, string, traceRecordPayload, bool) {
+func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (TraceSiteCode, TraceReasonCode, traceRecordPayload, bool) {
 	template := req.Template
 	if agentMax := limits.agentMax[template]; agentMax >= 0 && u.agentCount[template] >= agentMax {
-		return "reconciler.pool.agent_cap", "agent_cap", traceRecordPayload{
+		return TraceSitePoolAgentCap, TraceReasonAgentCap, traceRecordPayload{
 			"agent_max": agentMax,
 			"current":   u.agentCount[template],
 			"tier":      req.Tier,
@@ -639,7 +642,7 @@ func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (s
 			rigMax = -1
 		}
 		if rigMax >= 0 && u.rigCount[rig] >= rigMax {
-			return "reconciler.pool.rig_cap", "rig_cap", traceRecordPayload{
+			return TraceSitePoolRigCap, TraceReasonRigCap, traceRecordPayload{
 				"rig":     rig,
 				"rig_max": rigMax,
 				"current": u.rigCount[rig],
@@ -648,7 +651,7 @@ func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (s
 		}
 	}
 	if limits.workspaceMax >= 0 && u.workspaceCount >= limits.workspaceMax {
-		return "reconciler.pool.workspace_cap", "workspace_cap", traceRecordPayload{
+		return TraceSitePoolWorkspaceCap, TraceReasonWorkspaceCap, traceRecordPayload{
 			"workspace_max": limits.workspaceMax,
 			"current":       u.workspaceCount,
 			"tier":          req.Tier,
@@ -695,7 +698,7 @@ func recordNewDemandCapTrace(
 			blockingWork = append(blockingWork, req.WorkBeadID)
 		}
 	}
-	trace.recordDecision(site, template, "", reason, "rejected", traceRecordPayload{
+	trace.RecordDecision(site, reason, TraceOutcomeRejected, template, "", traceRecordPayload{
 		"scale_check":          scaleCount,
 		"accepted_new":         newCount,
 		"blocked_new":          scaleCount - newCount,
@@ -703,8 +706,8 @@ func recordNewDemandCapTrace(
 		"max":                  capMax,
 		"blocking_sessions":    blockingSessions,
 		"blocking_work_beads":  blockingWork,
-		"active_capacity_kind": reason,
-	}, nil, "")
+		"active_capacity_kind": string(reason),
+	})
 }
 
 func newDemandBlockingScope(
@@ -713,9 +716,9 @@ func newDemandBlockingScope(
 	limits nestedCapLimits,
 	usage nestedCapUsage,
 	newCount int,
-) (string, string, int, int, []SessionRequest) {
+) (TraceSiteCode, TraceReasonCode, int, int, []SessionRequest) {
 	if agentMax := limits.agentMax[template]; agentMax >= 0 && agentMax-usage.agentCount[template] <= newCount {
-		return string(TraceSitePoolNewDemandCap), string(TraceReasonAgentCap), agentMax, usage.agentCount[template], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
+		return TraceSitePoolNewDemandCap, TraceReasonAgentCap, agentMax, usage.agentCount[template], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
 			return req.Template == template
 		})
 	}
@@ -726,14 +729,14 @@ func newDemandBlockingScope(
 				rigMax = -1
 			}
 			if rigMax >= 0 && rigMax-usage.rigCount[rig] <= newCount {
-				return string(TraceSitePoolNewDemandCap), string(TraceReasonRigCap), rigMax, usage.rigCount[rig], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
+				return TraceSitePoolNewDemandCap, TraceReasonRigCap, rigMax, usage.rigCount[rig], filterCapBlockers(usage.requests, func(req SessionRequest) bool {
 					return limits.agentRig[req.Template] == rig
 				})
 			}
 		}
 	}
 	if limits.workspaceMax >= 0 && limits.workspaceMax-usage.workspaceCount <= newCount {
-		return string(TraceSitePoolNewDemandCap), string(TraceReasonWorkspaceCap), limits.workspaceMax, usage.workspaceCount, usage.requests
+		return TraceSitePoolNewDemandCap, TraceReasonWorkspaceCap, limits.workspaceMax, usage.workspaceCount, usage.requests
 	}
 	return "", "", 0, 0, nil
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -461,112 +462,19 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in
-// "--long" / "-s" form) for the given bd write-mutation subcommand.
-// Sourced from `bd <sub> --help` output (2026-06-10).
+// "--long" / "-s" form) for the given bd write-mutation subcommand. Backed
+// by internal/bdflags, the single source of truth shared with the `gc
+// lint` bd-flag validation check, so the two cannot drift apart.
 func bdSubcmdValueFlags(sub string) map[string]bool {
-	// Global flags shared by all bd subcommands that take a value.
-	global := map[string]bool{
-		"--actor": true, "--db": true, "--directory": true, "-C": true,
-		"--dolt-auto-commit": true,
-	}
-	var subFlags map[string]bool
-	switch sub {
-	case "update":
-		subFlags = map[string]bool{
-			"--acceptance": true,
-			"--add-label":  true, "--append-notes": true,
-			"-a": true, "--assignee": true,
-			"--await-id":  true,
-			"--body-file": true,
-			"--defer":     true,
-			"-d":          true, "--description": true,
-			"--design": true, "--design-file": true,
-			"--due": true,
-			"-e":    true, "--estimate": true,
-			"--external-ref": true,
-			"--metadata":     true,
-			"--notes":        true,
-			"--parent":       true,
-			"-p":             true, "--priority": true,
-			"--remove-label": true,
-			"--session":      true,
-			"--set-labels":   true,
-			"--set-metadata": true,
-			"-s":             true, "--status": true,
-			"-t": true, "--type": true,
-			"--title":          true,
-			"--spec-id":        true,
-			"--unset-metadata": true,
-		}
-	case "close":
-		subFlags = map[string]bool{
-			"-r": true, "--reason": true,
-			"--reason-file": true,
-			"--session":     true,
-		}
-	case "reopen":
-		subFlags = map[string]bool{
-			"-r": true, "--reason": true,
-		}
-	case "delete":
-		subFlags = map[string]bool{
-			"--from-file": true,
-		}
-	}
-	merged := make(map[string]bool, len(global)+len(subFlags))
-	for k := range global {
-		merged[k] = true
-	}
-	for k := range subFlags {
-		merged[k] = true
-	}
-	return merged
+	return bdflags.ValueFlags(sub)
 }
 
 // bdSubcmdBoolFlags returns the set of boolean (no-value) flag names for the
-// given bd write-mutation subcommand.
-// Sourced from `bd <sub> --help` output (2026-06-10).
+// given bd write-mutation subcommand. Backed by internal/bdflags, the
+// single source of truth shared with the `gc lint` bd-flag validation
+// check, so the two cannot drift apart.
 func bdSubcmdBoolFlags(sub string) map[string]bool {
-	// Global boolean flags shared by all bd subcommands.
-	global := map[string]bool{
-		"--global": true, "--ignore-schema-skew": true,
-		"--json": true, "--profile": true,
-		"-q": true, "--quiet": true,
-		"--readonly": true, "--sandbox": true,
-		"-v": true, "--verbose": true,
-		"-h": true, "--help": true,
-	}
-	var subFlags map[string]bool
-	switch sub {
-	case "update":
-		subFlags = map[string]bool{
-			"--allow-empty-description": true,
-			"--claim":                   true, "--ephemeral": true,
-			"--history": true, "--no-history": true,
-			"--persistent": true, "--stdin": true,
-		}
-	case "close":
-		subFlags = map[string]bool{
-			"--claim-next": true, "--continue": true,
-			"-f": true, "--force": true,
-			"--no-auto": true, "--suggest-next": true,
-		}
-	case "reopen":
-		subFlags = map[string]bool{}
-	case "delete":
-		subFlags = map[string]bool{
-			"--cascade": true, "--dry-run": true,
-			"-f": true, "--force": true,
-		}
-	}
-	merged := make(map[string]bool, len(global)+len(subFlags))
-	for k := range global {
-		merged[k] = true
-	}
-	for k := range subFlags {
-		merged[k] = true
-	}
-	return merged
+	return bdflags.BoolFlags(sub)
 }
 
 // bdMutationWriteID is a compatibility shim retained for callers that only
@@ -658,8 +566,22 @@ func extractRigFlag(args []string) (string, []string) {
 	return rigName, rest
 }
 
+// extractBdDirectoryFlag returns the -C / --directory value from bd passthrough
+// args, or "" if not present. The flag is left in args so bd itself still sees it.
+func extractBdDirectoryFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "-C" || args[i] == "--directory") && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(args[i], "--directory="):
+			return strings.TrimPrefix(args[i], "--directory=")
+		}
+	}
+	return ""
+}
+
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
-// Priority: explicit rig name > explicit city > bead prefix auto-detection > GC_RIG env > enclosing rig > city root.
+// Priority: explicit rig name > explicit city > bead prefix auto-detection > -C dir rig match > GC_RIG env > enclosing rig > city root.
 func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
@@ -712,6 +634,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			if bdBeadExists(cityPath, target, arg) {
 				return target, nil
 			}
+		}
+	}
+
+	// Honor -C / --directory passed to bd: if it names a path inside a
+	// registered rig, use that rig's store. This lets `gc bd create -C
+	// /path/to/packs-rig ...` route to the packs rig even when GC_RIG
+	// or cwd point elsewhere. The flag stays in bdArgs so bd itself still
+	// sees it and changes directory accordingly.
+	if cdDir := extractBdDirectoryFlag(args); cdDir != "" {
+		if rig, ok, err := resolveRigForDir(cfg, cityPath, cdDir); err != nil {
+			return execStoreTarget{}, err
+		} else if ok {
+			return bdRigScopeTarget(cityPath, rig), nil
 		}
 	}
 

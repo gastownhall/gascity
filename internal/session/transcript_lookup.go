@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -18,11 +17,14 @@ type anchoredCodexSession struct {
 	tieKey string
 }
 
-// ResolveCodexTranscriptBySessionOrder maps an ambiguous same-workdir Codex
-// session group to a transcript by using each session's wake/start timestamp.
-// It returns empty unless the target session has a unique transcript in its
-// start window, preserving ambiguity for underspecified groups.
-func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDir, targetID string, sessions []beads.Bead) string {
+// ResolveCodexTranscriptBySessionOrder maps an ambiguous same-workdir Codex session
+// group to a transcript by using each session's wake/start timestamp. It takes the
+// group as typed session.Info rows — the anchor keys (last_woke_at /
+// pending_create_started_at / awake_started_at / creation_complete_at), work_dir,
+// session_name, and CreatedAt are all mirrored on Info. It returns empty unless the
+// target session has a unique transcript in its start window, preserving ambiguity for
+// underspecified groups.
+func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDir, targetID string, sessions []Info) string {
 	if sessionlog.ProviderFamily(provider) != "codex" || strings.TrimSpace(workDir) == "" || strings.TrimSpace(targetID) == "" {
 		return ""
 	}
@@ -44,22 +46,24 @@ func ResolveCodexTranscriptBySessionOrder(searchPaths []string, provider, workDi
 	return ""
 }
 
-// collectAnchoredCodexSessions keeps the same-workdir sessions that carry a
-// non-zero start anchor, dropping ones without an id or a resolvable anchor.
-func collectAnchoredCodexSessions(sessions []beads.Bead, workDir string) []anchoredCodexSession {
+// collectAnchoredCodexSessions keeps the same-workdir Info rows carrying a non-zero
+// start anchor, dropping ones without an id or a resolvable anchor. It reads
+// Info.WorkDir (the legacy work_dir mirror), the anchor keys via transcriptStartAnchor,
+// and Info.SessionNameMetadata as the tiebreak key.
+func collectAnchoredCodexSessions(sessions []Info, workDir string) []anchoredCodexSession {
 	var anchored []anchoredCodexSession
-	for _, b := range sessions {
-		if b.ID == "" || strings.TrimSpace(b.Metadata["work_dir"]) != workDir {
+	for _, info := range sessions {
+		if info.ID == "" || strings.TrimSpace(info.WorkDir) != workDir {
 			continue
 		}
-		start := transcriptStartAnchor(b)
+		start := transcriptStartAnchor(info)
 		if start.IsZero() {
 			continue
 		}
 		anchored = append(anchored, anchoredCodexSession{
-			id:     b.ID,
+			id:     info.ID,
 			start:  start,
-			tieKey: strings.TrimSpace(b.Metadata["session_name"]),
+			tieKey: strings.TrimSpace(info.SessionNameMetadata),
 		})
 	}
 	return anchored
@@ -114,13 +118,13 @@ func codexSessionWindowEnd(anchored []anchoredCodexSession, i int) time.Time {
 // creation_complete_at would push the [start-2s, end) window past the true
 // transcript and drop it; awake_started_at keeps the window aligned with the
 // rollout. CreatedAt is the final fallback.
-func transcriptStartAnchor(b beads.Bead) time.Time {
-	for _, key := range []string{"last_woke_at", "pending_create_started_at", "awake_started_at", "creation_complete_at"} {
-		if parsed := parseTranscriptAnchorTime(b.Metadata[key]); !parsed.IsZero() {
+func transcriptStartAnchor(info Info) time.Time {
+	for _, raw := range []string{info.LastWokeAt, info.PendingCreateStartedAt, info.AwakeStartedAt, info.CreationCompleteAt} {
+		if parsed := parseTranscriptAnchorTime(raw); !parsed.IsZero() {
 			return parsed
 		}
 	}
-	return b.CreatedAt
+	return info.CreatedAt
 }
 
 func parseTranscriptAnchorTime(raw string) time.Time {

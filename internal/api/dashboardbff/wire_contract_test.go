@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -159,6 +160,78 @@ func TestWireContractRunDiff(t *testing.T) {
 	mustArray(t, m, "changedFiles")
 	mustString(t, m, "patch")
 	mustBool(t, m, "truncated")
+}
+
+// TestWireContractRunDetailProgressTerminal guards the Go-derived
+// progress.terminal flag on the run-detail wire: the SPA reads it (in place of
+// the retired isTerminalProgress client fold) to drive ambient-event
+// suppression, so the field must always be present and a bool.
+func TestWireContractRunDetailProgressTerminal(t *testing.T) {
+	dir := t.TempDir()
+	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"),
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	m := wireGet(t, p, "/api/city/alpha/runs/run1/detail")
+	progress, ok := m["progress"].(map[string]any)
+	if !ok {
+		t.Fatalf("progress must be an object, got %T", m["progress"])
+	}
+	mustBool(t, progress, "terminal")
+}
+
+// TestWireContractRunDetailStreamFrame is the cross-boundary guard for the P4
+// SSE detail stream: the pushed frame body is the SAME FormulaRunDetail struct
+// the GET serves, so a captured `data:` frame must satisfy the same field+type
+// contract the TS decodeFormulaRunDetail enforces. It parses the first SSE frame
+// off a real streaming connection and asserts the load-bearing fields the SPA
+// hard-derefs, so a Go struct that drifts from the TS decoder fails here.
+func TestWireContractRunDetailStreamFrame(t *testing.T) {
+	dir := t.TempDir()
+	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"),
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, sc, closeStream := startDetailStream(t, srv)
+	defer closeStream()
+	_ = resp
+
+	frame, ok := readSSEFrame(t, sc)
+	if !ok {
+		t.Fatal("no SSE frame to assert the wire contract against")
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(frame.data), &m); err != nil {
+		t.Fatalf("decode SSE frame body: %v; data=%q", err, frame.data)
+	}
+	// The same fields decodeFormulaRunDetail requires on the GET body.
+	mustString(t, m, "runId")
+	mustObject(t, m, "formula")
+	mustObject(t, m, "formulaDetail")
+	mustObject(t, m, "executionPath")
+	mustObject(t, m, "snapshotEventSeq")
+	mustObject(t, m, "completeness")
+	mustArray(t, m, "stages")
+	mustArray(t, m, "nodes")
+	mustArray(t, m, "edges")
+	mustArray(t, m, "lanes")
+	progress, isObj := m["progress"].(map[string]any)
+	if !isObj {
+		t.Fatalf("progress must be an object, got %T", m["progress"])
+	}
+	mustObject(t, progress, "statusCounts")
+	mustBool(t, progress, "terminal")
 }
 
 // TestSanitizeTerminalOutputStripsCSIAndControls is the regression guard for the

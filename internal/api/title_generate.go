@@ -24,7 +24,7 @@ Message: `
 // short title from the user's message, then updates the bead. On failure
 // (unsupported provider, timeout, subprocess error) it falls back to a
 // truncated version of the message.
-func generateAndSetTitle(store beads.Store, beadID string, provider *config.ResolvedProvider, message, workDir string) {
+func generateAndSetTitle(store beads.SessionStore, beadID string, provider *config.ResolvedProvider, message, workDir string) {
 	title := generateTitle(provider, message, workDir)
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -101,7 +101,7 @@ func truncateTitle(message string) string {
 // completes (or immediately if no generation is needed). Callers in
 // short-lived processes (e.g. CLI) should block on the channel before
 // exiting; long-lived servers can ignore it.
-func MaybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message string, provider *config.ResolvedProvider, workDir string, stderr func(string, ...any)) <-chan struct{} {
+func MaybeGenerateTitleAsync(store beads.SessionStore, beadID, userTitle, message string, provider *config.ResolvedProvider, workDir string, stderr func(string, ...any)) <-chan struct{} {
 	done := make(chan struct{})
 	message = strings.TrimSpace(message)
 	if message == "" || userTitle != "" {

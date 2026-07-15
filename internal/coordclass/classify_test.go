@@ -57,7 +57,7 @@ func TestClassifyGoldenTable(t *testing.T) {
 		// label; it classifies via the gc:wait class signal.
 		{"wait bead with per-entity session label", beads.Bead{Type: "gate", Labels: []string{"gc:wait", "session:gc-7"}}, ClassSessions},
 		// Federation-correctness guard: the per-entity session:<id> label is NOT a
-		// class signal. ListSessionWaitBeads queries by Label="session:<id>", which a
+		// class signal. ListSessionWaits queries by Label="session:<id>", which a
 		// route-by-query adapter would mis-route to the session store — but the
 		// federating Router classifies by the class-level signal (gc:wait/gc:session/
 		// type=session), so a bead carrying ONLY session:<id> stays ClassWork. This
