@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -9,6 +10,14 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
+
+// statusStoreHealthTimeout bounds the store-health row count so a live city
+// with a large closed-history table cannot stall `gc status` for minutes. The
+// count drives only the on-disk size ratio and is best-effort, so a timeout
+// returns 0 — mirroring the API server's countBeadStoreRows defense
+// (internal/api/store_health.go, statusStoreReadTimeout), which this CLI local
+// fallback never inherited. It matches the server's 1s bound.
+const statusStoreHealthTimeout = time.Second
 
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. LastGCAt is serialized as RFC3339 UTC when present;
@@ -42,19 +51,54 @@ func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) 
 	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
 }
 
-// liveRowCount returns the number of beads known to store, or 0 when
-// store is nil or the list fails. Counts all statuses (including
-// closed) because the ratio is about on-disk row footprint, not
-// actionable work.
+// liveRowCount returns the number of beads known to store, or 0 when store is
+// nil, the count fails, or it does not finish within statusStoreHealthTimeout.
+// Counts all statuses (including closed) because the ratio is about on-disk row
+// footprint, not actionable work — but that closed-inclusive scan is never
+// cache-answerable and hydrates the whole history from the backend, so it is
+// bounded to keep `gc status` responsive. A Counter-capable store (Dolt /
+// CachingStore) answers from the catalog without hydrating rows; otherwise a
+// bounded full scan is the fallback.
 func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	ctx, cancel := context.WithTimeout(context.Background(), statusStoreHealthTimeout)
+	defer cancel()
+	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
+	if counter, ok := store.(beads.Counter); ok {
+		if n, err := counter.Count(ctx, query); err == nil {
+			return n
+		}
+	}
+	list, err := listBeadsWithTimeout(ctx, store, query)
 	if err != nil {
 		return 0
 	}
 	return len(list)
+}
+
+// listBeadsWithTimeout runs store.List on a goroutine and returns its result,
+// or ctx.Err() if the deadline fires first. beads.Store.List takes no context,
+// so a stalled scan cannot be canceled — the goroutine is left to finish on
+// its own (harmless in the short-lived `gc status` process). Mirrors the API
+// server's statusListStoreWithTimeout.
+func listBeadsWithTimeout(ctx context.Context, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	type listResult struct {
+		list []beads.Bead
+		err  error
+	}
+	done := make(chan listResult, 1)
+	go func() {
+		list, err := store.List(query)
+		done <- listResult{list: list, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.list, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // renderStoreHealthBlock prints the human-readable "Store health:"

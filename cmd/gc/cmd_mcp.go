@@ -79,7 +79,7 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 					fmt.Fprintf(stderr, "gc mcp list: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
-				view, err = resolveSessionMCPProjection(cityPath, cfg, store, sessionID, exec.LookPath)
+				view, err = resolveSessionMCPProjection(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), sessionID, exec.LookPath)
 			} else {
 				agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 				if !ok {

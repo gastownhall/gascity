@@ -63,15 +63,18 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 
 	rigPath := c.normalizedRigPath()
 
-	// An external Dolt endpoint self-manages its backups on the remote server;
-	// the local .dolt-backup directory and managed-Dolt repo_state.json signals
-	// never apply to it, and the localhost fix hint below is actively wrong for
-	// it. Treat a resolved external endpoint as satisfied rather than warning.
-	// See gastownhall/gascity#3868. A resolution error falls through to the
+	// An external (non-managed) Dolt endpoint owns its own backups; gc does not
+	// manage them, so the local .dolt-backup directory and managed-Dolt
+	// repo_state.json signals never apply, and the localhost fix hint below is
+	// actively wrong for it. Treat a resolved external endpoint as satisfied
+	// rather than warning. Note that External classifies the endpoint's
+	// ownership, not its location — an explicit endpoint can resolve to a local
+	// host — so the message must not imply a remote machine. See
+	// gastownhall/gascity#3868. A resolution error falls through to the
 	// local-signal checks so a genuinely missing local backup still surfaces.
 	if target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath); err == nil && target.External {
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("rig %q: external Dolt endpoint %s:%s — backups self-managed on the external server", c.rig.Name, target.Host, target.Port)
+		r.Message = fmt.Sprintf("rig %q: external Dolt endpoint %s:%s — backups assumed self-managed at the endpoint", c.rig.Name, target.Host, target.Port)
 		return r
 	}
 

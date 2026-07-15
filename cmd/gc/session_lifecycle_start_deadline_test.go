@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // ctxIgnoringStartProvider blocks inside Start until either startDelay
@@ -45,11 +46,10 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsDeadlineExceeded(t
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "deadline-witness",
-					"template":     "worker",
-				},
+			info: sessionpkg.Info{
+				SessionName:         "deadline-witness",
+				SessionNameMetadata: "deadline-witness",
+				Template:            "worker",
 			},
 			tp: TemplateParams{
 				Command:      "claude",
@@ -113,14 +113,14 @@ func TestExecutePreparedStartWave_ResumeSessionKeyStaleCheckAfterInTimeStartStay
 	sp := runtime.NewFake()
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
+			info: seedSessionInfo(beads.Bead{
 				ID: "gc-resume",
 				Metadata: map[string]string{
 					"session_name": "resume-deadline-witness",
 					"session_key":  "resume-key",
 					"template":     "worker",
 				},
-			},
+			}),
 			tp: TemplateParams{
 				Command:      "claude --resume resume-key",
 				SessionName:  "resume-deadline-witness",
@@ -175,11 +175,10 @@ func TestExecutePreparedStartWave_CanceledContextReportsCanceled(t *testing.T) {
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "cancel-witness",
-					"template":     "worker",
-				},
+			info: sessionpkg.Info{
+				SessionName:         "cancel-witness",
+				SessionNameMetadata: "cancel-witness",
+				Template:            "worker",
 			},
 			tp: TemplateParams{
 				Command:      "claude",
@@ -226,11 +225,10 @@ func TestExecutePreparedStartWave_InitializingAfterDeadlineBacksOffSilently(t *t
 	sp := &initializingAfterDeadlineProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "initializing-witness",
-					"template":     "worker",
-				},
+			info: sessionpkg.Info{
+				SessionName:         "initializing-witness",
+				SessionNameMetadata: "initializing-witness",
+				Template:            "worker",
 			},
 			tp: TemplateParams{
 				Command:      "claude",

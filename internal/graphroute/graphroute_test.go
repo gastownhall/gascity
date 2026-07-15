@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -279,6 +280,126 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	}
 }
 
+func TestDecorateGraphWorkflowRecipe_ControlRouteUsesOwningStoreScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "city-worker", Scope: "city"},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-cross-scope",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-cross-scope", IsRoot: true, Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			}},
+			{ID: "wf-cross-scope.work", Metadata: map[string]string{}},
+			{ID: "wf-cross-scope.finalize", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe,
+		nil,
+		"",
+		"rig",
+		"fixture",
+		"rig:fixture",
+		"city-worker",
+		"test-city--city-worker",
+		nil,
+		"test-city",
+		cfg,
+		Deps{Resolver: testAgentResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	finalize := recipe.Steps[2]
+	if got := finalize.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("finalize gc.routed_to = %q, want owning-store route fixture/core.control-dispatcher", got)
+	}
+	if got := finalize.Metadata[GraphExecutionRouteMetaKey]; got != "city-worker" {
+		t.Fatalf("finalize gc.execution_routed_to = %q, want city-worker", got)
+	}
+}
+
+func TestDecorateGraphWorkflowRecipe_OwningStoreDoesNotRetargetExplicitWorkerStep(t *testing.T) {
+	maxOne, maxTwo := 1, 2
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "city-worker", MaxActiveSessions: &maxTwo},
+		{Name: "reviewer", MaxActiveSessions: &maxTwo},
+		{Name: "reviewer", Dir: "fixture", MaxActiveSessions: &maxTwo},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxOne,
+		},
+		{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxOne,
+		},
+	}}
+	recipe := &formula.Recipe{
+		Name: "wf-cross-scope-target",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-cross-scope-target", IsRoot: true, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			}},
+			{ID: "wf-cross-scope-target.work", Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey: "reviewer",
+			}},
+			{ID: "wf-cross-scope-target.finalize", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize,
+			}},
+		},
+	}
+
+	err := DecorateGraphWorkflowRecipe(
+		recipe,
+		nil,
+		"",
+		"rig",
+		"fixture",
+		"rig:fixture",
+		"city-worker",
+		"",
+		nil,
+		"test-city",
+		cfg,
+		Deps{Resolver: rigAwareDispatcherResolver{}},
+	)
+	if err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+
+	work := recipe.Steps[1]
+	if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "reviewer" {
+		t.Fatalf("worker gc.routed_to = %q, want city reviewer from execution context", got)
+	}
+	finalize := recipe.Steps[2]
+	if got := finalize.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("finalize gc.routed_to = %q, want owning rig dispatcher", got)
+	}
+}
+
 // TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim locks in the
 // #2763 writer-side fix: a graph.v2 workflow root must persist gc.routed_to —
 // the canonical delivery key every runtime demand/claim/scale reader consults —
@@ -400,7 +521,7 @@ on_exhausted = "hard_fail"
 		}
 	}
 
-	// Retry control beads (gc.kind=retry) route to the singleton
+	// Retry control beads (gc.kind=retry) route to the scope-local
 	// control-dispatcher queue. They must not assign a future on-demand
 	// runtime session name before that session exists.
 	controlIDs := []string{
@@ -727,15 +848,14 @@ func TestControlDispatcherBinding_ConfiguredDispatcherUsesCanonicalQueue(t *test
 	}
 }
 
-// TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped covers the
-// production shape after 9fa6b7fec: a bound city-level singleton
+// TestControlDispatcherBinding_UsesDispatcherForGraphScope covers the
+// production shape after 9fa6b7fec: a bound city-level dispatcher
 // (core.control-dispatcher, Dir="", max_active_sessions=1) plus a per-rig
-// materialized copy (fixture/core.control-dispatcher). For every scope the
-// binding must resolve to the city-level singleton — the one whose session
-// actually runs — not the rig-scoped copy (which would strand the control bead).
+// materialized copy (fixture/core.control-dispatcher). Each graph must bind to
+// the dispatcher whose store scope owns its control beads.
 // The resolver returns no match, exercising the binding-agnostic deterministic
 // lookup directly.
-func TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped(t *testing.T) {
+func TestControlDispatcherBinding_UsesDispatcherForGraphScope(t *testing.T) {
 	maxActive := 1
 	cfg := &config.City{Agents: []config.Agent{
 		{
@@ -753,14 +873,21 @@ func TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped(t *testing.T
 		},
 	}}
 
-	for _, rigContext := range []string{"", "fixture"} {
-		t.Run("rigContext="+rigContext, func(t *testing.T) {
-			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, rigContext, Deps{Resolver: noMatchAgentResolver{}})
+	for _, tt := range []struct {
+		name       string
+		rigContext string
+		want       string
+	}{
+		{name: "city", want: "core.control-dispatcher"},
+		{name: "rig", rigContext: "fixture", want: "fixture/core.control-dispatcher"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, tt.rigContext, Deps{Resolver: noMatchAgentResolver{}})
 			if err != nil {
 				t.Fatalf("ControlDispatcherBinding: %v", err)
 			}
-			if binding.QualifiedName != "core.control-dispatcher" {
-				t.Fatalf("QualifiedName = %q, want city-level singleton core.control-dispatcher", binding.QualifiedName)
+			if binding.QualifiedName != tt.want {
+				t.Fatalf("QualifiedName = %q, want %q", binding.QualifiedName, tt.want)
 			}
 			if binding.SessionName != "" {
 				t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)
@@ -772,12 +899,9 @@ func TestControlDispatcherBinding_PrefersCitySingletonOverRigScoped(t *testing.T
 	}
 }
 
-// TestControlDispatcherBinding_CityOnlyBoundDispatcher covers a city with only
-// the bound city-level singleton (no per-rig copies). It must resolve for both
-// the empty and a non-empty rig context, and must NOT depend on bare-name
-// matching: AgentMatchesIdentity rejects the bare "control-dispatcher" for a
-// bound agent, so a resolver that only does qualified-name matching returns no
-// match — the binding-agnostic deterministic lookup must still succeed.
+// TestControlDispatcherBinding_CityOnlyBoundDispatcher covers a config with
+// only the bound city dispatcher. It resolves city graphs but fails loudly for
+// rig graphs instead of routing rig-store control work to the city store.
 func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
 	maxActive := 1
 	dispatcher := config.Agent{
@@ -794,26 +918,26 @@ func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
 		t.Fatalf("precondition: bound core.control-dispatcher should NOT match bare %q", config.ControlDispatcherAgentName)
 	}
 
-	for _, rigContext := range []string{"", "fixture"} {
-		t.Run("rigContext="+rigContext, func(t *testing.T) {
-			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, rigContext, Deps{Resolver: noMatchAgentResolver{}})
-			if err != nil {
-				t.Fatalf("ControlDispatcherBinding: %v", err)
-			}
-			if binding.QualifiedName != "core.control-dispatcher" {
-				t.Fatalf("QualifiedName = %q, want core.control-dispatcher", binding.QualifiedName)
-			}
-			if !binding.MetadataOnly {
-				t.Fatalf("MetadataOnly = false, want true")
-			}
-		})
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "", Deps{Resolver: noMatchAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding(city): %v", err)
+	}
+	if binding.QualifiedName != "core.control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want core.control-dispatcher", binding.QualifiedName)
+	}
+	if !binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = false, want true")
+	}
+
+	if _, err := ControlDispatcherBinding(nil, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}}); err == nil {
+		t.Fatal("ControlDispatcherBinding(rig) error = nil, want missing rig dispatcher error")
 	}
 }
 
-// TestControlDispatcherBinding_RigScopedDeterministicFallback covers a city with
-// ONLY a rig-scoped deterministic dispatcher (no city-level singleton). The
-// rig-scoped instance is used as the fallback when its Dir matches the scope.
-func TestControlDispatcherBinding_RigScopedDeterministicFallback(t *testing.T) {
+// TestControlDispatcherBinding_RigScopedDeterministicDispatcher covers a config
+// with only a rig-scoped deterministic dispatcher. It resolves when its Dir
+// matches the graph scope.
+func TestControlDispatcherBinding_RigScopedDeterministicDispatcher(t *testing.T) {
 	maxActive := 1
 	cfg := &config.City{Agents: []config.Agent{{
 		Name:              config.ControlDispatcherAgentName,
@@ -952,9 +1076,7 @@ func TestStampLegacyRecipeRouting_RespectsPerStepRunTarget(t *testing.T) {
 }
 
 // rigAwareDispatcherResolver mirrors resolveAgentIdentity's rig-context-first
-// resolution for the control-dispatcher fallback tests: a non-empty rigContext
-// prefers <rig>/control-dispatcher, an empty one resolves the city-level
-// (bare-name) dispatcher.
+// resolution for plain, non-deterministic control-dispatcher configs.
 type rigAwareDispatcherResolver struct{}
 
 func (rigAwareDispatcherResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
@@ -973,97 +1095,11 @@ func (rigAwareDispatcherResolver) ResolveAgent(cfg *config.City, name, rigContex
 	return config.Agent{}, false
 }
 
-func dispatcherFallbackCfg() *config.City {
-	return &config.City{Agents: []config.Agent{
-		{Name: "control-dispatcher"},
-		{Name: "control-dispatcher", Dir: "gc-contrib"},
-	}}
-}
-
-func TestControlDispatcherBinding_FallsBackToCityWhenRigRuntimeMissing(t *testing.T) {
-	deps := Deps{
-		Resolver: rigAwareDispatcherResolver{},
-		ControlDispatcherRuntimeMissing: func(q string) bool {
-			return q == "gc-contrib/control-dispatcher"
-		},
-	}
-	binding, err := ControlDispatcherBinding(nil, "test-city", dispatcherFallbackCfg(), "gc-contrib", deps)
-	if err != nil {
-		t.Fatalf("ControlDispatcherBinding: %v", err)
-	}
-	if binding.QualifiedName != "control-dispatcher" {
-		t.Fatalf("QualifiedName = %q, want city-level control-dispatcher", binding.QualifiedName)
-	}
-	if binding.ControlFallbackFrom != "gc-contrib/control-dispatcher" {
-		t.Fatalf("ControlFallbackFrom = %q, want gc-contrib/control-dispatcher", binding.ControlFallbackFrom)
-	}
-	// Control-dispatcher routes are metadata-only (routed by qualified name; the
-	// concrete session is bound when a pool slot claims the step), so the city
-	// fallback binding carries no SessionName.
-	if !binding.MetadataOnly {
-		t.Fatalf("MetadataOnly = false, want true for routed control-dispatcher queue")
-	}
-	if binding.SessionName != "" {
-		t.Fatalf("SessionName = %q, want empty for routed control-dispatcher queue", binding.SessionName)
-	}
-}
-
-func TestControlDispatcherBinding_NoFallbackWhenRigHealthy(t *testing.T) {
-	deps := Deps{
-		Resolver:                        rigAwareDispatcherResolver{},
-		ControlDispatcherRuntimeMissing: func(string) bool { return false },
-	}
-	binding, err := ControlDispatcherBinding(nil, "test-city", dispatcherFallbackCfg(), "gc-contrib", deps)
-	if err != nil {
-		t.Fatalf("ControlDispatcherBinding: %v", err)
-	}
-	if binding.QualifiedName != "gc-contrib/control-dispatcher" {
-		t.Fatalf("QualifiedName = %q, want rig-local dispatcher", binding.QualifiedName)
-	}
-	if binding.ControlFallbackFrom != "" {
-		t.Fatalf("ControlFallbackFrom = %q, want empty", binding.ControlFallbackFrom)
-	}
-}
-
-func TestControlDispatcherBinding_NoFallbackWhenCheckerNil(t *testing.T) {
-	deps := Deps{Resolver: rigAwareDispatcherResolver{}}
-	binding, err := ControlDispatcherBinding(nil, "test-city", dispatcherFallbackCfg(), "gc-contrib", deps)
-	if err != nil {
-		t.Fatalf("ControlDispatcherBinding: %v", err)
-	}
-	if binding.QualifiedName != "gc-contrib/control-dispatcher" || binding.ControlFallbackFrom != "" {
-		t.Fatalf("binding = %+v, want rig-local with no fallback", binding)
-	}
-}
-
-func TestControlDispatcherBinding_NoFallbackWhenNoDistinctCityDispatcher(t *testing.T) {
-	// Only a rig-local dispatcher exists: the empty-context resolution finds no
-	// distinct city dispatcher, so the original (rig-local) binding is kept.
-	cfg := &config.City{Agents: []config.Agent{{Name: "control-dispatcher", Dir: "gc-contrib"}}}
-	deps := Deps{
-		Resolver:                        rigAwareDispatcherResolver{},
-		ControlDispatcherRuntimeMissing: func(string) bool { return true },
-	}
-	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "gc-contrib", deps)
-	if err != nil {
-		t.Fatalf("ControlDispatcherBinding: %v", err)
-	}
-	if binding.QualifiedName != "gc-contrib/control-dispatcher" || binding.ControlFallbackFrom != "" {
-		t.Fatalf("binding = %+v, want rig-local with no fallback", binding)
-	}
-}
-
-func TestApplyGraphControlRouteBinding_StampsFallbackMetadata(t *testing.T) {
-	step := &formula.RecipeStep{Metadata: map[string]string{}}
-	binding := GraphRouteBinding{
-		QualifiedName:       "control-dispatcher",
-		SessionName:         "control-dispatcher",
-		ControlFallbackFrom: "gc-contrib/control-dispatcher",
-	}
-	ApplyGraphControlRouteBinding(step, binding)
-	got := step.Metadata["gc.control_dispatcher_fallback"]
-	if want := "gc-contrib/control-dispatcher->control-dispatcher"; got != want {
-		t.Fatalf("gc.control_dispatcher_fallback = %q, want %q", got, want)
+func TestControlDispatcherBinding_PlainCityDispatcherDoesNotSatisfyRigScope(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "control-dispatcher"}}}
+	_, err := ControlDispatcherBinding(nil, "test-city", cfg, "gc-contrib", Deps{Resolver: rigAwareDispatcherResolver{}})
+	if err == nil {
+		t.Fatal("ControlDispatcherBinding error = nil, want missing rig dispatcher error")
 	}
 }
 

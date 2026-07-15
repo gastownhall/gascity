@@ -32,20 +32,28 @@ const (
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
 
-// nudgeStalledPoolClaims is a reconcile-tick backstop for runtimes the
-// controller is blind to (herdr). It re-delivers the claim nudge to a pool slot
-// that is running but whose assigned trigger bead is still UNCLAIMED (open, not
-// in_progress). Under herdr the startup nudge can be missed — a freshly-spawned
-// slot whose submit-CR was swallowed, or a warm slot that survived a `gc
-// restart` and was never re-Started — leaving the polecat idle at its prompt
-// with work it never began. tmux self-heals that through its relaunch/respawn
-// path (and reports activity), so it is gated out at the call site and never
-// runs here.
+// nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
+// runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
+// is running but whose assigned trigger bead is still UNCLAIMED (open, not
+// in_progress). The startup nudge can be missed — a freshly-spawned slot whose
+// submit-CR was swallowed, or a warm slot that survived a `gc restart` and was
+// never re-Started — leaving the worker session idle at its prompt with work it never
+// began. tmux's relaunch/respawn path only heals a session that DIED; a live
+// idle slot needs this demand-driven wake exactly as herdr does (activity
+// reporting makes the controller SEE the slot but never nudges it to claim).
+//
+// SCOPE (trigger-bead-key limitation): this keys on the slot's own
+// gc.trigger_bead_id, so it only rescues a slot the reconciler already bound to
+// a specific bead (resume / wake-known-identity tiers). A bead slung to the
+// pool AFTER the slot went idle and left UNASSIGNED (routed_to=pool, open, no
+// assignee) never stamps trigger_bead_id, so it is invisible here. Widening the
+// key to "any open+routed+unclaimed pool bead past the grace window" is the
+// documented follow-up (see engdocs/design/idle-claim-nudge-followups.md).
 //
 // Churn-free by construction — it inverts every failure mode that got the #312
 // idle-session nudger reverted:
 //   - Keys on bead state (trigger bead == open), never "idle for N minutes", so
-//     it is structurally invisible to a working agent: the instant a polecat
+//     it is structurally invisible to a working agent: the instant a pool slot
 //     claims, its trigger bead flips to in_progress and stops matching.
 //   - State is persisted on the session bead, so a restart cannot replay it.
 //   - Bounded per assignment: observe (grace) → nudge → backoff retries → give
@@ -141,7 +149,7 @@ func isUnclaimedTrigger(w beads.Bead, sessName string) bool {
 	return true
 }
 
-// claimNudgeFor resolves the slot's configured startup nudge (the polecat's
+// claimNudgeFor resolves the slot's configured startup nudge (the worker's
 // `gc hook --claim` line) from the agent template behind this session bead.
 func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 	template := normalizedSessionTemplate(session, cfg)

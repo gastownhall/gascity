@@ -1468,6 +1468,10 @@
           ],
           "description": "Scope selects city- or rig-scoped dispatch semantics, mirroring\nOrder.Scope. Empty defaults to city."
         },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the authoritative rig binding for a rig-scoped webhook (Scope==\"rig\").\nIt is REQUIRED when scope=\"rig\" and forbidden otherwise: the receiver copies\nit into the dispatch scope so the sink constrains delivery to this rig (R4),\nand a rule that names any other rig is refused. Without it a rig-scoped\nwebhook fails closed (it can target no rig). Leave unset for city scope."
+        },
         "publication": {
           "$ref": "#/$defs/ServicePublicationConfig",
           "description": "Publication declares generic publication intent, reusing the service\npublication contract. Pack/fragment-contributed public webhooks are\ncapped to tenant unless the city grants them via [webhooks].allow_public."
@@ -1563,7 +1567,7 @@
         },
         "dedup_header": {
           "type": "string",
-          "description": "DedupHeader names the request header carrying the delivery id used for\nat-least-once dedup."
+          "description": "DedupHeader names the request header whose value is surfaced as the\ndelivery id on webhook.received events for observability. It does NOT key\nat-least-once dedup for the signature-only schemes (github-hmac-sha256,\nhmac-sha256, slack-v0, discord-ed25519): those dedup on a hash of the\nsigned body, because an unsigned or coarse header cannot safely key dedup —\na captured valid delivery could be replayed under a fresh header id to\nre-fire the order. Only jwt-jwks keys dedup directly, on its signed\nper-delivery-unique \"jti\". As a consequence two deliveries with\nbyte-identical signed bodies inside the dedup window collapse to one\ndispatch, so a source that must resend an identical payload has to carry a\nunique value inside the signed body."
         },
         "timestamp_header": {
           "type": "string",

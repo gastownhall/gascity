@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -191,8 +192,29 @@ func (c *StateCache) refresh() {
 			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
 			c.mu.Lock()
 			c.lastError = err
+			// Two distinct failure regimes, keyed on whether the cache was ever
+			// primed (fetchedAt set by a prior success):
+			//
+			//   UNPRIMED + genuine no-server (a fresh city with no tmux server
+			//   yet): initialize to an EMPTY snapshot so the cache is primed.
+			//   Without this, currentState() sees a nil Sessions map and forces
+			//   a fresh list-panes spawn plus a failure log on EVERY IsRunning()
+			//   call — a re-spawn/log storm in the exact steady state (no server)
+			//   where nothing will change until one is started. An empty primed
+			//   snapshot correctly reports all sessions not-running and holds as
+			//   a cache hit until the TTL lapses.
+			//
+			//   PRIMED then now-unreachable: preserve last-known-good (do NOT
+			//   touch fetchedAt or sessions) until the staleTTL cliff. A server
+			//   that was up then briefly vanished (supervisor restart, socket
+			//   stall) must not wipe a good snapshot and drain healthy pool slots
+			//   — that is #4082's intent.
+			if c.fetchedAt.IsZero() && isNoServerError(err) {
+				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
+				c.fetchedAt = time.Now()
+				c.dirty = false
+			}
 			c.mu.Unlock()
-			// Preserve last-known-good — do NOT update fetchedAt or sessions.
 			return nil, err
 		}
 
@@ -231,7 +253,22 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
 		if isNoServerError(err) {
-			return runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}}, nil // No server = no sessions
+			// An unreachable tmux server is an observation FAILURE, not the
+			// fact "no sessions exist". Returning an empty *success* here let
+			// refresh() overwrite the cache's last-known-good and instantly
+			// report every session as not-running, so a brief server blip (a
+			// supervisor restart, a transient socket stall) drove the
+			// reconciler to drain/close healthy pool slots. Surface it as
+			// runtime.ErrRuntimeUnavailable instead: refresh() then preserves
+			// last-known-good until the existing staleTTL cliff, bounding the
+			// trust window. Genuine session ends evict from the cache via
+			// Stop()/EvictSession, so they are not masked by this preservation
+			// (the only residual is an externally-killed LAST session, whose
+			// cleanup is delayed by at most staleTTL — the intended trade).
+			// isNoServerError still matches the wrapped error (it contains the
+			// original "no server running" cause), so downstream absorbers are
+			// unaffected.
+			return runtimeStateSnapshot{}, fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return runtimeStateSnapshot{}, err
 	}

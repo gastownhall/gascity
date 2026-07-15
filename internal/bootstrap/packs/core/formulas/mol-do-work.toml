@@ -39,7 +39,7 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-do-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-bd show "$WORK_BEAD_ID"
+gc bd show "$WORK_BEAD_ID"
 ```
 
 Read the bead's title and description carefully. This is your task.
@@ -92,7 +92,7 @@ from `gc.work_outcome`.
 COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
 WORK_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 [ "$WORK_BRANCH" = "HEAD" ] && WORK_BRANCH=""   # detached HEAD — no stable branch
-bd update "$WORK_BEAD_ID" \
+gc bd update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=shipped \
   --set-metadata gc.work_commit="$COMMIT" \
@@ -104,7 +104,7 @@ bd update "$WORK_BEAD_ID" \
 
 **No-op** (the bead needed no change — already satisfied / duplicate):
 ```bash
-bd update "$WORK_BEAD_ID" \
+gc bd update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=no-op \
   --status=closed \
@@ -120,7 +120,7 @@ prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
 fi
 ```
 
@@ -143,7 +143,7 @@ session:
 
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ]; then
-  bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
 fi
 gc runtime drain-ack
 ```

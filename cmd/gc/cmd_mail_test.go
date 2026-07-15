@@ -3478,6 +3478,38 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	}
 }
 
+// TestMailCheckInjectArchivesEphemeralAutoHandoffMessages verifies that
+// ephemeral (wisp-tier) auto-handoff mail is archived after injection.
+// gc handoff --auto creates Ephemeral:true beads; BdStore.Get must fall back
+// to the wisp tier so ArchiveInjectedAutoHandoffs can delete them.
+func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	auto, err := store.Create(beads.Bead{
+		Title:     "context cycle",
+		Type:      "message",
+		Assignee:  "mayor",
+		From:      "mayor",
+		Labels:    []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral auto handoff: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCheck(mp, "mayor", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ephemeral auto handoff mail should be archived after injection, got err=%v", err)
+	}
+}
+
 func TestMailCheckInjectLeavesTruncatedAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

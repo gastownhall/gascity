@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -447,51 +448,69 @@ func TestCachingStoreHandlesCachedListUsesActiveSnapshotAfterPrimeActive(t *test
 func TestCachingStoreHandlesCachedReadUsesActiveSnapshotDuringRunningFullPrimeAfterPrimeActive(t *testing.T) {
 	t.Parallel()
 
-	mem := NewMemStore()
-	if _, err := mem.Create(Bead{Title: "cached work"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing := &blockingPrimeListStore{
-		Store:   mem,
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
-	}
-
-	primeDone := make(chan error, 1)
-	go func() {
-		primeDone <- cache.Prime(context.Background())
-	}()
-	select {
-	case <-backing.started:
-	case <-time.After(time.Second):
-		t.Fatal("full prime did not start")
-	}
-
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
-		readDone <- err
-	}()
-	select {
-	case err := <-readDone:
+	synctest.Test(t, func(t *testing.T) {
+		mem := NewMemStore()
+		cachedBead, err := mem.Create(Bead{Title: "cached work"})
 		if err != nil {
-			t.Fatalf("Cached.List error = %v, want active snapshot result", err)
+			t.Fatalf("Create: %v", err)
 		}
-	case <-time.After(25 * time.Millisecond):
-		t.Fatal("Cached.List waited for the running full prime")
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("prime list calls = %d, want only the running full prime", got)
-	}
+		backing := &blockingPrimeListStore{
+			Store:   mem,
+			started: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		var releaseOnce sync.Once
+		releasePrime := func() {
+			releaseOnce.Do(func() { close(backing.release) })
+		}
+		t.Cleanup(releasePrime)
 
-	close(backing.release)
-	if err := <-primeDone; err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+
+		primeDone := make(chan error, 1)
+		go func() {
+			primeDone <- cache.Prime(t.Context())
+		}()
+		synctest.Wait()
+		select {
+		case <-backing.started:
+		default:
+			t.Fatal("full prime did not reach its backing List gate")
+		}
+
+		type listResult struct {
+			rows []Bead
+			err  error
+		}
+		readDone := make(chan listResult, 1)
+		go func() {
+			rows, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
+			readDone <- listResult{rows: rows, err: err}
+		}()
+		synctest.Wait()
+		select {
+		case result := <-readDone:
+			if result.err != nil {
+				t.Fatalf("Cached.List error = %v, want active snapshot result", result.err)
+			}
+			if len(result.rows) != 1 || result.rows[0].ID != cachedBead.ID {
+				t.Fatalf("Cached.List rows = %#v, want active snapshot bead %q", result.rows, cachedBead.ID)
+			}
+		default:
+			t.Fatal("Cached.List remained blocked while the full prime was held at its backing List gate")
+		}
+		if got := backing.primeListCalls.Load(); got != 1 {
+			t.Fatalf("prime list calls = %d, want only the running full prime", got)
+		}
+
+		releasePrime()
+		if err := <-primeDone; err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+	})
 }
 
 func TestCachingStoreHandlesCachedReadDoesNotPrimeWhenDegraded(t *testing.T) {

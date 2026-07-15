@@ -188,7 +188,8 @@ type ExtMsgAdapterListInput struct {
 // ExtMsgAdapterRegisterInput is the Huma input for POST /v0/city/{cityName}/extmsg/adapters.
 type ExtMsgAdapterRegisterInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Provider     string                     `json:"provider" minLength:"1" doc:"Provider name."`
 		AccountID    string                     `json:"account_id" minLength:"1" doc:"Account ID."`
 		Name         string                     `json:"name,omitempty" doc:"Adapter display name."`

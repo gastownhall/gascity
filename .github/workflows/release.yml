@@ -42,6 +42,9 @@ jobs:
       - name: Verify release tag is stable
         run: make check-version-tag
 
+      - name: Verify release output is ignored
+        run: make check-release-dist-ignore
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
         with:
@@ -52,6 +55,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
+      - name: Verify release binary metadata
+        run: |
+          set -euo pipefail
+          expected_commit="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          scripts/verify-release-binary-metadata.sh \
+            dist/gascity_linux_amd64_v1/gc \
+            "$expected_commit" \
+            "${GITHUB_REF_NAME#v}"
 
   attest-release:
     name: Attest release

@@ -14,8 +14,10 @@ import (
 // controls for webhook secrets. A WebhookVerify.SecretEnv must start with this
 // prefix so a pack cannot point secret resolution at an arbitrary ambient
 // variable (HOME, AWS_SECRET_ACCESS_KEY, GC_CITY, …). This is the load-bearing
-// half of security review R1.
-const OperatorSecretEnvPrefix = "GC_WEBHOOK_"
+// half of security review R1. It aliases config.OperatorWebhookSecretEnvPrefix
+// so the runtime resolver here and config's load-time validation share one
+// source of truth and can never drift apart.
+const OperatorSecretEnvPrefix = config.OperatorWebhookSecretEnvPrefix
 
 // MinSecretBytes is the minimum accepted secret length. A shorter (or empty)
 // secret is rejected so a misconfigured or unset secret fails closed instead of

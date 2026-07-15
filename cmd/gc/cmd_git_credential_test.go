@@ -31,6 +31,10 @@ func clearGitCredEnv(t *testing.T, city string) {
 	t.Setenv(gitcred.EnvCredentialsFile, "")
 	t.Setenv(gitcred.EnvCredentialCommand, "")
 	t.Setenv(gitcred.EnvCredentialCity, city)
+	// Clear the ambient GitHub token env so the built-in github.com default rule
+	// stays inert and these tests observe only their own configured rules.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 }
 
 func TestRunGitCredentialGetHappyPath(t *testing.T) {
@@ -61,6 +65,36 @@ func TestRunGitCredentialDeclineOnNoMatch(t *testing.T) {
 	}
 	if stdout.String() != "" {
 		t.Fatalf("decline must produce zero stdout, got %q", stdout.String())
+	}
+}
+
+func TestRunGitCredentialGitHubDefaultHTTPSOnly(t *testing.T) {
+	// The built-in ambient github.com token is an HTTPS convenience. A plaintext
+	// http credential request must be declined so the bearer token is never
+	// served over cleartext; an https request still resolves it.
+	city := t.TempDir()
+	clearGitCredEnv(t, city)
+	t.Setenv("GITHUB_TOKEN", "ghp_ambient")
+
+	// protocol=http → declined, zero stdout.
+	var httpOut, httpErr strings.Builder
+	httpIn := strings.NewReader("protocol=http\nhost=github.com\npath=org/repo\n\n")
+	if err := runGitCredential("get", httpIn, &httpOut, &httpErr); err != nil {
+		t.Fatalf("runGitCredential(http): %v (stderr=%q)", err, httpErr.String())
+	}
+	if httpOut.String() != "" {
+		t.Fatalf("plaintext http must not receive the ambient token, got %q", httpOut.String())
+	}
+
+	// protocol=https → the default rule resolves the ambient token.
+	var httpsOut, httpsErr strings.Builder
+	httpsIn := strings.NewReader("protocol=https\nhost=github.com\npath=org/repo\n\n")
+	if err := runGitCredential("get", httpsIn, &httpsOut, &httpsErr); err != nil {
+		t.Fatalf("runGitCredential(https): %v (stderr=%q)", err, httpsErr.String())
+	}
+	want := "username=x-access-token\npassword=ghp_ambient\n"
+	if httpsOut.String() != want {
+		t.Fatalf("https stdout = %q, want %q", httpsOut.String(), want)
 	}
 }
 
@@ -141,8 +175,9 @@ func TestRunGitCredentialSSHRuleDeclines(t *testing.T) {
 	writeGitCredRules(t, city, "[[credential]]\nmatch=\"github.com\"\nssh_key_file=\"~/.ssh/id\"\n", 0o600)
 
 	var stdout, stderr strings.Builder
-	// Match() assumes http transport; an ssh_key_file rule is served via
-	// GIT_SSH_COMMAND, so the helper declines silently.
+	// The helper serves http(s) transport; an ssh_key_file rule is transport-
+	// incompatible (served via GIT_SSH_COMMAND on the injection side), so the
+	// helper declines silently.
 	in := strings.NewReader("protocol=https\nhost=github.com\npath=org/repo\n\n")
 	if err := runGitCredential("get", in, &stdout, &stderr); err != nil {
 		t.Fatalf("runGitCredential: %v", err)

@@ -49,7 +49,7 @@ func TestSessionIndex_Populate(t *testing.T) {
 
 	idx := newSessionIndex()
 	var stderr bytes.Buffer
-	idx.populateIndex(store, &stderr)
+	idx.populateIndex(sessionFrontDoor(store), &stderr)
 
 	if stderr.Len() > 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())

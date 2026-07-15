@@ -21,6 +21,10 @@ func setupCredCity(t *testing.T) string {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv(gitcred.EnvCredentialsFile, "")
 	t.Setenv(gitcred.EnvCredentialCommand, "")
+	// Clear the ambient GitHub token env so the built-in github.com default rule
+	// stays inert and these tests observe only their own configured rules.
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	return city
 }
 
@@ -218,6 +222,25 @@ func TestImportCredentialRemoveNotFound(t *testing.T) {
 	var stderr strings.Builder
 	if rc := doImportCredentialRemove("github.com/none", false, discardBuf(), &stderr); rc == 0 {
 		t.Fatalf("remove of absent credential should fail")
+	}
+}
+
+func TestImportCredentialRemoveIgnoresAmbientTokenOrigin(t *testing.T) {
+	// The built-in ambient github.com default has a synthetic $GH_TOKEN origin,
+	// not a file. Removing an absent github.com credential must fail with a plain
+	// not-found message, never "found in $GH_TOKEN; ... edit that file".
+	setupCredCity(t)
+	t.Setenv("GH_TOKEN", "gh_ambient")
+	var stderr strings.Builder
+	if rc := doImportCredentialRemove("github.com", false, discardBuf(), &stderr); rc == 0 {
+		t.Fatalf("remove of an ambient-only credential should fail")
+	}
+	msg := stderr.String()
+	if strings.Contains(msg, "$GH_TOKEN") || strings.Contains(msg, "edit that file") {
+		t.Fatalf("remove guidance must not point at the synthetic env origin, got %q", msg)
+	}
+	if !strings.Contains(msg, `no credential for "github.com"`) {
+		t.Fatalf("expected a plain not-found message, got %q", msg)
 	}
 }
 

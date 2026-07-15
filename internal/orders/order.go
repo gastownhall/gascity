@@ -273,13 +273,20 @@ func Validate(a Order) error {
 
 // MissingRequiredParams returns the names of declared-required params that are
 // absent from vars, sorted. It returns nil when every required param is present.
+//
+// A required param is "missing" when its key is absent OR its value is empty:
+// webhook arg extraction renders a template whose payload path does not resolve
+// to the empty string and still inserts the key, so a presence-only check would
+// fire an order with an empty required value. Treating empty-as-absent makes
+// `required = true` mean required-and-non-empty for both webhook dispatch and
+// `gc order run --var key=` (an explicitly-empty value is not a supplied value).
 func (a *Order) MissingRequiredParams(vars map[string]string) []string {
 	var missing []string
 	for name, p := range a.Params {
 		if !p.Required {
 			continue
 		}
-		if _, ok := vars[name]; !ok {
+		if strings.TrimSpace(vars[name]) == "" {
 			missing = append(missing, name)
 		}
 	}

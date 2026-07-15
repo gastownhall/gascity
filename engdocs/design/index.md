@@ -23,6 +23,8 @@ lives in the [Architecture](../architecture/index.md) section.
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
 | `beads-dolt-contract-redesign` | Accepted | Canonical bd+Dolt contract, topology commands, migration, and provider-boundary redesign |
 | `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
+| `runtime-partial-discipline` | Accepted (source-level), follow-ups Proposed | Treat a failed tmux-liveness observation as partial (defer destructive arms) instead of "nothing running"; mirrors storeQueryPartial |
+| `idle-claim-nudge-followups` | Proposed | Widen the stalled-pool-claim backstop key to unassigned pool-routed beads (the case the tmux warm-slot un-gate does not cover) |
 | `idle-controller-call-rate` | Proposed | Layer-3 (#2463/#3543) cut of the controller's idle bd/Dolt call *rate*: demand-gated ticking, per-pass snapshot, quiescent-scope skipping |
 | `session-store-fences` | Accepted | Cross-process write fences for session-owned metadata: store facts, flock and token-reread fences, residual convergence-through-persistence |
 | `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates; partially superseded by `session-model-unification` |

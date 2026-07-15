@@ -22,6 +22,14 @@ type dashCityPaths map[string]string
 
 func (m dashCityPaths) CityPath(n string) (string, bool) { p, ok := m[n]; return p, ok }
 
+func (m dashCityPaths) Cities() []dashboardbff.CityRef {
+	refs := make([]dashboardbff.CityRef, 0, len(m))
+	for name, path := range m {
+		refs = append(refs, dashboardbff.CityRef{Name: name, Path: path})
+	}
+	return refs
+}
+
 // TestSupervisorHostsDashboardSameOrigin proves the headline outcome: one
 // listener serves the SPA, the typed /v0 API, and the host-side /api plane,
 // with the reserved API prefixes never falling through to the SPA shell.

@@ -517,31 +517,6 @@ func TestHandleOrderCheckRunsConditionByDefault(t *testing.T) {
 	}
 }
 
-func TestLastRunOutcomeFromLabelsPrioritizesTerminalLabels(t *testing.T) {
-	tests := []struct {
-		name   string
-		labels []string
-		want   string
-	}{
-		{name: "wisp failed dominates success", labels: []string{"wisp", "wisp-failed"}, want: "failed"},
-		{name: "failed alone", labels: []string{"wisp-failed"}, want: "failed"},
-		{name: "exec failed dominates success", labels: []string{"exec", "exec-failed"}, want: "failed"},
-		{name: "exec env failed is failed", labels: []string{"exec-env-failed"}, want: "failed"},
-		{name: "trigger env failed is failed", labels: []string{"trigger-env-failed"}, want: "failed"},
-		{name: "canceled dominates success", labels: []string{"wisp", "wisp-canceled"}, want: "canceled"},
-		{name: "success fallback", labels: []string{"exec"}, want: "success"},
-		{name: "unknown", labels: []string{"order-tracking"}, want: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := lastRunOutcomeFromLabels(tc.labels); got != tc.want {
-				t.Fatalf("lastRunOutcomeFromLabels(%v) = %q, want %q", tc.labels, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestHandleOrdersFeedIgnoresUnrelatedStoreListFailures(t *testing.T) {
 	fs := newFakeState(t)
 	fs.stores["alpha"] = failListStore{Store: beads.NewMemStore()}

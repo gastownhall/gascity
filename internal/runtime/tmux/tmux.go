@@ -551,6 +551,70 @@ func (t *Tmux) KillSession(name string) error {
 // and caused Claude processes to become orphans when they couldn't shut down in time.
 const processKillGracePeriod = 2 * time.Second
 
+// processExitCheckInterval bounds how long cleanup waits after observing that a
+// TERM-targeted process has exited. The full grace period is reserved for
+// processes that remain alive and may still be flushing state.
+const processExitCheckInterval = 25 * time.Millisecond
+
+func terminateProcesses(pids []string) {
+	terminateProcessSet(
+		pids,
+		processKillGracePeriod,
+		func(pid, signal string) { _ = exec.Command("kill", "-"+signal, pid).Run() },
+		processIsAlive,
+		time.Sleep,
+		time.Now,
+	)
+}
+
+// terminateProcessSet gives each process a graceful TERM window, but returns as
+// soon as every target is observed dead. KILL is reserved for the targets still
+// alive when the grace period expires. Injected side effects keep the timing and
+// escalation policy deterministic in unit tests.
+func terminateProcessSet(
+	pids []string,
+	gracePeriod time.Duration,
+	signalProcess func(pid, signal string),
+	isAlive func(pid string) bool,
+	sleep func(time.Duration),
+	now func() time.Time,
+) {
+	if len(pids) == 0 {
+		return
+	}
+	for _, pid := range pids {
+		signalProcess(pid, "TERM")
+	}
+
+	deadline := now().Add(gracePeriod)
+	remaining := liveProcessIDs(pids, isAlive)
+	for len(remaining) > 0 {
+		left := deadline.Sub(now())
+		if left <= 0 {
+			break
+		}
+		delay := processExitCheckInterval
+		if delay > left {
+			delay = left
+		}
+		sleep(delay)
+		remaining = liveProcessIDs(remaining, isAlive)
+	}
+	for _, pid := range remaining {
+		signalProcess(pid, "KILL")
+	}
+}
+
+func liveProcessIDs(pids []string, isAlive func(string) bool) []string {
+	live := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if pid != "" && isAlive(pid) {
+			live = append(live, pid)
+		}
+	}
+	return live
+}
+
 // KillSessionWithProcesses explicitly kills all processes in a session before terminating it.
 // This prevents orphan processes that survive tmux kill-session due to SIGHUP being ignored.
 //
@@ -603,23 +667,11 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 			descendants = append(descendants, reparented...)
 		}
 
-		// Send SIGTERM to all descendants (deepest first to avoid orphaning)
-		for _, dpid := range descendants {
-			_ = exec.Command("kill", "-TERM", dpid).Run()
-		}
-
-		// Wait for graceful shutdown (2s gives processes time to clean up)
-		time.Sleep(processKillGracePeriod)
-
-		// Send SIGKILL to any remaining descendants
-		for _, dpid := range descendants {
-			_ = exec.Command("kill", "-KILL", dpid).Run()
-		}
-
-		// Kill the pane process itself (may have called setsid() and detached)
-		_ = exec.Command("kill", "-TERM", pid).Run()
-		time.Sleep(processKillGracePeriod)
-		_ = exec.Command("kill", "-KILL", pid).Run()
+		// Terminate descendants deepest-first, then the pane leader. Each phase
+		// returns as soon as its processes are observed dead while preserving the
+		// full graceful-shutdown window for processes that are still alive.
+		terminateProcesses(descendants)
+		terminateProcesses([]string{pid})
 	}
 
 	// Kill the tmux session
@@ -683,25 +735,12 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		// real processes (see computeExcludingKillSet).
 		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
 
-		// Send SIGTERM to all non-excluded processes
-		for _, dpid := range killList {
-			_ = exec.Command("kill", "-TERM", dpid).Run()
-		}
+		terminateProcesses(killList)
 
-		// Wait for graceful shutdown (2s gives processes time to clean up)
-		time.Sleep(processKillGracePeriod)
-
-		// Send SIGKILL to any remaining non-excluded processes
-		for _, dpid := range killList {
-			_ = exec.Command("kill", "-KILL", dpid).Run()
-		}
-
-		// Kill the pane process itself (may have called setsid() and detached)
-		// Only if not excluded
+		// Kill the pane process itself (may have called setsid() and detached),
+		// only if it is not excluded.
 		if killPaneLeader {
-			_ = exec.Command("kill", "-TERM", pid).Run()
-			time.Sleep(processKillGracePeriod)
-			_ = exec.Command("kill", "-KILL", pid).Run()
+			terminateProcesses([]string{pid})
 		}
 	}
 
@@ -747,28 +786,42 @@ func computeExcludingKillSet(panePID string, descendants, reparented []string, e
 	return killList, !exclude[panePID]
 }
 
-// collectReparentedGroupMembers returns process group members that have been
-// reparented to init (PPID == 1) but are not in the known descendant set.
-// These are processes that were likely children in our tree but outlived their
-// parent and got reparented to init while keeping the original PGID.
-//
-// This is safer than killing the entire process group blindly with
-// syscall.Kill(-pgid, ...), which could hit unrelated processes if the PGID
-// is shared or has been reused after the group leader exited.
+// collectReparentedGroupMembers returns process group members that outlived
+// their parent inside our tree and were reparented away, but are not already in
+// the known descendant set. It shares the pane leader's PGID with every member;
+// since the leader is still alive when this runs, the PGID cannot have been
+// reused, so members carrying it descend from our tree rather than an unrelated
+// process. This is safer than killing the entire group blindly with
+// syscall.Kill(-pgid, ...).
 func collectReparentedGroupMembers(pgid string, knownPIDs map[string]bool) []string {
-	members := getProcessGroupMembers(pgid)
+	return reparentedOrphans(getProcessGroupMembers(pgid), knownPIDs, getParentPID)
+}
+
+// reparentedOrphans selects group members whose parent is outside the known
+// descendant set — the pure, IO-free core of collectReparentedGroupMembers.
+//
+// The prior test was literal PPID == 1, which only holds when init adopts the
+// orphan. Under a `user@.service` subreaper (systemd --user), an orphaned child
+// reparents to the subreaper's pid, not 1, so the PPID == 1 test missed it and
+// the tree kill left it alive next to the replacement. "Parent outside the
+// descendant set" captures both cases: init (pid 1 is never a descendant) and
+// the subreaper (its pid is never a descendant either), while a member whose
+// parent is still a live descendant is left to getAllDescendants. Members whose
+// parent cannot be read are skipped rather than killed.
+func reparentedOrphans(members []string, knownPIDs map[string]bool, parentOf func(string) string) []string {
 	var reparented []string
 	for _, member := range members {
 		if knownPIDs[member] {
-			continue // Already in descendant list, will be handled there
+			continue // Already in the descendant list; handled there.
 		}
-		// Check if reparented to init — probably was our child
-		ppid := getParentPID(member)
-		if ppid == "1" {
-			reparented = append(reparented, member)
+		ppid := strings.TrimSpace(parentOf(member))
+		if ppid == "" {
+			continue // Parent unknown (raced exit) — cannot prove it's ours.
 		}
-		// Otherwise skip — this process is not in our tree and not reparented,
-		// so it's likely unrelated and should not be killed
+		if knownPIDs[ppid] {
+			continue // Parent still a live descendant; getAllDescendants owns it.
+		}
+		reparented = append(reparented, member)
 	}
 	return reparented
 }
@@ -839,24 +892,10 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 		descendants = append(descendants, reparented...)
 	}
 
-	// Send SIGTERM to all descendants (deepest first to avoid orphaning)
-	for _, dpid := range descendants {
-		_ = exec.Command("kill", "-TERM", dpid).Run()
-	}
-
-	// Wait for graceful shutdown (2s gives processes time to clean up)
-	time.Sleep(processKillGracePeriod)
-
-	// Send SIGKILL to any remaining descendants
-	for _, dpid := range descendants {
-		_ = exec.Command("kill", "-KILL", dpid).Run()
-	}
-
-	// Kill the pane process itself (may have called setsid() and detached,
-	// or may have no children like Claude Code)
-	_ = exec.Command("kill", "-TERM", pid).Run()
-	time.Sleep(processKillGracePeriod)
-	_ = exec.Command("kill", "-KILL", pid).Run()
+	// Terminate descendants deepest-first, then the pane leader. The grace
+	// period ends early when process exit is observed.
+	terminateProcesses(descendants)
+	terminateProcesses([]string{pid})
 
 	return nil
 }
@@ -917,24 +956,11 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 		}
 	}
 
-	// Send SIGTERM to all non-excluded descendants (deepest first to avoid orphaning)
-	for _, dpid := range filtered {
-		_ = exec.Command("kill", "-TERM", dpid).Run()
-	}
-
-	// Wait for graceful shutdown (2s gives processes time to clean up)
-	time.Sleep(processKillGracePeriod)
-
-	// Send SIGKILL to any remaining non-excluded descendants
-	for _, dpid := range filtered {
-		_ = exec.Command("kill", "-KILL", dpid).Run()
-	}
+	terminateProcesses(filtered)
 
 	// Kill the pane process itself only if not excluded
 	if !exclude[pid] {
-		_ = exec.Command("kill", "-TERM", pid).Run()
-		time.Sleep(processKillGracePeriod)
-		_ = exec.Command("kill", "-KILL", pid).Run()
+		terminateProcesses([]string{pid})
 	}
 
 	return nil
@@ -1001,21 +1027,38 @@ func (t *Tmux) HasSession(name string) (bool, error) {
 	return true, nil
 }
 
-// ListSessions returns all session names.
-func (t *Tmux) ListSessions() ([]string, error) {
+// listSessionNames returns all session names, propagating ErrNoServer so
+// callers that must distinguish an unreachable server from a genuinely empty
+// session list can do so. [Tmux.ListSessions] absorbs ErrNoServer into an
+// empty result for its tmux-internal callers; the reconciler-facing
+// [Provider.ListRunning] uses this variant to surface a total outage as a
+// [runtime.PartialListError] instead of "no sessions".
+func (t *Tmux) listSessionNames() ([]string, error) {
 	out, err := t.run("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// ListSessions returns all session names. An unreachable tmux server is
+// absorbed into an empty result (no server = no sessions) for tmux-internal
+// callers (FindSessionByWorkDir, CleanupOrphanedSessions) that treat "server
+// down" and "no sessions" identically. Reconciler-facing liveness listing goes
+// through [Provider.ListRunning], which instead reports the outage as a
+// [runtime.PartialListError].
+func (t *Tmux) ListSessions() ([]string, error) {
+	names, err := t.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
 			return nil, nil // No server = no sessions
 		}
 		return nil, err
 	}
-
-	if out == "" {
-		return nil, nil
-	}
-
-	return strings.Split(out, "\n"), nil
+	return names, nil
 }
 
 // SessionSet provides O(1) session existence checks by caching session names.
@@ -1948,6 +1991,12 @@ func (t *Tmux) AcceptStartupDialogs(ctx context.Context, sess string) error {
 // DismissKnownDialogs dismisses known trust, permissions, and rate-limit
 // dialogs using a bounded timeout.
 func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration) error {
+	// Gate external-CLAUDE.md-import auto-acceptance to imports within the
+	// pane's own repository; an import that escapes the repo is left for a
+	// human. Both lookups are best-effort: if either fails, the trust root
+	// stays empty and the external-imports modal is left unaccepted.
+	paneDir, _ := t.GetPaneWorkDir(sess)
+	trustRoot := runtime.WorkspaceImportTrustRoot(ctx, paneDir)
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
 		func(lines int) (string, error) { return t.CapturePane(sess, lines) },
 		func(keys ...string) error {
@@ -1958,6 +2007,7 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 			}
 			return nil
 		},
+		runtime.WithTrustedImportRoot(trustRoot),
 	)
 }
 

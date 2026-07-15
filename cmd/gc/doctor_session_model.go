@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -141,25 +142,33 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 
 	seen := make(map[string]bool)
 	var all []beads.Bead
-	// Union of Type=session and Label=gc:session beads, deduped by ID.
-	// Replaces two separate listStep entries that re-implemented the same
-	// union; ListAllSessionBeads is now the single source of truth so a
-	// future shape (e.g. typed but unlabeled production beads) is handled
-	// consistently across the CLI.
-	sessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedAsc,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("session beads: %w", err)
-	}
-	for _, item := range sessionBeads {
-		if seen[item.ID] {
-			continue
+	// Doctor's OWN inline copy of the type+label session union (Type=session ∪
+	// Label=gc:session, deduped by ID, narrowed to IsSessionBeadOrRepairable, globally
+	// re-sorted by CreatedAt) — so this diagnostic no longer calls the policed
+	// session.ListAllSessionBeads codec while still holding raw beads (its §5 doctor
+	// exemption covers HOLDING raw beads, not calling the codec). A gc:session bead that
+	// lost its type after a crash still surfaces via the label leg.
+	sessionUnionStart := len(all)
+	for _, q := range []beads.ListQuery{
+		{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
+		{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
+	} {
+		items, err := store.List(q)
+		if err != nil {
+			return nil, fmt.Errorf("session beads: %w", err)
 		}
-		seen[item.ID] = true
-		all = append(all, item)
+		for _, item := range items {
+			if seen[item.ID] || !session.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			seen[item.ID] = true
+			all = append(all, item)
+		}
 	}
+	sessionUnion := all[sessionUnionStart:]
+	sort.SliceStable(sessionUnion, func(i, j int) bool {
+		return sessionUnion[i].CreatedAt.Before(sessionUnion[j].CreatedAt)
+	})
 	for _, step := range steps {
 		items, err := store.List(step.query)
 		if err != nil {

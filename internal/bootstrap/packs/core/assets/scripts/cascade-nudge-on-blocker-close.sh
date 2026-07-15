@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cascade-nudge-on-blocker-close — notify dependents when a blocker closes.
 #
-# When a blocker bead closes (linked via `bd dep <dependent> --blocks
+# When a blocker bead closes (linked via `gc bd dep <dependent> --blocks
 # <blocker>`), the owner of each dependent has no event-driven signal that
 # work can resume: they poll, get nudged by hand, or miss the unblock.
 #

@@ -7,6 +7,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -18,7 +19,7 @@ import (
 func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamInput) (*sessionStreamState, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
@@ -43,7 +44,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 	history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), historyReq)
 	hasHistory := historyErr == nil && history != nil
 	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
-		return nil, huma.Error500InternalServerError("reading session history: " + historyErr.Error())
+		return nil, apierr.Internal.Msg("reading session history: " + historyErr.Error())
 	}
 
 	state, stateErr := handle.State(ctx)
@@ -52,7 +53,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 	}
 	running := workerPhaseHasLiveOutput(state.Phase)
 	if !hasHistory && !running {
-		return nil, huma.Error404NotFound("session " + id + " has no live output")
+		return nil, apierr.SessionNotFound.Msg("session " + id + " has no live output")
 	}
 
 	return &sessionStreamState{

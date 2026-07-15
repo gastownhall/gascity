@@ -1,19 +1,17 @@
 package api
 
-import "github.com/danielgtaylor/huma/v2"
+import (
+	"github.com/danielgtaylor/huma/v2"
 
-const (
-	slingMissingBeadProblemType     = "urn:gascity:error:sling-missing-bead"
-	slingCrossRigProblemType        = "urn:gascity:error:sling-cross-rig"
-	slingCrossStoreRouteProblemType = "urn:gascity:error:sling-cross-store-route"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 )
 
-var documentedProblemTypes = []string{
-	slingMissingBeadProblemType,
-	slingCrossRigProblemType,
-	slingCrossStoreRouteProblemType,
-}
-
+// documentProblemTypes annotates the generated OpenAPI ErrorModel schema with
+// the catalog of machine-readable problem-type URNs the API can return. It
+// generates the `x-gascity-problem-types` extension and the `type` examples
+// directly from the apierr registry (apierr.Registered()), so the published
+// contract stays in lockstep with the codes the server actually mints — adding
+// a catalog entry surfaces in the spec with no edit here.
 func documentProblemTypes(oapi *huma.OpenAPI) {
 	if oapi == nil || oapi.Components == nil || oapi.Components.Schemas == nil {
 		return
@@ -26,15 +24,21 @@ func documentProblemTypes(oapi *huma.OpenAPI) {
 	if typeSchema == nil {
 		return
 	}
-	for _, problemType := range documentedProblemTypes {
-		if !hasProblemTypeExample(typeSchema.Examples, problemType) {
-			typeSchema.Examples = append(typeSchema.Examples, problemType)
+
+	urns := make([]string, 0, len(apierr.Registered()))
+	for _, pt := range apierr.Registered() {
+		urns = append(urns, pt.URN())
+	}
+
+	for _, urn := range urns {
+		if !hasProblemTypeExample(typeSchema.Examples, urn) {
+			typeSchema.Examples = append(typeSchema.Examples, urn)
 		}
 	}
 	if typeSchema.Extensions == nil {
 		typeSchema.Extensions = map[string]any{}
 	}
-	typeSchema.Extensions["x-gascity-problem-types"] = append([]string(nil), documentedProblemTypes...)
+	typeSchema.Extensions["x-gascity-problem-types"] = urns
 }
 
 func hasProblemTypeExample(examples []any, problemType string) bool {

@@ -139,7 +139,7 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 	empty := ""
 	update := beads.UpdateOpts{
 		Assignee: &empty,
-		Metadata: withClearedSessionAffinityMetadata(nil),
+		Metadata: clearedSessionAffinityMetadata(),
 	}
 	if item.Status == "in_progress" {
 		open := "open"

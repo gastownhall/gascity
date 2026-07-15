@@ -6,7 +6,16 @@ import { useCachedData } from './useCachedData';
 
 interface RunDiffState {
   kind: 'idle' | 'loading' | 'ready' | 'failed';
+  /** TTL-bypassing refresh — the manual Refresh lane; re-runs the git diff. */
   refresh: () => Promise<void>;
+  /**
+   * TTL-absorbed refresh for high-frequency event-driven nudges. Omits the
+   * refresh flag (the manual lane sets refresh=true) as a forward-compat client
+   * contract for a future server-side diff TTL cache; today the flag is dropped
+   * on the wire, so the live burst protection is the tab-gating + event
+   * coalescing, not the flag. Use for the bead/session nudge.
+   */
+  cheapRefresh: () => Promise<void>;
 }
 
 type RunDiffRefreshState =
@@ -38,13 +47,20 @@ export function useRunDiff(
   scopeRef?: string,
 ): RunDiffLoadState {
   const key = runDiffCacheKey(runId, executionPath, scopeKind, scopeRef);
-  const { data, loading, error, refresh } = useCachedData(
+  const { data, loading, error, refresh, cheapRefresh } = useCachedData(
     key,
     () => loadRunDiff(runId, executionPath, scopeKind, scopeRef),
     {
-      // Explicit refresh re-reads local git state for the same supervisor-
-      // resolved execution path, in lockstep with detail refreshes.
+      // refresh=true/false is a forward-compat CLIENT contract for a future
+      // server-side diff cache: the manual Refresh button takes the bypass lane
+      // (refresh=true), event-driven nudges take the cheap lane (refresh=false).
+      // NOTE: today the diff endpoint has NO cache and runQuery drops the flag,
+      // so both lanes issue an identical git read on the wire — this phase's live
+      // win is the tab-gating in FormulaRunDetail (the diff refetches only while
+      // the Diff tab is open), not the flag. When a server diff cache lands, the
+      // cheap lane already lets it absorb bursts with no client change.
       refreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, true),
+      sseRefreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, false),
       onError: (err) => {
         if (runId !== undefined) reportRunDiffError('load diff', runId, err);
       },
@@ -52,18 +68,19 @@ export function useRunDiff(
   );
 
   if (runId === undefined || executionPath === undefined) {
-    return { kind: 'idle', refresh: noopRefresh };
+    return { kind: 'idle', refresh: noopRefresh, cheapRefresh: noopRefresh };
   }
   if (data?.kind === 'loaded') {
     return {
       kind: 'ready',
       diff: data.diff,
       refresh,
+      cheapRefresh,
       refreshState: refreshState(loading, error),
     };
   }
-  if (error !== null) return { kind: 'failed', error, refresh };
-  return { kind: 'loading', refresh };
+  if (error !== null) return { kind: 'failed', error, refresh, cheapRefresh };
+  return { kind: 'loading', refresh, cheapRefresh };
 }
 
 async function loadRunDiff(

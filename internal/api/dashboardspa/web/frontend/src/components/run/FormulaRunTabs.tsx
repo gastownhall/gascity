@@ -4,13 +4,34 @@ import type { RunDisplayNode } from 'gas-city-dashboard-shared';
 import type { RunDiffLoadState } from '../../hooks/useRunDiff';
 import { RunNodeEvidencePanel } from './RunNodeEvidencePanel';
 
+export type RunEvidenceTab = 'diff' | 'session';
+
 interface FormulaRunTabsProps {
   diff: RunDiffLoadState;
   selectedNode: RunDisplayNode | null;
+  /**
+   * Controlled active tab. When paired with {@link onActiveTabChange} the parent
+   * owns the tab so it can gate work on which view is visible (P5 gates the diff
+   * refresh on the Diff tab being active). Both must be supplied together; when
+   * omitted the component keeps its own internal tab state.
+   */
+  activeTab?: RunEvidenceTab;
+  onActiveTabChange?: (tab: RunEvidenceTab) => void;
 }
 
-export function FormulaRunTabs({ diff, selectedNode }: FormulaRunTabsProps) {
-  const [tab, setTab] = useState<'diff' | 'session'>('diff');
+export function FormulaRunTabs({
+  diff,
+  selectedNode,
+  activeTab,
+  onActiveTabChange,
+}: FormulaRunTabsProps) {
+  const [internalTab, setInternalTab] = useState<RunEvidenceTab>('diff');
+  const controlled = activeTab !== undefined && onActiveTabChange !== undefined;
+  const tab = controlled ? activeTab : internalTab;
+  const setTab = (next: RunEvidenceTab) => {
+    if (controlled) onActiveTabChange(next);
+    else setInternalTab(next);
+  };
   const activeTabId = `run-evidence-tab-${tab}`;
 
   return (

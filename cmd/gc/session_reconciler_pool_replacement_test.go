@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates is the
@@ -135,8 +136,8 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 		if got.Metadata["state"] != "drained" {
 			t.Fatalf("loser state = %q, want drained", got.Metadata["state"])
 		}
-		if poolSessionIsLive(got) {
-			t.Fatalf("drained loser still reports poolSessionIsLive=true; it would over-count supply: metadata=%v", got.Metadata)
+		if poolSessionIsLiveInfo(sessiontest.SeedBead(t, got)) {
+			t.Fatalf("drained loser still reports poolSessionIsLiveInfo=true; it would over-count supply: metadata=%v", got.Metadata)
 		}
 	})
 
@@ -217,8 +218,8 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 				if err != nil {
 					t.Fatalf("create phantom pool session: %v", err)
 				}
-				if live := poolSessionIsLive(phantom); live != tc.wantStillLive {
-					t.Fatalf("poolSessionIsLive(%s phantom) = %v, want %v", tc.name, live, tc.wantStillLive)
+				if live := poolSessionIsLiveInfo(sessiontest.SeedBead(t, phantom)); live != tc.wantStillLive {
+					t.Fatalf("poolSessionIsLiveInfo(%s phantom) = %v, want %v", tc.name, live, tc.wantStillLive)
 				}
 
 				// Still-ready routed bead delivered cross-store to the city store

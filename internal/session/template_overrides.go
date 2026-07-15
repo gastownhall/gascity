@@ -11,7 +11,23 @@ func ParseTemplateOverrides(metadata map[string]string) (map[string]string, erro
 	if metadata == nil {
 		return nil, nil
 	}
-	raw := strings.TrimSpace(metadata["template_overrides"])
+	return parseTemplateOverrides(metadata["template_overrides"])
+}
+
+// ParseTemplateOverridesFromInfo decodes the template_overrides mirror carried on
+// a session.Info (Info.TemplateOverrides — the raw JSON-object string). It is the
+// front-door read used by the reconciler config-drift hash path and the launch
+// path instead of cracking session.Metadata directly, and is byte-identical to
+// ParseTemplateOverrides for the same underlying bead.
+func ParseTemplateOverridesFromInfo(info Info) (map[string]string, error) {
+	return parseTemplateOverrides(info.TemplateOverrides)
+}
+
+// parseTemplateOverrides is the shared decode core over the raw template_overrides
+// JSON-object string: absent/blank/JSON-null/empty-object normalize to nil with no
+// error; malformed payloads surface an error naming the metadata key.
+func parseTemplateOverrides(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}

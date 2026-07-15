@@ -314,11 +314,8 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 		if info.store == nil {
 			continue
 		}
-		results, err := info.store.List(beads.ListQuery{
-			Label:    "order-tracking",
-			Sort:     beads.SortCreatedDesc,
-			TierMode: beads.TierBoth,
-		})
+		front := orders.NewStore(beads.OrdersStore{Store: info.store})
+		runs, err := front.ListTracking()
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -331,32 +328,28 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 
-		for _, bead := range results {
-			scopedName := orderTrackingScopedName(bead)
-			if scopedName == "" {
-				continue
-			}
-			scopeKind, scopeRef := orderTrackingScope(scopedName, cityScopeRef)
+		for _, run := range runs {
+			scopeKind, scopeRef := orderTrackingScope(run.Scoped, cityScopeRef)
 			if !includeAllForCity && (scopeKind != requestedScopeKind || scopeRef != requestedScopeRef) {
 				continue
 			}
 
-			updatedAt := orderTrackingUpdatedAt(info.store, bead, scopedName)
-			orderDef, ok := orderByScopedName[scopedName]
-			title := orderTrackingTitle(scopedName, orderDef, ok)
-			target := orderTrackingTarget(orderDef, ok, bead)
-			itemType := orderTrackingType(orderDef, ok, bead)
+			updatedAt := orderTrackingUpdatedAt(front, run)
+			orderDef, ok := orderByScopedName[run.Scoped]
+			title := orderTrackingTitle(run.Scoped, orderDef, ok)
+			target := orderTrackingTarget(orderDef, ok, run)
+			itemType := orderTrackingType(orderDef, ok, run)
 			item := monitorFeedItemResponse{
-				ID:                 "order:" + info.ref + ":" + bead.ID,
+				ID:                 "order:" + info.ref + ":" + run.ID,
 				Type:               itemType,
-				Status:             normalizeMonitorStatus(orderTrackingStatus(bead)),
+				Status:             normalizeMonitorStatus(run.State()),
 				Title:              title,
 				ScopeKind:          scopeKind,
 				ScopeRef:           scopeRef,
 				Target:             target,
-				StartedAt:          bead.CreatedAt.Format(time.RFC3339Nano),
+				StartedAt:          run.CreatedAt.Format(time.RFC3339Nano),
 				UpdatedAt:          updatedAt.Format(time.RFC3339Nano),
-				BeadID:             bead.ID,
+				BeadID:             run.ID,
 				StoreRef:           info.ref,
 				DetailAvailable:    ok && orderDef.IsExec(),
 				RunDetailAvailable: ok && orderDef.IsExec(),
@@ -376,27 +369,18 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	}, nil
 }
 
-func orderTrackingUpdatedAt(store beads.Store, tracking beads.Bead, scopedName string) time.Time {
-	updatedAt := tracking.CreatedAt
-	if store == nil || strings.TrimSpace(scopedName) == "" {
-		return updatedAt
-	}
-
-	runs, err := store.List(beads.ListQuery{
-		Label:    "order-run:" + scopedName,
-		Limit:    1,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil && len(runs) == 0 {
-		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", scopedName, tracking.ID, err)
+func orderTrackingUpdatedAt(front *orders.Store, run orders.OrderRun) time.Time {
+	updatedAt := run.CreatedAt
+	latest, found, err := front.LatestOpenRun(run.Scoped)
+	if err != nil && !found {
+		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", run.Scoped, run.ID, err)
 		return updatedAt
 	}
 	if err != nil {
-		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", scopedName, tracking.ID, err)
+		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", run.Scoped, run.ID, err)
 	}
-	if len(runs) > 0 && runs[0].CreatedAt.After(updatedAt) {
-		updatedAt = runs[0].CreatedAt
+	if found && latest.CreatedAt.After(updatedAt) {
+		updatedAt = latest.CreatedAt
 	}
 	return updatedAt
 }
@@ -468,15 +452,6 @@ func aggregateWorkflowRunStatus(root beads.Bead, beadsForRun []beads.Bead) strin
 	return best
 }
 
-func orderTrackingScopedName(bead beads.Bead) string {
-	for _, label := range bead.Labels {
-		if scopedName, ok := strings.CutPrefix(label, "order-run:"); ok && strings.TrimSpace(scopedName) != "" {
-			return strings.TrimSpace(scopedName)
-		}
-	}
-	return ""
-}
-
 func orderTrackingScope(scopedName, cityScopeRef string) (string, string) {
 	if idx := strings.LastIndex(scopedName, ":rig:"); idx >= 0 {
 		return "rig", scopedName[idx+5:]
@@ -494,7 +469,7 @@ func orderTrackingTitle(scopedName string, orderDef orders.Order, found bool) st
 	return scopedName
 }
 
-func orderTrackingTarget(orderDef orders.Order, found bool, bead beads.Bead) string {
+func orderTrackingTarget(orderDef orders.Order, found bool, run orders.OrderRun) string {
 	if found {
 		if orderDef.IsExec() {
 			return "exec"
@@ -506,7 +481,7 @@ func orderTrackingTarget(orderDef orders.Order, found bool, bead beads.Bead) str
 			return orderDef.Formula
 		}
 	}
-	if orderLabelsContainExec(bead.Labels) {
+	if run.Outcome.IsExec() {
 		return "exec"
 	}
 	return "formula"
@@ -519,45 +494,17 @@ func qualifyOrderFeedTarget(pool, rig string) string {
 	return rig + "/" + pool
 }
 
-func orderTrackingType(orderDef orders.Order, found bool, bead beads.Bead) string {
+func orderTrackingType(orderDef orders.Order, found bool, run orders.OrderRun) string {
 	if found {
 		if orderDef.IsExec() {
 			return "exec"
 		}
 		return "formula"
 	}
-	if orderLabelsContainExec(bead.Labels) {
+	if run.Outcome.IsExec() {
 		return "exec"
 	}
 	return "formula"
-}
-
-func orderTrackingStatus(bead beads.Bead) string {
-	if orderLabelsContainExecFailure(bead.Labels) ||
-		orderLabelsContainTriggerEnvFailure(bead.Labels) ||
-		containsString(bead.Labels, "wisp-canceled") ||
-		containsString(bead.Labels, "wisp-failed") {
-		return "failed"
-	}
-	if strings.TrimSpace(bead.Status) != "closed" {
-		return "active"
-	}
-	return "completed"
-}
-
-func orderLabelsContainExec(labels []string) bool {
-	return containsString(labels, "exec") ||
-		containsString(labels, "exec-failed") ||
-		containsString(labels, "exec-env-failed")
-}
-
-func orderLabelsContainExecFailure(labels []string) bool {
-	return containsString(labels, "exec-failed") ||
-		containsString(labels, "exec-env-failed")
-}
-
-func orderLabelsContainTriggerEnvFailure(labels []string) bool {
-	return containsString(labels, "trigger-env-failed")
 }
 
 // normalizeFeedLimit clamps a caller-supplied feed limit to a sensible

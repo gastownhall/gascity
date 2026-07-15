@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func isDrainedSessionMetadata(meta map[string]string) bool {
@@ -11,23 +12,35 @@ func isDrainedSessionMetadata(meta map[string]string) bool {
 	if state == "drained" {
 		return true
 	}
-	return state == "asleep" && strings.TrimSpace(meta["sleep_reason"]) == "drained"
+	return state == "asleep" && strings.TrimSpace(meta["sleep_reason"]) == string(sessionpkg.SleepReasonDrained)
 }
 
 func isDrainedSessionBead(session beads.Bead) bool {
 	return isDrainedSessionMetadata(session.Metadata)
 }
 
-// poolSessionIsLive reports whether a pool session bead represents an
-// actively running session for the runningSessions counter in
-// build_desired_state. An asleep or drained bead is not live — it holds
-// no active process and must not suppress the isCold cross-store wake
-// probe.
-func poolSessionIsLive(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["state"]) == "asleep" {
+// isDrainedSessionInfo is the session.Info mirror of isDrainedSessionBead. It
+// reads the RAW metadata state (Info.MetadataState) and sleep reason
+// (Info.SleepReason), matching the bead form's untrimmed-key reads.
+func isDrainedSessionInfo(i sessionpkg.Info) bool {
+	state := strings.TrimSpace(i.MetadataState)
+	if state == "drained" {
+		return true
+	}
+	return state == "asleep" && strings.TrimSpace(i.SleepReason) == string(sessionpkg.SleepReasonDrained)
+}
+
+// poolSessionIsLiveInfo reports whether a pool session represents an actively
+// running session for the runningSessions counter in build_desired_state. An
+// asleep or drained session is not live — it holds no active process and must
+// not suppress the isCold cross-store wake probe. It reads the RAW state
+// metadata (Info.MetadataState) and delegates the drained/asleep-drained check
+// to isDrainedSessionInfo, matching the untrimmed-key reads the bead carried.
+func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
+	if strings.TrimSpace(i.MetadataState) == "asleep" {
 		return false
 	}
-	if isDrainedSessionBead(session) {
+	if isDrainedSessionInfo(i) {
 		return false
 	}
 	return true
@@ -63,8 +76,27 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	}
 	reason := strings.TrimSpace(session.Metadata["sleep_reason"])
 	switch reason {
-	case "idle", "idle-timeout", sleepReasonCityStop, "failed-create", sleepReasonRuntimeMissing,
-		sleepReasonProviderTerminalError:
+	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
+		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
+		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError):
+		return true
+	}
+	return false
+}
+
+// isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
+func isPoolSessionSlotFreeableInfo(i sessionpkg.Info) bool {
+	if isDrainedSessionInfo(i) {
+		return true
+	}
+	if strings.TrimSpace(i.MetadataState) != "asleep" {
+		return false
+	}
+	reason := strings.TrimSpace(i.SleepReason)
+	switch reason {
+	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
+		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
+		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError):
 		return true
 	}
 	return false

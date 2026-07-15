@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { GC_EVENT_PREFIX, SCOPE_REF_RE } from 'gas-city-dashboard-shared';
 import type {
@@ -15,7 +15,7 @@ import { PageHeader } from '../components/PageHeader';
 import { RelatedEntities } from '../components/RelatedEntities';
 import { BeadDetailModal } from '../components/BeadDetailModal';
 import { FormulaRunDiagram } from '../components/run/FormulaRunDiagram';
-import { FormulaRunTabs } from '../components/run/FormulaRunTabs';
+import { FormulaRunTabs, type RunEvidenceTab } from '../components/run/FormulaRunTabs';
 import { StageLadder } from '../components/run/StageLadder';
 import { useNow } from '../contexts/NowContext';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
@@ -29,14 +29,6 @@ import { getActiveCity } from '../api/cityBase';
 
 const RUN_DETAIL_EVENT_PREFIXES = [GC_EVENT_PREFIX.bead, GC_EVENT_PREFIX.session] as const;
 const NO_EVENT_PREFIXES: readonly string[] = [];
-const TERMINAL_STATUSES: readonly RunNodeStatus[] = ['completed', 'done', 'failed', 'skipped'];
-const NON_TERMINAL_STATUSES: readonly RunNodeStatus[] = [
-  'pending',
-  'ready',
-  'running',
-  'active',
-  'blocked',
-];
 
 export function FormulaRunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -86,14 +78,48 @@ export function FormulaRunDetailPage() {
       : readyRun !== null && readyRun.refreshState.kind === 'failed'
         ? readyRun.refreshState.error
         : null;
+  // The Diff tab is the default-active view; the parent owns the tab so the P5
+  // gate below can suppress the diff's git-exec read while it is hidden.
+  const [activeTab, setActiveTab] = useState<RunEvidenceTab>('diff');
+  const diffTabActive = activeTab === 'diff';
+
+  // P4: the run DETAIL streams (useFormulaRunDetail owns the per-run SSE stream,
+  // which pushes the whole DTO with zero refetch), so when the stream is live
+  // this nudge lane refreshes ONLY the run DIFF (a separate git-exec read the
+  // stream does not carry). When the stream is UNAVAILABLE — a runtime with no
+  // EventSource, where detail would otherwise be fetched once then frozen — the
+  // nudge must ALSO refresh the detail so its auto-refresh survives.
+  //
+  // P5: the diff refresh is now (a) TTL-absorbed via cheapRefresh (refresh=false,
+  // the server diff TTL coalesces bursts) instead of the bypassing manual lane,
+  // and (b) gated on the Diff tab being visible — a nudge fires ZERO /diff POSTs
+  // while the tab is hidden. The manual Refresh button (refreshRunResources)
+  // keeps the bypass. Switching TO the Diff tab refreshes it once (below) so it
+  // is never stale from the nudges it skipped.
+  const streamActive = runDetail.streamActive;
   useGcEventRefresh(
     routeError ? NO_EVENT_PREFIXES : RUN_DETAIL_EVENT_PREFIXES,
-    () => void refreshRunResources(runDetail.refresh, runDiff.refresh),
+    () =>
+      void runDetailNudgeRefresh(
+        streamActive,
+        diffTabActive,
+        runDetail.refresh,
+        runDiff.cheapRefresh,
+      ),
     {
       matches: (event) => {
-        if (detail === null) return false;
         const identity = runEventIdentity(event);
-        if (isTerminalProgress(detail.progress) && identityIsAmbient(identity)) return false;
+        // F4: before the detail loads (still warming, or the first load
+        // failed), anchor the match on the ROUTE's runId. A printed deep link
+        // lands here before the just-slung run's bead events exist, and
+        // requiring a loaded detail meant those eventual events could never
+        // nudge the page out of the failed state. An identity-less (ambient)
+        // event also matches — a root bead's own events may carry no run
+        // identity — mirroring the non-terminal ambient behavior below.
+        if (detail === null) {
+          return runId !== undefined && (identity.runIds.size === 0 || identity.runIds.has(runId));
+        }
+        if (detail.progress.terminal && identityIsAmbient(identity)) return false;
         return formulaRunDetailEventMatches(identity, {
           runId: detail.runId,
           rootBeadId: detail.rootBeadId,
@@ -101,7 +127,33 @@ export function FormulaRunDetailPage() {
       },
     },
   );
+  // P5: switching TO the Diff tab refreshes the diff once so it is not stale from
+  // the nudges it skipped while hidden. The refresh lives in an effect (not the
+  // tab-change handler) so it is a pure state update — React StrictMode's updater
+  // double-invoke can't fire the git-exec read twice. The mount already loads the
+  // diff for the default-active Diff tab, so a ref-tracked "was the Diff tab last
+  // visible" flag suppresses the initial render and fires only on a genuine
+  // hidden→visible transition. cheapRefresh is captured in a ref so the effect
+  // depends only on visibility, never re-running on an unrelated re-render.
+  const diffCheapRefreshRef = useRef(runDiff.cheapRefresh);
+  diffCheapRefreshRef.current = runDiff.cheapRefresh;
+  const diffTabWasActiveRef = useRef(diffTabActive);
+  useEffect(() => {
+    const wasActive = diffTabWasActiveRef.current;
+    diffTabWasActiveRef.current = diffTabActive;
+    if (diffTabActive && !wasActive) void diffCheapRefreshRef.current();
+  }, [diffTabActive]);
+  const handleActiveTabChange = useCallback((next: RunEvidenceTab) => setActiveTab(next), []);
+
   const pageError = routeError ?? loadError;
+  // F4: while the initial load polls the graced warming 503 (reason
+  // 'unknown_run': the projection is warm but has never seen this run — the
+  // just-slung deep-link window, or a genuinely dead link), the interim copy
+  // must be honest about BOTH possibilities instead of an anonymous spinner. A
+  // reason-less warming 503 (the projection itself is cold-replaying) keeps
+  // the plain loading copy: the run is not in doubt there.
+  const warmingUnknownRun =
+    runDetail.kind === 'loading' && runDetail.warming?.reason === 'unknown_run';
   const { selectedNodeId, selectedNode, toggleNode } = useRunNodeSelection(
     detail,
     initialNodeId,
@@ -185,6 +237,11 @@ export function FormulaRunDetailPage() {
             <StageLadder stages={skeletonLane.stages} label={skeletonLane.title} />
             <p className="text-body text-fg-muted italic mt-8">Loading run detail.</p>
           </>
+        ) : warmingUnknownRun ? (
+          <p className="text-body text-fg-muted italic" role="status">
+            This run may still be being recorded — new work can take a couple of minutes to appear —
+            or it may no longer exist.
+          </p>
         ) : (
           <p className="text-body text-fg-muted italic">Loading formula run.</p>
         )
@@ -213,7 +270,12 @@ export function FormulaRunDetailPage() {
               selectedNodeId={selectedNodeId}
               onToggleNode={toggleNode}
             />
-            <FormulaRunTabs diff={runDiff} selectedNode={selectedNode} />
+            <FormulaRunTabs
+              diff={runDiff}
+              selectedNode={selectedNode}
+              activeTab={activeTab}
+              onActiveTabChange={handleActiveTabChange}
+            />
           </div>
           <RelatedEntities
             view={links.view}
@@ -241,22 +303,32 @@ async function refreshRunResources(
   await Promise.all([refreshDetail(), refreshDiff()]);
 }
 
-function identityIsAmbient(identity: ReturnType<typeof runEventIdentity>): boolean {
-  return identity.runIds.size === 0 && identity.rootBeadIds.size === 0;
+/**
+ * The bead/session nudge callback (P4/P5). When the per-run detail stream is live
+ * it carries detail on its own, so the nudge refreshes ONLY the run diff (a
+ * separate git-exec read the stream does not push) — avoiding a double detail
+ * refetch. When the stream is UNAVAILABLE (a runtime with no EventSource), detail
+ * would freeze after first paint, so the nudge must refresh detail AND diff.
+ *
+ * P5: the diff refresh is gated on the Diff tab being visible (`diffTabActive`) —
+ * a hidden Diff tab fires ZERO /diff POSTs — and `refreshDiff` is the TTL-absorbed
+ * cheapRefresh (refresh=false), not the bypassing manual lane. Exported so the
+ * branch is unit-tested directly without the coupled EventSource harness.
+ */
+export function runDetailNudgeRefresh(
+  streamActive: boolean,
+  diffTabActive: boolean,
+  refreshDetail: () => Promise<void>,
+  refreshDiff: () => Promise<void>,
+): Promise<void> {
+  const diff = diffTabActive ? refreshDiff : noopRefresh;
+  return streamActive ? diff() : refreshRunResources(refreshDetail, diff);
 }
 
-function isTerminalProgress(progress: FormulaRunProgress): boolean {
-  if (progress.visibleNodeCount <= 0) return false;
-  const nonTerminal = NON_TERMINAL_STATUSES.reduce(
-    (count, status) => count + (progress.statusCounts[status] ?? 0),
-    0,
-  );
-  if (nonTerminal > 0) return false;
-  const terminal = TERMINAL_STATUSES.reduce(
-    (count, status) => count + (progress.statusCounts[status] ?? 0),
-    0,
-  );
-  return terminal >= progress.visibleNodeCount;
+async function noopRefresh(): Promise<void> {}
+
+function identityIsAmbient(identity: ReturnType<typeof runEventIdentity>): boolean {
+  return identity.runIds.size === 0 && identity.rootBeadIds.size === 0;
 }
 
 function RunMetadata({ detail }: { detail: FormulaRunDetailData }) {

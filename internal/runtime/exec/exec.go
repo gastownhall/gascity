@@ -231,6 +231,10 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	}
 
 	dialogTimeout := runtime.StartupDialogTimeout()
+	// Gate external-CLAUDE.md-import auto-acceptance to imports within this
+	// session's own repository; an import that escapes the repo (a third-party
+	// or system path) is left for a human rather than auto-trusted.
+	trustRoot := runtime.WithTrustedImportRoot(runtime.WorkspaceImportTrustRoot(ctx, cfg.WorkDir))
 	snapshots, closeWatch, ok, err := p.startStartupWatch(ctx, name, startupWatchFirstEventTimeout())
 	if err != nil {
 		return err
@@ -238,6 +242,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	if ok {
 		streamObserved, streamErr := runtime.AcceptStartupDialogsFromStreamWithStatus(ctx, dialogTimeout, snapshots,
 			func(keys ...string) error { return p.SendKeys(name, keys...) },
+			trustRoot,
 		)
 		closeErr := closeWatch()
 		switch {
@@ -249,6 +254,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 			return runtime.AcceptStartupDialogs(ctx,
 				func(lines int) (string, error) { return p.Peek(name, lines) },
 				func(keys ...string) error { return p.SendKeys(name, keys...) },
+				trustRoot,
 			)
 		}
 	}
@@ -256,6 +262,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	return runtime.AcceptStartupDialogs(ctx,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
 		func(keys ...string) error { return p.SendKeys(name, keys...) },
+		trustRoot,
 	)
 }
 
@@ -438,6 +445,16 @@ func formatStartupWatchError(stderr string, err error) error {
 
 // DismissKnownDialogs best-effort clears known trust/permissions dialogs on a
 // running session using a bounded timeout.
+//
+// Unlike the startup path (dismissStartupDialogs), this mid-session clear is
+// deliberately not given a trusted import root: exec has no reliable
+// mid-session work-dir lookup for a running box (the workdir is provision-half
+// and is not persisted to queryable meta), so there is no exec analog of tmux's
+// GetPaneWorkDir here. Leaving the root empty means the external-CLAUDE.md-import
+// modal fails closed on this path — it is left for a human rather than
+// auto-accepted — which is the safe asymmetry: the common startup case is
+// gated, and the rare mid-session re-surface (resume/reattach) never
+// auto-trusts an unverified import.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
