@@ -993,6 +993,16 @@ type CityUnregisterSucceededPayload struct {
 	RequestId string `json:"request_id"`
 }
 
+// ConditionalWritesDegradedPayload defines model for ConditionalWritesDegradedPayload.
+type ConditionalWritesDegradedPayload struct {
+	BdVersion *string `json:"bd_version,omitempty"`
+	Mode      string  `json:"mode"`
+	Origin    string  `json:"origin"`
+	Reason    string  `json:"reason"`
+	StoreId   string  `json:"store_id"`
+	StoreKind string  `json:"store_kind"`
+}
+
 // ConfigAgentResponse defines model for ConfigAgentResponse.
 type ConfigAgentResponse struct {
 	Dir       *string `json:"dir,omitempty"`
@@ -3957,6 +3967,21 @@ type TypedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedEventStreamEnvelopeBeadsConditionalWritesDegraded.
+type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
+	Actor     string                           `json:"actor"`
+	Message   *string                          `json:"message,omitempty"`
+	Payload   ConditionalWritesDegradedPayload `json:"payload"`
+	RunId     *string                          `json:"run_id,omitempty"`
+	Seq       int64                            `json:"seq"`
+	SessionId *string                          `json:"session_id,omitempty"`
+	StepId    *string                          `json:"step_id,omitempty"`
+	Subject   *string                          `json:"subject,omitempty"`
+	Ts        time.Time                        `json:"ts"`
+	Type      string                           `json:"type"`
+	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeCityCreated defines model for TypedEventStreamEnvelopeCityCreated.
 type TypedEventStreamEnvelopeCityCreated struct {
 	Actor     string                   `json:"actor"`
@@ -5123,6 +5148,22 @@ type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts        time.Time                 `json:"ts"`
 	Type      string                    `json:"type"`
 	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded.
+type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
+	Actor     string                           `json:"actor"`
+	City      string                           `json:"city"`
+	Message   *string                          `json:"message,omitempty"`
+	Payload   ConditionalWritesDegradedPayload `json:"payload"`
+	RunId     *string                          `json:"run_id,omitempty"`
+	Seq       int64                            `json:"seq"`
+	SessionId *string                          `json:"session_id,omitempty"`
+	StepId    *string                          `json:"step_id,omitempty"`
+	Subject   *string                          `json:"subject,omitempty"`
+	Ts        time.Time                        `json:"ts"`
+	Type      string                           `json:"type"`
+	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityCreated defines model for TypedTaggedEventStreamEnvelopeCityCreated.
@@ -8048,6 +8089,32 @@ func (t *EventPayload) MergeCityUnregisterSucceededPayload(v CityUnregisterSucce
 	return err
 }
 
+// AsConditionalWritesDegradedPayload returns the union data inside the EventPayload as a ConditionalWritesDegradedPayload
+func (t EventPayload) AsConditionalWritesDegradedPayload() (ConditionalWritesDegradedPayload, error) {
+	var body ConditionalWritesDegradedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromConditionalWritesDegradedPayload overwrites any union data inside the EventPayload as the provided ConditionalWritesDegradedPayload
+func (t *EventPayload) FromConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeConditionalWritesDegradedPayload performs a merge with any union data inside the EventPayload, using the provided ConditionalWritesDegradedPayload
+func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
 func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
 	var body GroupCreatedEventPayload
@@ -9244,6 +9311,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadWorktreeReape
 // MergeTypedEventStreamEnvelopeBeadWorktreeReaped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadWorktreeReaped
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadWorktreeReaped(v TypedEventStreamEnvelopeBeadWorktreeReaped) error {
 	v.Type = "bead.worktree.reaped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
+	var body TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadsConditionalWritesDegraded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -11218,6 +11313,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.conditional_writes.degraded":
+		return t.AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
 		return t.AsTypedEventStreamEnvelopeCityCreated()
 	case "city.resumed":
@@ -11583,6 +11680,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadW
 // MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadWorktreeReaped
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped(v TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) error {
 	v.Type = "bead.worktree.reaped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13557,6 +13682,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.conditional_writes.degraded":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
 		return t.AsTypedTaggedEventStreamEnvelopeCityCreated()
 	case "city.resumed":

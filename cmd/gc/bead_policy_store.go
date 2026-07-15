@@ -35,7 +35,20 @@ type beadPolicyGraphStore struct {
 	applier beads.GraphApplyStore
 }
 
-var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
+var (
+	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+)
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target. The policy layer shapes creation and
+// reads; it does not intercept metadata writes (SetMetadata promotes from the
+// embedded store), so fenced writes resolve against the inner store — without
+// this declaration, interface embedding would hide the factory stamp and a
+// require deployment would silently collapse to legacy writes through the
+// wrapper. beadPolicyGraphStore inherits this via its embedded
+// *beadPolicyStore.
+func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)

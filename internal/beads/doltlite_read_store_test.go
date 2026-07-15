@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
@@ -1829,4 +1832,91 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 		t.Fatalf("open writable doltlite db: %v", err)
 	}
 	return writer
+}
+
+// TestDoltliteReadStoreConditionalWriterLoudlyDegrades pins the F2 fix
+// (ga-zj78gu): once BdStore implements ConditionalWriter, the methods promote
+// through DoltliteReadStore's embedded *BdStore and ConditionalWriterFor asserts
+// true — but DoltliteReadStore.Get reads via direct SQL and cannot supply a real
+// revision until bd #4682. So the four CAS methods are shadowed to return the
+// typed unsupported veto rather than false-promote a store whose read path and
+// fenced-write path disagree on the revision source. The interface stays
+// SATISFIED (no hiding wrapper); every verb just degrades loudly.
+func TestDoltliteReadStoreConditionalWriterLoudlyDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	w, ok := ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("DoltliteReadStore must still SATISFY ConditionalWriter (degrade is behavioral, not interface-stripping)")
+	}
+
+	if err := w.UpdateIfMatch("ga-1", 1, UpdateOpts{}); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("UpdateIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.CloseIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CloseIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.DeleteIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("DeleteIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	ok2, err := w.CompareAndSetMetadataKey("ga-1", "k", "", "v")
+	if ok2 || !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CompareAndSetMetadataKey: got (%v, %v), want (false, ErrConditionalWriteUnsupported)", ok2, err)
+	}
+
+	// Completeness guard: iterate EVERY method on the ConditionalWriter interface
+	// via reflection and assert each degrades to unsupported. A CAS verb added to
+	// the interface later that is not shadowed here would instead promote from the
+	// embedded *BdStore, run the capability probe against the fatal-on-call
+	// backing runner, and fail loudly — closing the F2 false-promote class for
+	// future verbs, not just today's four.
+	cwType := reflect.TypeOf((*ConditionalWriter)(nil)).Elem()
+	wv := reflect.ValueOf(w)
+	for i := 0; i < cwType.NumMethod(); i++ {
+		name := cwType.Method(i).Name
+		method := wv.MethodByName(name)
+		in := make([]reflect.Value, method.Type().NumIn())
+		for j := range in {
+			in[j] = reflect.Zero(method.Type().In(j))
+		}
+		out := method.Call(in)
+		last, _ := out[len(out)-1].Interface().(error)
+		if !IsConditionalWriteUnsupported(last) {
+			t.Fatalf("ConditionalWriter.%s degraded to %v, want ErrConditionalWriteUnsupported (unshadowed promoted verb?)", name, last)
+		}
+	}
+}
+
+// TestDoltliteReadStoreResolveConditionalWriterDegrades pins the seam half of
+// F2: even when the embedded BdStore's capability probe would report capable,
+// DoltliteReadStore's prober shadow keeps ResolveConditionalWriter on the
+// degrade/refuse path — its SQL read path carries no bead revision, so a
+// promoted "capable" verdict would false-promote a store whose reads and
+// fenced writes disagree on the revision source. The fatal-on-call backing
+// runner doubles as the teeth: if the shadow ever disappears, the promoted
+// probe runs four subprocesses through it and the test dies loudly.
+func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	store.stampConditionalWritesMode(gate.Auto, false)
+	w, diag, err := ResolveConditionalWriter(store)
+	if w != nil || err != nil {
+		t.Fatalf("auto over doltlite = (%v, _, %v), want (nil, diag, nil)", w, err)
+	}
+	if diag == nil || diag.PreflightGate != "conditional_writes" {
+		t.Fatalf("diag = %+v, want the conditional_writes degrade diagnostic", diag)
+	}
+	if !strings.Contains(diag.PreflightReason, "revision") {
+		t.Fatalf("PreflightReason = %q, want the no-revision F2 reason", diag.PreflightReason)
+	}
+
+	store.stampConditionalWritesMode(gate.Require, false)
+	w, diag, err = ResolveConditionalWriter(store)
+	if w != nil || diag == nil || !IsConditionalWritesRequired(err) {
+		t.Fatalf("require over doltlite = (%v, %v, %v), want (nil, diag, typed refusal)", w, diag, err)
+	}
 }

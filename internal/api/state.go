@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -256,6 +257,15 @@ type WebhookDispatchProvider interface {
 	// WebhookDispatcher returns the order dispatcher, or nil when webhook dispatch
 	// is unavailable for this city.
 	WebhookDispatcher() orderdispatch.Dispatcher
+}
+
+// RolloutFlagsProvider is optionally implemented by State to expose the
+// boot-latched rollout-gate snapshot resolved once at controller construction
+// (internal/rollout). Modeled on RawConfigProvider/WebhookDispatchProvider so
+// the test fakes are not forced to grow it: a State without it gets a
+// Resolve-from-Config() fallback at Server construction (see newServer).
+type RolloutFlagsProvider interface {
+	RolloutFlags() rollout.Flags
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()

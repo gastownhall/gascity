@@ -1480,6 +1480,37 @@
         ],
         "type": "object"
       },
+      "ConditionalWritesDegradedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bd_version": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "store_id": {
+            "type": "string"
+          },
+          "store_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_id",
+          "store_kind",
+          "mode",
+          "origin",
+          "reason"
+        ],
+        "type": "object"
+      },
       "ConfigAgentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2329,6 +2360,9 @@
           },
           {
             "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -8812,6 +8846,7 @@
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.conditional_writes.degraded": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
@@ -8907,6 +8942,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
@@ -9526,6 +9564,57 @@
         "title": "TypedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.conditional_writes.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope beads.conditional_writes.degraded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -10043,7 +10132,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "beads.conditional_writes.degraded"
               ]
             },
             "type": "string"
@@ -13134,6 +13224,7 @@
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.conditional_writes.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
@@ -13229,6 +13320,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
@@ -13880,6 +13974,61 @@
         "title": "TypedTaggedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.conditional_writes.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope beads.conditional_writes.degraded",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -14432,7 +14581,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "beads.conditional_writes.degraded"
               ]
             },
             "type": "string"

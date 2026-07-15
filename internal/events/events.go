@@ -227,6 +227,17 @@ const (
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
 	EmergencyAcked    = "emergency.acked"
+
+	// BeadsConditionalWritesDegraded fires when a store resolved under the
+	// beads.conditional_writes rollout gate at mode=auto is vetoed by runtime
+	// capability (bd lacks --if-revision, a runtime unsupported latch, or a
+	// revision-less read path) and loud-degrades to the legacy write path.
+	// Latched once per store instance by the emitter so log/event storms are
+	// structurally impossible (DESIGN §12.2). The name mirrors the FLAG key
+	// beads.conditional_writes (hence plural beads., unlike the per-bead
+	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
+	// emission is wired in stage 3 — nothing emits it yet.
+	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -271,6 +282,7 @@ var KnownEventTypes = []string{
 	StoreDiskWarn, StoreDiskCritical,
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
+	BeadsConditionalWritesDegraded,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

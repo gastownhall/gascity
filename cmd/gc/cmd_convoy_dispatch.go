@@ -439,7 +439,9 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 		return openStoreAtForCity(storePath, cityPath)
 	}
 	if samePath(scopeRoot, cityPath) {
-		return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+		return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
+			return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+		})
 	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -448,13 +450,17 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
 			if samePath(rigPath, scopeRoot) {
-				return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+				return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
+					return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+				})
 			}
 		}
 	}
 	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
 	// still need write-capable bd commands with auto-export suppressed.
-	return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+	return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
+		return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+	})
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,

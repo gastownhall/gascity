@@ -334,7 +334,40 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	if err != nil || attemptNum <= current {
 		return nil
 	}
-	return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
+	if resolveErr != nil {
+		return fmt.Errorf("syncing control epoch on %s: %w", control.ID, resolveErr)
+	}
+	if writer == nil {
+		return store.SetMetadata(control.ID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(attemptNum))
+	}
+	// Bounded to one re-issue from a fresh read: losing the CAS is benign
+	// (another processor advanced the epoch first), but a conflict that keeps
+	// recurring with a still-stale epoch is cross-key revision interference
+	// and must surface as transient rather than loop (level-triggered passes
+	// re-enter).
+	const syncAttempts = 2
+	expected := current
+	for attempt := 1; attempt <= syncAttempts; attempt++ {
+		ok, casErr := writer.CompareAndSetMetadataKey(control.ID, beadmeta.ControlEpochMetadataKey,
+			strconv.Itoa(expected), strconv.Itoa(attemptNum))
+		if ok {
+			return nil
+		}
+		if casErr != nil && !beads.IsPreconditionFailed(casErr) {
+			return fmt.Errorf("syncing control epoch on %s: %w", control.ID, casErr)
+		}
+		refreshed, getErr := store.Get(control.ID)
+		if getErr != nil {
+			return getErr
+		}
+		refreshedEpoch, err := strconv.Atoi(strings.TrimSpace(refreshed.Metadata[beadmeta.ControlEpochMetadataKey]))
+		if err != nil || refreshedEpoch >= attemptNum {
+			return nil
+		}
+		expected = refreshedEpoch
+	}
+	return fmt.Errorf("syncing control epoch on %s: conditional advance kept conflicting below attempt %d", control.ID, attemptNum)
 }
 
 func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
@@ -399,6 +432,16 @@ func IsTransientControllerError(err error) bool {
 		return true
 	}
 	if errors.Is(err, errTransientControllerBoundary) {
+		return true
+	}
+	// Conditional-write contention and capability loss are level-triggered
+	// re-entry classes, never terminal dispositions: exhaustion means the
+	// store could not get a clean shot (re-enter and retry), and a runtime
+	// unsupported latch means the next resolve degrades (auto) or refuses
+	// (require) — neither is a broken control. A require refusal
+	// (ConditionalWritesRequiredError) is deliberately NOT here: it is a
+	// persistent policy refusal and stays hard/fail-closed.
+	if beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -568,6 +611,16 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		ExpectedEpoch:  epoch,
 	})
 	if err != nil {
+		// An epoch conflict is a ROUTINE convergence signal under the CAS-last
+		// fence: another processor won this attempt, and the next
+		// level-triggered pass re-enters and converges on the winner through
+		// findExistingAttach. It must classify transient — the partial-attach
+		// hard path below exists for genuinely broken (crash-partial)
+		// attempts, and routing a normal fence loser there terminally closes
+		// the shared control, making the promised convergence impossible.
+		if errors.Is(err, molecule.ErrEpochConflict) {
+			return markTransientControllerBoundaryError(fmt.Errorf("attach epoch conflict on %s attempt %d (fence lost; converging next pass): %w", control.ID, attemptNum, err))
+		}
 		failedRootID, lookupErr := failedAttemptAttachRootID(store, control, attemptNum)
 		if lookupErr != nil {
 			return &failedAttemptAttachLookupError{lookupErr: lookupErr, err: err}

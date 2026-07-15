@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -1336,6 +1337,16 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false)
+}
+
+// openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
+// conditional-writes mode supplied by the caller instead of re-resolved from
+// the on-disk config. Controller-owned reopens use it to carry the
+// boot-latched mode: re-resolving from disk on a reload would flip the city
+// store's write discipline mid-process while rig stores keep the boot mode —
+// exactly the mixed-writer state the process latch exists to prevent.
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1350,16 +1361,22 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
-		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
+	mode := resolvedConditionalWritesMode(cfg)
+	if haveMode {
+		mode = modeOverride
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:        scopeRoot,
-		CityPath:         runtimeCityPath,
-		Provider:         provider,
-		PreflightChecker: newBeadsPreflightChecker(runtimeCityPath, provider),
-		Logger:           slog.Default(),
+		ScopeRoot:         scopeRoot,
+		CityPath:          runtimeCityPath,
+		Provider:          provider,
+		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
+		Logger:            slog.Default(),
+		ConditionalWrites: mode,
+		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
+			flags, resolved := resolvedConditionalWritesFlags(cfg)
+			return lazyConditionalWritesDegradeEmitter(
+				runtimeCityPath, conditionalWritesStoreID(scopeRoot, runtimeCityPath), flags, resolved)
+		}(),
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},

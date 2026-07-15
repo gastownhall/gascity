@@ -101,7 +101,9 @@ const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 // actually unsets. TestDoltPortVarsAreLeakVectors enforces that pairing.
 // Test-gate vars (GC_FAST_UNIT, GC_REAL_PROCESS_SIGNAL_TESTS,
 // GC_DOLT_REAL_BINARY, ...) do NOT belong here; they're how tests opt into
-// expensive paths.
+// expensive paths. Rollout-gate env overrides (internal/rollout registry
+// EnvOverride names) DO belong here: a developer's shell value must not leak in
+// and non-deterministically flip a gate's resolved mode during a test.
 var LeakVectorVars = []string{
 	"BEADS_DIR",
 	"BEADS_DOLT_PASSWORD",
@@ -113,6 +115,7 @@ var LeakVectorVars = []string{
 	"GC_AGENT",
 	"GC_ALIAS",
 	"GC_BEADS",
+	"GC_BEADS_CONDITIONAL_WRITES",
 	"GC_BEADS_SCOPE_ROOT",
 	"GC_BIN",
 	"GC_CITY",
