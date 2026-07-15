@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 522
+baseline_calls = 523
 baseline_files = 152
 reported_calls = 495
 reported_files = 135
@@ -38,7 +38,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 395
+baseline_calls = 396
 baseline_files = 106
 reported_calls = 380
 reported_files = 98
@@ -189,6 +189,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "cmd/gc TestMain is the checked package-level Medium owner"
 resource_owner = "only environment calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "Make/provider and suite-contract proof is a checked Medium owner"
+resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
+migration_target = "P0.1"
 expires = "2026-10-01"
 
 # Small-debt rows apply the exact Medium filter while the source-debt rows
