@@ -3,8 +3,10 @@ package subprocess
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // shortTempDir returns a temp directory short enough for Unix socket paths
@@ -30,6 +33,64 @@ func shortTempDir(t *testing.T) string {
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
+}
+
+func requirePrivateSocketDirectory(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat(%q): %v", path, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%q mode = %v, want directory", path, info.Mode())
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("%q permissions = %04o, want 0700", path, got)
+	}
+	if special := info.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky); special != 0 {
+		t.Fatalf("%q special mode bits = %v, want none", path, special)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("%q ownership metadata = %T, want *syscall.Stat_t", path, info.Sys())
+	}
+	if got, want := stat.Uid, uint32(os.Geteuid()); got != want {
+		t.Fatalf("%q uid = %d, want %d", path, got, want)
+	}
+}
+
+func ensurePrivateFallbackRootForTest(t *testing.T) string {
+	t.Helper()
+	root := privateFallbackRoot(os.Geteuid())
+	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
+		t.Fatalf("Mkdir private fallback root: %v", err)
+	}
+	requirePrivateSocketDirectory(t, root)
+	return root
+}
+
+func requirePrivateFallbackRejected(t *testing.T, p *Provider, name string) {
+	t.Helper()
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "Stop", run: func() error { return p.Stop(name) }},
+		{name: "Interrupt", run: func() error { return p.Interrupt(name) }},
+		{name: "ListRunning", run: func() error {
+			_, err := p.ListRunning("")
+			return err
+		}},
+		{name: "sendSocketCommand", run: func() error {
+			return p.sendSocketCommand(name, "ping", testutil.ExecRaceTimeout)
+		}},
+	}
+	for _, check := range checks {
+		err := check.run()
+		if err == nil || !strings.Contains(err.Error(), "private socket directory") {
+			t.Errorf("%s error = %v, want private socket directory validation", check.name, err)
+		}
+	}
 }
 
 func TestStartCreatesProcess(t *testing.T) {
@@ -127,6 +188,7 @@ func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("TMPDIR", root)
 
 	longDir := filepath.Join(root, strings.Repeat("p", 120), "runtime", "gc", "subprocess", "hash")
 	if err := os.MkdirAll(longDir, 0o755); err != nil {
@@ -162,6 +224,293 @@ func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
 	if len(got) != 1 || got[0] != name {
 		t.Fatalf("ListRunning = %#v, want [%q]", got, name)
 	}
+}
+
+func TestFallbackKeepsBindableLegacyTempPathPastConservativeLimit(t *testing.T) {
+	root := shortTempDir(t)
+	longDir := filepath.Join(root, strings.Repeat("p", socketPathLimit+32))
+	owner := NewProviderWithDir(longDir)
+	observer := NewProviderWithDir(longDir)
+	const name = "bindable-legacy-fallback"
+
+	var bindableTemp string
+	for length := 1; length <= socketPathLimit; length++ {
+		candidate := filepath.Join(root, strings.Repeat("t", length))
+		probe := filepath.Join(candidate, fallbackSocketDirName, owner.fallbackLeaf(), owner.sockKey(name)+".sock")
+		if len(probe) > socketPathLimit && len(probe) <= nativeSocketPathLimit {
+			bindableTemp = candidate
+			break
+		}
+	}
+	if bindableTemp == "" {
+		t.Fatalf("could not construct fallback path in (%d, %d]", socketPathLimit, nativeSocketPathLimit)
+	}
+	if err := os.MkdirAll(bindableTemp, 0o700); err != nil {
+		t.Fatalf("MkdirAll bindable TMPDIR: %v", err)
+	}
+	t.Setenv("TMPDIR", bindableTemp)
+
+	fallback := owner.fallbackDir()
+	wantFallback := filepath.Join(bindableTemp, fallbackSocketDirName, owner.fallbackLeaf())
+	if fallback != wantFallback {
+		t.Fatalf("fallback = %q, want legacy path %q", fallback, wantFallback)
+	}
+	if got := len(owner.sockPath(name)); got <= socketPathLimit || got > nativeSocketPathLimit {
+		t.Fatalf("legacy fallback socket length = %d, want (%d, %d]", got, socketPathLimit, nativeSocketPathLimit)
+	}
+	t.Cleanup(func() {
+		_ = owner.Stop(name)
+		_ = observer.Stop(name)
+		_ = syscall.Rmdir(fallback)
+	})
+
+	if err := owner.Start(context.Background(), name, runtime.Config{Command: "sleep 300"}); err != nil {
+		t.Fatalf("Start on native-addressable legacy fallback: %v", err)
+	}
+	if _, err := os.Lstat(owner.sockPath(name)); err != nil {
+		t.Fatalf("Lstat legacy fallback socket: %v", err)
+	}
+	if !observer.IsRunning(name) {
+		t.Fatal("native-addressable legacy fallback is not visible through another provider")
+	}
+	if err := observer.Stop(name); err != nil {
+		t.Fatalf("cross-provider Stop on native-addressable legacy fallback: %v", err)
+	}
+}
+
+func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
+	root := shortTempDir(t)
+	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
+	if err := os.MkdirAll(longTemp, 0o700); err != nil {
+		t.Fatalf("MkdirAll long TMPDIR: %v", err)
+	}
+	t.Setenv("TMPDIR", longTemp)
+	const name = "x"
+
+	var legacyDir string
+	for length := 1; length <= socketPathLimit; length++ {
+		candidate := filepath.Join(root, strings.Repeat("p", length))
+		canonicalProbe := filepath.Join(candidate, "s00000000.sock")
+		legacyPath := filepath.Join(candidate, name+".sock")
+		if len(canonicalProbe) > socketPathLimit && len(legacyPath) <= nativeSocketPathLimit {
+			legacyDir = candidate
+			break
+		}
+	}
+	if legacyDir == "" {
+		t.Fatal("could not construct addressable legacy path with fallback canonical path")
+	}
+	p := NewProviderWithDir(legacyDir)
+	privateLeaf := p.fallbackDir()
+	if filepath.Dir(privateLeaf) != privateFallbackRoot(os.Geteuid()) {
+		t.Fatalf("fallback = %q, want private root", privateLeaf)
+	}
+	if _, err := os.Lstat(privateLeaf); !os.IsNotExist(err) {
+		t.Fatalf("private fallback before discovery: %v, want not exist", err)
+	}
+
+	gotCommand := startRecordingControlSocket(t, p.legacySockPath(name), "ok\n", 5)
+	t.Cleanup(func() { _ = syscall.Rmdir(privateLeaf) })
+
+	startCalls := 0
+	p.ops.start = func(*exec.Cmd) error {
+		startCalls++
+		return errors.New("process start must not be reached")
+	}
+	if !p.IsRunning(name) {
+		t.Fatal("IsRunning missed addressable legacy socket")
+	}
+	names, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning legacy socket: %v", err)
+	}
+	if len(names) != 1 || names[0] != name {
+		t.Fatalf("ListRunning = %#v, want [%q]", names, name)
+	}
+	if err := p.Interrupt(name); err != nil {
+		t.Fatalf("Interrupt legacy socket: %v", err)
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop legacy socket: %v", err)
+	}
+	err = p.Start(context.Background(), name, runtime.Config{Command: "sleep 300"})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start error = %v, want ErrSessionExists from legacy socket", err)
+	}
+	if startCalls != 0 {
+		t.Fatalf("process start calls = %d, want 0", startCalls)
+	}
+	for _, want := range []string{"ping", "ping", "interrupt", "stop", "ping"} {
+		select {
+		case got := <-gotCommand:
+			if got != want {
+				t.Fatalf("legacy socket command = %q, want %q", got, want)
+			}
+		case <-time.After(testutil.ExecRaceTimeout):
+			t.Fatalf("timed out waiting for legacy socket command %q", want)
+		}
+	}
+}
+
+func TestOverlongTempDirUsesPrivateFallbackAcrossProviders(t *testing.T) {
+	root := shortTempDir(t)
+	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
+	if err := os.MkdirAll(longTemp, 0o700); err != nil {
+		t.Fatalf("MkdirAll long TMPDIR: %v", err)
+	}
+	t.Setenv("TMPDIR", longTemp)
+
+	longDir := filepath.Join(root, strings.Repeat("p", socketPathLimit+32))
+	owner := NewProviderWithDir(longDir)
+	observer := NewProviderWithDir(longDir)
+	const name = "private-fallback-lifecycle"
+	fallback := owner.fallbackDir()
+	privateRoot := privateFallbackRoot(os.Geteuid())
+	sentinel := filepath.Join(privateRoot, owner.fallbackLeaf()+".sentinel")
+	t.Cleanup(func() {
+		_ = owner.Stop(name)
+		_ = observer.Stop(name)
+		_ = os.Remove(sentinel)
+		if err := syscall.Rmdir(fallback); err != nil && !os.IsNotExist(err) {
+			t.Errorf("Rmdir private fallback leaf: %v", err)
+		}
+	})
+
+	legacySocket := filepath.Join(longTemp, fallbackSocketDirName, owner.fallbackLeaf(), owner.sockKey(name)+".sock")
+	if len(legacySocket) <= nativeSocketPathLimit {
+		t.Fatalf("legacy fallback socket length = %d, want greater than %d", len(legacySocket), nativeSocketPathLimit)
+	}
+	if got, want := fallback, filepath.Join(privateRoot, owner.fallbackLeaf()); got != want {
+		t.Fatalf("fallback = %q, want private path %q", got, want)
+	}
+	if err := owner.Start(context.Background(), name, runtime.Config{Command: "sleep 300"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	requirePrivateSocketDirectory(t, privateRoot)
+	requirePrivateSocketDirectory(t, fallback)
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("WriteFile private-root sentinel: %v", err)
+	}
+
+	if !observer.IsRunning(name) {
+		t.Fatal("private fallback session is not visible through another provider")
+	}
+	names, err := observer.ListRunning("")
+	if err != nil {
+		t.Fatalf("cross-provider ListRunning: %v", err)
+	}
+	if len(names) != 1 || names[0] != name {
+		t.Fatalf("cross-provider ListRunning = %#v, want [%q]", names, name)
+	}
+	if err := observer.Stop(name); err != nil {
+		t.Fatalf("cross-provider Stop: %v", err)
+	}
+
+	requirePrivateSocketDirectory(t, fallback)
+	if contents, err := os.ReadFile(sentinel); err != nil || string(contents) != "keep" {
+		t.Fatalf("private-root sentinel after Stop: contents=%q err=%v", contents, err)
+	}
+	if info, err := os.Stat(longDir); err != nil || !info.IsDir() {
+		t.Fatalf("caller-owned directory after Stop: info=%v err=%v", info, err)
+	}
+}
+
+func TestPrivateFallbackRejectsHostilePrecreation(t *testing.T) {
+	root := shortTempDir(t)
+	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
+	if err := os.MkdirAll(longTemp, 0o700); err != nil {
+		t.Fatalf("MkdirAll long TMPDIR: %v", err)
+	}
+	t.Setenv("TMPDIR", longTemp)
+	privateRoot := ensurePrivateFallbackRootForTest(t)
+
+	t.Run("symlink leaf", func(t *testing.T) {
+		longDir := filepath.Join(root, "symlink-state", strings.Repeat("p", socketPathLimit+32))
+		p := NewProviderWithDir(longDir)
+		const name = "hostile-symlink-fallback"
+		fallback := p.fallbackDir()
+		if filepath.Dir(fallback) != privateRoot {
+			t.Fatalf("fallback parent = %q, want %q", filepath.Dir(fallback), privateRoot)
+		}
+
+		target := shortTempDir(t)
+		socketTarget := filepath.Join(target, p.sockKey(name)+".sock")
+		nameTarget := filepath.Join(target, p.sockKey(name)+".name")
+		for path, contents := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatalf("WriteFile hostile target %q: %v", path, err)
+			}
+		}
+		if err := os.Symlink(target, fallback); err != nil {
+			t.Fatalf("Symlink fallback leaf: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Remove(fallback) })
+
+		startCalls := 0
+		p.ops.start = func(*exec.Cmd) error {
+			startCalls++
+			return errors.New("process start must not be reached")
+		}
+		err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 300"})
+		if err == nil || !strings.Contains(err.Error(), "private socket directory") {
+			t.Fatalf("Start error = %v, want private socket directory validation", err)
+		}
+		if startCalls != 0 {
+			t.Fatalf("process start calls = %d, want 0", startCalls)
+		}
+		requirePrivateFallbackRejected(t, p, name)
+		for path, want := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
+			contents, err := os.ReadFile(path)
+			if err != nil || string(contents) != want {
+				t.Errorf("hostile target %q: contents=%q err=%v, want %q", path, contents, err, want)
+			}
+		}
+	})
+
+	t.Run("permissive leaf", func(t *testing.T) {
+		longDir := filepath.Join(root, "permissive-state", strings.Repeat("p", socketPathLimit+32))
+		p := NewProviderWithDir(longDir)
+		const name = "hostile-permissive-fallback"
+		fallback := p.fallbackDir()
+		if err := os.Mkdir(fallback, 0o755); err != nil {
+			t.Fatalf("Mkdir permissive fallback leaf: %v", err)
+		}
+		if err := os.Chmod(fallback, 0o755); err != nil {
+			t.Fatalf("Chmod permissive fallback leaf: %v", err)
+		}
+		socketTarget := filepath.Join(fallback, p.sockKey(name)+".sock")
+		nameTarget := filepath.Join(fallback, p.sockKey(name)+".name")
+		for path, contents := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatalf("WriteFile hostile target %q: %v", path, err)
+			}
+		}
+		t.Cleanup(func() {
+			_ = os.Remove(socketTarget)
+			_ = os.Remove(nameTarget)
+			_ = syscall.Rmdir(fallback)
+		})
+
+		startCalls := 0
+		p.ops.start = func(*exec.Cmd) error {
+			startCalls++
+			return errors.New("process start must not be reached")
+		}
+		err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 300"})
+		if err == nil || !strings.Contains(err.Error(), "private socket directory") {
+			t.Fatalf("Start error = %v, want private socket directory validation", err)
+		}
+		if startCalls != 0 {
+			t.Fatalf("process start calls = %d, want 0", startCalls)
+		}
+		requirePrivateFallbackRejected(t, p, name)
+		for path, want := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
+			contents, err := os.ReadFile(path)
+			if err != nil || string(contents) != want {
+				t.Errorf("hostile target %q: contents=%q err=%v, want %q", path, contents, err, want)
+			}
+		}
+	})
 }
 
 func TestStopUnknownSessionWithVeryLongSocketDirIsIdempotent(t *testing.T) {
@@ -603,8 +952,9 @@ func TestStopBySocket_PreservesCanonicalErrorWhenLegacyPathIsTooLong(t *testing.
 	if got := len(p.legacySockPath(name)); got <= socketPathLimit {
 		t.Fatalf("legacy socket path length = %d, want greater than %d", got, socketPathLimit)
 	}
-	if err := os.MkdirAll(filepath.Dir(p.sockPath(name)), 0o755); err != nil {
-		t.Fatalf("MkdirAll canonical socket directory: %v", err)
+	euid := os.Geteuid()
+	if err := p.ensureSocketDir(p.socketDirForEUID(euid), euid); err != nil {
+		t.Fatalf("ensure canonical socket directory: %v", err)
 	}
 	_ = startRejectingControlSocket(t, p.sockPath(name))
 
@@ -615,6 +965,10 @@ func TestStopBySocket_PreservesCanonicalErrorWhenLegacyPathIsTooLong(t *testing.
 }
 
 func startRejectingControlSocket(t *testing.T, path string) <-chan string {
+	return startRecordingControlSocket(t, path, "nope\n", 1)
+}
+
+func startRecordingControlSocket(t *testing.T, path, response string, commandBuffer int) <-chan string {
 	t.Helper()
 	lis, err := net.Listen("unix", path)
 	if err != nil {
@@ -626,19 +980,20 @@ func startRejectingControlSocket(t *testing.T, path string) <-chan string {
 		_ = os.Remove(filepath.Dir(path))
 	})
 
-	gotCommand := make(chan string, 1)
+	gotCommand := make(chan string, commandBuffer)
 	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			line, readErr := bufio.NewReader(conn).ReadString('\n')
+			if readErr == nil {
+				gotCommand <- strings.TrimSpace(line)
+			}
+			_, _ = conn.Write([]byte(response))
+			_ = conn.Close()
 		}
-		defer conn.Close() //nolint:errcheck
-
-		line, readErr := bufio.NewReader(conn).ReadString('\n')
-		if readErr == nil {
-			gotCommand <- strings.TrimSpace(line)
-		}
-		_, _ = conn.Write([]byte("nope\n"))
 	}()
 	return gotCommand
 }
@@ -786,6 +1141,24 @@ func TestCrossProcessInterruptBySocket(t *testing.T) {
 
 	// sleep may or may not die on SIGINT depending on shell;
 	// just verify the interrupt was sent without error.
+}
+
+func TestInterruptPreservesBestEffortForNormalSocketProtocolError(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "reject-interrupt"
+	gotCommand := startRejectingControlSocket(t, p.sockPath(name))
+
+	if err := p.Interrupt(name); err != nil {
+		t.Fatalf("Interrupt returned ordinary socket protocol error: %v", err)
+	}
+	select {
+	case got := <-gotCommand:
+		if got != "interrupt" {
+			t.Fatalf("socket command = %q, want interrupt", got)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("timed out waiting for interrupt command")
+	}
 }
 
 func TestIsRunningViaSocket(t *testing.T) {
