@@ -240,6 +240,14 @@ go run ./scripts/test-timing-summary.go /path/to/downloaded-artifacts \
   >> "$GITHUB_STEP_SUMMARY"
 ```
 
+Use the same strict parser to emit the versioned machine-readable history
+snapshot:
+
+```bash
+go run ./scripts/test-timing-summary.go --format=json \
+  /path/to/downloaded-artifacts > timing-history-v1.json
+```
+
 The summarizer recursively reads schema-v1 JSON artifacts, deduplicates
 identical downloads, and rejects conflicting artifacts with the same workflow,
 run, attempt, job, shard, and variant identity. It emits the ten slowest
@@ -252,12 +260,28 @@ is ranked. Statistics use successful durations only while retaining failure
 and skip counts. Percentiles use the empirical nearest-rank method, variance
 is population variance in seconds squared, and samples are not trimmed.
 
+The JSON snapshot groups units by that same comparable profile and preserves
+every successful observation with its exact artifact identity and tested SHA.
+Profiles and units have canonical ordering. Observations compare the raw string
+tuple `(workflow, run_id, run_attempt, job, shard_id, variant)` lexically, then
+tested SHA and duration; run IDs and attempts are opaque strings, so `002`,
+`10`, and `2` remain distinct and sort in that order. Identical artifact
+downloads increment `duplicate_artifact_count` without duplicating samples.
+Units that have only failed or skipped remain present with empty successful
+observations and `null` statistics. `p75_authoritative` becomes true at five
+successful samples and `p95_authoritative` at twenty. `last_success_sha` is the
+SHA of the final successful observation in canonical artifact-identity order;
+schema v1 has no trustworthy timestamp, so this field is deterministic but not
+a claim about chronological recency.
+
 Schema v1 does not record the event, ref, or workflow conclusion, so the tool
 cannot prove protected-branch provenance. The caller must supply artifacts
-from successful `main` push runs. An observed p95 with fewer than 20 successful
-samples is diagnostic, not planner-authoritative, and the seven-day artifact
-retention window is not a protected historical timing database. Renamed tests
-remain separate histories.
+from successful `main` push runs. The JSON snapshot is workflow-neutral input,
+not a protected store or planner decision. An observed p75 with fewer than five
+successful samples and p95 with fewer than twenty are diagnostic, not
+planner-authoritative. The seven-day artifact retention window is not a
+protected historical timing database, and this one-shot builder does not prune
+observations. Renamed tests remain separate histories.
 
 In schema v1, `commit_sha` is the exact Git revision checked out and tested
 (`GITHUB_SHA`). On `pull_request` runs, GitHub sets it to the synthetic merge

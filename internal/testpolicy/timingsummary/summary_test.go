@@ -309,6 +309,27 @@ func TestRunRequiresArtifactRoots(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidFormatArguments(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing", args: []string{"--format"}, want: "--format requires a value"},
+		{name: "unsupported", args: []string{"--format=yaml"}, want: `unsupported format "yaml"`},
+		{name: "repeated", args: []string{"--format=json", "--format=markdown"}, want: "--format may be specified only once"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, exitCode := runSummary(tc.args...)
+			if exitCode != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("Run(%q) = stdout %q stderr %q exit %d", tc.args, stdout, stderr, exitCode)
+			}
+		})
+	}
+}
+
 type timingArtifactFixture struct {
 	Schema     int          `json:"schema"`
 	ShardID    string       `json:"shard_id"`
