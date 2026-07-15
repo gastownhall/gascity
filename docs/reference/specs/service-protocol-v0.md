@@ -6,7 +6,7 @@ description: Authoritative specification for the generic hosted-service wire pro
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-07-10 |
+| Last verified | 2026-07-15 |
 | Contract | `gascity.dev/service/v0` |
 | Primary implementation | `internal/cliauth`, `cmd/gc` (`gc login`, `gc whoami`) |
 | Concept model | [How Gas City Works](/getting-started/how-gas-city-works) — the Agent (WHO) primitive |
@@ -80,15 +80,22 @@ refused (see [§7](#7-the-session-token-and-401-vs-403)).
 
 ## 3. Endpoints (auth + identity)
 
-All request and response bodies are `application/json`. Field names are
-`snake_case`. Unknown fields MUST be ignored by both sides (forward
+Protocol API request and response bodies are `application/json`. Field names
+are `snake_case`. Unknown fields MUST be ignored by both sides (forward
 compatibility). Errors use the shape in [§6](#6-errors).
+
+The server-rendered browser routes are the exception. `GET /gc/v0/auth/cli`
+and `GET /gc/v0/device` return HTML. `POST /gc/v0/device` accepts
+`application/x-www-form-urlencoded` form data and returns HTML. These pages
+remain server-owned; the CLI neither renders nor parses them.
 
 | Method | Path | Auth | Purpose |
 | ------ | ---- | ---- | ------- |
 | `GET`  | `/gc/v0/auth/cli`          | none    | Browser sign-in page (server-rendered) |
 | `POST` | `/gc/v0/auth/device/code`  | none    | Begin device-code login (headless) |
 | `POST` | `/gc/v0/auth/device/token` | none    | Poll for the device-code token |
+| `GET`  | `/gc/v0/device`            | browser session | Show the device-code approval page (server-rendered) |
+| `POST` | `/gc/v0/device`            | browser session | Approve or deny a device code (form submission) |
 | `GET`    | `/gc/v0/me`                | bearer  | Identify the authenticated account |
 | `DELETE` | `/gc/v0/session`           | bearer  | Revoke the presented session (`gc logout`) |
 
@@ -150,8 +157,8 @@ Response `200`:
 {
   "device_code": "<opaque>",
   "user_code": "BDWK-JQPX",
-  "verification_uri": "https://gascity.com/device",
-  "verification_uri_complete": "https://gascity.com/device?code=BDWK-JQPX",
+  "verification_uri": "https://gascity.com/gc/v0/device",
+  "verification_uri_complete": "https://gascity.com/gc/v0/device?code=BDWK-JQPX",
   "expires_in": 900,
   "interval": 5
 }
@@ -159,6 +166,12 @@ Response `200`:
 
 The CLI prints `verification_uri` and `user_code` (and the `_complete` link if
 present), then polls.
+
+The verification URI opens the server-rendered browser surface. An
+authenticated browser uses `GET /gc/v0/device` to enter or inspect the user
+code, then submits an approve or deny decision to `POST /gc/v0/device` as
+`application/x-www-form-urlencoded` data. The server owns browser-session and
+CSRF enforcement; this browser exchange never exposes its session to the CLI.
 
 **Poll** — `POST /gc/v0/auth/device/token`
 
@@ -315,7 +328,8 @@ A server MAY publish:
 GET {base}/.well-known/gascity-service
 → 200 { "version": "gascity.dev/service/v0",
         "endpoints": { "auth_cli": "/gc/v0/auth/cli", "device_code": "…",
-                       "device_token": "…", "me": "/gc/v0/me" },
+                       "device_token": "…", "device_verify": "/gc/v0/device",
+                       "me": "/gc/v0/me" },
         "message": "…" }
 ```
 
@@ -363,10 +377,12 @@ A server is conformant for `gc login` / `gc whoami` if it:
    `redirect_uri` with `token`, `service`, and `state` in the URL fragment;
 2. implements the device-code pair at `POST /gc/v0/auth/device/{code,token}`
    with the RFC-8628-shaped fields and error values above;
-3. implements `GET /gc/v0/me` returning `{ user: { id, handle, display_name } }`
+3. serves the device verification page at `GET /gc/v0/device` and accepts its
+   approve/deny form at `POST /gc/v0/device` for an authenticated browser;
+4. implements `GET /gc/v0/me` returning `{ user: { id, handle, display_name } }`
    for a valid bearer and a non-2xx for an invalid one;
-4. treats the token as an opaque bearer it can validate;
-5. confines all account/commercial policy behind these endpoints, exposing it to
+5. treats the token as an opaque bearer it can validate;
+6. confines all account/commercial policy behind these endpoints, exposing it to
    the client only through opaque `message`/`links`.
 
 `https://gascity.com` is one such server. So is any other.
