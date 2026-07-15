@@ -484,7 +484,7 @@ test-worker-inference-phase3: test-worker-inference
 ## target runs the command-heavy Tier A package serially; RC gate shards it.
 ACCEPTANCE_TIMEOUT ?= 15m
 test-acceptance:
-	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
 ## test-bd-cli-contract: run only Gas City's external bd CLI compatibility contract.
 ## Keep this separate from hermetic Tier A so each supported bd version can run
@@ -586,7 +586,7 @@ test-integration-review-formulas-recovery-cover:
 
 ## test-integration-bdstore: run the bd store conformance shard in isolation
 test-integration-bdstore:
-	./scripts/test-integration-shard bdstore
+	GOFLAGS= GOENV=off GOWORK=off ./scripts/test-integration-shard bdstore
 
 ## test-integration-bdstore-cover: run the bdstore shard with a CI coverage profile
 test-integration-bdstore-cover:
