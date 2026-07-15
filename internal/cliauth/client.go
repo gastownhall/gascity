@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -303,6 +304,12 @@ func browserLoginHandler(state string, resultCh chan<- browserLoginResult) http.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Content-Security-Policy", browserCallbackContentSecurityPolicy())
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		_, _ = io.WriteString(w, browserCallbackHTML())
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
@@ -333,32 +340,47 @@ func browserLoginHandler(state string, resultCh chan<- browserLoginResult) http.
 	return mux
 }
 
+const browserCallbackScript = `
+const status = document.getElementById("status");
+const params = new URLSearchParams(window.location.hash.slice(1));
+const token = params.get("token");
+const service = params.get("service");
+const state = params.get("state");
+history.replaceState(null, "", window.location.pathname + window.location.search);
+
+if (!token || !service || !state) {
+  status.textContent = "Login failed. Return to your terminal and try again.";
+} else {
+  fetch("/token", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({token, service, state}),
+    cache: "no-store",
+    credentials: "omit"
+  }).then((response) => {
+    status.textContent = response.ok ? "Login complete. You can return to your terminal." : "Login failed. Return to your terminal and try again.";
+  }).catch(() => {
+    status.textContent = "Login failed. Return to your terminal and try again.";
+  });
+}
+`
+
+func browserCallbackContentSecurityPolicy() string {
+	digest := sha256.Sum256([]byte(browserCallbackScript))
+	scriptSource := "'sha256-" + base64.StdEncoding.EncodeToString(digest[:]) + "'"
+	return "default-src 'none'; script-src " + scriptSource + "; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+}
+
 func browserCallbackHTML() string {
 	return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Gas City CLI Login</title></head>
 <body>
-<main style="font-family: system-ui, sans-serif; max-width: 48rem; margin: 3rem auto; line-height: 1.5;">
+<main>
 <h1>Completing Gas City CLI login</h1>
 <p id="status">Sending credentials to the local CLI callback.</p>
 </main>
-<script>
-const status = document.getElementById("status");
-const params = new URLSearchParams(window.location.hash.slice(1));
-fetch("/token", {
-  method: "POST",
-  headers: {"Content-Type": "application/json"},
-  body: JSON.stringify({
-    token: params.get("token") || "",
-    service: params.get("service") || "",
-    state: params.get("state") || ""
-  })
-}).then((response) => {
-  status.textContent = response.ok ? "Login complete. You can return to your terminal." : "Login failed. Return to your terminal and try again.";
-}).catch(() => {
-  status.textContent = "Login failed. Return to your terminal and try again.";
-});
-</script>
+<script>` + browserCallbackScript + `</script>
 </body>
 </html>`
 }
