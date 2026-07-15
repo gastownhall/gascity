@@ -23,6 +23,10 @@ import (
 
 // Factory creates a (provider, config, sessionName) tuple for a single test.
 // The provider may be shared across tests; config and name must be unique.
+// The conformance runner reports cleanup failures and stops every successfully
+// started session. Factories should register only teardown that is distinct
+// from Provider.Stop, except for a documented provider whose failed Start can
+// leave partial resources and therefore still needs temporary fallback cleanup.
 type Factory func(t *testing.T) (runtime.Provider, runtime.Config, string)
 
 // Options customizes provider conformance behavior for implementations whose
@@ -53,7 +57,6 @@ func RunProviderTestsWithOptions(t *testing.T, newSession Factory, opts Options)
 	t.Run("SharedSession", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start shared session")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 		RunSessionTests(t, sp, cfg, name)
 	})
 }
@@ -77,7 +80,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("Start_CreatesRunningSession", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
 		if !sp.IsRunning(name) {
 			t.Error("IsRunning = false after Start, want true")
@@ -87,9 +89,8 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("Start_DuplicateReturnsError", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "first Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
-		err := sp.Start(context.Background(), name, cfg)
+		err := startWithCleanup(t, sp, name, cfg)
 		if err == nil {
 			t.Error("second Start should return error for duplicate name")
 		}
@@ -101,11 +102,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		_, cfg3, name3 := newSession(t)
 		names := []string{name1, name2, name3}
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
-		for _, name := range names {
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(name))
-		}
 		errs := make([]error, len(names))
 		var wg sync.WaitGroup
 		for i := range names {
@@ -116,6 +112,11 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 			}(i)
 		}
 		wg.Wait()
+		for i, err := range errs {
+			if err == nil {
+				registerStopCleanup(t, sp, names[i])
+			}
+		}
 		for i, err := range errs {
 			if err != nil {
 				handleStartError(t, opts, err, fmt.Sprintf("concurrent Start(%s)", names[i]))
@@ -193,9 +194,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		errs := make([]error, len(names))
 		var wg sync.WaitGroup
@@ -229,9 +227,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		got := make([]bool, len(names))
 		var wg sync.WaitGroup
@@ -255,11 +250,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ListRunning_FindsSessions", func(t *testing.T) {
 		sp, cfg1, name1 := newSession(t)
 		startOrSkip(t, opts, sp, name1, cfg1, fmt.Sprintf("Start %s", name1))
-		t.Cleanup(func() { _ = sp.Stop(name1) })
 
 		_, cfg2, name2 := newSession(t)
 		startOrSkip(t, opts, sp, name2, cfg2, fmt.Sprintf("Start %s", name2))
-		t.Cleanup(func() { _ = sp.Stop(name2) })
 
 		names, err := sp.ListRunning("")
 		if err != nil {
@@ -276,11 +269,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ListRunning_PrefixFiltering", func(t *testing.T) {
 		sp, cfg1, name1 := newSession(t)
 		startOrSkip(t, opts, sp, name1, cfg1, fmt.Sprintf("Start %s", name1))
-		t.Cleanup(func() { _ = sp.Stop(name1) })
 
 		_, cfg2, name2 := newSession(t)
 		startOrSkip(t, opts, sp, name2, cfg2, fmt.Sprintf("Start %s", name2))
-		t.Cleanup(func() { _ = sp.Stop(name2) })
 
 		// Using the full name as prefix should match only that session.
 		names, err := sp.ListRunning(name1)
@@ -314,7 +305,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ListRunning_EmptyPrefix", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
 		names, err := sp.ListRunning("")
 		if err != nil {
@@ -333,9 +323,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		results := make([][]string, len(names))
 		var wg sync.WaitGroup
@@ -364,7 +351,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ProcessAlive_EmptyNamesReturnsTrue", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
 		if !sp.ProcessAlive(name, nil) {
 			t.Error("ProcessAlive with empty names = false, want true")
@@ -391,9 +377,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		got := make([]bool, len(names))
 		var wg sync.WaitGroup
@@ -416,9 +399,34 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 func startOrSkip(t *testing.T, opts Options, sp runtime.Provider, name string, cfg runtime.Config, label string) {
 	t.Helper()
 
-	if err := sp.Start(context.Background(), name, cfg); err != nil {
+	if err := startWithCleanup(t, sp, name, cfg); err != nil {
 		handleStartError(t, opts, err, label)
 	}
+}
+
+func startWithCleanup(t *testing.T, sp runtime.Provider, name string, cfg runtime.Config) error {
+	t.Helper()
+
+	err := sp.Start(context.Background(), name, cfg)
+	if err == nil {
+		registerStopCleanup(t, sp, name)
+	}
+	return err
+}
+
+type cleanupTB interface {
+	Helper()
+	Cleanup(func())
+	Errorf(string, ...any)
+}
+
+func registerStopCleanup(t cleanupTB, sp runtime.Provider, name string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := sp.Stop(name); err != nil {
+			t.Errorf("Stop(%q) during conformance cleanup: %v", name, err)
+		}
+	})
 }
 
 func handleStartError(t *testing.T, opts Options, err error, label string) {
