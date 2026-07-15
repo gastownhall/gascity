@@ -227,7 +227,10 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			// A finalizer kept through a RootOnly drop has no compiled step
 			// blockers; mark it so processWorkflowFinalize gates on the
 			// root's input convoy instead of closing the root immediately.
-			if recipe.RootOnly {
+			// Keyed on the finalize kind, not merely RootOnly: keepRootOnlyGraphStep
+			// only keeps workflow-finalize today, but gating the stamp on kind
+			// keeps the gate metadata off any other survivor if that filter grows.
+			if recipe.RootOnly && step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 				node.Metadata[beadmeta.FinalizeGateMetadataKey] = beadmeta.FinalizeGateInputConvoy
 			}
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
