@@ -99,6 +99,10 @@ var snapshotInfoOnlyFiles = []string{
 // a raw beads.Bead (or []beads.Bead). The typed mirrors OpenInfos()/FindInfoByID/
 // FindInfoByTemplate/FindInfoByNamedIdentity do not contain these substrings, so
 // a converted file matching one of these has reintroduced a raw session-bead read.
+// The typed mirrors read openInfos + the index maps (not the raw open slice), so
+// they return correct results on BOTH a bead-built snapshot and an Info-built one
+// (newSessionBeadSnapshotFromInfos leaves open nil); the raw accessors above
+// return empty on an Info-built snapshot, which is why they are forbidden here.
 var forbiddenRawSnapshotAccessors = []string{
 	".Open()",
 	".FindByID(",

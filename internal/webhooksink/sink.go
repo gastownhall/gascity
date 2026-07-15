@@ -19,9 +19,12 @@
 //  1. the rule's {order, rig} is within the receiving webhook's provenance scope
 //     (R4): a rig-scoped webhook may target only its own rig; a city-scoped
 //     webhook may target the city or any rig;
-//  2. the resolved order opts in with trigger="webhook" — a webhook may never
+//  2. a public webhook may not fire an exec (sh -c) order (R4) — public
+//     deliveries are limited to formula orders so the pack-verified public
+//     ingress can never reach the in-process shell-exec sink;
+//  3. the resolved order opts in with trigger="webhook" — a webhook may never
 //     fire an order that did not declare itself webhook-triggered;
-//  3. every declared-required param is present in the extracted args (E1).
+//  4. every declared-required param is present in the extracted args (E1).
 //
 // # R4 — arg namespacing
 //
@@ -60,10 +63,21 @@ type WebhookScope struct {
 	Scope string
 	// Rig is the webhook's own rig when Scope=="rig" (empty for city scope).
 	Rig string
+	// Visibility is the webhook's EFFECTIVE (post pack-guard) publication
+	// visibility: "public", "tenant", or "private". A public webhook's only gate
+	// is its pack-authored signature verify, so the sink refuses to let it reach
+	// the exec (sh -c) sink (R4); private/tenant hooks are additionally gated by
+	// the receiver's internal-origin perimeter and may target exec orders.
+	Visibility string
 	// SourceDir is the pack/fragment provenance ("" ⇒ operator-authored root).
 	// Carried for future content-scoped consent (R3); not consulted by v0 rig
 	// scoping, which keys on Scope/Rig.
 	SourceDir string
+}
+
+// IsPublic reports whether the webhook's effective visibility is public.
+func (s WebhookScope) IsPublic() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Visibility), "public")
 }
 
 // ConversationSink routes a verified conversation-target delivery into the
@@ -130,14 +144,26 @@ func routeOrder(ctx context.Context, deps Deps, scope WebhookScope, match webhoo
 		return res, nil
 	}
 
-	// (2) A webhook may fire only orders that explicitly opt in.
+	// (2) A public webhook may never fire an exec (sh -c) order. A public hook's
+	// only gate is its pack-authored signature verify (R1), so reaching the
+	// in-process shell-exec sink would preserve the red-team RCE path the design
+	// set out to remove; public deliveries are forced through formula orders only.
+	// Private/tenant hooks are additionally gated by the receiver's internal-origin
+	// perimeter, so they may still target exec orders.
+	if scope.IsPublic() && a.IsExec() {
+		res.Rejected = true
+		res.Reason = fmt.Sprintf("public webhook %q may not fire exec order %q; public deliveries are limited to formula orders", scope.Name, a.ScopedName())
+		return res, nil
+	}
+
+	// (3) A webhook may fire only orders that explicitly opt in.
 	if strings.TrimSpace(a.Trigger) != "webhook" {
 		res.Rejected = true
 		res.Reason = fmt.Sprintf("order %q has trigger %q; a webhook may only fire trigger=\"webhook\" orders", a.ScopedName(), a.Trigger)
 		return res, nil
 	}
 
-	// (3) Required-param validation against the RAW extracted args (keyed by the
+	// (4) Required-param validation against the RAW extracted args (keyed by the
 	// declared param name), before any namespacing.
 	if err := orders.ValidateRequiredParams(a, match.Vars); err != nil {
 		res.Rejected = true

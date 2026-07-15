@@ -196,6 +196,7 @@ func runPerfIterations(gcBin, scenario string, args []string, opts perfCmdOption
 		cmd := exec.Command(gcBin, args...) //nolint:gosec // gcBin is resolved from os.Executable
 		cmd.Stdout = io.Discard
 		cmd.Stderr = &stderrBuf
+		disableProductMetricsForChild(cmd)
 		start := time.Now()
 		runErr := cmd.Run()
 		wallMs := time.Since(start).Milliseconds()

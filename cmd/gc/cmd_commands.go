@@ -16,7 +16,89 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const docgenSkipAnnotation = "gc.docgen.skip"
+const (
+	docgenSkipAnnotation           = "gc.docgen.skip"
+	productMetricsClassAnnotation  = "gc.productmetrics.class"
+	packCommandClassificationValue = "pack-command"
+)
+
+type commandClassification string
+
+const (
+	unknownCommandClassification commandClassification = "unknown"
+	packCommandClassification    commandClassification = packCommandClassificationValue
+)
+
+// packCommandOutcome is the privacy-minimized lifecycle result shared by
+// eager and lazy pack dispatch. It deliberately cannot carry a binding, pack
+// name, command path, or arguments.
+type packCommandOutcome struct {
+	handled        bool
+	classification commandClassification
+	exitCode       int
+}
+
+// packCommandAction separates private command resolution from execution. The
+// lifecycle may inspect outcome before invoking the closure; only the minimized
+// outcome is eligible to cross into command classification or recording.
+type packCommandAction struct {
+	selected bool
+	outcome  packCommandOutcome
+	invoke   func() int
+}
+
+func unresolvedPackCommandAction() packCommandAction {
+	return packCommandAction{outcome: packCommandOutcome{
+		classification: unknownCommandClassification,
+		exitCode:       1,
+	}}
+}
+
+func resolvedPackCommandAction(invoke func() int) packCommandAction {
+	return packCommandAction{
+		selected: true,
+		outcome: packCommandOutcome{
+			handled:        true,
+			classification: packCommandClassification,
+		},
+		invoke: invoke,
+	}
+}
+
+// selectedUnknownPackCommandAction represents an invocation that selected a
+// discovered namespace but did not resolve to one of its children. selected
+// stays private to dispatch: the minimized lifecycle outcome remains the same
+// unknown outcome used when no pack namespace matched at all.
+func selectedUnknownPackCommandAction(invoke func() int) packCommandAction {
+	return packCommandAction{
+		selected: true,
+		outcome: packCommandOutcome{
+			classification: unknownCommandClassification,
+			exitCode:       1,
+		},
+		invoke: invoke,
+	}
+}
+
+func (action packCommandAction) execute() packCommandOutcome {
+	return action.executeReporting(nil)
+}
+
+func (action packCommandAction) executeReporting(report func(packCommandOutcome)) packCommandOutcome {
+	outcome := action.outcome
+	if report != nil {
+		report(outcome)
+	}
+	if !action.selected || action.invoke == nil {
+		return outcome
+	}
+	outcome.exitCode = action.invoke()
+	return outcome
+}
+
+func (outcome packCommandOutcome) err() error {
+	return exitForCode(outcome.exitCode)
+}
 
 func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer, warnOnCollision bool) {
 	core := coreCommandNames(root)
@@ -43,19 +125,27 @@ func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.Discovere
 		}
 		nsCmd := newDiscoveredNamespaceCmd(binding, grouped[binding], cityPath, cityName, stdout, stderr)
 		root.AddCommand(nsCmd)
+		configureDiscoveredGroups(nsCmd)
 	}
 }
 
 func newDiscoveredNamespaceCmd(binding string, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer) *cobra.Command {
 	ns := &cobra.Command{
-		Use:         binding,
-		Short:       fmt.Sprintf("Commands from the %s import", binding),
-		Annotations: map[string]string{docgenSkipAnnotation: "true"},
+		Use:   binding,
+		Short: fmt.Sprintf("Commands from the %s import", binding),
+		Annotations: map[string]string{
+			docgenSkipAnnotation:          "true",
+			productMetricsClassAnnotation: packCommandClassificationValue,
+		},
+		// NoArgs makes an unknown subcommand ("gc <binding> bogus") fail with
+		// "unknown command" and a non-zero exit, matching native command groups.
+		// A bare invocation ("gc <binding>") passes NoArgs and falls through to
+		// RunE, which still prints help and exits 0. See gastownhall/gascity#3966.
+		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return c.Help()
 		},
 	}
-
 	for _, entry := range sortCommandsForTree(entries) {
 		addDiscoveredLeaf(ns, entry, cityPath, cityName, stdout, stderr)
 	}
@@ -76,6 +166,13 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		}
 		next := &cobra.Command{
 			Use: word,
+			Annotations: map[string]string{
+				productMetricsClassAnnotation: packCommandClassificationValue,
+			},
+			// Intermediate namespace nodes reject unknown subcommands too, so a
+			// deep "gc <binding> repo bogus" fails non-zero like a native group
+			// rather than printing help and exiting 0. See gastownhall/gascity#3966.
+			Args: cobra.NoArgs,
 			RunE: func(c *cobra.Command, _ []string) error {
 				return c.Help()
 			},
@@ -90,6 +187,7 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 	}
 
 	annotations := map[string]string{}
+	annotations[productMetricsClassAnnotation] = packCommandClassificationValue
 	if strings.TrimSpace(entry.SourceDir) != "" {
 		annotations[jsonSchemaDirAnnotation] = filepath.Join(entry.SourceDir, "schemas")
 	}
@@ -101,17 +199,68 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		Annotations:        annotations,
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if discoveredHelpRequested(args) {
-				return cmd.Help()
-			}
-			code := runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-			return nil
+			action := resolveDiscoveredLeafAction(cmd, args, func() int {
+				return runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
+			})
+			return executeProductMetricsPackAction(cmd, action).err()
 		},
 	}
 	parent.AddCommand(leaf)
+}
+
+func configureDiscoveredGroups(cmd *cobra.Command) {
+	if cmd.DisableFlagParsing {
+		return
+	}
+	configureDiscoveredGroup(cmd)
+	for _, child := range cmd.Commands() {
+		configureDiscoveredGroups(child)
+	}
+}
+
+// configureDiscoveredGroup gives namespaces and intermediate nodes the same
+// typed lifecycle behavior as leaves without changing Cobra's canonical help
+// rendering. The help wrapper only owns this exact node; descendant leaves
+// inherit the renderer without creating a second pack action.
+func configureDiscoveredGroup(cmd *cobra.Command) {
+	renderHelp := cmd.HelpFunc()
+	helpAction := func(helpCmd *cobra.Command, args []string) packCommandAction {
+		return resolvedPackCommandAction(func() int {
+			renderHelp(helpCmd, args)
+			return 0
+		})
+	}
+	cmd.SetHelpFunc(func(helpCmd *cobra.Command, args []string) {
+		if helpCmd != cmd {
+			renderHelp(helpCmd, args)
+			return
+		}
+		_ = executeProductMetricsPackAction(helpCmd, helpAction(helpCmd, args))
+	})
+	cmd.RunE = func(runCmd *cobra.Command, args []string) error {
+		return executeProductMetricsPackAction(runCmd, helpAction(runCmd, args)).err()
+	}
+}
+
+func resolvedPackCommandUnknownAction(cmd *cobra.Command, arg string, stderr io.Writer) packCommandAction {
+	return selectedUnknownPackCommandAction(func() int {
+		fmt.Fprintf(stderr, "gc: unknown command %q\n\n", arg) //nolint:errcheck // best-effort stderr
+		printCommandUsage(stderr, cmd)
+		return 1
+	})
+}
+
+func resolvedPackCommandHelpAction(cmd *cobra.Command) packCommandAction {
+	return resolvedPackCommandAction(func() int {
+		return commandExitCode(cmd.Help())
+	})
+}
+
+func resolveDiscoveredLeafAction(cmd *cobra.Command, args []string, invoke func() int) packCommandAction {
+	if discoveredHelpRequested(args) {
+		return resolvedPackCommandHelpAction(cmd)
+	}
+	return resolvedPackCommandAction(invoke)
 }
 
 func findSubcommand(cmd *cobra.Command, name string) *cobra.Command {
@@ -167,6 +316,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		"GC_CITY_NAME="+cityName,
 	)
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
+	disableProductMetricsForChild(cmd)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -245,9 +395,9 @@ func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 	return out
 }
 
-func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) bool {
-	if len(args) == 0 {
-		return false
+func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) packCommandAction {
+	if len(args) == 0 || cfg == nil {
+		return unresolvedPackCommandAction()
 	}
 
 	binding := args[0]
@@ -258,12 +408,14 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 		}
 	}
 	if len(matching) == 0 {
-		return false
+		return unresolvedPackCommandAction()
 	}
 
 	if len(args) == 1 {
-		printDiscoveredCommandList(stdout, binding, nil, matching)
-		return true
+		return resolvedPackCommandAction(func() int {
+			printDiscoveredCommandList(stdout, binding, nil, matching)
+			return 0
+		})
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
@@ -273,13 +425,17 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 	if prefix, ok := discoveredHelpPrefix(args[1:]); ok {
 		for _, entry := range matching {
 			if slices.Equal(prefix, entry.Command) {
-				printDiscoveredCommandHelp(stdout, entry)
-				return true
+				return resolvedPackCommandAction(func() int {
+					printDiscoveredCommandHelp(stdout, entry)
+					return 0
+				})
 			}
 		}
 		if discoveredCommandPrefixExists(matching, prefix) {
-			printDiscoveredCommandList(stdout, binding, prefix, matching)
-			return true
+			return resolvedPackCommandAction(func() int {
+				printDiscoveredCommandList(stdout, binding, prefix, matching)
+				return 0
+			})
 		}
 	}
 	for _, entry := range matching {
@@ -287,20 +443,59 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 			continue
 		}
 		if slices.Equal(args[1:1+len(entry.Command)], entry.Command) {
-			commandArgs := args[1+len(entry.Command):]
+			commandArgs := slices.Clone(args[1+len(entry.Command):])
 			if discoveredHelpRequested(commandArgs) {
-				printDiscoveredCommandHelp(stdout, entry)
-				return true
+				return resolvedPackCommandAction(func() int {
+					printDiscoveredCommandHelp(stdout, entry)
+					return 0
+				})
 			}
-			code := runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-			return true
+			return resolvedPackCommandAction(func() int {
+				return runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
+			})
 		}
 	}
 
-	return false
+	knownPrefix := make([]string, 0, len(args)-1)
+	for _, word := range args[1:] {
+		candidate := append(slices.Clone(knownPrefix), word)
+		if !discoveredCommandPrefixExists(matching, candidate) {
+			return resolvedDiscoveredCommandUnknownAction(binding, knownPrefix, word, matching, cityPath, cityName, stdout, stderr)
+		}
+		knownPrefix = candidate
+	}
+	if len(knownPrefix) > 0 {
+		prefix := slices.Clone(knownPrefix)
+		return resolvedPackCommandAction(func() int {
+			printDiscoveredCommandList(stdout, binding, prefix, matching)
+			return 0
+		})
+	}
+
+	return unresolvedPackCommandAction()
+}
+
+func resolvedDiscoveredCommandUnknownAction(binding string, prefix []string, unknown string, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer) packCommandAction {
+	root := &cobra.Command{Use: "gc"}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	namespace := newDiscoveredNamespaceCmd(binding, entries, cityPath, cityName, stdout, stderr)
+	root.AddCommand(namespace)
+	configureDiscoveredGroups(namespace)
+
+	target := namespace
+	for _, word := range prefix {
+		next := findSubcommand(target, word)
+		if next == nil {
+			break
+		}
+		target = next
+	}
+	return resolvedPackCommandUnknownAction(target, unknown, stderr)
+}
+
+func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) packCommandOutcome {
+	return resolveDiscoveredCommandFallback(args, cfg, cityPath, stdout, stderr).execute()
 }
 
 func discoveredHelpPrefix(args []string) ([]string, bool) {

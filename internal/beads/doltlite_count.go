@@ -148,6 +148,12 @@ func doltliteCountSupported(query ListQuery) bool {
 	if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
 		return false
 	}
+	// The compound (created_at, id) seek boundary is resolved Go-side (to keep
+	// the tie-break identical to the in-memory sort), which a single COUNT
+	// cannot reproduce (same class as CreatedBefore).
+	if query.SeekAfter != nil {
+		return false
+	}
 	if query.Limit > 0 {
 		return false
 	}

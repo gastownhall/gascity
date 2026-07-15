@@ -68,7 +68,7 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-prompt-synth requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-bd show "$WORK_BEAD_ID"
+gc bd show "$WORK_BEAD_ID"
 ```
 
 The bead's metadata records the same `synth_role`, `dest_path`, and
@@ -134,8 +134,8 @@ completion signal:
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
-bd update "$WORK_BEAD_ID" --notes "Synthesized: {{dest_path}}"
-bd close "$WORK_BEAD_ID"
+gc bd update "$WORK_BEAD_ID" --notes "Synthesized: {{dest_path}}"
+gc bd close "$WORK_BEAD_ID"
 ```
 
 **4. Drain and exit:**

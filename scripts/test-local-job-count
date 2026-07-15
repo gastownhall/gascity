@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# A fast-suite shard can build a roughly 2.8 GiB test binary. Budget 4 GiB per
+# concurrent shard for compiler/linker headroom, cap automatic fan-out at 16,
+# and preserve the former three-job safety default when memory is unknowable.
+readonly job_memory_kib=$((4 * 1024 * 1024))
+readonly max_auto_jobs=16
+readonly unknown_memory_jobs=3
+
+fail() {
+  echo "test-local-job-count: $*" >&2
+  exit 1
+}
+
+detect_cpus() {
+  if [[ -n "${GC_TEST_LOCAL_CPUS:-}" ]]; then
+    [[ "$GC_TEST_LOCAL_CPUS" =~ ^[0-9]+$ && "$GC_TEST_LOCAL_CPUS" -gt 0 ]] ||
+      fail "GC_TEST_LOCAL_CPUS must be a positive integer"
+    printf '%s\n' "$GC_TEST_LOCAL_CPUS"
+    return
+  fi
+
+  nproc 2>/dev/null ||
+    getconf _NPROCESSORS_ONLN 2>/dev/null ||
+    sysctl -n hw.ncpu 2>/dev/null ||
+    printf '8\n'
+}
+
+cgroup_remaining_kib() {
+  local root="${1%/}" relative="${2#/}" limit_file="$3" current_file="$4"
+  local dir limit current remaining_kib best=0 found=0
+
+  [[ -n "$root" ]] || root=/
+  dir="$root"
+  if [[ -n "$relative" ]]; then
+    dir="$root/$relative"
+  fi
+
+  # A leaf may be unlimited while an ancestor enforces the real budget. Walk
+  # the process cgroup and every ancestor up to the controller mount.
+  while [[ "$dir" == "$root" || "$dir" == "$root/"* ]]; do
+    if [[ -r "$dir/$limit_file" && -r "$dir/$current_file" ]]; then
+      read -r limit < "$dir/$limit_file" || true
+      read -r current < "$dir/$current_file" || true
+      if [[ "$limit" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ ]]; then
+        found=1
+        if [[ "$current" -ge "$limit" ]]; then
+          remaining_kib=1
+        else
+          remaining_kib=$(((limit - current + 1023) / 1024))
+          if [[ "$remaining_kib" -lt 1 ]]; then
+            remaining_kib=1
+          fi
+        fi
+        if [[ "$best" -eq 0 || "$remaining_kib" -lt "$best" ]]; then
+          best="$remaining_kib"
+        fi
+      fi
+    fi
+
+    [[ "$dir" == "$root" ]] && break
+    dir="${dir%/*}"
+  done
+
+  [[ "$found" -eq 1 ]] || return 1
+  printf '%s\n' "$best"
+}
+
+detect_cgroup_memory_kib() {
+  local proc_cgroup="${GC_TEST_LOCAL_PROC_CGROUP:-/proc/self/cgroup}"
+  local cgroup_root="${GC_TEST_LOCAL_CGROUP_ROOT:-/sys/fs/cgroup}"
+  local relative
+
+  [[ -r "$proc_cgroup" ]] || return 1
+
+  relative="$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' "$proc_cgroup" 2>/dev/null || true)"
+  if [[ -n "$relative" ]] &&
+    cgroup_remaining_kib "$cgroup_root" "$relative" memory.max memory.current; then
+    return
+  fi
+
+  relative="$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3; exit }' "$proc_cgroup" 2>/dev/null || true)"
+  [[ -n "$relative" ]] || return 1
+  cgroup_remaining_kib "$cgroup_root/memory" "$relative" memory.limit_in_bytes memory.usage_in_bytes
+}
+
+detect_memory_kib() {
+  if [[ -n "${GC_TEST_LOCAL_MEMORY_KIB+x}" ]]; then
+    [[ "$GC_TEST_LOCAL_MEMORY_KIB" =~ ^[0-9]+$ ]] ||
+      fail "GC_TEST_LOCAL_MEMORY_KIB must be a non-negative integer"
+    if [[ "$GC_TEST_LOCAL_MEMORY_KIB" -gt 0 ]]; then
+      printf '%s\n' "$GC_TEST_LOCAL_MEMORY_KIB"
+      return
+    fi
+    return 1
+  fi
+
+  local meminfo="${GC_TEST_LOCAL_MEMINFO:-/proc/meminfo}"
+  local best=0 candidate total_bytes total_kib
+  if [[ -r "$meminfo" ]]; then
+    candidate="$(awk '/^MemAvailable:/ { print $2; exit }' "$meminfo" 2>/dev/null || true)"
+    if [[ "$candidate" =~ ^[0-9]+$ && "$candidate" -gt 0 ]]; then
+      best="$candidate"
+    fi
+  fi
+
+  # Container or systemd-scope limits can be lower than host MemAvailable.
+  # Resolve the process's cgroup path and take its tightest ancestor budget.
+  candidate="$(detect_cgroup_memory_kib || true)"
+  if [[ "$candidate" =~ ^[0-9]+$ && "$candidate" -gt 0 ]]; then
+    if [[ "$best" -eq 0 || "$candidate" -lt "$best" ]]; then
+      best="$candidate"
+    fi
+  fi
+
+  # macOS exposes total rather than readily available memory. Reserve 4 GiB
+  # for the OS and interactive work before applying the per-shard budget.
+  if [[ "$best" -eq 0 ]]; then
+    total_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+    if [[ "$total_bytes" =~ ^[0-9]+$ && "$total_bytes" -gt 0 ]]; then
+      total_kib=$((total_bytes / 1024))
+      if [[ "$total_kib" -gt "$job_memory_kib" ]]; then
+        best=$((total_kib - job_memory_kib))
+      else
+        best=$((total_kib / 2))
+      fi
+    fi
+  fi
+
+  [[ "$best" -gt 0 ]] || return 1
+  printf '%s\n' "$best"
+}
+
+cpus="$(detect_cpus)"
+memory_kib="$(detect_memory_kib || true)"
+jobs="$cpus"
+
+if [[ -n "$memory_kib" ]]; then
+  memory_jobs=$((memory_kib / job_memory_kib))
+  if [[ "$memory_jobs" -lt 1 ]]; then
+    memory_jobs=1
+  fi
+  if [[ "$memory_jobs" -lt "$jobs" ]]; then
+    jobs="$memory_jobs"
+  fi
+elif [[ "$jobs" -gt "$unknown_memory_jobs" ]]; then
+  jobs="$unknown_memory_jobs"
+fi
+
+if [[ "$jobs" -gt "$max_auto_jobs" ]]; then
+  jobs="$max_auto_jobs"
+fi
+
+printf '%s\n' "$jobs"

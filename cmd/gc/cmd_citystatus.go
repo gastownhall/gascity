@@ -30,9 +30,11 @@ type StatusJSON struct {
 	Suspended     bool                   `json:"suspended"`
 	Health        HealthJSON             `json:"health"`
 	Beads         *beads.BeadsDiagnostic `json:"beads,omitempty"`
-	Agents        []StatusAgentJSON      `json:"agents"`
-	Rigs          []StatusRigJSON        `json:"rigs"`
-	Summary       StatusSummaryJSON      `json:"summary"`
+	// ConditionalWrites mirrors the API status block verbatim (§12.5).
+	ConditionalWrites *api.StatusConditionalWrites `json:"conditional_writes,omitempty"`
+	Agents            []StatusAgentJSON            `json:"agents"`
+	Rigs              []StatusRigJSON              `json:"rigs"`
+	Summary           StatusSummaryJSON            `json:"summary"`
 }
 
 type WorkspaceJSON struct {
@@ -181,7 +183,15 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return code
 	}
 	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
+	if err != nil {
+		message := fmt.Sprintf("gc status: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	c, reason := cityStatusAPIClient(cityPath)
 	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
@@ -218,12 +228,12 @@ func routeCityStatus(
 			logRoute(stderr, cmdName, "api", "")
 			return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -268,11 +278,12 @@ func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView],
 // helpers produce identical output on the API path.
 func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapshot {
 	snapshot := cityStatusSnapshot{
-		CityName:   v.CityName,
-		CityPath:   v.CityPath,
-		Suspended:  v.Suspended,
-		Controller: controllerStatusForCity(cityPath),
-		Beads:      v.Beads,
+		CityName:          v.CityName,
+		CityPath:          v.CityPath,
+		Suspended:         v.Suspended,
+		Controller:        controllerStatusForCity(cityPath),
+		Beads:             v.Beads,
+		ConditionalWrites: v.ConditionalWrites,
 		Summary: StatusSummaryJSON{
 			TotalAgents:       v.Summary.TotalAgents,
 			RunningAgents:     v.Summary.RunningAgents,
@@ -390,7 +401,7 @@ type statusObservationTarget struct {
 
 func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
-		return newSessionBeadSnapshot(nil)
+		return newSessionBeadSnapshotFromInfos(nil)
 	}
 	// Callers pass the session coordination-class store (cliSessionStore) so a
 	// [beads.classes.sessions] relocation reaches this snapshot; the guard in
@@ -446,7 +457,7 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 			return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot: %w", result.err))
 		}
 		if result.snapshot == nil {
-			return newSessionBeadSnapshot(nil)
+			return newSessionBeadSnapshotFromInfos(nil)
 		}
 		return result.snapshot
 	case <-time.After(statusSessionSnapshotTimeout):

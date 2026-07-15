@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -27,6 +27,15 @@ import (
 // payloads while staying well under GitHub's own 25 MiB delivery ceiling.
 const defaultMaxWebhookBodyBytes int64 = 5 << 20
 
+// webhookRequest carries the resolved receiver context for one /hook/ delivery,
+// threaded through the receiver's stages so each stage stays a small, focused
+// function (keeping handleHookProxy's complexity low).
+type webhookRequest struct {
+	hook   config.Webhook
+	cfg    *config.City
+	scheme string
+}
+
 // handleHookProxy is the raw /hook/{name} receiver — the fourth sanctioned
 // non-Huma surface (alongside /svc/*), mounted on the per-city Server.mux so the
 // HMAC/ed25519 verifiers see the exact raw body. It deliberately sits OUTSIDE the
@@ -38,102 +47,147 @@ const defaultMaxWebhookBodyBytes int64 = 5 << 20
 // ADDITIONAL gate for public webhooks, never a replacement for the operator's grant
 // when write-auth is configured.
 //
-// Flow: resolve webhook (404 if unknown) → R2 perimeter → E8 rate-limit (429) →
-// read raw body (capped) → R1 verifier build → verify (E4) → Discord PING→PONG →
-// parse + match (E5) → E8 dedup claim → dispatch (E6) via the live E0.5 seam. Every
-// accept/reject decision emits a webhook.received / webhook.rejected event (E8).
+// Flow (split into stages): resolve webhook (404 if unknown) → admit (R2
+// perimeter → POST-only → allowed_cidrs → bearer_env → E8 rate-limit) → read raw
+// body (capped) → verify (R1 build → E4 verify → Discord PING→PONG) → dispatch
+// (parse + match → dedup → E6 sink). The pre-verification reject paths that an
+// unauthenticated caller fully controls (unknown name, perimeter, method,
+// source/bearer denial, rate-limit) are NON-evented so a flood cannot amplify
+// into per-request event/log writes; so are the pre-limiter access-gate
+// operator-fault 503s (allowed_cidrs/bearer_env misconfig), which are logged
+// one-shot instead. The verify/dispatch decisions past the limiter — including the
+// verifier operator-fault 503 the limiter throttles — stay evented. The access
+// gates sit BEFORE the limiter so a disallowed caller cannot drain the shared
+// delivery bucket.
 func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.resolveWebhookRequest(w, r)
+	if !ok {
+		return
+	}
+	if !s.admitWebhookRequest(w, r, req) {
+		return
+	}
+	body, ok := s.readWebhookBody(w, r, req)
+	if !ok {
+		return
+	}
+	vres, ok := s.verifyWebhook(w, r, req, body)
+	if !ok {
+		return
+	}
+	s.dispatchWebhook(w, r, req, body, vres)
+}
+
+// resolveWebhookRequest resolves the {name} segment to a configured webhook.
+// An empty or unknown name → 404, deliberately NOT evented: the route segment is
+// attacker-chosen and unauthenticated, so emitting would be an event-log-flood
+// amplifier and a name-existence oracle.
+func (s *Server) resolveWebhookRequest(w http.ResponseWriter, r *http.Request) (webhookRequest, bool) {
 	name := webhookNameFromPath(r.URL.Path)
 	if name == "" {
 		problemWebhookRouteNotFound.writeTo(w)
-		return
+		return webhookRequest{}, false
 	}
 	cfg := s.state.Config()
 	hook, ok := findWebhook(cfg, name)
 	if !ok {
-		// Unknown name → 404. Never leak which webhook names exist, and never
-		// answer with a 403-plus-detail that would confirm the route. Deliberately
-		// NOT evented: the route segment is attacker-chosen and unauthenticated, so
-		// emitting here would be an event-log-flood amplifier and a name oracle.
 		problemWebhookRouteNotFound.writeTo(w)
-		return
+		return webhookRequest{}, false
 	}
-	scheme := strings.TrimSpace(hook.Verify.Scheme)
+	return webhookRequest{hook: hook, cfg: cfg, scheme: strings.TrimSpace(hook.Verify.Scheme)}, true
+}
 
-	// Webhooks are POST deliveries only.
+// admitWebhookRequest runs the cheap pre-verification gates in the order that
+// closes the amplification/existence-leak findings AND keeps a disallowed caller
+// off the shared per-hook delivery bucket: the R2 perimeter FIRST (so a
+// private/tenant probe gets the same 404 as an unknown route, never a 405 that
+// confirms existence), then POST-only, then the operator-owned source and bearer
+// gates, and ONLY THEN the E8 rate limiter. Running the access gates before the
+// limiter is load-bearing: an off-network or unauthenticated flood is rejected
+// without consuming a delivery token, so it cannot drain the bucket that
+// legitimate provider deliveries draw from and force them into 429s. Every gate
+// here is non-evented — each is a cheap, unauthenticated, attacker-fully-controlled
+// reject, so eventing it would be the per-request amplification the limiter exists
+// to stop (an operator misconfiguration surfaced by the access gates is the lone
+// evented exception, a 503). It returns false when it has already written the
+// response.
+func (s *Server) admitWebhookRequest(w http.ResponseWriter, r *http.Request, req webhookRequest) bool {
+	// R2 perimeter on the EFFECTIVE (post pack-guard) visibility. Non-evented: the
+	// private/tenant 404 must be as quiet as an unknown-route 404.
+	visibility := strings.ToLower(strings.TrimSpace(req.hook.Publication.Visibility))
+	if !webhookRequestAllowed(w, visibility, r, s.readOnly) {
+		return false
+	}
+	// POST-only, right after the perimeter so a non-POST probe of a private/tenant
+	// hook already got the existence-hiding 404. Cheap, non-evented.
 	if r.Method != http.MethodPost {
 		problemWebhookMethodNotAllowed.writeTo(w)
-		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
-			Reason: reasonMethodNotAllowed, Status: http.StatusMethodNotAllowed,
-		})
-		return
+		return false
 	}
-
-	// R2 perimeter. The effective Publication.Visibility was ALREADY capped by
-	// E2's pack-guard at config load (public honored only under a city
-	// allow_public grant; otherwise tenant). Read the post-guard value — do NOT
-	// re-derive trust here.
-	visibility := strings.ToLower(strings.TrimSpace(hook.Publication.Visibility))
-	if allowed, reason := webhookRequestAllowed(w, visibility, r, s.readOnly); !allowed {
-		// webhookRequestAllowed already wrote the response; reason distinguishes a
-		// perimeter denial from a read-only refusal.
-		s.emitWebhookRejected(WebhookRejectedPayload{Webhook: hook.Name, Scheme: scheme, Reason: reason})
-		return
+	// Operator-owned access controls, enforced fail-closed BEFORE the limiter so a
+	// disallowed source/bearer neither consumes a delivery token nor reaches the
+	// body read and signature verify. Their attacker-controlled denials are
+	// non-evented; only an operator misconfiguration (503) events.
+	if !s.webhookSourceAllowed(w, r, req) {
+		return false
 	}
-
-	// E8 rate-limit: per-webhook token bucket on the RESOLVED name, upstream of the
-	// expensive body-read + verify. The limit is operator-owned; a pack can only
-	// LOWER its own ceiling (clamped in EffectiveRateLimit), never raise it.
-	perMinute, burst := cfg.WebhookPolicy.EffectiveRateLimit(hook)
-	if ok, retryAfter := s.webhookLimiter.allow(hook.Name, perMinute, burst); !ok {
+	if !s.webhookBearerAllowed(w, r, req) {
+		return false
+	}
+	// E8 rate-limit on the RESOLVED name, LAST in admit so only access-passing
+	// requests consume the operator-owned per-hook delivery bucket, and still
+	// upstream of the expensive body read + signature verify it exists to throttle.
+	// Non-evented: eventing here would be the per-request amplification the limiter
+	// stops. A pack can only LOWER its own ceiling (EffectiveRateLimit), never raise it.
+	perMinute, burst := req.cfg.WebhookPolicy.EffectiveRateLimit(req.hook)
+	if ok, retryAfter := s.webhookLimiter.allow(req.hook.Name, perMinute, burst); !ok {
 		setRetryAfter(w, retryAfter)
 		problemWebhookRateLimited.writeTo(w)
-		// Deliberately NOT evented: this fires on every over-limit request, so on a
-		// flood it would be an un-throttled per-request event/log write on a public
-		// endpoint — the very amplification the limiter exists to stop. The 429 +
-		// Retry-After IS the signal; a persistent flood shows up in ingress metrics.
-		// (The other reject paths — perimeter_denied, verify_failed, operator_fault,
-		// dispatch_* — stay evented: they are lower-volume and diagnostically useful.)
-		return
+		return false
 	}
+	return true
+}
 
-	// Read the raw body under a hard cap (the signature is computed over it).
+// readWebhookBody reads the raw body under a hard cap (the signature is computed
+// over it, so it must be buffered whole). A too-large/unreadable body is evented
+// (it is past the limiter, so bounded, and diagnostically useful).
+func (s *Server) readWebhookBody(w http.ResponseWriter, r *http.Request, req webhookRequest) ([]byte, bool) {
 	body, err := readCappedBody(w, r, s.maxWebhookBodyBytes())
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			problemWebhookBodyTooLarge.writeTo(w)
-			s.emitWebhookRejected(WebhookRejectedPayload{
-				Webhook: hook.Name, Scheme: scheme,
-				Reason: reasonBodyTooLarge, Status: http.StatusRequestEntityTooLarge,
-			})
-			return
-		}
-		problemWebhookBadBody.writeTo(w)
-		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
-			Reason: reasonBadBody, Status: http.StatusBadRequest,
-		})
-		return
+	if err == nil {
+		return body, true
 	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		problemWebhookBodyTooLarge.writeTo(w)
+		s.emitWebhookRejected(WebhookRejectedPayload{
+			Webhook: req.hook.Name, Scheme: req.scheme,
+			Reason: reasonBodyTooLarge, Status: http.StatusRequestEntityTooLarge,
+		})
+		return nil, false
+	}
+	problemWebhookBadBody.writeTo(w)
+	s.emitWebhookRejected(WebhookRejectedPayload{
+		Webhook: req.hook.Name, Scheme: req.scheme,
+		Reason: reasonBadBody, Status: http.StatusBadRequest,
+	})
+	return nil, false
+}
 
-	// R1: build the verifier with an operator-owned secret / trust anchor.
-	verifier, secret, verr := s.buildWebhookVerifier(cfg, hook)
+// verifyWebhook builds the R1 verifier and runs the E4 signature check, then
+// short-circuits a verified Discord PING to a PONG. It returns ok=false (response
+// already written) on an operator fault (503), a failed verification (401), or a
+// handled PING; otherwise it returns the verified result.
+func (s *Server) verifyWebhook(w http.ResponseWriter, r *http.Request, req webhookRequest, body []byte) (webhookverify.VerifyResult, bool) {
+	verifier, secret, verr := s.buildWebhookVerifier(req.cfg, req.hook)
 	if verr != nil {
 		// Operator fault (secret_env outside GC_WEBHOOK_*, unset, too weak; or a
 		// jwt-jwks webhook with no operator [webhooks].jwt_policy; or a scheme
 		// construction error) → 503, never 401: the delivery may be perfectly
 		// authentic, we simply cannot check it. This is the R1 fail-closed contract.
-		log.Printf("api: webhook %q verifier unavailable: %v", hook.Name, verr)
-		problemWebhookVerifierUnavailable.writeTo(w)
-		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
-			Reason: reasonOperatorFault, Status: http.StatusServiceUnavailable, BodySize: len(body),
-		})
-		return
+		log.Printf("api: webhook %q verifier unavailable: %v", req.hook.Name, verr)
+		s.rejectWebhookOperatorFault(w, req, len(body))
+		return webhookverify.VerifyResult{}, false
 	}
-
 	vres, verifyErr := verifier.Verify(r.Context(), webhookverify.VerifyRequest{
 		Body:   body,
 		Header: r.Header,
@@ -141,38 +195,87 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	})
 	if verifyErr != nil {
 		// The check could not be performed (operator fault, e.g. malformed key).
-		log.Printf("api: webhook %q verify error: %v", hook.Name, verifyErr)
-		problemWebhookVerifierUnavailable.writeTo(w)
-		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
-			Reason: reasonOperatorFault, Status: http.StatusServiceUnavailable, BodySize: len(body),
-		})
-		return
+		log.Printf("api: webhook %q verify error: %v", req.hook.Name, verifyErr)
+		s.rejectWebhookOperatorFault(w, req, len(body))
+		return webhookverify.VerifyResult{}, false
 	}
 	if !vres.OK {
 		problemWebhookUnauthorized.writeTo(w)
 		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
+			Webhook: req.hook.Name, Scheme: req.scheme,
 			Reason: reasonVerifyFailed, Status: http.StatusUnauthorized,
 			EventType: vres.EventType, BodySize: len(body),
 		})
-		return
+		return webhookverify.VerifyResult{}, false
 	}
-
 	// Discord PING (interaction type 1) on a VERIFIED payload → PONG, no dispatch.
 	// Ordered after verification so a forged type=1 body cannot elicit a PONG. A
 	// protocol handshake, not a delivery, so it is neither deduped nor evented.
-	if strings.EqualFold(scheme, "discord-ed25519") && isDiscordPing(body) {
+	if strings.EqualFold(req.scheme, "discord-ed25519") && isDiscordPing(body) {
 		writeJSONBytes(w, http.StatusOK, discordPongBody)
-		return
+		return webhookverify.VerifyResult{}, false
 	}
+	return vres, true
+}
 
+// rejectWebhookOperatorFault writes the shared 503 verifier-unavailable response
+// and emits the operator_fault rejection event. It is the POST-limiter fault path
+// (verifier unavailable), so the delivery limiter already throttles a flood; the
+// per-request event is bounded and diagnostically useful. The pre-limiter access
+// gates use rejectWebhookAccessOperatorFault instead, which must not amplify.
+func (s *Server) rejectWebhookOperatorFault(w http.ResponseWriter, req webhookRequest, bodySize int) {
+	problemWebhookVerifierUnavailable.writeTo(w)
+	s.emitWebhookRejected(WebhookRejectedPayload{
+		Webhook: req.hook.Name, Scheme: req.scheme,
+		Reason: reasonOperatorFault, Status: http.StatusServiceUnavailable, BodySize: bodySize,
+	})
+}
+
+// rejectWebhookAccessOperatorFault writes the shared 503 operator-fault response
+// for a PRE-LIMITER access gate — a misconfigured allowed_cidrs, or an unset/empty
+// bearer_env on a hook that still passed config load. Unlike the post-limiter
+// verifier fault above, these gates run BEFORE the delivery limiter, so an
+// attacker flooding a misconfigured public hook could amplify the fault into
+// unbounded per-request event/log writes (CWE-400). This path is therefore
+// deliberately NON-EVENTED and its diagnostic log is one-shot per (hook, fault):
+// the 503 status — still returned per request, as cheap as the other pre-limiter
+// rejects — plus ingress metrics are the flood-proof operator signal, and the
+// latched log names the broken hook once. faultDetail identifies the specific
+// misconfiguration so a later, different fault reports again.
+func (s *Server) rejectWebhookAccessOperatorFault(w http.ResponseWriter, hookName, faultDetail string) {
+	problemWebhookVerifierUnavailable.writeTo(w)
+	if s.webhookAccessFaultFirstSeen(hookName, faultDetail) {
+		log.Printf("api: webhook %q %s", hookName, faultDetail)
+	}
+}
+
+// webhookAccessFaultFirstSeen reports whether the (hook, fault) pair has not been
+// reported yet, latching it so a flood reports the fault once instead of once per
+// request. The key derives from the webhook name and the operator-owned
+// misconfiguration, never attacker input, so the latch set stays bounded by config.
+func (s *Server) webhookAccessFaultFirstSeen(hookName, faultDetail string) bool {
+	key := hookName + "\x00" + faultDetail
+	s.webhookAccessFaultMu.Lock()
+	defer s.webhookAccessFaultMu.Unlock()
+	if s.webhookAccessFaultLogged == nil {
+		s.webhookAccessFaultLogged = make(map[string]struct{})
+	}
+	if _, seen := s.webhookAccessFaultLogged[key]; seen {
+		return false
+	}
+	s.webhookAccessFaultLogged[key] = struct{}{}
+	return true
+}
+
+// dispatchWebhook parses + matches the verified delivery, claims dedup, and
+// routes a matched rule to the E6 sink. It owns every post-verification response.
+func (s *Server) dispatchWebhook(w http.ResponseWriter, r *http.Request, req webhookRequest, body []byte, vres webhookverify.VerifyResult) {
 	parsed, perr := webhookmatch.ParseBody(body)
 	if perr != nil {
 		// Authentic sender, malformed payload → 400.
 		problemWebhookBadPayload.writeTo(w)
 		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
+			Webhook: req.hook.Name, Scheme: req.scheme,
 			Reason: reasonBadPayload, Status: http.StatusBadRequest,
 			EventType: vres.EventType, BodySize: len(body),
 		})
@@ -184,13 +287,13 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		DedupID:   vres.DedupID,
 		Identity:  vres.Identity,
 		Body:      parsed,
-	}, hook.Rules)
+	}, req.hook.Rules)
 	if merr != nil {
 		// Structural arg-extraction failure on a matched rule (misconfiguration).
-		log.Printf("api: webhook %q match error: %v", hook.Name, merr)
+		log.Printf("api: webhook %q match error: %v", req.hook.Name, merr)
 		problemInternalServerError.writeTo(w)
 		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
+			Webhook: req.hook.Name, Scheme: req.scheme,
 			Reason: reasonMatchError, Status: http.StatusInternalServerError,
 			EventType: vres.EventType, BodySize: len(body),
 		})
@@ -201,7 +304,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		// non-2xx, so a valid-but-unmatched delivery is a 2xx no-op — never a 4xx —
 		// but it IS an accepted delivery, so it is evented as webhook.received.
 		s.emitWebhookReceived(WebhookReceivedPayload{
-			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
+			Webhook: req.hook.Name, Scheme: req.scheme, EventType: vres.EventType,
 			DedupID: vres.DedupID, Matched: false, Dispatched: false,
 			RuleIndex: -1, BodySize: len(body),
 		})
@@ -223,11 +326,11 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	if eventDedupID == "" {
 		eventDedupID = webhookBodyHash(body)
 	}
-	dedupKey := webhookDedupKeyFor(hook.Name, vres, body)
+	dedupKey := webhookDedupKeyFor(req.hook.Name, vres, body)
 	if s.webhookDedup.seen(dedupKey) {
 		// Duplicate: ack 2xx so the sender stops retrying, but do NOT dispatch.
 		s.emitWebhookReceived(WebhookReceivedPayload{
-			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
+			Webhook: req.hook.Name, Scheme: req.scheme, EventType: vres.EventType,
 			DedupID: eventDedupID, Deduped: true, Matched: true, Dispatched: false,
 			RuleIndex: match.RuleIndex, Order: match.Order, Rig: match.Rig, BodySize: len(body),
 		})
@@ -241,7 +344,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		s.webhookDedup.forget(dedupKey) // never acted on: let the sender retry
 		problemWebhookDispatchUnavailable.writeTo(w)
 		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
+			Webhook: req.hook.Name, Scheme: req.scheme,
 			Reason: reasonDispatchUnavailable, Status: http.StatusServiceUnavailable,
 			EventType: vres.EventType, DedupID: eventDedupID, BodySize: len(body),
 		})
@@ -254,13 +357,13 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 	result, rerr := webhooksink.Route(context.WithoutCancel(r.Context()), webhooksink.Deps{
 		Dispatcher:   dispatcher,
 		ResolveOrder: orderResolverFor(s.state),
-	}, webhookScopeFor(hook), match)
+	}, webhookScopeFor(req.hook), match)
 	if rerr != nil {
 		s.webhookDedup.forget(dedupKey) // genuine failure: allow the sender's retry
-		log.Printf("api: webhook %q dispatch failed: %v", hook.Name, rerr)
+		log.Printf("api: webhook %q dispatch failed: %v", req.hook.Name, rerr)
 		problemWebhookDispatchUnavailable.writeTo(w)
 		s.emitWebhookRejected(WebhookRejectedPayload{
-			Webhook: hook.Name, Scheme: scheme,
+			Webhook: req.hook.Name, Scheme: req.scheme,
 			Reason: reasonDispatchError, Status: http.StatusServiceUnavailable,
 			EventType: vres.EventType, DedupID: eventDedupID, BodySize: len(body),
 		})
@@ -269,7 +372,7 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 
 	if result.Dispatched {
 		s.emitWebhookReceived(WebhookReceivedPayload{
-			Webhook: hook.Name, Scheme: scheme, EventType: vres.EventType,
+			Webhook: req.hook.Name, Scheme: req.scheme, EventType: vres.EventType,
 			DedupID: eventDedupID, Deduped: false, Matched: true, Dispatched: true,
 			RuleIndex: match.RuleIndex, Order: match.Order, Rig: match.Rig,
 			ScopedName: result.Dispatch.ScopedName, TrackingID: result.Dispatch.TrackingID,
@@ -278,16 +381,16 @@ func (s *Server) handleHookProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSONBytes(w, http.StatusAccepted, webhookAcceptedBody)
 		return
 	}
-	// Refused by a sink guard (rig scope, trigger!=webhook, missing required param,
-	// conversation sink not yet wired). Deterministic, so release the dedup claim:
-	// the sender's non-2xx retry should get an honest 422, not a masked 2xx dedup.
-	// The detailed reason names an order/rig/param — safe to log, but the wire body
-	// AND the event stay generic (reason=dispatch_refused) so the public edge learns
-	// nothing about the city's order catalog.
+	// Refused by a sink guard (rig scope, public-hook exec order, trigger!=webhook,
+	// missing required param, conversation sink not yet wired). Deterministic, so
+	// release the dedup claim: the sender's non-2xx retry should get an honest 422,
+	// not a masked 2xx dedup. The detailed reason names an order/rig/param — safe to
+	// log, but the wire body AND the event stay generic (reason=dispatch_refused) so
+	// the public edge learns nothing about the city's order catalog.
 	s.webhookDedup.forget(dedupKey)
-	log.Printf("api: webhook %q refused: %s", hook.Name, result.Reason)
+	log.Printf("api: webhook %q refused: %s", req.hook.Name, result.Reason)
 	s.emitWebhookRejected(WebhookRejectedPayload{
-		Webhook: hook.Name, Scheme: scheme,
+		Webhook: req.hook.Name, Scheme: req.scheme,
 		Reason: reasonDispatchRefused, Status: http.StatusUnprocessableEntity,
 		EventType: vres.EventType, DedupID: eventDedupID, BodySize: len(body),
 	})
@@ -346,22 +449,25 @@ func findWebhook(cfg *config.City, name string) (config.Webhook, bool) {
 // gets a 404 (not a read-only 403 that would confirm the route exists); a public
 // route's existence is already known, so a read-only 403 there leaks nothing.
 //
-// Returns (true, "") to proceed; on false it has already written the rejection and
-// returns the reason enum (reasonPerimeterDenied or reasonReadOnly) for the event.
-func webhookRequestAllowed(w http.ResponseWriter, visibility string, r *http.Request, apiReadOnly bool) (bool, string) {
+// It returns true to proceed; on false it has already written the rejection.
+// These denials are DELIBERATELY NOT evented (the caller does not emit): they are
+// cheap, unauthenticated, attacker-fully-controlled reject paths, so eventing
+// them would be the same event-log-flood amplifier and existence oracle that
+// keeps an unknown-name 404 non-evented.
+func webhookRequestAllowed(w http.ResponseWriter, visibility string, r *http.Request, apiReadOnly bool) bool {
 	public := visibility == "public"
 	if !public {
 		internalProxyRequest := r.Header.Get("X-GC-Request") != ""
 		if !isLoopbackRemoteAddr(r.RemoteAddr) && !internalProxyRequest {
 			problemWebhookRouteNotFound.writeTo(w)
-			return false, reasonPerimeterDenied
+			return false
 		}
 	}
 	if apiReadOnly {
 		problemWebhookReadOnly.writeTo(w)
-		return false, reasonReadOnly
+		return false
 	}
-	return true, ""
+	return true
 }
 
 // buildWebhookVerifier constructs the E4 verifier for a hook with an
@@ -449,14 +555,18 @@ func webhookVerifierFingerprint(hook config.Webhook, opts webhookverify.Options)
 	}, "\x00")
 }
 
-// webhookScopeFor builds the E6 dispatch scope from a matched webhook. config.Webhook
-// carries no rig binding today, so a rig-scoped webhook fails closed in the sink's
-// R4 scoping (it declares no rig); city-scoped webhooks let the rule's own rig stand.
+// webhookScopeFor builds the E6 dispatch scope from a matched webhook. It carries
+// the webhook's authoritative rig binding (so a rig-scoped webhook dispatches to
+// its own rig and refuses foreign rigs, R4) and its EFFECTIVE (post pack-guard)
+// publication visibility (so the sink refuses to let a public hook reach the exec
+// sink, R4). A city-scoped webhook lets the rule's own rig stand.
 func webhookScopeFor(w config.Webhook) webhooksink.WebhookScope {
 	return webhooksink.WebhookScope{
-		Name:      w.Name,
-		Scope:     w.ScopeOrDefault(),
-		SourceDir: w.SourceDir,
+		Name:       w.Name,
+		Scope:      w.ScopeOrDefault(),
+		Rig:        strings.TrimSpace(w.Rig),
+		Visibility: strings.ToLower(strings.TrimSpace(w.Publication.Visibility)),
+		SourceDir:  w.SourceDir,
 	}
 }
 
@@ -510,8 +620,9 @@ type OrderRunInput struct {
 
 // OrderRunOutput is the response for POST /v0/city/{cityName}/order/{name}/run.
 type OrderRunOutput struct {
-	Status int `json:"-"`
-	Body   struct {
+	Status   int    `json:"-"`
+	Location string `header:"Location" doc:"Runs-list URL. An order dispatches asynchronously, so no single run root is known at response time; the dispatched run appears in the list once it materializes."`
+	Body     struct {
 		Status     string `json:"status" doc:"\"dispatched\" when the order fired."`
 		ScopedName string `json:"scoped_name,omitempty" doc:"Rig-qualified name of the fired order."`
 		TrackingID string `json:"tracking_id,omitempty" doc:"Tracking bead id for the dispatch."`
@@ -526,18 +637,18 @@ type OrderRunOutput struct {
 func (s *Server) humaHandleOrderRun(ctx context.Context, input *OrderRunInput) (*OrderRunOutput, error) {
 	order, ok := resolveWebhookOrder(s.state, input.Name)
 	if !ok {
-		return nil, huma.Error404NotFound("not_found: order not found: " + input.Name)
+		return nil, apierr.OrderNotFound.Msg("not_found: order not found: " + input.Name)
 	}
 	// Refuse non-webhook-trigger orders up front for a clear 422 (the sink also
 	// enforces this — defense in depth).
 	if strings.TrimSpace(order.Trigger) != "webhook" {
-		return nil, huma.Error422UnprocessableEntity(fmt.Sprintf(
+		return nil, apierr.WebhookRejected.Msg(fmt.Sprintf(
 			"order %q has trigger %q; the run endpoint fires only trigger=\"webhook\" orders",
 			order.ScopedName(), order.Trigger))
 	}
 	dispatcher := webhookDispatcherFor(s.state)
 	if dispatcher == nil {
-		return nil, huma.Error503ServiceUnavailable("webhook dispatch is not available for this city")
+		return nil, apierr.ServiceUnavailable.Msg("webhook dispatch is not available for this city")
 	}
 	result, err := webhooksink.Route(context.WithoutCancel(ctx), webhooksink.Deps{
 		Dispatcher:   dispatcher,
@@ -549,12 +660,12 @@ func (s *Server) humaHandleOrderRun(ctx context.Context, input *OrderRunInput) (
 		Vars:   input.Body.Vars,
 	})
 	if err != nil {
-		return nil, huma.Error503ServiceUnavailable("dispatch failed: " + err.Error())
+		return nil, apierr.ServiceUnavailable.Msg("dispatch failed: " + err.Error())
 	}
 	if !result.Dispatched {
-		return nil, huma.Error422UnprocessableEntity("rejected: " + result.Reason)
+		return nil, apierr.WebhookRejected.Msg("rejected: " + result.Reason)
 	}
-	out := &OrderRunOutput{Status: http.StatusAccepted}
+	out := &OrderRunOutput{Status: http.StatusAccepted, Location: runsListPath(input.CityName)}
 	out.Body.Status = "dispatched"
 	out.Body.ScopedName = result.Dispatch.ScopedName
 	out.Body.TrackingID = result.Dispatch.TrackingID
@@ -633,6 +744,10 @@ var (
 	problemWebhookUnauthorized = problemBody{
 		status: http.StatusUnauthorized,
 		body:   []byte(`{"status":401,"title":"Unauthorized","detail":"signature verification failed"}`),
+	}
+	problemWebhookForbiddenSource = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"forbidden: source address is not permitted"}`),
 	}
 	problemWebhookVerifierUnavailable = problemBody{
 		status: http.StatusServiceUnavailable,

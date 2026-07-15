@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -123,7 +124,7 @@ func TestSlingRefusesCityStoreBeadToRigTarget(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if problem.Type != slingCrossStoreRouteProblemType {
+	if problem.Type != "urn:gascity:error:sling-cross-store-route" {
 		t.Fatalf("type = %q, want cross-store discriminator", problem.Type)
 	}
 	for _, want := range []string{"refusing cross-store route", "city:test-city", "myrig/worker", "rig:myrig"} {
@@ -415,7 +416,11 @@ func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal components: %v", err)
 	}
-	for _, want := range []string{slingMissingBeadProblemType, slingCrossRigProblemType, slingCrossStoreRouteProblemType} {
+	for _, want := range []string{
+		"urn:gascity:error:sling-missing-bead",
+		"urn:gascity:error:sling-cross-rig",
+		"urn:gascity:error:sling-cross-store-route",
+	} {
 		if !bytes.Contains(components, []byte(want)) {
 			t.Fatalf("OpenAPI components missing problem type %q", want)
 		}
@@ -444,9 +449,9 @@ func TestDocumentProblemTypesIsIdempotent(t *testing.T) {
 			counts[s]++
 		}
 	}
-	for _, problemType := range documentedProblemTypes {
-		if counts[problemType] != 1 {
-			t.Fatalf("example count for %q = %d, want 1", problemType, counts[problemType])
+	for _, pt := range apierr.Registered() {
+		if counts[pt.URN()] != 1 {
+			t.Fatalf("example count for %q = %d, want 1", pt.URN(), counts[pt.URN()])
 		}
 	}
 }

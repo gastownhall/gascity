@@ -1,12 +1,37 @@
 package config
 
 import (
+	"fmt"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// ghPublicPackTOML is a pack that contributes a public github webhook, used by
+// the allow_public content-digest tests.
+const ghPublicPackTOML = `
+[pack]
+name = "gh"
+schema = 1
+
+[[webhook]]
+name = "github"
+
+[webhook.publication]
+visibility = "public"
+hostname = "hooks"
+
+[webhook.verify]
+scheme = "github-hmac-sha256"
+secret_env = "GC_WEBHOOK_GITHUB_SECRET"
+
+[[webhook.rule]]
+event = "pull_request"
+order = "pr-review-request"
+`
 
 // (a) A full [[webhook]] with every sub-table parses and validates.
 func TestWebhook_ParsesAllSubTables(t *testing.T) {
@@ -193,9 +218,10 @@ order = "backlog-patrol"
 	}
 }
 
-// (d) A city-level allow_public grant honors public exposure for the matching
-// pack webhook.
-func TestWebhook_AllowPublicGrantHonorsPublic(t *testing.T) {
+// (d) A city-level allow_public grant with NO digest is default-closed: the pack
+// webhook is capped to tenant even though name+source match, because a name-only
+// grant would silently re-honor a content swap (R3 content-scoped consent).
+func TestWebhook_AllowPublicWithoutDigestCapped(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `
 [workspace]
@@ -206,26 +232,7 @@ includes = ["packs/gh"]
 name = "github"
 source = "packs/gh"
 `)
-	writeFile(t, dir, "packs/gh/pack.toml", `
-[pack]
-name = "gh"
-schema = 1
-
-[[webhook]]
-name = "github"
-
-[webhook.publication]
-visibility = "public"
-hostname = "hooks"
-
-[webhook.verify]
-scheme = "github-hmac-sha256"
-secret_env = "GC_WEBHOOK_GITHUB_SECRET"
-
-[[webhook.rule]]
-event = "pull_request"
-order = "pr-review-request"
-`)
+	writeFile(t, dir, "packs/gh/pack.toml", ghPublicPackTOML)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
 	if err != nil {
@@ -234,12 +241,92 @@ order = "pr-review-request"
 	if len(cfg.Webhooks) != 1 {
 		t.Fatalf("want 1 webhook, got %d", len(cfg.Webhooks))
 	}
-	w := cfg.Webhooks[0]
-	if w.SourceDir == "" {
+	if w := cfg.Webhooks[0]; w.SourceDir == "" {
 		t.Fatal("imported-pack webhook must carry SourceDir provenance")
 	}
-	if w.Publication.Visibility != "public" {
-		t.Errorf("visibility = %q, want public (granted by [webhooks].allow_public)", w.Publication.Visibility)
+	if got := cfg.Webhooks[0].Publication.Visibility; got != "tenant" {
+		t.Errorf("visibility = %q, want tenant (a name+source grant with no digest must not honor public)", got)
+	}
+}
+
+// (d') A grant whose digest matches the webhook's current content honors public
+// exposure; a stale/placeholder digest does not (content-scoped consent, R3).
+func TestWebhook_AllowPublicWithMatchingDigestHonored(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/gh/pack.toml", ghPublicPackTOML)
+	grantWith := func(digest string) string {
+		return fmt.Sprintf(`
+[workspace]
+name = "test"
+includes = ["packs/gh"]
+
+[[webhooks.allow_public]]
+name = "github"
+source = "packs/gh"
+digest = %q
+`, digest)
+	}
+
+	// A placeholder (stale) digest is still capped to tenant; the composed webhook
+	// then yields the real digest (visibility is excluded from the digest, so the
+	// capped value is fine to compute from).
+	writeFile(t, dir, "city.toml", grantWith("sha256:stale"))
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes (stale): %v", err)
+	}
+	if got := cfg.Webhooks[0].Publication.Visibility; got != "tenant" {
+		t.Fatalf("stale-digest grant: visibility = %q, want tenant", got)
+	}
+	digest := WebhookContentDigest(cfg.Webhooks[0])
+
+	// Re-consent with the correct digest → public honored.
+	writeFile(t, dir, "city.toml", grantWith(digest))
+	cfg2, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes (matching): %v", err)
+	}
+	if got := cfg2.Webhooks[0].Publication.Visibility; got != "public" {
+		t.Errorf("matching-digest grant: visibility = %q, want public", got)
+	}
+}
+
+// (d”) Duplicate allow_public grants for the same name+source must not let a
+// stale-digest entry shadow a later valid re-consent: authorization holds when
+// ANY matching grant pins the current digest, regardless of grant order.
+func TestWebhookPublicDenyReason_StaleGrantDoesNotShadowValid(t *testing.T) {
+	const cityRoot = "/city"
+	w := &Webhook{
+		Name:      "github",
+		SourceDir: "/city/packs/gh",
+		Verify:    WebhookVerify{Scheme: "github-hmac-sha256", SecretEnv: "GC_WEBHOOK_GITHUB_SECRET"},
+		Rules:     []WebhookRule{{Event: "pull_request", Order: "pr-review-request"}},
+	}
+	digest := WebhookContentDigest(*w)
+	stale := WebhookAllowPublic{Name: "github", Source: "/city/packs/gh", Digest: "sha256:stale"}
+	valid := WebhookAllowPublic{Name: "github", Source: "/city/packs/gh", Digest: digest}
+
+	// Stale grant FIRST, valid re-consent SECOND → authorized (the shadowing bug:
+	// the stale first match used to cap the hook despite the later valid grant).
+	if reason := webhookPublicDenyReason(w, cityRoot, []WebhookAllowPublic{stale, valid}); reason != "" {
+		t.Errorf("stale-then-valid: got deny reason %q, want authorized (empty)", reason)
+	}
+	// Order-independent: valid FIRST, stale SECOND → still authorized.
+	if reason := webhookPublicDenyReason(w, cityRoot, []WebhookAllowPublic{valid, stale}); reason != "" {
+		t.Errorf("valid-then-stale: got deny reason %q, want authorized (empty)", reason)
+	}
+	// Only stale duplicates (none pin the current digest) → capped, and the reason
+	// is the content-changed re-consent prompt (not the no-digest or no-match one).
+	onlyStale := []WebhookAllowPublic{
+		{Name: "github", Source: "/city/packs/gh", Digest: "sha256:stale-a"},
+		{Name: "github", Source: "/city/packs/gh", Digest: "sha256:stale-b"},
+	}
+	reason := webhookPublicDenyReason(w, cityRoot, onlyStale)
+	if reason == "" {
+		t.Fatal("only-stale duplicates: got authorized, want a content-changed deny reason")
+	}
+	if !strings.Contains(reason, "content changed") {
+		t.Errorf("only-stale duplicates: reason = %q, want it to mention content change", reason)
 	}
 }
 
@@ -385,6 +472,30 @@ func TestValidateWebhooks_Rejects(t *testing.T) {
 			w.Rules = []WebhookRule{{Event: "e", Order: "o", Args: map[string]string{"GC_CITY": "{{action}}"}}}
 			return w
 		}(), "reserved controller-owned env key"},
+		{"secret_env outside operator namespace", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Verify.SecretEnv = "MY_SECRET"
+			return w
+		}(), "operator namespace"},
+		{"discord requires secret_env", func() Webhook {
+			return Webhook{Name: "h", Verify: WebhookVerify{Scheme: "discord-ed25519"}, Rules: []WebhookRule{{Event: "e", Order: "o"}}}
+		}(), "secret_env is required"},
+		{"bearer_env outside operator namespace", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Verify.BearerEnv = "SOME_TOKEN"
+			return w
+		}(), "operator namespace"},
+		{"malformed allowed_cidr", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Verify.AllowedCIDRs = []string{"not-a-cidr"}
+			return w
+		}(), "allowed_cidrs"},
+		{"rig scope without rig", func() Webhook {
+			return base(Webhook{Name: "h", Scope: "rig"})
+		}(), "requires a rig binding"},
+		{"city scope with rig", func() Webhook {
+			return base(Webhook{Name: "h", Rig: "maintainer"})
+		}(), "rig is only valid for scope"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,6 +507,132 @@ func TestValidateWebhooks_Rejects(t *testing.T) {
 				t.Errorf("error = %q, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A rig-scoped webhook with its authoritative rig binding validates; the sink
+// uses that rig to constrain dispatch (R4).
+func TestValidateWebhooks_RigScopedValid(t *testing.T) {
+	w := Webhook{
+		Name:   "maintainer-hook",
+		Scope:  "rig",
+		Rig:    "maintainer",
+		Verify: WebhookVerify{Scheme: "hmac-sha256", SecretEnv: "GC_WEBHOOK_MAINT"},
+		Rules:  []WebhookRule{{Event: "issue", Order: "triage", Rig: "maintainer"}},
+	}
+	if err := ValidateWebhooks([]Webhook{w}); err != nil {
+		t.Fatalf("valid rig-scoped webhook rejected: %v", err)
+	}
+}
+
+// Valid operator-namespaced bearer_env and well-formed allowed_cidrs (CIDR and
+// bare-IP forms) are accepted.
+func TestValidateWebhooks_BearerAndCIDRAccepted(t *testing.T) {
+	w := Webhook{
+		Name: "gh",
+		Verify: WebhookVerify{
+			Scheme: "github-hmac-sha256", SecretEnv: "GC_WEBHOOK_GH",
+			BearerEnv:    "GC_WEBHOOK_GH_BEARER",
+			AllowedCIDRs: []string{"192.30.252.0/22", "203.0.113.7"},
+		},
+		Rules: []WebhookRule{{Event: "push", Order: "build", Args: map[string]string{"ref": "{{ref}}"}}},
+	}
+	if err := ValidateWebhooks([]Webhook{w}); err != nil {
+		t.Fatalf("valid bearer_env/allowed_cidrs rejected: %v", err)
+	}
+}
+
+// A bare IPv4-mapped IPv6 allowlist entry is unmapped to its IPv4 form so it
+// matches the unmapped request IP the source check compares against. Without the
+// unmap it would parse as an IPv6 /128 and fail-close (403) a legitimate IPv4
+// caller, diverging from the request-time normalization the parser promises to
+// share.
+func TestParseWebhookCIDRs_UnmapsBareIPv4Mapped(t *testing.T) {
+	prefixes, err := ParseWebhookCIDRs([]string{"::ffff:192.0.2.1"})
+	if err != nil {
+		t.Fatalf("ParseWebhookCIDRs(::ffff:192.0.2.1) error: %v", err)
+	}
+	if len(prefixes) != 1 {
+		t.Fatalf("got %d prefixes, want 1", len(prefixes))
+	}
+	p := prefixes[0]
+	if !p.Addr().Is4() {
+		t.Errorf("parsed prefix addr = %v, want unmapped IPv4 form", p.Addr())
+	}
+	// webhookRemoteIP unmaps 4-in-6 request IPs, so a request from 192.0.2.1 must
+	// fall inside the parsed mapped-form entry.
+	if req := netip.MustParseAddr("192.0.2.1"); !p.Contains(req) {
+		t.Errorf("prefix %v does not contain unmapped request IP %v", p, req)
+	}
+}
+
+// A CIDR-form IPv4-mapped IPv6 allowlist entry ("::ffff:192.0.2.0/120") is
+// normalized to its equivalent IPv4 prefix ("192.0.2.0/24"), matching the
+// unmapped request IP the source check compares against. Before the fix the
+// ParsePrefix branch appended the prefix without unmapping, so it stayed an IPv6
+// prefix that fail-closed (403) a legitimate IPv4 caller — the same divergence
+// the bare-address case above closes, but for CIDR notation.
+func TestParseWebhookCIDRs_UnmapsMappedCIDRPrefix(t *testing.T) {
+	prefixes, err := ParseWebhookCIDRs([]string{"::ffff:192.0.2.0/120"})
+	if err != nil {
+		t.Fatalf("ParseWebhookCIDRs(::ffff:192.0.2.0/120) error: %v", err)
+	}
+	if len(prefixes) != 1 {
+		t.Fatalf("got %d prefixes, want 1", len(prefixes))
+	}
+	p := prefixes[0]
+	if !p.Addr().Is4() {
+		t.Errorf("parsed prefix addr = %v, want unmapped IPv4 form", p.Addr())
+	}
+	if p.Bits() != 24 {
+		t.Errorf("parsed prefix bits = %d, want 24 (a /120 mapped prefix is a /24 IPv4 range)", p.Bits())
+	}
+	// A request from inside the range matches; one just outside it does not — proving
+	// the prefix width survived the conversion rather than collapsing to a host route.
+	if in := netip.MustParseAddr("192.0.2.200"); !p.Contains(in) {
+		t.Errorf("prefix %v does not contain in-range IPv4 %v", p, in)
+	}
+	if out := netip.MustParseAddr("192.0.3.1"); p.Contains(out) {
+		t.Errorf("prefix %v wrongly contains out-of-range IPv4 %v", p, out)
+	}
+}
+
+// A mapped-form prefix shorter than /96 spans beyond the IPv4-mapped range, so it
+// cannot represent an IPv4 allowlist entry and is rejected at parse (and thus at
+// config load) rather than silently never matching an unmapped IPv4 peer.
+func TestParseWebhookCIDRs_RejectsSub96MappedPrefix(t *testing.T) {
+	if _, err := ParseWebhookCIDRs([]string{"::ffff:0.0.0.0/64"}); err == nil {
+		t.Fatal("ParseWebhookCIDRs(::ffff:0.0.0.0/64) = nil error, want rejection of a sub-/96 mapped prefix")
+	}
+}
+
+// WebhookContentDigest is stable across equivalent content and changes when a
+// security-relevant field (here the target order) changes, but ignores the
+// excluded fields (name, SourceDir, visibility, max_per_minute).
+func TestWebhookContentDigest_StableAndSensitive(t *testing.T) {
+	w := Webhook{
+		Name:        "github",
+		Publication: ServicePublicationConfig{Visibility: "public"},
+		Verify:      WebhookVerify{Scheme: "github-hmac-sha256", SecretEnv: "GC_WEBHOOK_GH"},
+		Rules:       []WebhookRule{{Event: "pull_request", Order: "pr-review", Args: map[string]string{"repo": "{{repo}}"}}},
+	}
+	base := WebhookContentDigest(w)
+
+	// Excluded fields do not change the digest.
+	ignored := w
+	ignored.Name = "renamed"
+	ignored.SourceDir = "/packs/elsewhere"
+	ignored.Publication.Visibility = "tenant"
+	ignored.MaxPerMinute = 99
+	if got := WebhookContentDigest(ignored); got != base {
+		t.Errorf("digest changed on an excluded-field edit: %q != %q", got, base)
+	}
+
+	// A security-relevant change (target order) changes the digest.
+	swapped := w
+	swapped.Rules = []WebhookRule{{Event: "pull_request", Order: "attacker-order", Args: map[string]string{"repo": "{{repo}}"}}}
+	if got := WebhookContentDigest(swapped); got == base {
+		t.Error("digest must change when a rule's target order changes (content-swap detection)")
 	}
 }
 

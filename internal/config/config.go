@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/remotesource"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -91,36 +92,44 @@ func IsDeterministicControlDispatcher(agent *Agent) bool {
 }
 
 // PreferredDeterministicControlDispatcher returns the deterministic control-
-// dispatcher to route a scope's control beads to, binding-agnostic. The
-// city-level singleton (Dir == "") is preferred for every scope — given
-// max_active_sessions=1, it is the one whose session actually runs and claims
-// the control queue — and a rig-scoped instance (Dir == rigContext) is used only
-// when no city-level deterministic dispatcher is configured. Routing to a
-// rig-scoped copy when a city singleton exists strands the control bead, since
-// the singleton session never claims a <rig>/... route. This is the canonical
-// selection shared by the graph.v2 decoration path (internal/graphroute) and the
-// attempt-time control re-route path (internal/dispatch); keep them in lockstep.
+// dispatcher for a scope, binding-agnostic. A city graph (empty rigContext)
+// selects the city dispatcher; a rig graph selects only the dispatcher expanded
+// for that rig. This keeps the route identity aligned with the store that owns
+// the graph. It is the canonical selection shared by graph.v2 decoration and
+// attempt-time control re-routing; keep those paths in lockstep.
 func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agent, bool) {
 	if cfg == nil {
 		return Agent{}, false
 	}
 	rigContext = strings.TrimSpace(rigContext)
-	var rigScoped Agent
-	haveRigScoped := false
 	for _, a := range cfg.Agents {
 		if !IsDeterministicControlDispatcher(&a) {
 			continue
 		}
-		if strings.TrimSpace(a.Dir) == "" {
+		if strings.TrimSpace(a.Dir) == rigContext {
 			return a, true
 		}
-		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
-			rigScoped = a
-			haveRigScoped = true
-		}
 	}
-	if haveRigScoped {
-		return rigScoped, true
+	return Agent{}, false
+}
+
+// ControlDispatcherForScope returns the configured control dispatcher whose
+// directory exactly matches rigContext. Deterministic dispatchers are preferred,
+// while an exact-scope plain dispatcher remains supported for minimal/custom
+// configs. It never substitutes a city dispatcher for a rig scope (or vice
+// versa), because those dispatchers read different bead stores.
+func ControlDispatcherForScope(cfg *City, rigContext string) (Agent, bool) {
+	if dispatcher, ok := PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+		return dispatcher, true
+	}
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigContext = strings.TrimSpace(rigContext)
+	for _, agent := range cfg.Agents {
+		if agent.Name == ControlDispatcherAgentName && strings.TrimSpace(agent.Dir) == rigContext {
+			return agent, true
+		}
 	}
 	return Agent{}, false
 }
@@ -1375,6 +1384,11 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
+	// byte-identical), "auto" (compare-and-swap where the store is capable,
+	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
+	// defaults to "off". Any other value fails config load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1407,6 +1421,20 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	default:
 		return BeadsBDCompatibility104
 	}
+}
+
+// NormalizedConditionalWrites returns the configured conditional-writes value,
+// mapping ONLY the empty string to the built-in default "off". Unlike
+// NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+// The string→rollout.Mode mapping deliberately lives in internal/rollout to keep
+// config free of a rollout import (cycle).
+func (b BeadsConfig) NormalizedConditionalWrites() string {
+	if b.ConditionalWrites == "" {
+		return "off"
+	}
+	return b.ConditionalWrites
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -2046,13 +2074,62 @@ type APIConfig struct {
 	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
-	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field.
+	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
+	// multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,
+	// no config field) additionally binds the gate to the controller's own
+	// city id: every grant must then carry that exact cid claim, failing
+	// closed on a mismatching or missing cid.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	// WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup
 	// error instead of silently disabling the gate, so a config that intends to
 	// gate writes fails closed if the key is ever dropped. The
 	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
 	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
+	// WriteAuthAllowUnverified acknowledges running a non-loopback bind with
+	// allow_mutations and NO write-auth verify key — an unauthenticated write
+	// plane fronted only by the network. Without it, that combination is a
+	// fail-closed startup error (gate G10) so a hardened deployment cannot boot
+	// wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for
+	// a network-fronted deployment that intentionally trusts its perimeter.
+	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
+	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
+	// already-registered city on the typed per-city API — the routes under
+	// /v0/city/{cityName} — to carry a signed read grant from a configured
+	// trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding
+	// in-process, grant-based admission control to the typed city read surface
+	// (beads, mail, sessions, agent transcripts) instead of trusting network
+	// position.
+	//
+	// Scope boundary: this gate covers ONLY the typed /v0/city/{cityName} read
+	// routes. It does NOT cover other surfaces on the same listener that can also
+	// expose per-city data: the supervisor-scope aggregate event feed (/v0/events
+	// and /v0/events/stream, which multiplex every running city's events), the
+	// default-on dashboard host plane (/api/*, including its /api/city/{cityName}/*
+	// samplers, run detail, run diff, and config reads), and the supervisor-scope
+	// routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the
+	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the
+	// only complete mitigation is to front the whole listener with the
+	// grant-minting authority/edge (the intended deployment), which protects
+	// every surface above. Disabling the dashboard host plane with
+	// GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*
+	// only, while the supervisor-scope event feed /v0/events and
+	// /v0/events/stream stays readable by network position until the follow-up
+	// supervisor-scope grant lands. Gating those feeds is tracked as that
+	// follow-up work.
+	//
+	// Built-in callers (the bundled gc API client and dashboard SPA) mint no
+	// grant, so enabling this gate turns their direct /v0/city reads away with a
+	// clear 401; such deployments front reads through the authority that mints
+	// grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma
+	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
+	// via an epoch floor is an ops-plane control set only through the
+	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
+	// instead of silently disabling the gate, so a config that intends to gate
+	// reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1
+	// env var has the same effect.
+	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
@@ -3208,6 +3285,47 @@ type Agent struct {
 	layout agentLayout
 }
 
+// Clone returns a deep copy of the agent. Every slice, map, and pointer field
+// is independently allocated so that mutating the clone never affects the
+// original (and vice versa) — the guarantee the pack-load cache and pool
+// expansion both rely on. Scalar and unexported value fields (including the
+// source/layout provenance enums) are carried over by the initial struct copy.
+//
+// This is the single deep-copy source for Agent: deepCopyAgents (pack cache)
+// and cmd/gc's pool deepCopyAgent both call through here. TestAgentCloneIsDeep
+// enforces completeness — any new reference-type field must be cloned here or
+// the build fails.
+func (a Agent) Clone() Agent {
+	out := a
+	out.PreStart = append([]string(nil), a.PreStart...)
+	out.Args = append([]string(nil), a.Args...)
+	out.ProcessNames = append([]string(nil), a.ProcessNames...)
+	out.NamepoolNames = append([]string(nil), a.NamepoolNames...)
+	out.InstallAgentHooks = append([]string(nil), a.InstallAgentHooks...)
+	out.Skills = append([]string(nil), a.Skills...)
+	out.MCP = append([]string(nil), a.MCP...)
+	out.SessionSetup = append([]string(nil), a.SessionSetup...)
+	out.SessionLive = append([]string(nil), a.SessionLive...)
+	out.InjectFragments = append([]string(nil), a.InjectFragments...)
+	out.AppendFragments = append([]string(nil), a.AppendFragments...)
+	out.InheritedAppendFragments = append([]string(nil), a.InheritedAppendFragments...)
+	out.DependsOn = append([]string(nil), a.DependsOn...)
+	out.SharedSkills = append([]string(nil), a.SharedSkills...)
+	out.SharedMCP = append([]string(nil), a.SharedMCP...)
+	out.Env = deepCopyStringMap(a.Env)
+	out.OptionDefaults = deepCopyStringMap(a.OptionDefaults)
+	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
+	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
+	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
+	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
+	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
+	out.Attach = copyBoolPtr(a.Attach)
+	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
+	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)
+	return out
+}
+
 // agentSource enumerates the configuration origins recognized by
 // describeSource. Discovery sites stamp exactly one value per agent.
 type agentSource uint8
@@ -3308,6 +3426,18 @@ func (a *Agent) MouseModeOn() bool {
 // AttachEnabled reports whether the agent supports interactive attachment.
 func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
+}
+
+// EffectiveDefaultSlingFormula returns the default sling formula for
+// this agent, or "" if none is set.
+func (a *Agent) EffectiveDefaultSlingFormula() string {
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
+	}
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
 }
 
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
@@ -4266,7 +4396,25 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateConditionalWrites rejects an out-of-enum beads.conditional_writes
+// value at load time. This gate selects a correctness discipline: a typo like
+// "requre" silently meaning "off" would leave an operator believing the epoch
+// fence is enforced while every write runs unfenced, so the config fails to
+// load instead. The empty string (unset) is valid and defaults to off.
+func validateConditionalWrites(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

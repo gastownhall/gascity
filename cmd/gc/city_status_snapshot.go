@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -63,10 +64,13 @@ type cityStatusSnapshot struct {
 	Controller      ControllerJSON
 	Suspended       bool
 	Beads           *beads.BeadsDiagnostic
-	Agents          []cityStatusAgentRow
-	Rigs            []StatusRigJSON
-	NamedSessions   []cityStatusNamedSession
-	Summary         StatusSummaryJSON
+	// ConditionalWrites is the daemon's latched §12.5 snapshot; nil on the
+	// local fallback path (a stopped controller has no latched state to show).
+	ConditionalWrites *api.StatusConditionalWrites
+	Agents            []cityStatusAgentRow
+	Rigs              []StatusRigJSON
+	NamedSessions     []cityStatusNamedSession
+	Summary           StatusSummaryJSON
 }
 
 type cityStatusAgentRow struct {
@@ -363,13 +367,13 @@ func namedSessionStatusForCity(
 		return "lookup error: " + err.Error()
 	}
 
-	bead, err := sessStore.Get(id)
+	info, err := sessionFrontDoor(sessStore).Get(id)
 	if err != nil {
 		return "lookup error: " + err.Error()
 	}
-	// Read the raw state through the session.Info codec (verbatim MetadataState)
-	// rather than cracking bead.Metadata inline (class-store leak closure).
-	if state := strings.TrimSpace(session.InfoFromPersistedBead(bead).MetadataState); state != "" {
+	// Read the raw state (verbatim MetadataState) through the typed session
+	// front door rather than cracking bead.Metadata inline (class-store leak closure).
+	if state := strings.TrimSpace(info.MetadataState); state != "" {
 		return state
 	}
 	return "materialized"
@@ -454,19 +458,20 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	degraded := len(signals) > 0
 	running := snapshot.Controller.Running
 	return StatusJSON{
-		SchemaVersion: "1",
-		OK:            true,
-		CityName:      snapshot.CityName,
-		Workspace:     WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
-		CityPath:      snapshot.CityPath,
-		Controller:    snapshot.Controller,
-		Running:       running,
-		Suspended:     snapshot.Suspended,
-		Health:        HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
-		Beads:         snapshot.Beads,
-		Agents:        agents,
-		Rigs:          rigs,
-		Summary:       summary,
+		SchemaVersion:     "1",
+		OK:                true,
+		CityName:          snapshot.CityName,
+		Workspace:         WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
+		CityPath:          snapshot.CityPath,
+		Controller:        snapshot.Controller,
+		Running:           running,
+		Suspended:         snapshot.Suspended,
+		Health:            HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
+		Beads:             snapshot.Beads,
+		ConditionalWrites: snapshot.ConditionalWrites,
+		Agents:            agents,
+		Rigs:              rigs,
+		Summary:           summary,
 	}
 }
 
@@ -532,4 +537,26 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 	}
 
 	renderStoreHealthBlock(stdout, snapshot.Summary.StoreHealth)
+	renderConditionalWritesBlock(stdout, snapshot.ConditionalWrites)
+}
+
+// renderConditionalWritesBlock prints the daemon's latched conditional-writes
+// snapshot. Off with no notices is silent — the block earns lines only when
+// the gate is on or something needs an operator's eye.
+func renderConditionalWritesBlock(stdout io.Writer, cw *api.StatusConditionalWrites) {
+	if cw == nil || (cw.Effective == "off" && len(cw.Notices) == 0) {
+		return
+	}
+	fmt.Fprintln(stdout)                                                                                        //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Conditional writes: %s (origin=%s, effective=%s)\n", cw.Mode, cw.Origin, cw.Effective) //nolint:errcheck // best-effort stdout
+	for _, v := range cw.Stores {
+		if v.Capable {
+			fmt.Fprintf(stdout, "  %-24s%-8scapable\n", v.StoreID, v.Kind) //nolint:errcheck // best-effort stdout
+			continue
+		}
+		fmt.Fprintf(stdout, "  %-24s%-8sINCAPABLE (probe=%s latch=%s): %s\n", v.StoreID, v.Kind, v.Probe, v.Latch, v.Reason) //nolint:errcheck // best-effort stdout
+	}
+	for _, n := range cw.Notices {
+		fmt.Fprintf(stdout, "  ! %s\n", n.Message) //nolint:errcheck // best-effort stdout
+	}
 }

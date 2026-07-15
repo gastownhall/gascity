@@ -32,7 +32,8 @@ type EventEmitRequest struct {
 // EventEmitInput is the Huma input for POST /v0/city/{cityName}/events.
 type EventEmitInput struct {
 	CityScope
-	Body EventEmitRequest
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           EventEmitRequest
 }
 
 // EventEmitOutput is the response body for POST /v0/events.

@@ -325,6 +325,34 @@ real path.
 import "github.com/danielgtaylor/huma/v2/adapters/humago"
 ```
 
+## 12. The `huma.NewError` override and `Operation.Errors`
+
+`internal/api/errors_install.go` replaces the `huma.NewError` package var at
+package-init so every error the API produces is an `*apierr.ErrorModel` carrying
+a machine `type` URN + `code` (see `internal/api/apierr` and the control-plane
+doc §3.8). Two gotchas fall out of this:
+
+- **The override changes the runtime type of every Huma error, but not the
+  wire.** Overriding `NewError` covers `NewErrorWithContext` too (Huma's default
+  delegates to the `NewError` var at call time, and the serving path goes through
+  it). For everything except Huma's built-in request-validation 422, the override
+  wraps Huma's own `ErrorModel` verbatim with an empty (omitted) `code`, so the
+  JSON is byte-identical — locked by round-trip + `TestOpenAPISpecInSync`. Mint a
+  *typed* error through the `apierr` catalog constructors
+  (`apierr.BeadNotFound.Msg(...)`), never a raw `&huma.ErrorModel{}` literal or a
+  bare `urn:gascity:error:` string (the `TestEveryEmittedErrorCodeIsRegistered`
+  guard forbids the latter outside `apierr/`).
+
+- **`Operation.Errors` auto-appends 422 and 500.** When you declare any error
+  status on an operation (directly, or via the `errorStatuses(...)` operation
+  handler), Huma additionally appends `422` (for ops with path params or a body —
+  i.e. every city-scoped op) and `500`, then emits one response per status and
+  **suppresses the `default` response** (`huma.go` `defineErrors`). So an op you
+  give `errorStatuses(http.StatusNotFound)` shows `404`, `422`, `500` in the
+  spec. This is expected — do not hand-edit the generated `openapi.json` to remove
+  them; pass only the 4xx/503 the handler actually returns and let Huma add the
+  rest.
+
 ## What we don't use from Huma
 
 - **`huma.Group`** — we have a single API per supervisor and a

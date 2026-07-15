@@ -768,6 +768,14 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 		if b.Metadata["pool_slot"] != "" {
 			t.Errorf("singleton agent should not have pool_slot, got %q", b.Metadata["pool_slot"])
 		}
+		// A2 canonical record (S19 Stage 2, write-only): a config-resolved
+		// singleton gets a canonical name and NO canonical_pool_slot.
+		if got := b.Metadata[session.CanonicalInstanceNameMetadata]; got != "db-node-1" {
+			t.Errorf("singleton canonical_instance_name = %q, want db-node-1", got)
+		}
+		if got := b.Metadata[session.CanonicalPoolSlotMetadata]; got != "" {
+			t.Errorf("singleton canonical_pool_slot = %q, want empty", got)
+		}
 	}
 }
 
@@ -804,6 +812,15 @@ func TestAdoptionBarrier_StaleDashNSingletonAdoptsCanonicalIdentity(t *testing.T
 		}
 		if b.Metadata["pool_slot"] != "" {
 			t.Errorf("stale singleton session should not have pool_slot metadata, got %q", b.Metadata["pool_slot"])
+		}
+		// A2 canonical record (S19 Stage 2, write-only): the stale-dash-N
+		// singleton is stamped with the CANONICAL base name and NO slot — never
+		// the phantom refinery-1 pool identity (S2-3 honesty).
+		if got := b.Metadata[session.CanonicalInstanceNameMetadata]; got != "refinery" {
+			t.Errorf("stale singleton canonical_instance_name = %q, want refinery", got)
+		}
+		if got := b.Metadata[session.CanonicalPoolSlotMetadata]; got != "" {
+			t.Errorf("stale singleton canonical_pool_slot = %q, want empty", got)
 		}
 	}
 }
@@ -850,5 +867,55 @@ func TestProcessHintsUsesExplicitAgentProcessNames(t *testing.T) {
 	got[0] = "mutated"
 	if agent.ProcessNames[0] != "worker-cli" {
 		t.Fatalf("processHints() returned agent slice without cloning")
+	}
+}
+
+// TestAdoptionBarrier_StampsCanonicalIdentity proves the A2 canonical stamp
+// (S19 Stage 2, write-only): a config-resolved pool instance gets a canonical
+// record (name + slot), while an orphan session (ends in -N, matches no agent)
+// gets NO canonical record — a wrong authoritative identity is worse than an
+// absent one (S2-3).
+func TestAdoptionBarrier_StampsCanonicalIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &fakeAdoptionProvider{running: []string{"worker-3", "orphan-9"}}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+		},
+	}
+	var stderr bytes.Buffer
+	clk := &clock.Fake{Time: time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)}
+
+	_, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	byAgent := map[string]beads.Bead{}
+	for _, b := range beadList {
+		byAgent[b.Metadata["agent_name"]] = b
+	}
+
+	pool, ok := byAgent["worker-3"]
+	if !ok {
+		t.Fatalf("no adopted bead for pool instance worker-3; beads=%v", byAgent)
+	}
+	if got := pool.Metadata[session.CanonicalInstanceNameMetadata]; got != "worker-3" {
+		t.Errorf("pool canonical_instance_name = %q, want worker-3", got)
+	}
+	if got := pool.Metadata[session.CanonicalPoolSlotMetadata]; got != "3" {
+		t.Errorf("pool canonical_pool_slot = %q, want 3", got)
+	}
+
+	orphan, ok := byAgent["orphan-9"]
+	if !ok {
+		t.Fatalf("no adopted bead for orphan-9; beads=%v", byAgent)
+	}
+	if got := orphan.Metadata[session.CanonicalInstanceNameMetadata]; got != "" {
+		t.Errorf("orphan canonical_instance_name = %q, want empty (no canonical record for orphan)", got)
+	}
+	if got := orphan.Metadata[session.CanonicalPoolSlotMetadata]; got != "" {
+		t.Errorf("orphan canonical_pool_slot = %q, want empty", got)
 	}
 }

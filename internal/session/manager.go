@@ -141,7 +141,45 @@ type Info struct {
 	// isManualSessionBead compares it WITHOUT trimming, so the Info mirror
 	// keeps the raw value to stay byte-identical on whitespace-padded inputs.
 	ManualSessionMetadata string
-	Labels                []string // bead labels (agent:<name> identity fallback + canonical checks)
+	// PoolAliasConflict / PoolAliasConflictCount / PoolAliasConflictAt are the RAW
+	// pool_alias_conflict{,_count,_at} metadata mirrors. The singleton-pool
+	// normalization lane (normalizeNonExpandingPoolSessionInfo in cmd/gc) reads
+	// pool_alias_conflict as the deferred canonical alias, increments the count on
+	// each deferral, and clears all three once the canonical alias is (re)acquired;
+	// the Info form of that lane needs the raw values to stay byte-identical. These
+	// keys are cmd/gc constants (session_beads.go poolAliasConflict*MetadataKey); the
+	// literals here mirror them. Additive, internal-only (absent from the HTTP wire).
+	PoolAliasConflict      string   // pool_alias_conflict (raw; deferred canonical alias)
+	PoolAliasConflictCount string   // pool_alias_conflict_count (raw)
+	PoolAliasConflictAt    string   // pool_alias_conflict_at (raw RFC3339)
+	Labels                 []string // bead labels (agent:<name> identity fallback + canonical checks)
+
+	// CanonicalInstanceNameMetadata / CanonicalPoolSlotMetadata are the RAW
+	// canonical-identity record mirrors (canonical_instance_name /
+	// canonical_pool_slot), verbatim. They follow the DependencyOnlyMetadata /
+	// PendingCreateClaimMetadata house pattern: projected by InfoFromPersistedBead
+	// and folded per-key (verbatim copy) by ApplyPatch, so the two keys round-trip
+	// through the fold-vs-reproject oracle trivially. The typed record is derived
+	// on demand by the Info.CanonicalIdentity() accessor over these mirrors, never
+	// stored, so nothing can go stale after a heal. Additive, internal-only
+	// (absent from the HTTP wire). S19 Stage 2 is WRITE-ONLY: stamped at
+	// create/adoption but read by no decision path yet.
+	CanonicalInstanceNameMetadata string // canonical_instance_name (raw)
+	CanonicalPoolSlotMetadata     string // canonical_pool_slot (raw)
+
+	// PrimedAtMetadata / PrimingAttemptedAtMetadata / PromptHashMetadata are the
+	// RAW priming-marker mirrors (primed_at / priming_attempted_at / prompt_hash),
+	// verbatim. They follow the same raw-mirror house pattern as the canonical
+	// keys: projected by infoFromPersistedBead and folded per-key (verbatim copy)
+	// by ApplyPatch. The S19 Stage 3 shadow harness snapshots the compared keys
+	// off these Info mirrors at tick start/end (the reconciler loop carries no raw
+	// session beads), so every compared key must be a projected Info field.
+	// Additive, internal-only (absent from the HTTP wire). S19 Stage 2 is
+	// WRITE-ONLY: stamped/cleared at start/clear sites but read by no decision
+	// path yet (the harness observes them; Stage 4 acts on them).
+	PrimedAtMetadata           string // primed_at (raw RFC3339)
+	PrimingAttemptedAtMetadata string // priming_attempted_at (raw RFC3339)
+	PromptHashMetadata         string // prompt_hash (raw sha256 hex)
 
 	// MCPIdentity / MCPServersSnapshot mirror the raw mcp_identity and
 	// mcp_servers_snapshot metadata (verbatim). The ACP-transport classifier
@@ -172,6 +210,26 @@ type Info struct {
 	TriggerBeadStoreRef string // gc.trigger_bead_store_ref (raw)
 	BrainParentSID      string // gc.brain_parent_sid (raw)
 	Pack                string // gc.pack (raw); resolveTemplateForSessionBead threads it into GC_PACKER_PACK
+	// PackWorkspace is the RAW gc.pack_workspace metadata (beadmeta.PackWorkspaceMetadataKey),
+	// the pack workspace slug bindPoolSessionTriggerBead stamps alongside gc.pack.
+	// The pool-trigger binding diff compares it (trimmed) against the request's
+	// workspace slug, so the mirror keeps the raw value. Additive, internal-only
+	// (absent from the HTTP wire).
+	PackWorkspace string // gc.pack_workspace (raw)
+	// WorkDirCanonical is the RAW gc.work_dir metadata (beadmeta.WorkDirMetadataKey),
+	// the canonical work-dir key distinct from the legacy "work_dir" key that
+	// Info.WorkDir already mirrors. bindPoolSessionTriggerBead diffs BOTH keys
+	// independently, so the Info form needs a mirror for each; this one carries the
+	// canonical value verbatim. Additive, internal-only (absent from the HTTP wire).
+	WorkDirCanonical string // gc.work_dir (raw)
+	// WorkerDir is the RAW worker_dir metadata (beadmeta.WorkerDirMetadataKey),
+	// the canonical agent-process-cwd key. It is DISTINCT from both Info.WorkDir
+	// (the legacy "work_dir" key) and Info.WorkDirCanonical (the "gc.work_dir"
+	// key). WorkerDirFromInfo reads this canonical value first and falls back to
+	// the legacy Info.WorkDir, mirroring contract.WorkerDirFromMetadata's
+	// canonical→legacy precedence. Additive, internal-only (absent from the HTTP
+	// wire).
+	WorkerDir string // worker_dir (raw)
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//
@@ -218,6 +276,18 @@ type Info struct {
 	// start-in-flight) and parse it for the in-flight deadline, so the Info
 	// mirror keeps the raw value.
 	LastWokeAt string // last_woke_at (raw)
+	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
+	// the immutable start-of-awake-interval epoch that survives sleep/drain
+	// teardowns (unlike last_woke_at / pending_create_started_at, which are
+	// cleared). The Codex transcript windowing (ResolveCodexTranscriptBySessionOrder)
+	// and the compute-usage lane anchor on it, so the Info mirror keeps the raw value.
+	AwakeStartedAt string // awake_started_at (raw)
+	// UsageComputeEmittedAt is the RAW usage_compute_emitted_at metadata: the
+	// awake_started_at value of the interval whose compute Fact has already been
+	// recorded. The compute-usage lane compares it to AwakeStartedAt to skip a
+	// terminal session whose current interval is already accounted BEFORE issuing a
+	// per-session store Get.
+	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)
@@ -227,10 +297,17 @@ type Info struct {
 	CreationCompleteAt string // creation_complete_at (raw)
 	// ContinuationResetPending is the RAW continuation_reset_pending metadata.
 	// The reconciler's restart-handoff path branches on it (trimmed) == "true"
-	// via resetPendingCommittedAt; the Info mirror keeps the raw value.
+	// via resetPendingCommittedAtInfo; the Info mirror keeps the raw value.
 	ContinuationResetPending string // continuation_reset_pending (raw)
+	// SessionCircuitState is the RAW session_circuit_state metadata, verbatim —
+	// the durable session circuit-breaker posture (SessionCircuitStateOpen /
+	// SessionCircuitStateClosed). The lifecycle display-reason projection reads it
+	// (== SessionCircuitStateOpen) to surface "circuit-open" ahead of other
+	// reasons, so LifecycleDisplayReasonWithLivenessInfo can resolve the reason off
+	// Info without the bead. Additive, internal-only (absent from the HTTP wire).
+	SessionCircuitState string // session_circuit_state (raw)
 	// ResetCommittedAt is the RAW reset_committed_at metadata (RFC3339 or empty),
-	// the durable marker for when a restart handoff committed. resetPendingCommittedAt
+	// the durable marker for when a restart handoff committed. resetPendingCommittedAtInfo
 	// parses it; the Info mirror keeps the raw value.
 	ResetCommittedAt string // reset_committed_at (raw)
 	// Generation is the RAW generation metadata, verbatim. The drain/wake
@@ -307,6 +384,14 @@ type Info struct {
 	StartedProvisionHash string // started_provision_hash (raw)
 	StartedLaunchHash    string // started_launch_hash (raw)
 	StartedLiveHash      string // started_live_hash (raw)
+	// LiveHash / StartupDialogVerified are the RAW live_hash / startup_dialog_verified
+	// metadata, verbatim. They are two of the fresh-wake conversation-reset keys
+	// (FreshWakeConversationResetKeys) a fresh wake clears; preWakeCommit's fresh-wake
+	// reset trace reads their pre-reset values to report which durable provider markers
+	// it cleared. The mirrors let that trace read the pre-reset state off Info instead
+	// of the raw bead. Additive, internal-only (absent from the HTTP wire).
+	LiveHash              string // live_hash (raw)
+	StartupDialogVerified string // startup_dialog_verified (raw)
 	// ConfigDriftDeferredAt / ConfigDriftDeferredKey mirror the named-session
 	// config-drift deferral timer (config_drift_deferred_at / _key). The deferral
 	// path compares the stored key against the current drift key (exact compare)
@@ -322,6 +407,17 @@ type Info struct {
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
 	StrandedEventEmittedAt string // stranded_event_emitted_at (raw)
+	// UnknownStateFirstSeen / UnknownStateValue / UnknownStateEscalatedAt are the
+	// RAW unknown_state_first_seen / _value / _escalated_at metadata, the durable
+	// throttle markers the unknown-state diagnostic emitter reads to gate emission
+	// to first sight and value transitions (UnknownStateValue is compared verbatim
+	// against MetadataState), survive reconciler restarts (UnknownStateFirstSeen is
+	// the escalation clock, parsed RFC3339), and guard the single past-threshold
+	// escalation (UnknownStateEscalatedAt, trimmed != ""). Mirrors keep the raw
+	// values so the emitter reads them off Info instead of the raw bead.
+	UnknownStateFirstSeen   string // unknown_state_first_seen (raw)
+	UnknownStateValue       string // unknown_state_value (raw)
+	UnknownStateEscalatedAt string // unknown_state_escalated_at (raw)
 	// SessionNameExplicit is the RAW session_name_explicit metadata. The lifecycle
 	// projection's LifecycleIdentifiersReleased predicate reads it (trimmed == "")
 	// alongside alias / session_name, and build_desired_state / the parallel
@@ -361,6 +457,48 @@ type Info struct {
 	// raw value. Additive, internal-only (absent from the HTTP wire). Session-class
 	// periphery front-door migration.
 	ProviderKind string // provider_kind (raw)
+	// BuiltinAncestor is the RAW builtin_ancestor metadata, verbatim — the highest-
+	// precedence rung of the provider-FAMILY resolution ladder (builtin_ancestor →
+	// provider_kind → provider) that ProviderFamilyFromMetadata walks. It is stamped
+	// from ResolvedProvider.BuiltinAncestor at session-bead creation for custom
+	// providers with an explicit `base = "builtin:..."`. The mirror completes the
+	// family-resolution vocab already partly present on Info (Provider, ProviderKind)
+	// so ProviderFamilyFromInfo can resolve the family without the bead. Additive,
+	// internal-only (absent from the HTTP wire).
+	BuiltinAncestor string // builtin_ancestor (raw)
+
+	// --- sleep-policy cluster (controller decision-read surface) ---
+	//
+	// Raw mirrors of the seven sleep-policy metadata keys persistSleepPolicyMetadata
+	// writes (session_sleep.go). They let that helper's change-detection diff and
+	// the sleep decision readers (configWakeSuppressed, recoverPendingIdleSleep)
+	// compute from Info without a re-Get. Each is the RAW projected value,
+	// verbatim; ConfigWakeSuppressedMetadata stays a raw string mirror (a
+	// "true"/"false" value written via boolMetadata) like ManualSessionMetadata.
+	// Additive, internal-only (absent from the HTTP wire). The ApplyPatch
+	// reprojection oracle pins the in-package InfoFromPersistedBead↔ApplyPatch
+	// parallelism; the cmd/gc keys are inline literals, so a cmd/gc-side rename is
+	// caught only when the sleep helpers migrate onto these fields (W6).
+
+	// SleepPolicyFingerprint is the RAW sleep_policy_fingerprint metadata — the
+	// decision-critical one: recoverPendingIdleSleep preserves it across an
+	// in-flight idle drain, persistSleepPolicyMetadata's preserve branch keeps it,
+	// and configWakeSuppressed compares it (exact) against the resolved policy
+	// fingerprint.
+	SleepPolicyFingerprint string // sleep_policy_fingerprint (raw)
+	// RequestedSleepAfterIdle / EffectiveSleepAfterIdle / SleepPolicySource /
+	// SleepCapability / SleepPolicyAdjustmentReason are the RAW policy-derived
+	// markers persistSleepPolicyMetadata batches; the change-detection diff
+	// compares each verbatim.
+	RequestedSleepAfterIdle     string // requested_sleep_after_idle (raw)
+	EffectiveSleepAfterIdle     string // effective_sleep_after_idle (raw)
+	SleepPolicySource           string // sleep_policy_source (raw)
+	SleepCapability             string // sleep_capability (raw)
+	SleepPolicyAdjustmentReason string // sleep_policy_adjustment_reason (raw)
+	// ConfigWakeSuppressedMetadata is the RAW config_wake_suppressed metadata,
+	// verbatim (a "true"/"false" string). Kept as a raw string mirror like
+	// ManualSessionMetadata so the persisted value round-trips exactly.
+	ConfigWakeSuppressedMetadata string // config_wake_suppressed (raw)
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a
@@ -419,11 +557,12 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store             beads.Store
-	sp                runtime.Provider
-	cityPath          string
-	transportResolver func(template, provider string) transportResolution
-	clk               clock.Clock
+	store                   beads.Store
+	sp                      runtime.Provider
+	cityPath                string
+	transportResolver       func(template, provider string) transportResolution
+	clk                     clock.Clock
+	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -467,12 +606,12 @@ func transportFromMetadata(b beads.Bead) string {
 	return normalizeTransport(b.Metadata["provider"], b.Metadata["transport"])
 }
 
-func (m *Manager) resolveConfiguredTransport(template, provider string) (string, bool) {
+func (m *Manager) resolveConfiguredTransport(template, provider string) string {
 	if m.transportResolver == nil {
-		return "", false
+		return ""
 	}
 	resolution := m.transportResolver(strings.TrimSpace(template), strings.TrimSpace(provider))
-	return normalizeTransport(provider, resolution.transport), resolution.allowStoppedFallback
+	return normalizeTransport(provider, resolution.transport)
 }
 
 func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool) {
@@ -485,7 +624,7 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 		return "acp", false
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
-		transport, _ = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+		transport = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
 		if transport != "" {
 			return transport, true
 		}
@@ -503,6 +642,40 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 	return "", false
 }
 
+// transportForInfo is the Info-taking twin of transportForBead: it derives the
+// session transport from the projected Info fields instead of the raw bead, so
+// the runtime overlay can enrich an Info the caller already holds. Every branch
+// reads an Info field that mirrors the exact bead metadata transportForBead
+// cracked (Provider/TransportMetadata, MCPIdentity/MCPServersSnapshot,
+// PendingCreateClaim, Template, SessionName), so the two are byte-identical.
+func (m *Manager) transportForInfo(info Info) (string, bool) {
+	transport := normalizeTransport(info.Provider, info.TransportMetadata)
+	if transport != "" {
+		return transport, false
+	}
+	if strings.TrimSpace(info.MCPIdentity) != "" ||
+		strings.TrimSpace(info.MCPServersSnapshot) != "" {
+		return "acp", false
+	}
+	if info.PendingCreateClaim {
+		transport = m.resolveConfiguredTransport(info.Template, info.Provider)
+		if transport != "" {
+			return transport, true
+		}
+		return "", false
+	}
+	if detector, ok := m.sp.(transportDetector); ok {
+		transport = normalizeTransport(info.Provider, detector.DetectTransport(info.SessionName))
+		if transport != "" {
+			return transport, true
+		}
+	}
+	if m.sp != nil && m.sp.IsRunning(info.SessionName) {
+		return "", false
+	}
+	return "", false
+}
+
 func (m *Manager) persistTransport(id, provider, transport string) {
 	transport = normalizeTransport(provider, transport)
 	if transport == "" {
@@ -511,17 +684,25 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
-func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) {
+// killExistingOrphans terminates any untracked runtime whose session ID and
+// city match the session about to start, then confirms each is dead. It returns
+// a non-nil error only when an orphan could not be confirmed dead, so callers
+// gating a Start can refuse rather than race a survivor for the same work. A
+// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
+// the roots the scan did surface are still killed, and matching the started
+// replacement is impossible because it does not exist yet.
+func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := m.sp.(runtime.ProcessTableScanner)
 	if !ok || sessionID == "" {
-		return
+		return nil
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s: %v", sessionID, err)
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	var termErrs []error
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -531,8 +712,13 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) {
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
+			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
 		}
 	}
+	if len(termErrs) > 0 {
+		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+	}
+	return nil
 }
 
 func (m *Manager) now() time.Time {
@@ -554,65 +740,36 @@ func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() 
 	return func() { router.Unroute(sessName) }
 }
 
-// NewManager creates a Manager backed by the given bead store and session provider.
-func NewManager(store beads.Store, sp runtime.Provider) *Manager {
-	return &Manager{store: store, sp: sp}
+// ManagerOption configures an optional Manager capability. It is the single
+// knob form behind NewManagerWithOptions; the named NewManager* constructors
+// are thin presets over it.
+type ManagerOption func(*Manager)
+
+// WithCityPath lets the Manager persist deferred submits into the city's
+// nudge queue rooted at cityPath.
+func WithCityPath(cityPath string) ManagerOption {
+	return func(m *Manager) { m.cityPath = cityPath }
 }
 
-// NewManagerWithTransportResolver creates a Manager that can infer session
-// transport from template or provider config when older beads do not have
-// transport metadata.
-func NewManagerWithTransportResolver(store beads.Store, sp runtime.Provider, resolver func(template, provider string) string) *Manager {
-	return &Manager{
-		store: store,
-		sp:    sp,
-		transportResolver: func(template, provider string) transportResolution {
+// WithTransportResolver lets the Manager infer session transport from template
+// or provider config when older beads do not have transport metadata.
+func WithTransportResolver(resolver func(template, provider string) string) ManagerOption {
+	return func(m *Manager) {
+		m.transportResolver = func(template, provider string) transportResolution {
 			if resolver == nil {
 				return transportResolution{}
 			}
 			return transportResolution{transport: resolver(template, provider)}
-		},
+		}
 	}
 }
 
-// NewManagerWithCityPath creates a Manager that can persist deferred submits
-// into the city's nudge queue.
-func NewManagerWithCityPath(store beads.Store, sp runtime.Provider, cityPath string) *Manager {
-	return &Manager{store: store, sp: sp, cityPath: cityPath}
-}
-
-// NewManagerWithTransportResolverAndCityPath creates a Manager that can infer
-// session transport from template or provider config and persist deferred
-// submits into the city's nudge queue.
-func NewManagerWithTransportResolverAndCityPath(store beads.Store, sp runtime.Provider, cityPath string, resolver func(template, provider string) string) *Manager {
-	return &Manager{
-		store:    store,
-		sp:       sp,
-		cityPath: cityPath,
-		transportResolver: func(template, provider string) transportResolution {
-			if resolver == nil {
-				return transportResolution{}
-			}
-			return transportResolution{transport: resolver(template, provider)}
-		},
-	}
-}
-
-// NewManagerWithTransportPolicyResolverAndCityPath creates a Manager that can
-// infer transport from config and, when the resolver marks it safe, continue
-// using that transport for stopped legacy sessions without persisted
-// transport metadata.
-func NewManagerWithTransportPolicyResolverAndCityPath(
-	store beads.Store,
-	sp runtime.Provider,
-	cityPath string,
-	resolver func(template, provider string) (string, bool),
-) *Manager {
-	return &Manager{
-		store:    store,
-		sp:       sp,
-		cityPath: cityPath,
-		transportResolver: func(template, provider string) transportResolution {
+// WithTransportPolicyResolver lets the Manager infer transport from config and,
+// when the resolver marks it safe, continue using that transport for stopped
+// legacy sessions without persisted transport metadata.
+func WithTransportPolicyResolver(resolver func(template, provider string) (string, bool)) ManagerOption {
+	return func(m *Manager) {
+		m.transportResolver = func(template, provider string) transportResolution {
 			if resolver == nil {
 				return transportResolution{}
 			}
@@ -621,45 +778,53 @@ func NewManagerWithTransportPolicyResolverAndCityPath(
 				transport:            transport,
 				allowStoppedFallback: allowStoppedFallback,
 			}
-		},
+		}
 	}
 }
 
-// Create creates a new chat session bead and starts the runtime session.
-// The command is the full provider command to execute (e.g., "claude --dangerously-skip-permissions").
-// The resume parameter carries provider resume capabilities; if the provider
-// supports SessionIDFlag, a UUID session key is generated and injected.
-// The caller is responsible for attaching after Create returns.
-func (m *Manager) Create(ctx context.Context, template, title, command, workDir, provider string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateAliasedNamedWithTransportAndMetadata(ctx, "", "", template, title, command, workDir, provider, "", env, resume, hints, map[string]string{
-		"session_origin": "manual",
-	})
+// WithStaleKeyDetectionWaiter supplies the lifecycle signal used before a
+// keyed start is probed for stale resume-key failure. A nil waiter retains the
+// immutable production timer.
+func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
+	return func(m *Manager) {
+		if waiter != nil {
+			m.staleKeyDetectionWaiter = waiter
+		}
+	}
 }
 
-// CreateWithTransport creates a new chat session bead and starts the runtime
-// session, preserving the transport override separately from the provider name
-// so ACP-routed sessions can be resumed correctly.
-func (m *Manager) CreateWithTransport(ctx context.Context, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateAliasedNamedWithTransportAndMetadata(ctx, "", "", template, title, command, workDir, provider, transport, env, resume, hints, map[string]string{
-		"session_origin": "manual",
-	})
+// NewManagerWithOptions creates a Manager backed by the given bead store and
+// session provider, applying any capability options. It is the canonical
+// constructor; the named NewManager* variants below are one-line presets.
+func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
+	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
-// CreateAliasedNamedWithTransport creates a new chat session bead with an
-// optional public alias and optional explicit runtime session_name.
-func (m *Manager) CreateAliasedNamedWithTransport(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.createAliasedNamedWithTransport(ctx, alias, explicitName, template, title, command, workDir, provider, transport, env, resume, hints, map[string]string{
-		"session_origin": "manual",
-	})
+// CreateSession is the single entry point for creating a session. It reads a
+// field-named CreateOptions and either starts the runtime immediately or, when
+// spec.BeadOnly is set, creates a start-pending bead for the reconciler to
+// start later.
+func (m *Manager) CreateSession(ctx context.Context, spec CreateOptions) (Info, error) {
+	if spec.BeadOnly {
+		return m.createBeadOnly(spec)
+	}
+	return m.createStarted(ctx, spec)
 }
 
-// CreateAliasedNamedWithTransportAndMetadata creates a new chat session bead
-// with additional metadata published atomically at bead creation time.
-func (m *Manager) CreateAliasedNamedWithTransportAndMetadata(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config, extraMeta map[string]string) (Info, error) {
-	return m.createAliasedNamedWithTransport(ctx, alias, explicitName, template, title, command, workDir, provider, transport, env, resume, hints, extraMeta)
-}
+func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, error) {
+	alias, explicitName := spec.Alias, spec.ExplicitName
+	template, title := spec.Template, spec.Title
+	command, workDir := spec.Command, spec.WorkDir
+	provider, transport := spec.Provider, spec.Transport
+	env := spec.Env
+	resume := spec.Resume
+	hints := spec.Hints
+	extraMeta := spec.ExtraMeta
 
-func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config, extraMeta map[string]string) (Info, error) {
 	alias, err := ValidateAlias(alias)
 	if err != nil {
 		return Info{}, err
@@ -729,7 +894,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			meta[k] = v
 		}
 		if meta["session_origin"] == "" {
-			meta["session_origin"] = "manual"
+			meta["session_origin"] = spec.defaultSessionOrigin()
 		}
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
@@ -815,8 +980,15 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
-		// Start the runtime session.
-		m.killExistingOrphans(ctx, b.ID)
+		// Start the runtime session. Refuse to start if a prior escaped process
+		// for this session could not be confirmed dead: a survivor would race
+		// the replacement for the same work bead (duplicate bd close).
+		if orphanErr := m.killExistingOrphans(ctx, b.ID); orphanErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr), rbErr)
+			}
+			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
@@ -871,18 +1043,6 @@ func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error 
 	return nil
 }
 
-// CreateNamedWithTransport creates a new chat session bead with an optional
-// explicit session_name and starts the runtime session.
-//
-// WARNING: withSessionNameReservationLock only serializes callers inside this
-// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
-// when explicitName is non-empty so duplicate names cannot race across processes.
-func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateAliasedNamedWithTransportAndMetadata(ctx, "", explicitName, template, title, command, workDir, provider, transport, env, resume, hints, map[string]string{
-		"session_origin": "manual",
-	})
-}
-
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
 	if sp == nil {
 		return false
@@ -904,30 +1064,14 @@ func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanc
 	return strings.TrimSpace(liveToken) == instanceToken
 }
 
-// CreateBeadOnly creates a session bead without starting the runtime process.
-// The bead is created with state "start-pending" — the controller's
-// reconciler will detect it in buildDesiredState and start the process on its
-// next tick.
-//
-// This is the Phase 2 path: CLI creates intent (bead), reconciler executes.
-func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume) (Info, error) {
-	return m.CreateBeadOnlyNamed("", template, title, command, workDir, provider, transport, env, resume)
-}
+func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
+	alias, explicitName := spec.Alias, spec.ExplicitName
+	template, title := spec.Template, spec.Title
+	command, workDir := spec.Command, spec.WorkDir
+	provider, transport := spec.Provider, spec.Transport
+	resume := spec.Resume
+	extraMeta := spec.ExtraMeta
 
-// CreateAliasedBeadOnlyNamed creates a session bead without starting the
-// runtime process, preserving an optional public alias and explicit runtime
-// session_name for the reconciler.
-func (m *Manager) CreateAliasedBeadOnlyNamed(alias, explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
-	return m.createAliasedBeadOnlyNamed(alias, explicitName, template, title, command, workDir, provider, transport, resume, nil)
-}
-
-// CreateAliasedBeadOnlyNamedWithMetadata creates a session bead without
-// starting the runtime process, publishing extra metadata atomically.
-func (m *Manager) CreateAliasedBeadOnlyNamedWithMetadata(alias, explicitName, template, title, command, workDir, provider, transport string, resume ProviderResume, extraMeta map[string]string) (Info, error) {
-	return m.createAliasedBeadOnlyNamed(alias, explicitName, template, title, command, workDir, provider, transport, resume, extraMeta)
-}
-
-func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, title, command, workDir, provider, transport string, resume ProviderResume, extraMeta map[string]string) (Info, error) {
 	alias, err := ValidateAlias(alias)
 	if err != nil {
 		return Info{}, err
@@ -993,7 +1137,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 			meta[k] = v
 		}
 		if meta["session_origin"] == "" {
-			meta["session_origin"] = "ephemeral"
+			meta["session_origin"] = spec.defaultSessionOrigin()
 		}
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
@@ -1029,16 +1173,6 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		return Info{}, err
 	}
 	return info, nil
-}
-
-// CreateBeadOnlyNamed creates a session bead without starting the runtime
-// process, preserving an optional explicit session_name for the reconciler.
-//
-// WARNING: withSessionNameReservationLock only serializes callers inside this
-// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
-// when explicitName is non-empty so duplicate names cannot race across processes.
-func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
-	return m.CreateAliasedBeadOnlyNamed("", explicitName, template, title, command, workDir, provider, transport, nil, resume)
 }
 
 // Attach attaches the user's terminal to the session. If the session is
@@ -1190,7 +1324,7 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		if err := m.sp.Stop(sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
-		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, id, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
 		}
@@ -1241,6 +1375,12 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	update.Metadata["session_name_explicit"] = ""
 	update.Metadata["pending_create_claim"] = ""
 	update.Metadata["pending_create_started_at"] = ""
+	// Free the durable canonical-identity record on this close path too, matching
+	// RetireNamedSessionPatch. Without it a configured named session closed via
+	// Manager.Close keeps a stale canonical instance name / pool slot — the same
+	// strand class the S19 retirement fix removed for the duplicate/removed/API
+	// paths, which this hand-rolled path is not one of.
+	freeCanonicalIdentityMetadata(update.Metadata)
 	if err := m.store.Update(id, update); err != nil {
 		return fmt.Errorf("retiring configured named session identifiers: %w", err)
 	}
@@ -1634,7 +1774,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, b.ID, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(b.ID, time.Now().UTC())
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
 		}
@@ -1665,43 +1805,15 @@ func pruneStateAllowed(state State, metadata map[string]string, allowed map[Stat
 	return ok
 }
 
-// Get returns info about a single session.
+// Get returns info about a single session. It loads the session bead (allowing
+// closed sessions), applies the read-path empty-type heal, and enriches the
+// persisted projection with the live runtime overlay (infoFromBead).
 func (m *Manager) Get(id string) (Info, error) {
-	info, _, err := m.GetWithBead(id)
-	return info, err
-}
-
-// GetWithBead returns session info and the underlying bead in a single
-// store fetch, for callers that need both views (e.g. spec build plus
-// metadata lookup) without a redundant store.Get.
-func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
 	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
-		return Info{}, beads.Bead{}, err
+		return Info{}, err
 	}
-	return m.infoFromBead(b), b, nil
-}
-
-// GetWithPersistedResponse returns the runtime-enriched session Info plus the
-// persisted-response projection (status + metadata) in a single store fetch.
-// It is the domain-typed read the API response path routes through: the caller
-// gets session.Info for the scalar/runtime fields and session.PersistedResponse
-// for the status/metadata-derived fields, without a raw *beads.Bead crossing the
-// boundary or a redundant second store.Get beside Get. Bead serialization stays
-// confined here via PersistedResponseFromBead.
-func (m *Manager) GetWithPersistedResponse(id string) (Info, PersistedResponse, error) {
-	info, b, err := m.GetWithBead(id)
-	if err != nil {
-		return Info{}, PersistedResponse{}, err
-	}
-	return info, PersistedResponseFromBead(b), nil
-}
-
-// SessionInfoFromBead converts an already-loaded session bead to Info,
-// applying the same enrichment as Get. Callers that have just resolved
-// the bead can use this to avoid a second store.Get.
-func (m *Manager) SessionInfoFromBead(b beads.Bead) Info {
-	return m.infoFromBead(b)
+	return m.infoFromBead(b), nil
 }
 
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
@@ -1723,50 +1835,22 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) Runtim
 	return obs
 }
 
-// ListResult holds the results of a ListFull call, including the raw beads
-// to avoid redundant store queries.
-type ListResult struct {
-	Sessions []Info
-	Beads    []beads.Bead // All session beads (unfiltered by state/template)
-}
-
-// List returns all chat sessions, optionally filtered by state and template.
+// List returns all chat sessions, optionally filtered by state and template,
+// with the live runtime overlay applied. It is composed over the type+label
+// union feed (Store.ListAll) plus the shared filter-then-enrich (ListFromInfos).
+//
+// This is a deliberate semantic UPGRADE over the retired ListFull, which queried
+// by the gc:session label only and silently dropped session beads that had lost
+// their label after a crash or schema migration; the union feed surfaces those
+// repairable type-lost beads. Every former ListFull/ListFullFromBeads caller
+// already pre-fed union rows (via ListAllSessionBeads / the session snapshot), so
+// their behavior is unchanged — only a bare List now also sees the type-lost beads.
 func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error) {
-	r, err := m.ListFull(stateFilter, templateFilter)
-	if err != nil {
-		return nil, err
-	}
-	return r.Sessions, nil
-}
-
-// ListFull is like List but also returns the raw session beads to avoid
-// redundant store queries by the caller (e.g., for building a bead index).
-func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResult, error) {
-	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
-		Sort:  beads.SortCreatedDesc,
-	})
+	infos, err := m.PersistedStore().ListAll(ListAllOptions{Sort: beads.SortCreatedDesc})
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
-	return m.ListFullFromBeads(all, stateFilter, templateFilter), nil
-}
-
-// ListFullFromBeads is like ListFull but reuses a caller-supplied slice of
-// session-labeled beads. Callers that already loaded session beads can avoid
-// a second store scan by passing the same slice here.
-func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
-	result := make([]Info, 0, len(all))
-	for _, b := range all {
-		if !IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
-			continue
-		}
-		result = append(result, m.infoFromBead(b))
-	}
-	return &ListResult{Sessions: result, Beads: all}
+	return m.ListFromInfos(infos, stateFilter, templateFilter), nil
 }
 
 // Peek captures the last N lines of output from the session.
@@ -1788,13 +1872,26 @@ func (m *Manager) Peek(id string, lines int) (string, error) {
 // detection, ACP routing, stale-state downgrade, attachment/last-active) lives
 // here, where the runtime provider is available.
 func (m *Manager) infoFromBead(b beads.Bead) Info {
-	info := InfoFromPersistedBead(b)
+	return m.EnrichInfo(infoFromPersistedBead(b))
+}
+
+// EnrichInfo applies the live runtime overlay to a persisted Info projection:
+// transport detection, ACP routing, stale-active→asleep downgrade, and
+// attachment/last-active. It is the runtime half of infoFromBead extracted onto
+// an Info parameter, so a caller that already holds a persisted Info (e.g. from
+// Store.ListAll) can enrich it without a second bead read. infoFromBead is now
+// exactly EnrichInfo(infoFromPersistedBead(b)); that refactoring identity, plus
+// the manager's existing Get/List tests, is the oracle.
+//
+// It reads only Info fields that mirror the exact bead metadata the raw overlay
+// cracked (via transportForInfo), so it is byte-identical to the raw overlay.
+func (m *Manager) EnrichInfo(info Info) Info {
 	sessName := info.SessionName
 
 	if !info.Closed {
-		transport, _ := m.transportForBead(b, sessName)
+		transport, _ := m.transportForInfo(info)
 		info.Transport = transport
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		_ = m.routeACPIfNeeded(info.Provider, transport, sessName)
 
 		// Surface stale "awake" / "active" beads as dormant immediately.
 		// The controller also heals metadata on the next tick.
@@ -1812,6 +1909,49 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	}
 
 	return info
+}
+
+// EnrichInfos applies EnrichInfo to each element in place and returns the same
+// slice, for the list read path (filter the persisted projection first, then
+// enrich the survivors — matching ListFullFromBeads' order).
+func (m *Manager) EnrichInfos(infos []Info) []Info {
+	for i := range infos {
+		infos[i] = m.EnrichInfo(infos[i])
+	}
+	return infos
+}
+
+// PersistedStore wraps the manager's underlying store as the session-domain
+// front door for persisted reads (Store.ListAll / Store.GetPersistedResponse /
+// Store.RepairType). The wrapper holds the exact store value the manager uses,
+// so reads observe the same backing and caching as the manager's own store.List;
+// per-call construction of the one-field wrapper is safe (spec §7). It is the
+// persisted read half of the read model — pair it with EnrichInfo for the live
+// overlay (the worker catalog's Get composes exactly that).
+func (m *Manager) PersistedStore() *Store {
+	return NewStore(beads.SessionStore{Store: m.store})
+}
+
+// ListFromInfos filters a pre-loaded persisted Info feed by state and template
+// and applies the live runtime overlay to the survivors, returning the enriched
+// list. It is the typed pre-fed listing — the Info analog of the retired
+// ListFullFromBeads: callers that already hold the union Info feed (the CLI
+// session snapshot) reuse it instead of re-scanning the store. Filter-then-enrich
+// order matches ListFullFromBeads exactly (the persisted state filter runs on the
+// persisted projection, before the runtime stale-active downgrade), and the
+// IsSessionBeadOrRepairableInfo guard mirrors the old defensive filter.
+func (m *Manager) ListFromInfos(infos []Info, stateFilter, templateFilter string) []Info {
+	result := make([]Info, 0, len(infos))
+	for _, info := range infos {
+		if !IsSessionBeadOrRepairableInfo(info) {
+			continue
+		}
+		if !sessionMatchesFiltersInfo(info, stateFilter, templateFilter) {
+			continue
+		}
+		result = append(result, info)
+	}
+	return m.EnrichInfos(result)
 }
 
 // PersistSessionKey stores a provider resume key on an existing session when

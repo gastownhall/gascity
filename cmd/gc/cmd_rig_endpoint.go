@@ -12,13 +12,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
@@ -681,11 +681,9 @@ func isMissingDoltMetadataTableError(err error) bool {
 		strings.Contains(msg, "no such table: metadata")
 }
 
-type fileSnapshot struct {
-	path   string
-	data   []byte
-	exists bool
-}
+// fileSnapshot aliases rig.FileSnapshot so cmd/gc's existing rollback call sites
+// keep compiling while the primitives live in internal/rig (C2.1 extraction).
+type fileSnapshot = rig.FileSnapshot
 
 func snapshotRigCanonicalFiles(fs fsys.FS, scopeRoot string) ([]fileSnapshot, error) {
 	paths := []string{
@@ -737,34 +735,11 @@ func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSna
 	return snapshots, nil
 }
 
-// snapshotResolvedFile snapshots path for rollback through any symlink
-// chain: restoring at the link path would replace the link with a regular
-// file (the ga-lurp5d failure mode), so the snapshot records the resolved
-// target and the restore writes there instead. Resolve-only by design — a
-// rollback writes the original bytes back, so the key-loss rewrite guard
-// does not apply. A path blocked by a regular-file intermediate cannot
-// exist; it snapshots as missing, matching snapshotOptionalFile.
+// snapshotResolvedFile delegates to internal/rig, which owns the rollback
+// primitives (C2.1). The symlink-resolution rationale lives on
+// rig.SnapshotResolvedFile.
 func snapshotResolvedFile(fs fsys.FS, path string) (fileSnapshot, error) {
-	resolved, err := fsys.ResolveSymlinks(fs, path)
-	if err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return fileSnapshot{path: path}, nil
-		}
-		return fileSnapshot{}, err
-	}
-	return snapshotOptionalFile(fs, resolved)
-}
-
-func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
-			return fileSnapshot{path: path}, nil
-		}
-		return fileSnapshot{}, err
-	}
-	cp := append([]byte(nil), data...)
-	return fileSnapshot{path: path, data: cp, exists: true}, nil
+	return rig.SnapshotResolvedFile(fs, path)
 }
 
 // cityTomlRollbackPath returns the symlink-resolved city.toml path that a
@@ -789,24 +764,5 @@ func writeRigEndpointRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fil
 }
 
 func restoreSnapshots(fs fsys.FS, snapshots []fileSnapshot) error {
-	var failures []string
-	for _, snap := range snapshots {
-		if err := restoreSnapshot(fs, snap); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", snap.path, err))
-		}
-	}
-	if len(failures) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s", strings.Join(failures, "; "))
-}
-
-func restoreSnapshot(fs fsys.FS, snap fileSnapshot) error {
-	if !snap.exists {
-		if err := fs.Remove(snap.path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	return fsys.WriteFileAtomic(fs, snap.path, snap.data, 0o644)
+	return rig.RestoreSnapshots(fs, snapshots)
 }

@@ -178,6 +178,54 @@ func TestDoHookClaimRecordsRunIDOnExistingAssignment(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimExistingAssignmentMissingSessionBeadStillReturnsWork pins the
+// observed gcw-2y6 symptom at the claim seam: when the live worker still owns an
+// in-progress bead but its GC_SESSION_ID bead is already gone, the best-effort
+// session-pointer write logs the missing-bead error and hook claim STILL returns
+// the same existing assignment. That behavior means the repeated work result is
+// not itself evidence that claim-time stamping is wedging the worker.
+func TestDoHookClaimExistingAssignmentMissingSessionBeadStillReturnsWork(t *testing.T) {
+	spy := &recordRunIDSpy{err: errors.New(`updating bead "sess-1": bead not found`)}
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[{"id":"hw-existing","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-R2"}}]`, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Error("Claim must not be called on the existing-assignment path")
+			return beads.Bead{}, false, nil
+		},
+		ResolveWorkBranch:     func(string) string { return "" },
+		RecordSessionPointers: spy.fn,
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		Env:                []string{"GC_SESSION_ID=sess-1"},
+		JSON:               true,
+	}
+
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+			t.Fatalf("attempt %d: doHookClaim = %d, want 0; stderr=%s", i+1, code, stderr.String())
+		}
+		var result hookClaimJSONResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("attempt %d: stdout is not JSON: %v\nraw: %s", i+1, err, stdout.String())
+		}
+		if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != "hw-existing" {
+			t.Fatalf("attempt %d: result = %+v, want existing-assignment for hw-existing", i+1, result)
+		}
+		if !strings.Contains(stderr.String(), `recording session pointers on session bead sess-1: updating bead "sess-1": bead not found`) {
+			t.Fatalf("attempt %d: stderr = %q, want missing session bead warning", i+1, stderr.String())
+		}
+	}
+	if spy.calls != 2 {
+		t.Fatalf("record calls = %d, want 2 (one per claim attempt)", spy.calls)
+	}
+}
+
 // TestDoHookClaimRecordsActiveWorkBeadAsStepID: the active-work-bead pointer is the
 // work bead's BARE gc.step_id, NOT its namespaced bead id — the cross-plane join key
 // the events plane also uses. The fixture makes them differ (bead id

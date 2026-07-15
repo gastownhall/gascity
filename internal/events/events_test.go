@@ -1260,6 +1260,84 @@ func TestFileRecorderWatchContextCancel(t *testing.T) {
 	}
 }
 
+// TestWatchNextBlockedThenContextEndsReturnsContextErr pins the watcher
+// cancellation contract for a Next that is already blocked waiting for new
+// events (the steady state of an idle SSE stream). When the context ends while
+// Next sleeps it must return the context cause — context.Canceled or
+// context.DeadlineExceeded — not errWatcherClosed, so callers that classify the
+// context error can tell a real cancellation/deadline from a closed watcher.
+func TestWatchNextBlockedThenContextEndsReturnsContextErr(t *testing.T) {
+	newBlockedWatcher := func(t *testing.T, ctx context.Context) (Watcher, func()) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		var stderr bytes.Buffer
+		rec, err := NewFileRecorder(path, &stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "seed"})
+		w, err := rec.Watch(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Consume the seed so the next Next has nothing to return and blocks in
+		// the poll sleep.
+		if _, err := w.Next(); err != nil {
+			t.Fatalf("draining seed: %v", err)
+		}
+		return w, func() {
+			_ = w.Close()
+			_ = rec.Close()
+		}
+	}
+
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		w, cleanup := newBlockedWatcher(t, ctx)
+		defer cleanup()
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := w.Next()
+			errCh <- err
+		}()
+		// End the context from a timer so Next is already parked in its poll
+		// sleep when cancellation lands, exercising the blocked-Next path
+		// without a wall-clock time.Sleep (mirrors the deadline subtest below).
+		time.AfterFunc(50*time.Millisecond, cancel)
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Next after cancel-while-blocked = %v, want context.Canceled", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Next did not observe cancellation while blocked")
+		}
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer cancel()
+		w, cleanup := newBlockedWatcher(t, ctx)
+		defer cleanup()
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := w.Next()
+			errCh <- err
+		}()
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Next after deadline-while-blocked = %v, want context.DeadlineExceeded", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Next did not observe deadline while blocked")
+		}
+	})
+}
+
 // writeEmpty creates an empty file at path.
 func writeEmpty(path string) error {
 	f, err := os.Create(path)

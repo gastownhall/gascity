@@ -95,25 +95,23 @@ describe('BeadsPage supervisor reads', () => {
     expect(screen.getByText('Read-only')).toBeTruthy();
   });
 
-  it('disables the per-bead close/nudge actions in read-only mode', async () => {
+  it('disables the per-bead close action in read-only mode', async () => {
     renderPage('/beads?bead=td-bead-abc123', [], { readOnly: true });
 
     const dialog = await screen.findByRole('dialog');
     // Scope to the bead-action group: the modal's own dismiss control also
-    // carries aria-label "Close", so query the actions row via Nudge (unique to
-    // the action row) and assert the writes there are disabled. There is no
-    // operator Claim action (gascity-dashboard-2j8e.8) — the human is never a
-    // bead assignee.
-    const actions = (within(dialog).getByRole('button', { name: 'Nudge' }) as HTMLButtonElement)
-      .parentElement;
+    // carries aria-label "Close", so locate the action-row Close (its visible
+    // text is exactly "Close", unlike the "×" dismiss) and assert the write
+    // there is disabled. There is no operator Claim action
+    // (gascity-dashboard-2j8e.8) — the human is never a bead assignee.
+    const closeButton = within(dialog)
+      .getAllByRole('button', { name: /^close$/i })
+      .find((button) => button.textContent?.trim() === 'Close') as HTMLButtonElement;
+    expect(closeButton).toBeTruthy();
+    const actions = closeButton.parentElement;
     expect(actions).not.toBeNull();
     expect(within(actions as HTMLElement).queryByRole('button', { name: 'Claim' })).toBeNull();
-    for (const name of ['Close', 'Nudge']) {
-      const button = within(actions as HTMLElement).getByRole('button', {
-        name,
-      }) as HTMLButtonElement;
-      expect(button.disabled).toBe(true);
-    }
+    expect(closeButton.disabled).toBe(true);
     // The action row carries the shared glyph+word affordance, not a bare
     // dimmed button (DESIGN.md §States have words).
     expect(within(actions as HTMLElement).getByText('Read-only')).toBeTruthy();

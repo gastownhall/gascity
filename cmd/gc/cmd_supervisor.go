@@ -1354,11 +1354,40 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
 	}
 	// Gate city-config mutations on a signed write grant when configured. Fail
-	// closed at boot if write-auth is required but no key is set, so the
+	// closed at boot if write-auth is required but no key is set, or if a
+	// non-loopback + allow_mutations bind has no key and no ack knob (G10), so the
 	// multi-city supervisor cannot silently serve mutations unguarded.
-	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); err != nil {
+	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired, api.WriteAuthBindContext{
+		NonLocal:        nonLocal,
+		AllowMutations:  supCfg.Supervisor.AllowMutations,
+		AllowUnverified: supCfg.Supervisor.WriteAuthAllowUnverified,
+	}); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	// Gate city reads on a signed read grant when configured. Fail closed at boot
+	// if read-auth is required but no key is set, so the supervisor cannot
+	// silently serve reads unguarded.
+	if err := api.InstallReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
+	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
+	// the standalone controller seam) so an operator sees the read surface needs a
+	// network front. grantGated and readAuthInstalled are resolved the same way
+	// InstallWriteAuth/InstallReadAuth did; a read-auth verifier suppresses the
+	// warning because the read plane is then authenticated.
+	if nonLocal && supCfg.Supervisor.AllowMutations {
+		grantGated := false
+		if v, verr := api.ResolveWriteAuthVerifier(supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); verr == nil && v != nil {
+			grantGated = true
+		}
+		readAuthInstalled := false
+		if v, verr := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); verr == nil && v != nil {
+			readAuthInstalled = true
+		}
+		warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
 	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same
@@ -1369,10 +1398,14 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: dashboard: %v\n", dashErr) //nolint:errcheck
 		return 1
 	}
-	if dashboardPlane != nil {
-		dashboardPlane.Start(ctx)
-		defer dashboardPlane.Stop()
+	dashboardMounted := dashboardPlane != nil
+	if dashboardPlane == nil {
+		// The typed run census is available even when the embedded dashboard is
+		// disabled. Keep its incremental plane unmounted in that posture.
+		dashboardPlane = newRunCensusPlane(apiMux, registry)
 	}
+	dashboardPlane.Start(ctx)
+	defer dashboardPlane.Stop()
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1412,13 +1445,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.Shutdown(shutCtx) //nolint:errcheck
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
-	if dashboardPlane != nil {
-		dashTag := ""
-		if readOnly {
-			dashTag = "  [read-only]"
-		}
-		fmt.Fprintf(stdout, "Dashboard:  %s/%s\n", dashboardLoopbackBaseURL(bind, port), dashTag) //nolint:errcheck
-	}
+	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
@@ -1967,7 +1994,7 @@ func reconcileCities(
 			providerName := effectiveProviderName(cfg.Session.Provider)
 			ctx := sessionProviderContextForCity(cfg, path, providerName)
 			snapshot := loadProviderSessionSnapshot(ctx)
-			resolvedSP, err := newSessionProviderFromContextWithError(ctx, snapshot)
+			resolvedSP, err := newSessionProviderFromContext(ctx, snapshot)
 			if err != nil {
 				return err
 			}
@@ -2093,6 +2120,14 @@ func reconcileCities(
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
+
+		// G13 §6 sweep-before-serve: reconcile this city's orphan in_flight
+		// rig-create idem records before it is published into the registry (and
+		// thus before the SupervisorMux can route a rig-create/sling request to
+		// it), so a same-id retry can never re-clone over un-torn-down debris.
+		if err := cs.sweepOrphanRigProvisions(cityCtx); err != nil {
+			fmt.Fprintf(stderr, "api: rig-create boot sweep (%s): %v\n", cityName, err) //nolint:errcheck // best-effort stderr
+		}
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

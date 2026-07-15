@@ -26,6 +26,14 @@
 #       the check the `org_` grep (b) cannot see: a workspace-id / user-id / email
 #       context threaded into core would sail past (b). INERT until the OpenFeature
 #       dependency lands in core (Phase 1) — wired now so it bites the moment it does.
+#   (f) a commercial-semantics JSON field (trial/billing/credit/plan/invoice/
+#       subscription/quota/coupon/entitlement) appears in a wire struct on the
+#       hosted-service surface (internal/cliauth, internal/serviceproto, the
+#       gc login/whoami commands). The structural checks above cannot see a
+#       commercial FIELD in a generic-looking wire type; account/commercial
+#       policy must travel only in the opaque message/links fields the CLI prints
+#       verbatim (service-protocol-v0 §5). Annotate a benign line with
+#       `// boundary:allow commercial`.
 #
 # FAILS CLOSED: if a check cannot evaluate (e.g. go.mod is unreadable), that is a
 # violation, not a pass. A guard that silently passes when it cannot evaluate
@@ -115,6 +123,30 @@ if [ -n "$evalctx$evalctx_lit" ]; then
 	note "  Core must evaluate flags with an EMPTY context; per-tenant targeting is hosted-only."
 	note "  Use NewEvaluationContext(\"\", nil), or annotate a benign line with '// boundary:allow evalctx':"
 	printf '%s\n' "$evalctx" "$evalctx_lit" | grep -v '^$' >&2
+	failed=1
+fi
+
+# (f) commercial-semantics wire field on the hosted-service surface. Scoped to the
+# onboarding packages/files so it targets the exact leak (a commercial field in a
+# generic wire struct) without false-positiving on unrelated core code. Matches a
+# json struct tag whose key carries account/commercial semantics; a genuinely
+# benign line is annotated with `// boundary:allow commercial`.
+COMMERCIAL_SURFACE="internal/cliauth internal/serviceproto cmd/gc/cmd_login.go"
+COMMERCIAL_FIELD_RE='json:"[^"]*(trial|billing|credit|plan|invoice|subscription|quota|coupon|entitlement)'
+commercial_fields=""
+for p in $COMMERCIAL_SURFACE; do
+	[ -e "$p" ] || continue
+	hits=$(grep -rnE --include='*.go' "$COMMERCIAL_FIELD_RE" "$p" 2>/dev/null \
+		| grep -v '_test\.go:' | grep -v 'boundary:allow commercial')
+	if [ -n "$hits" ]; then
+		commercial_fields="${commercial_fields}${hits}"$'\n'
+	fi
+done
+commercial_fields=$(printf '%s' "$commercial_fields" | grep -v '^$')
+if [ -n "$commercial_fields" ]; then
+	note "BLOCKED (f) — commercial-semantics wire field on the hosted-service surface."
+	note "  Account/commercial policy must travel only in opaque message/links (service-protocol-v0 §5):"
+	printf '%s\n' "$commercial_fields" >&2
 	failed=1
 fi
 

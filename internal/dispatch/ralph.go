@@ -20,6 +20,18 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
+// maxCheckInfraRetries bounds how many times a ralph check gate may be re-run
+// because it could not EXECUTE (GateError/GateTimeout) before that infra error
+// is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
+// transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
+// green PR (maintainer-city incident: 3 attempts burned in one outage). The
+// bound guarantees a gate that can never run (a missing script, a perpetual
+// timeout) still terminates the workflow instead of pending forever. The
+// counter is cloned into each next attempt, so this is the ralph loop's total
+// infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
+// outage.
+const maxCheckInfraRetries = 20
+
 func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	if bead.Metadata[beadmeta.TerminalMetadataKey] == "true" {
 		return ControlResult{}, nil
@@ -62,6 +74,32 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
 
+	// Gate-exec infra errors must not burn a ralph attempt. GateError (the gate
+	// could not run) and GateTimeout (the gate did not finish) mean the gate
+	// never produced a verdict; only a gate that ran to completion and returned
+	// GateFail is a real failure. Re-run the gate via the benign
+	// ErrControlPending path (no attempt increment, no close), bounded by
+	// maxCheckInfraRetries so an unrunnable gate still terminates.
+	if result.Outcome == convergence.GateError || result.Outcome == convergence.GateTimeout {
+		infraRetries, _ := strconv.Atoi(bead.Metadata[beadmeta.CheckInfraRetryMetadataKey])
+		if infraRetries < maxCheckInfraRetries {
+			if err := store.SetMetadata(bead.ID, beadmeta.CheckInfraRetryMetadataKey, strconv.Itoa(infraRetries+1)); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return ControlResult{}, ErrControlPending
+				}
+				return ControlResult{}, fmt.Errorf("%s: recording gate infra-retry: %w", bead.ID, err)
+			}
+			opts.tracef("ralph check-infra-retry bead=%s outcome=%s infra_retry=%d/%d attempt=%d (attempt not burned)",
+				bead.ID, result.Outcome, infraRetries+1, maxCheckInfraRetries, attempt)
+			return ControlResult{}, ErrControlPending
+		}
+		// Infra-retry budget spent: fall through to the normal exhaust/retry
+		// path so a gate that never becomes runnable still terminates the
+		// workflow rather than pending forever.
+		opts.tracef("ralph check-infra-exhausted bead=%s outcome=%s infra_retry=%d attempt=%d (falling through)",
+			bead.ID, result.Outcome, infraRetries, attempt)
+	}
+
 	if result.Outcome == convergence.GatePass {
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed check: %w", bead.ID, err)
@@ -75,6 +113,34 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass"}, nil
+	}
+
+	// A hard-class subject failure is terminal: stop the loop immediately in a
+	// single attempt instead of cloning further attempts (the treadmill that
+	// abort_scope-killed molecules). This mirrors the retry dispatcher's explicit
+	// hard disposition (see processRetryEval in retry.go) but deliberately
+	// diverges on the empty class: classifyRetryAttempt maps an empty
+	// gc.failure_class to hard (retry.go: `case beadmeta.FailureClassHard, "":`),
+	// whereas this loop keeps an empty or transient class repairable and clones up
+	// to gc.max_attempts below. Only an explicit "hard" class terminates here.
+	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
+		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
+		if err := store.SetMetadataBatch(logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
+			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    retryFailureReason(subject),
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
+		}); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
+		}
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing hard-failed check: %w", bead.ID, err)
+		}
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 	}
 
 	if attempt >= maxAttempts {
@@ -412,7 +478,12 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 		}
 		return existing, nil
 	}
-	cfg := loadAttemptRouteConfig(opts.CityPath)
+	// A routeConfig error is intentionally tolerated here: Ralph retry preserves
+	// the prior attempt's already-stamped routes rather than scope-routing, so a
+	// nil cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
+	// (control.go, fanout.go) fail closed on this error because they scope-route
+	// through applyAttemptControlStepRoute.
+	cfg, _ := opts.routeConfig()
 	if molecule.IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
 			return appendRalphRetryViaGraphApply(store, applier, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg, opts)
@@ -548,10 +619,20 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 				return nil, fmt.Errorf("remapping logical bead for retry clone %s: %w", newID, err)
 			}
 		}
+		if remapped := remappedControlForBeadID(mapping, old.Metadata[beadmeta.ControlForMetadataKey]); remapped != "" {
+			if err := store.SetMetadata(newID, beadmeta.ControlForMetadataKey, remapped); err != nil {
+				return nil, fmt.Errorf("remapping control_for for retry clone %s: %w", newID, err)
+			}
+		}
 	}
 	if remapped := remappedLogicalBeadID(mapping, prevCheck.Metadata[beadmeta.LogicalBeadIDMetadataKey]); remapped != "" {
 		if err := store.SetMetadata(newCheck.ID, beadmeta.LogicalBeadIDMetadataKey, remapped); err != nil {
 			return nil, fmt.Errorf("remapping logical bead for retry check %s: %w", newCheck.ID, err)
+		}
+	}
+	if remapped := remappedControlForBeadID(mapping, prevCheck.Metadata[beadmeta.ControlForMetadataKey]); remapped != "" {
+		if err := store.SetMetadata(newCheck.ID, beadmeta.ControlForMetadataKey, remapped); err != nil {
+			return nil, fmt.Errorf("remapping control_for for retry check %s: %w", newCheck.ID, err)
 		}
 	}
 
@@ -653,13 +734,25 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, old.ID)
 	}
 	meta[beadmeta.StepRefMetadataKey] = rewriteRetryStepRef(meta, old.Ref, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
-	if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
-		meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
-	}
 	metadataRefs := map[string]string(nil)
+	// gc.control_for: a bead-ID-valued pointer at a bead re-minted in this plan
+	// is remapped to the clone's new ID via MetadataRefs (the applier
+	// substitutes the created ID), mirroring gc.logical_bead_id below (S38 W7).
+	// Step-ref-valued pointers stay on the string rewrite.
+	if controlFor := strings.TrimSpace(meta[beadmeta.ControlForMetadataKey]); controlFor != "" {
+		if attemptIDs[controlFor] {
+			metadataRefs = make(map[string]string, 1)
+			metadataRefs[beadmeta.ControlForMetadataKey] = controlFor
+			delete(meta, beadmeta.ControlForMetadataKey)
+		} else {
+			meta[beadmeta.ControlForMetadataKey] = rewriteRetryControlFor(meta, controlFor, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
+		}
+	}
 	if oldLogicalID := strings.TrimSpace(old.Metadata[beadmeta.LogicalBeadIDMetadataKey]); oldLogicalID != "" {
 		if attemptIDs[oldLogicalID] {
-			metadataRefs = make(map[string]string, 1)
+			if metadataRefs == nil {
+				metadataRefs = make(map[string]string, 1)
+			}
 			metadataRefs[beadmeta.LogicalBeadIDMetadataKey] = oldLogicalID
 			delete(meta, beadmeta.LogicalBeadIDMetadataKey)
 		} else {
@@ -692,10 +785,6 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		ParentKey:         parentKey,
 		ParentID:          parentID,
 	}
-}
-
-func retryPreservedAssignee(bead beads.Bead, cityPath string) string {
-	return retryPreservedAssigneeWithConfig(bead, loadAttemptRouteConfig(cityPath))
 }
 
 func retryPreservedAssigneeWithConfig(bead beads.Bead, cfg *config.City) string {
@@ -1112,6 +1201,21 @@ func remappedLogicalBeadID(mapping map[string]string, raw string) string {
 		return mapped
 	}
 	return logicalID
+}
+
+// remappedControlForBeadID returns the new bead ID for a bead-ID-valued
+// gc.control_for pointer that referenced a bead re-minted in this retry clone
+// (i.e. the old value is a mapping key). It returns "" for step-ref-valued
+// pointers and for bead IDs outside the clone set — those keep the value
+// produced by rewriteRetryControlFor at clone time. This mirrors the
+// gc.logical_bead_id remap so cloned attempt roots point at the cloned
+// nested control's NEW bead ID (S38 W6).
+func remappedControlForBeadID(mapping map[string]string, raw string) string {
+	controlFor := strings.TrimSpace(raw)
+	if controlFor == "" {
+		return ""
+	}
+	return mapping[controlFor]
 }
 
 func resolveExistingRalphRetryFromBeads(store beads.Store, all []beads.Bead, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string) (map[string]string, error) {

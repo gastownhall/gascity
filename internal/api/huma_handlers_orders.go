@@ -9,9 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -46,9 +47,9 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 	a, err := resolveOrder(s.state.OrdersAll(), input.Name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
-			return nil, huma.Error409Conflict(err.Error())
+			return nil, apierr.AmbiguousReference.Msg(err.Error())
 		}
-		return nil, huma.Error404NotFound(err.Error())
+		return nil, apierr.OrderNotFound.Msg(err.Error())
 	}
 	return &struct {
 		Body orderResponse
@@ -101,9 +102,10 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			cr.LastRun = &ts
 		}
 		if len(history) > 0 {
-			outcome := lastRunOutcomeFromLabels(history[0].bead.Labels)
-			if outcome != "" {
-				cr.LastRunOutcome = &outcome
+			if run, ok := orders.RunFromTrackingBead(history[0].bead); ok {
+				if outcome := run.Outcome.Display(); outcome != "" {
+					cr.LastRunOutcome = &outcome
+				}
 			}
 		}
 		checks = append(checks, cr)
@@ -140,7 +142,7 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
 		if fresh {
-			cursorFn = orders.CursorAcrossStores(storesFromWorkflowInfos(infos)...)
+			cursorFn = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
@@ -183,7 +185,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	}
 	scopedName := input.ScopedName
 	if scopedName == "" {
-		return nil, huma.Error400BadRequest("scoped_name is required")
+		return nil, apierr.InvalidRequest.Msg("scoped_name is required")
 	}
 
 	limit := 20
@@ -195,7 +197,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	if input.Before != "" {
 		t, err := time.Parse(time.RFC3339, input.Before)
 		if err != nil {
-			return nil, huma.Error400BadRequest("invalid before timestamp: must be RFC3339, got " + strconv.Quote(input.Before))
+			return nil, apierr.InvalidRequest.Msg("invalid before timestamp: must be RFC3339, got " + strconv.Quote(input.Before))
 		}
 		beforeTime = t
 	}
@@ -220,14 +222,14 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	storeInfos, err := orderStoreInfosForState(s.state, orderDef)
 	if err != nil {
 		if errors.Is(err, errNoOrderStores) {
-			return nil, huma.Error503ServiceUnavailable(err.Error())
+			return nil, apierr.ServiceUnavailable.Msg(err.Error())
 		}
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	results, err := orderHistoryBeadsAcrossStoreInfos(storeInfos, scopedName, limit, beforeTime)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	entries := make([]orderHistoryEntry, 0, len(results))
@@ -254,16 +256,14 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
 
-		if b.Metadata != nil {
-			if v, ok := b.Metadata["convergence.gate_duration_ms"]; ok && v != "" {
-				entry.DurationMs = &v
-			}
-			if v, ok := b.Metadata["convergence.gate_exit_code"]; ok && v != "" {
-				entry.ExitCode = &v
-			}
+		gate := convergence.GateOutputFromMetadata(b.Metadata)
+		if gate.DurationMs != "" {
+			entry.DurationMs = &gate.DurationMs
 		}
-
-		entry.HasOutput = entry.CaptureOutput || orderRunHasOutput(b)
+		if gate.ExitCode != "" {
+			entry.ExitCode = &gate.ExitCode
+		}
+		entry.HasOutput = entry.CaptureOutput || gate.HasOutput()
 
 		entries = append(entries, entry)
 		if len(entries) >= limit {
@@ -276,13 +276,6 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	}
 	out.Body.Entries = entries
 	return out, nil
-}
-
-func orderRunHasOutput(b beads.Bead) bool {
-	if b.Metadata == nil {
-		return false
-	}
-	return b.Metadata["convergence.gate_stdout"] != "" || b.Metadata["convergence.gate_stderr"] != ""
 }
 
 // orderHistoryEntry is a single entry in the order history response.
@@ -312,34 +305,23 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	if input.StoreRef != "" {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {
-			return nil, huma.Error404NotFound("store not found")
+			return nil, apierr.ScopeNotFound.Msg("store_ref does not resolve to a known scope")
 		}
 		storeInfos = []workflowStoreInfo{info}
 	}
 	result, err := orderHistoryBeadAcrossStoreInfos(storeInfos, input.BeadID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return nil, huma.Error404NotFound("bead not found")
+			return nil, apierr.BeadNotFound.Msg("bead not found")
 		}
 		if errors.Is(err, errNoOrderStores) {
-			return nil, huma.Error503ServiceUnavailable(err.Error())
+			return nil, apierr.ServiceUnavailable.Msg(err.Error())
 		}
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	b := result.bead
 
-	output := ""
-	if b.Metadata != nil {
-		if stdout := b.Metadata["convergence.gate_stdout"]; stdout != "" {
-			output = stdout
-		}
-		if stderr := b.Metadata["convergence.gate_stderr"]; stderr != "" {
-			if output != "" {
-				output += "\n"
-			}
-			output += stderr
-		}
-	}
+	output := convergence.GateOutputFromMetadata(b.Metadata).CombinedOutput()
 
 	return &struct {
 		Body orderHistoryDetailResponse
@@ -395,14 +377,21 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 	return infos, nil
 }
 
-func storesFromWorkflowInfos(infos []workflowStoreInfo) []beads.Store {
-	stores := make([]beads.Store, 0, len(infos))
+// orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
+// order front doors for the mixed orders+graph Cursor read. Each store is used
+// as both the orders leg and the graph leg (single-store colocation dedups to one
+// read); a graph-store split would supply a distinct graph leg here.
+func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store {
+	out := make([]*orders.Store, 0, len(infos))
 	for _, info := range infos {
 		if info.store != nil {
-			stores = append(stores, info.store)
+			out = append(out, orders.NewStoreWithGraph(
+				beads.OrdersStore{Store: info.store},
+				beads.GraphStore{Store: info.store},
+			))
 		}
 	}
-	return stores
+	return out
 }
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {
@@ -576,7 +565,7 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 ) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
@@ -591,11 +580,11 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 
 	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
 	if err != nil {
-		return nil, huma.Error500InternalServerError("workflow feed failed")
+		return nil, apierr.Internal.Msg("workflow feed failed")
 	}
 	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("order feed failed")
+		return nil, apierr.Internal.Msg("order feed failed")
 	}
 
 	items := make([]monitorFeedItemResponse, 0, len(workflowRuns.Items)+len(orderRuns.Items))
@@ -665,9 +654,9 @@ func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, er
 	a, err := resolveOrder(s.state.OrdersAll(), name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
-			return nil, huma.Error409Conflict(err.Error())
+			return nil, apierr.AmbiguousReference.Msg(err.Error())
 		}
-		return nil, huma.Error404NotFound(err.Error())
+		return nil, apierr.OrderNotFound.Msg(err.Error())
 	}
 
 	if enabled {

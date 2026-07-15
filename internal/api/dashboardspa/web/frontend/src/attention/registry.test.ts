@@ -956,6 +956,7 @@ function agent(overrides: Partial<AgentResponse>): AgentResponse {
     running: false,
     state: 'active',
     suspended: false,
+    pack_derived: false,
     ...overrides,
   };
 }

@@ -52,7 +52,7 @@ while IFS='=' read -r name _; do
   esac
 done < <(env)
 
-run_go_test() {
+run_in_test_env() {
   local base_env=(
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -86,10 +86,38 @@ run_go_test() {
     GC_TEST_SHARD_TOTAL="${shard_total}"
   )
   if (( ${#extra_env[@]} > 0 )); then
-    env -i "${base_env[@]}" "${extra_env[@]}" go test "$@"
+    env -i "${base_env[@]}" "${extra_env[@]}" "$@"
   else
-    env -i "${base_env[@]}" go test "$@"
+    env -i "${base_env[@]}" "$@"
   fi
+}
+
+run_go_test() {
+  run_in_test_env go test "$@"
+}
+
+run_observable_go_test() {
+  local timing_name="${GO_TEST_TIMING_NAME:-${test_pkg#./}-shard-${shard_index}-of-${shard_total}}"
+  local observable_env=(
+    OBSERVABLE_TIMING_FILE="${GO_TEST_TIMING_FILE}"
+    OBSERVABLE_SHARD_ID="${timing_name}"
+    OBSERVABLE_VARIANT="${GO_TEST_TIMING_VARIANT:-default}"
+    OBSERVABLE_COMMIT_SHA="${GITHUB_SHA:-}"
+    OBSERVABLE_WORKFLOW="${GITHUB_WORKFLOW:-}"
+    OBSERVABLE_RUN_ID="${GITHUB_RUN_ID:-}"
+    OBSERVABLE_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
+    OBSERVABLE_JOB="${GITHUB_JOB:-}"
+    OBSERVABLE_RUNNER_LABEL="${GO_TEST_RUNNER_LABEL:-}"
+    OBSERVABLE_RUNNER_NAME="${RUNNER_NAME:-}"
+    OBSERVABLE_RUNNER_OS="${RUNNER_OS:-}"
+    OBSERVABLE_RUNNER_ARCH="${RUNNER_ARCH:-}"
+    OBSERVABLE_RUNNER_CPU_COUNT="${GO_TEST_RUNNER_CPU_COUNT:-}"
+  )
+  if [[ "${GC_TEST_NO_SLICE:-0}" == "1" ]]; then
+    observable_env+=(GC_TEST_NO_SLICE=1)
+  fi
+  run_in_test_env "${observable_env[@]}" \
+    "$repo_root/scripts/go-test-observable" "$timing_name" -- "$@"
 }
 
 go_test_args=(-timeout "$timeout")
@@ -145,4 +173,8 @@ join_regex() {
 regex="^($(join_regex "${selected[@]}"))$"
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
-run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+if [[ -n "${GO_TEST_TIMING_FILE:-}" ]]; then
+  run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+else
+  run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+fi

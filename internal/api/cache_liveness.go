@@ -3,7 +3,7 @@ package api
 import (
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -32,7 +32,7 @@ func cacheLiveOr503(store beads.Store) error {
 	if lr.IsLive() {
 		return nil
 	}
-	return huma.Error503ServiceUnavailable("cache_not_live: supervisor cache is priming or reconciling; retry via fallback")
+	return apierr.StoreUnavailable.Msg("cache_not_live: supervisor cache is priming or reconciling; retry via fallback")
 }
 
 // cacheAgeSeconds returns the age in seconds of the store's latest fresh

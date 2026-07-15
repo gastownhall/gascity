@@ -370,6 +370,54 @@ func TestBdStoreGet(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetFallsBackToEphemeralForWisps(t *testing.T) {
+	// bd show does not query the wisps table, so Get for a wisp ID returns
+	// ErrNotFound from bd show. Get must fall back to bd query with
+	// ephemeral=true so that wisp-tier beads (e.g. auto-handoff mail created
+	// by gc handoff --auto) are retrievable.
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-abc`: {
+			err: fmt.Errorf("issue gc-wisp-abc not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-abc --all --limit 1`: {
+			out: []byte(`[{"id":"gc-wisp-abc","title":"context cycle","status":"open","issue_type":"message","assignee":"claude","ephemeral":true}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	b, err := s.Get("gc-wisp-abc")
+	if err != nil {
+		t.Fatalf("Get wisp: %v", err)
+	}
+	if b.ID != "gc-wisp-abc" {
+		t.Errorf("ID = %q, want %q", b.ID, "gc-wisp-abc")
+	}
+	if !b.Ephemeral {
+		t.Error("Ephemeral = false, want true")
+	}
+}
+
+func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-missing`: {
+			err: fmt.Errorf("issue gc-wisp-missing not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-missing --all --limit 1`: {
+			out: []byte(`[]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-wisp-missing")
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	cutoff := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	runner := func(_, name string, args ...string) ([]byte, error) {
@@ -3678,6 +3726,28 @@ func TestBdStoreDepAddRetriesTransientDoltConnectionError(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+// TestBdStoreDepAddRetriesSqliteBusyError proves a sqlite-backed bd write
+// that loses a lock race ("database is locked (5) (SQLITE_BUSY)") goes
+// through the same transient-write retry loop as Dolt serialization
+// failures instead of failing permanently on first contention.
+func TestBdStoreDepAddRetriesSqliteBusyError(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("exit status 1: adding dependency: database is locked (5) (SQLITE_BUSY)")
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("bd-42", "bd-41", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (1 sqlite busy + 1 retry success)", calls)
 	}
 }
 

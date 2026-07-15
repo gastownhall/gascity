@@ -942,7 +942,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 		t.Fatalf("loadSessionBeadSnapshot(): %v", err)
 	}
 	if info, conflict := findNamedSessionConflictInfo(snapshot, spec); !conflict {
-		t.Fatalf("findNamedSessionConflictInfo() = false, want conflict; snapshot=%#v", snapshot.Open())
+		t.Fatalf("findNamedSessionConflictInfo() = false, want conflict; snapshot=%#v", snapshot.OpenInfos())
 	} else if info.Template != "other" {
 		t.Fatalf("findNamedSessionConflictInfo() info template = %q, want other", info.Template)
 	}
@@ -972,28 +972,15 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 			Template: "mayor",
 		}},
 	}
-	mgr := session.NewManager(store, runtime.NewFake())
-	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
-		context.Background(),
-		"mayor",
-		config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor"),
-		"mayor",
-		"Mayor",
-		"true",
-		t.TempDir(),
-		"shell",
-		"",
-		nil,
-		session.ProviderResume{},
-		runtime.Config{},
-		map[string]string{
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake())
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Alias: "mayor", ExplicitName: config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor"), Template: "mayor", Title: "Mayor", Command: "true", WorkDir: t.TempDir(), Provider: "shell", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "on_demand",
-		},
-	)
+		}})
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)

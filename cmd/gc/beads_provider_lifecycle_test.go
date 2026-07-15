@@ -4164,6 +4164,39 @@ wait
 	waitForProviderTestPIDExit(t, pid, "provider op")
 }
 
+func TestRunProviderOpWithEnvContextParentCancellationKillsProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	childPIDFile := filepath.Join(dir, "child.pid")
+	script := filepath.Join(dir, "provider-op.sh")
+	content := `#!/bin/sh
+sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
+wait
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- runProviderOpWithEnvContext(ctx, script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
+	}()
+
+	pid := waitForProviderTestChildPID(t, childPIDFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("provider op error = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider op did not return after parent cancellation")
+	}
+	waitForProviderTestPIDExit(t, pid, "provider op with parent context")
+}
+
 func TestRunProviderProbeKillsProcessGroupOnTimeout(t *testing.T) {
 	cancelCh := useCancelableProviderLifecycleContext(t)
 

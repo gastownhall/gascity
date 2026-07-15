@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const testDetachedPoolProbeSpec = "tmux:gascity:soak-loop"
@@ -146,7 +148,7 @@ func TestGCSweepSessionBeads_ClosesOrphans(t *testing.T) {
 
 	sessionBeads := []beads.Bead{orphan, active}
 
-	closed := GCSweepSessionBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 1 {
 		t.Fatalf("closed %d beads, want 1", len(closed))
@@ -190,7 +192,7 @@ func TestGCSweepSessionBeads_KeepsBlockedAssigned(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := GCSweepSessionBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (blocked work keeps session alive)", len(closed))
@@ -219,7 +221,7 @@ func TestGCSweepSessionBeads_ClosesWhenAllWorkClosed(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := GCSweepSessionBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 1 {
 		t.Errorf("closed %d beads, want 1 (all work done)", len(closed))
@@ -235,7 +237,7 @@ func TestGCSweepSessionBeads_SkipsAlreadyClosed(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := GCSweepSessionBeads(store, nil, sessionBeads)
+	closed := gcSweepSessionBeadsFromBeads(store, sessionBeads)
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (already closed)", len(closed))
@@ -260,7 +262,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -308,7 +310,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsUnassignedWorkflowRoot(t *testing.T
 		t.Fatalf("Reload workflow root: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -353,7 +355,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensEphemeralPoolAssignee(t *testing.
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -400,7 +402,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensLegacyWorkflowRunTarget(t *testin
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -451,7 +453,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeAliveSkipsRelease(t *testin
 	restore := captureLogOutput(&logs)
 	defer restore()
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		testPoolReleaseConfig(),
 		"",
@@ -488,7 +490,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadReleasesAndClears(t *te
 	work := createDetachedOrphanedPoolWork(t, store)
 	installFakeTmux(t, "exit 1")
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		testPoolReleaseConfig(),
 		"",
@@ -523,7 +525,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadPreservesGuardWhenRelea
 	store := failReleaseUpdateStore{Store: base, failID: work.ID}
 	installFakeTmux(t, "exit 1")
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		testPoolReleaseConfig(),
 		"",
@@ -558,7 +560,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeErrorsReleaseOnThirdTick(t 
 	installFakeTmux(t, "exit 2")
 
 	for tick := 1; tick <= 2; tick++ {
-		released := releaseOrphanedPoolAssignments(
+		released := releaseOrphanedPoolAssignmentsFromBeads(
 			store,
 			testPoolReleaseConfig(),
 			"",
@@ -583,7 +585,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeErrorsReleaseOnThirdTick(t 
 		}
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		testPoolReleaseConfig(),
 		"",
@@ -779,7 +781,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionMissingFromSnapshot(t *t
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -841,7 +843,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionWhenLiveSessionListMisse
 		directSessions: map[string]beads.Bead{"mc-live": sessionBead},
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -905,7 +907,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionAssignedByAlias(t *testi
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -970,7 +972,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionAssignedByAliasHistory(t
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -1021,7 +1023,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionByAliasViaLiveList(t *te
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -1057,7 +1059,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsWorkReassignedAfterCandidateSnapsho
 		t.Fatalf("Reassign work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -1103,7 +1105,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensUnassignedInProgressPoolWork(t *t
 		t.Fatalf("test setup assignee = %q, want empty", work.Assignee)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -1168,7 +1170,7 @@ func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 	}
 
 	// Empty openSessionBeads — the assignee's session is dead.
-	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
 	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
@@ -1218,7 +1220,7 @@ func TestCollectAndReleaseOrphanWorkflowRunTargetBead(t *testing.T) {
 		t.Fatalf("collect missed the workflow run-target bead: got %#v, want [%s]", found, work.ID)
 	}
 
-	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
 	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
@@ -1268,7 +1270,7 @@ func TestCollectAndReleaseNonWorkflowRunTargetBeadStaysAssigned(t *testing.T) {
 		t.Fatalf("collectAssignedWorkBeadsWithStores returned %#v, want none for non-workflow gc.run_target", found)
 	}
 
-	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
 	if len(released) != 0 {
 		t.Fatalf("released = %v, want none for non-workflow gc.run_target", released)
 	}
@@ -1335,7 +1337,7 @@ func TestReleaseOrphanedPoolAssignments_UpdatesRigStoreFallback(t *testing.T) {
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		&config.City{
 			Rigs:   []config.Rig{{Name: "rig", Prefix: "ga"}},
@@ -1403,7 +1405,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensRigStoreMissingPoolAssignee(t *te
 		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", citySession.ID, work.ID)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		&config.City{
 			Rigs:   []config.Rig{{Name: "repo"}},
@@ -1484,7 +1486,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensCrossStoreIDCollisions(t *testing
 		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		&config.City{
 			Rigs:   []config.Rig{{Name: "repo"}},
@@ -1538,7 +1540,7 @@ func TestReleaseOrphanedPoolAssignments_ClearsSessionAffinityOnRelease(t *testin
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{
 			Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
@@ -1591,7 +1593,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsStoreAwareEntryWithoutOwnerStore(t 
 		t.Fatalf("Reload rig work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -1645,7 +1647,7 @@ func TestReleaseOrphanedPoolAssignments_KeepsOpenSessionOwnership(t *testing.T) 
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
@@ -1705,7 +1707,7 @@ func TestReleaseOrphanedPoolAssignments_ReleasesRigWorkAssignedToUnreachableOpen
 		t.Fatalf("Reload rig work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		&config.City{
 			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
@@ -1784,7 +1786,7 @@ func TestReleaseOrphanedPoolAssignments_KeepsCrossStoreEligibleHolderRigWork(t *
 		t.Fatalf("Reload rig work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		&config.City{
 			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
@@ -1871,7 +1873,7 @@ func TestReleaseOrphanedPoolAssignments_KeepsSameStoreScopedOpenSessionOwnership
 		t.Fatalf("Reload work bead: %v", err)
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		cityPath,
@@ -1925,7 +1927,7 @@ func TestReleaseOrphanedPoolAssignments_ReopensStaleDirectAssigneeForNamedBacked
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, []beads.Bead{work}, nil, nil, nil)
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", nil, []beads.Bead{work}, nil, nil, nil)
 	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
@@ -1970,7 +1972,7 @@ func TestReleaseOrphanedPoolAssignments_PreservesCanonicalNamedIdentity(t *testi
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, []beads.Bead{work}, nil, nil, nil)
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", nil, []beads.Bead{work}, nil, nil, nil)
 	if len(released) != 0 {
 		t.Fatalf("released = %v, want none", released)
 	}
@@ -2018,7 +2020,7 @@ func TestReleaseOrphanedPoolAssignments_ReleasesNamedIdentityForUnreachableStore
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		cfg,
 		cityPath,
@@ -2080,7 +2082,7 @@ func TestReleaseOrphanedPoolAssignments_PreservesCrossStoreEligibleNamedIdentity
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		cityStore,
 		cfg,
 		cityPath,
@@ -2132,7 +2134,7 @@ func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *te
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(
+	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
 		cfg,
 		cityPath,
@@ -2156,4 +2158,340 @@ func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *te
 	if got.Assignee != "reviewer" {
 		t.Fatalf("assignee = %q, want reviewer", got.Assignee)
 	}
+}
+
+// conditionalReleaseProbeStore wraps a MemStore for the orphan-release TOCTOU
+// tests. It records the store writes the release path performs, can report the
+// conditional release unsupported (forcing the recheck fallback), and can
+// inject a concurrent re-claim at controlled points: right after the
+// pre-release live-work gate (a claim landing between the staleness check and
+// the release write) or right after the release write (a claim that survives
+// the race and should be observable in the verify-after read).
+type conditionalReleaseProbeStore struct {
+	beads.Store
+	t   *testing.T
+	mem *beads.MemStore
+
+	releaseUnsupported bool
+	claimID            string
+	claimAssignee      string
+	claimAfterLiveGate bool
+	claimAfterWrite    bool
+
+	releaseCalls      []releaseProbeCall
+	assignmentUpdates []beads.UpdateOpts
+	liveWorkLists     int
+}
+
+type releaseProbeCall struct {
+	id       string
+	assignee string
+}
+
+func newConditionalReleaseProbeStore(t *testing.T) (*conditionalReleaseProbeStore, beads.Bead) {
+	t.Helper()
+	return newConditionalReleaseProbeStoreWithMetadata(t, nil)
+}
+
+// newConditionalReleaseProbeStoreWithMetadata builds the orphan-release probe
+// store with extra metadata merged onto the default routed/affinity fixture, so
+// a test can add routing vectors (e.g. gc.continuation_group) without
+// duplicating the setup. A nil extra map reproduces the default fixture exactly.
+func newConditionalReleaseProbeStoreWithMetadata(t *testing.T, extra map[string]string) (*conditionalReleaseProbeStore, beads.Bead) {
+	t.Helper()
+	mem := beads.NewMemStore()
+	metadata := map[string]string{
+		"gc.routed_to":        "worker",
+		"gc.session_affinity": "require",
+	}
+	for k, v := range extra {
+		metadata[k] = v
+	}
+	work, err := mem.Create(beads.Bead{
+		Title:    "orphaned pool work",
+		Assignee: "worker-dead",
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := mem.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	return &conditionalReleaseProbeStore{
+		Store:         mem,
+		t:             t,
+		mem:           mem,
+		claimID:       work.ID,
+		claimAssignee: "worker-live",
+	}, work
+}
+
+func (s *conditionalReleaseProbeStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	if s.releaseUnsupported {
+		return false, beads.ErrConditionalReleaseUnsupported
+	}
+	s.releaseCalls = append(s.releaseCalls, releaseProbeCall{id: id, assignee: expectedAssignee})
+	return s.mem.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+func (s *conditionalReleaseProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	out, err := s.Store.List(query)
+	if query.Live && query.Status == "in_progress" && query.Label == "" {
+		s.liveWorkLists++
+		if s.claimAfterLiveGate && s.liveWorkLists == 1 {
+			s.reclaim()
+		}
+	}
+	return out, err
+}
+
+func (s *conditionalReleaseProbeStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Assignee != nil || opts.Status != nil {
+		s.assignmentUpdates = append(s.assignmentUpdates, opts)
+	}
+	err := s.Store.Update(id, opts)
+	if err == nil && s.claimAfterWrite && opts.Assignee != nil && *opts.Assignee == "" {
+		s.claimAfterWrite = false
+		s.reclaim()
+	}
+	return err
+}
+
+func (s *conditionalReleaseProbeStore) reclaim() {
+	s.t.Helper()
+	if err := s.mem.Update(s.claimID, beads.UpdateOpts{
+		Assignee: stringPtr(s.claimAssignee),
+		Status:   stringPtr("in_progress"),
+	}); err != nil {
+		s.t.Fatalf("injecting concurrent re-claim: %v", err)
+	}
+}
+
+func releaseProbeAssignments(store *conditionalReleaseProbeStore, work beads.Bead) []releasedPoolAssignment {
+	return releaseOrphanedPoolAssignments(
+		store,
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+}
+
+func TestReleaseOrphanedPoolAssignments_UsesConditionalReleaseWhenSupported(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	if len(store.releaseCalls) != 1 {
+		t.Fatalf("ReleaseIfCurrent calls = %v, want exactly one", store.releaseCalls)
+	}
+	if call := store.releaseCalls[0]; call.id != work.ID || call.assignee != "worker-dead" {
+		t.Fatalf("ReleaseIfCurrent call = %+v, want {%s worker-dead}", call, work.ID)
+	}
+	if len(store.assignmentUpdates) != 0 {
+		t.Fatalf("assignment-shaped Update calls = %+v, want none when ReleaseIfCurrent is supported", store.assignmentUpdates)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", got.Status, got.Assignee)
+	}
+	if got.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("gc.session_affinity = %q, want cleared after conditional release", got.Metadata["gc.session_affinity"])
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ContinuationGroupBeadBypassesCASWindow(t *testing.T) {
+	// A bead carrying the active continuation-group routing vector must NOT take
+	// the two-write CAS release path: ReleaseIfCurrent swaps only status/assignee,
+	// so a follow-up metadata clear would briefly expose an open, unassigned bead
+	// whose gc.continuation_group is still set, letting a concurrent
+	// `gc hook --claim` vacuum it (or its {root, group} siblings) onto a new
+	// session via the stale group. The release must instead take the recheck
+	// fallback, which clears status, assignee, and the group in a single Update —
+	// so the group is never visible on a claimable bead. This is the regression
+	// pin for the CAS release-then-clear ordering window.
+	store, work := newConditionalReleaseProbeStoreWithMetadata(t, map[string]string{
+		"gc.root_bead_id":       "root-1",
+		"gc.continuation_group": "grp-1",
+	})
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+	if len(store.releaseCalls) != 0 {
+		t.Fatalf("ReleaseIfCurrent calls = %v, want none: a continuation-group bead must bypass the CAS fast path", store.releaseCalls)
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped Update calls = %+v, want exactly one atomic release write", store.assignmentUpdates)
+	}
+	// The single release write must clear the assignment AND the continuation
+	// group together, leaving no open/unassigned/group-still-set window.
+	update := store.assignmentUpdates[0]
+	if update.Assignee == nil || *update.Assignee != "" || update.Status == nil || *update.Status != "open" {
+		t.Fatalf("release update = %+v, want assignee=\"\" and status=open", update)
+	}
+	if v, ok := update.Metadata[beadmeta.ContinuationGroupMetadataKey]; !ok || v != "" {
+		t.Fatalf("release update metadata[%s] = %q (present=%v), want cleared in the same write", beadmeta.ContinuationGroupMetadataKey, v, ok)
+	}
+
+	final, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if final.Status != "open" || final.Assignee != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", final.Status, final.Assignee)
+	}
+	if strings.TrimSpace(final.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" {
+		t.Fatalf("gc.continuation_group = %q, want cleared after release", final.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	}
+	if strings.TrimSpace(final.Metadata["gc.session_affinity"]) != "" {
+		t.Fatalf("gc.session_affinity = %q, want cleared after release", final.Metadata["gc.session_affinity"])
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ConditionalReleaseLosesRaceNoClobber(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.claimAfterLiveGate = true
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none when a concurrent claim wins the release race", released)
+	}
+	if len(store.assignmentUpdates) != 0 {
+		t.Fatalf("assignment-shaped Update calls = %+v, want none after losing the conditional release", store.assignmentUpdates)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-live" {
+		t.Fatalf("work = status %q assignee %q, want the concurrent claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_UnsupportedStoreRechecksBeforeWrite(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	store.claimAfterLiveGate = true
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none when the assignee flips between check and write", released)
+	}
+	if len(store.assignmentUpdates) != 0 {
+		t.Fatalf("assignment-shaped Update calls = %+v, want none after the recheck observes the re-claim", store.assignmentUpdates)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-live" {
+		t.Fatalf("work = status %q assignee %q, want the concurrent claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_UnsupportedStoreLogsRacedClaimAfterRelease(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	store.claimAfterWrite = true
+
+	var buf bytes.Buffer
+	restore := captureLogOutput(&buf)
+	defer restore()
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+	if !strings.Contains(buf.String(), "raced the orphan release") {
+		t.Fatalf("log output = %q, want a loud raced-claim detection after the release write", buf.String())
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-live" {
+		t.Fatalf("work = status %q assignee %q, want the surviving claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_UnsupportedStoreReleasesNormalOrphan(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+
+	var buf bytes.Buffer
+	restore := captureLogOutput(&buf)
+	defer restore()
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped Update calls = %+v, want exactly the release write", store.assignmentUpdates)
+	}
+	if strings.Contains(buf.String(), "raced the orphan release") {
+		t.Fatalf("log output = %q, want no raced-claim detection for an uncontended release", buf.String())
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", got.Status, got.Assignee)
+	}
+	if got.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("gc.session_affinity = %q, want cleared after fallback release", got.Metadata["gc.session_affinity"])
+	}
+}
+
+// releaseOrphanedPoolAssignmentsFromBeads projects raw session beads to
+// session.Info and calls releaseOrphanedPoolAssignments, letting the existing
+// raw-bead fixtures exercise the WI-5 W4 typed signature.
+func releaseOrphanedPoolAssignmentsFromBeads(
+	store beads.Store,
+	cfg *config.City,
+	cityPath string,
+	openSessionBeads []beads.Bead,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStores []beads.Store,
+	assignedWorkStoreRefs []string,
+	rigStores map[string]beads.Store,
+) []releasedPoolAssignment {
+	var infos []session.Info
+	for _, b := range openSessionBeads {
+		infos = append(infos, seedSessionInfo(b))
+	}
+	return releaseOrphanedPoolAssignments(store, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores)
+}
+
+// gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
+// calls GCSweepSessionBeads, letting the raw-bead fixtures exercise the WI-5 W4
+// typed signature.
+func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) []string {
+	var infos []session.Info
+	for _, b := range sessionBeads {
+		infos = append(infos, seedSessionInfo(b))
+	}
+	return GCSweepSessionBeads(store, nil, infos)
 }

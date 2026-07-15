@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -70,6 +71,222 @@ func newFakeDrainOps() *fakeDrainOps {
 		acked:            make(map[string]bool),
 		restartRequested: make(map[string]bool),
 		driftRestart:     make(map[string]bool),
+	}
+}
+
+func TestE2b2ProviderConstructionFailuresReturnThroughRun(t *testing.T) {
+	if cityPath, sessionID, markerPath, ok := e2b2ProviderFailureHelperArgs(os.Args); ok {
+		runE2b2ProviderFailureHelper(t, cityPath, sessionID, markerPath)
+		return
+	}
+
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	markerPath := filepath.Join(t.TempDir(), "returned-through-run")
+	cmd := exec.Command(
+		os.Args[0],
+		"-test.run=^TestE2b2ProviderConstructionFailuresReturnThroughRun$",
+		"--",
+		"e2b2-provider-failure-helper",
+		cityPath,
+		sessionID,
+		markerPath,
+	)
+	cmd.Dir = cityPath
+	cmd.Env = e2b2ProviderFailureChildEnv(
+		"GC_BEADS=file",
+		"GC_BEADS_SCOPE_ROOT=",
+		"GC_CITY="+cityPath,
+		"GC_CITY_PATH="+cityPath,
+		"GC_CEILING_DIRECTORIES="+filepath.Dir(cityPath),
+		"GC_HOME="+filepath.Join(filepath.Dir(cityPath), "gc-home"),
+		"GC_SESSION=broken",
+		"GC_ALIAS=worker",
+		"GC_AGENT=worker",
+		"GC_SESSION_ID="+sessionID,
+		"GC_SESSION_NAME=test-city--frontend--worker",
+		"GC_TMUX_SESSION=test-city--frontend--worker",
+	)
+	var processStdout, processStderr bytes.Buffer
+	cmd.Stdout = &processStdout
+	cmd.Stderr = &processStderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("provider failure helper did not return through run: %v; stdout=%q stderr=%q", err, processStdout.String(), processStderr.String())
+	}
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("run-return marker missing: %v", err)
+	}
+	if got, want := string(marker), "returned\n"; got != want {
+		t.Fatalf("run-return marker = %q, want %q", got, want)
+	}
+}
+
+func e2b2ProviderFailureHelperArgs(args []string) (string, string, string, bool) {
+	for index, arg := range args {
+		if arg == "--" && index+5 == len(args) && args[index+1] == "e2b2-provider-failure-helper" {
+			return args[index+2], args[index+3], args[index+4], true
+		}
+	}
+	return "", "", "", false
+}
+
+func e2b2ProviderFailureChildEnv(extra ...string) []string {
+	base := sanitizedBaseEnv(extra...)
+	env := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "OTEL_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "OTEL_SDK_DISABLED=true")
+}
+
+func writeE2b2ProviderFailureCity(t *testing.T) (string, string) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig path: %v", err)
+	}
+	cityTOML := `[workspace]
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeCatalogFile(t, cityPath, ".gc/site.toml", fmt.Sprintf(`workspace_name = "test-city"
+
+[[rig]]
+name = "frontend"
+path = %q
+`, rigPath))
+	writeBuiltinImportsFixture(t, cityPath, "core")
+	writeCatalogFile(t, cityPath, "agents/worker/agent.toml", "dir = \"frontend\"\n")
+
+	store, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "runtime provider failure target",
+		Type:   sessionBeadType,
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"agent_name":   "frontend/worker",
+			"template":     "frontend/worker",
+			"session_name": "test-city--frontend--worker",
+			"state":        "awake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return cityPath, created.ID
+}
+
+func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath string) {
+	t.Helper()
+	defer func() {
+		if err := os.WriteFile(markerPath, []byte("returned\n"), 0o600); err != nil {
+			t.Errorf("write run-return marker: %v", err)
+		}
+	}()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(cityPath))
+	t.Setenv("GC_SESSION", "broken")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_SESSION_NAME", "test-city--frontend--worker")
+	t.Setenv("GC_TMUX_SESSION", "test-city--frontend--worker")
+
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	defer func() { buildSessionProviderByName = oldBuild }()
+
+	const constructionFailure = "constructing session provider: injected provider failure"
+	tests := []struct {
+		name             string
+		args             []string
+		wantCommand      string
+		wantJSONCode     string
+		wantJSONMessage  string
+		wantJSONDiagCode string
+	}{
+		{name: "runtime drain text", args: []string{"--city", cityPath, "runtime", "drain", sessionID}, wantCommand: "gc runtime drain"},
+		{name: "runtime drain json", args: []string{"--city", cityPath, "runtime", "drain", sessionID, "--json"}, wantCommand: "gc runtime drain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime undrain text", args: []string{"--city", cityPath, "runtime", "undrain", sessionID}, wantCommand: "gc runtime undrain"},
+		{name: "runtime undrain json", args: []string{"--city", cityPath, "runtime", "undrain", sessionID, "--json"}, wantCommand: "gc runtime undrain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check explicit text", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID}, wantCommand: "gc runtime drain-check"},
+		{name: "runtime drain-check explicit json", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID, "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check context text", args: []string{"--city", cityPath, "runtime", "drain-check"}, wantCommand: "gc runtime drain-check"},
+		{name: "runtime drain-check context json", args: []string{"--city", cityPath, "runtime", "drain-check", "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-ack explicit text", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID}, wantCommand: "gc runtime drain-ack"},
+		{name: "runtime drain-ack explicit json", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID, "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-ack context text", args: []string{"--city", cityPath, "runtime", "drain-ack"}, wantCommand: "gc runtime drain-ack"},
+		{name: "runtime drain-ack context json", args: []string{"--city", cityPath, "runtime", "drain-ack", "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart"},
+		{name: "rig status text", args: []string{"--city", cityPath, "rig", "status", "frontend"}, wantCommand: "gc rig status"},
+		{name: "rig status json", args: []string{"--city", cityPath, "rig", "status", "frontend", "--json"}, wantCommand: "gc rig status", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "city status text", args: []string{"--city", cityPath, "status"}, wantCommand: "gc status"},
+		{name: "city status json flag", args: []string{"--city", cityPath, "status", "--json"}, wantCommand: "gc status", wantJSONCode: "session_provider_failed", wantJSONMessage: "gc status: " + constructionFailure, wantJSONDiagCode: "session_provider_failed"},
+		{name: "city status json format", args: []string{"--city", cityPath, "status", "--format=json"}, wantCommand: "gc status", wantJSONCode: "session_provider_failed", wantJSONMessage: "gc status: " + constructionFailure, wantJSONDiagCode: "session_provider_failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr); code != 1 {
+				t.Fatalf("run(%v) = %d, want 1; stdout=%q stderr=%q", tc.args, code, stdout.String(), stderr.String())
+			}
+
+			wantMessage := tc.wantCommand + ": " + constructionFailure
+			if tc.wantJSONCode == "" {
+				if got := stdout.String(); got != "" {
+					t.Fatalf("stdout = %q, want empty", got)
+				}
+				if got, want := stderr.String(), wantMessage+"\n"; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				return
+			}
+
+			var output cliJSONErrorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+				t.Fatalf("stdout is not a structured JSON failure: %v; stdout=%q", err, stdout.String())
+			}
+			if output.OK || output.Error.Code != tc.wantJSONCode || output.Error.ExitCode != 1 || output.Error.Message != tc.wantJSONMessage {
+				t.Fatalf("JSON failure = %#v, want code=%q message=%q exit_code=1", output, tc.wantJSONCode, tc.wantJSONMessage)
+			}
+			if tc.wantJSONDiagCode == "" {
+				if got, want := stderr.String(), wantMessage+"\n"; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				return
+			}
+			var diagnostic cliJSONDiagnostic
+			if err := json.Unmarshal(stderr.Bytes(), &diagnostic); err != nil {
+				t.Fatalf("stderr is not a structured JSON diagnostic: %v; stderr=%q", err, stderr.String())
+			}
+			if diagnostic.Code != tc.wantJSONDiagCode || diagnostic.Message != tc.wantJSONMessage || diagnostic.ExitCode != 1 {
+				t.Fatalf("JSON diagnostic = %#v, want code=%q message=%q exit_code=1", diagnostic, tc.wantJSONDiagCode, tc.wantJSONMessage)
+			}
+		})
 	}
 }
 
@@ -471,6 +688,16 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	}
 	if got := stderr.String(); got != "gc runtime drain-ack: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) {
+	err := joinDrainAckMutationErrors(
+		fmt.Errorf("setting metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+		fmt.Errorf("removing metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+	)
+	if err != nil {
+		t.Fatalf("joinDrainAckMutationErrors(...) = %v, want nil for missing session bead", err)
 	}
 }
 

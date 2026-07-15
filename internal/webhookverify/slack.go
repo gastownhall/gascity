@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -61,12 +62,8 @@ func (v *slackV0) Verify(_ context.Context, req VerifyRequest) (VerifyResult, er
 	if err != nil {
 		return failf("%s is not a unix timestamp", v.timestampHeader), nil
 	}
-	skew := effectiveNow(req, v.now).Sub(time.Unix(tsSecs, 0))
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > v.window {
-		return failf("%s skew %s exceeds replay window %s", v.timestampHeader, skew.Truncate(time.Second), v.window), nil
+	if !withinReplayWindow(effectiveNow(req, v.now), tsSecs, v.window) {
+		return failf("%s %d is outside the %s replay window", v.timestampHeader, tsSecs, v.window), nil
 	}
 
 	sig := strings.TrimSpace(req.Header.Get(v.signatureHeader))
@@ -91,5 +88,28 @@ func (v *slackV0) Verify(_ context.Context, req VerifyRequest) (VerifyResult, er
 	if subtle.ConstantTimeCompare(provided, expected) != 1 {
 		return failf("%s does not match", v.signatureHeader), nil
 	}
-	return VerifyResult{OK: true, DedupID: tsRaw}, nil
+	return VerifyResult{OK: true, DedupID: tsRaw, EventType: slackEventType(req.Body)}, nil
+}
+
+// slackEventType derives the rule-facing event type from a verified Slack
+// payload: the nested "event.type" for an Events API event_callback (so a rule
+// can select `event = "message"`), falling back to the top-level "type" for
+// envelopes that carry no nested event (e.g. "url_verification"). It returns ""
+// when the body is not the expected JSON object; the matcher then only matches a
+// "*" rule. Parsing failures are not signature failures — the delivery already
+// verified — so this never affects OK.
+func slackEventType(body []byte) string {
+	var p struct {
+		Type  string `json:"type"`
+		Event struct {
+			Type string `json:"type"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return ""
+	}
+	if p.Event.Type != "" {
+		return p.Event.Type
+	}
+	return p.Type
 }

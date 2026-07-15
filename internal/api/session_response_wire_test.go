@@ -63,21 +63,23 @@ func sessionResponseFromBead(info session.Info, b *beads.Bead, cfg *config.City,
 	return r
 }
 
-// TestGetWithPersistedResponseWireByteIdentical is the keystone S3 invariant:
-// collapsing the redundant raw store.Get beside mgr.Get into the single-fetch
-// session.Manager.GetWithPersistedResponse must produce a byte-identical
-// session response. The golden builds the response the pre-S3 way (mgr.Get for
-// Info plus a separate store.Get projected through PersistedResponseFromBead);
-// the new path builds Info + PersistedResponse from the single domain call.
-func TestGetWithPersistedResponseWireByteIdentical(t *testing.T) {
+// TestSessionGetEnrichedWireByteIdentical is the keystone Get-path invariant:
+// the PRODUCTION single-handle read composition (sessionGetEnriched =
+// Store.GetPersistedResponse + Manager.EnrichInfo, the path that replaced the
+// retired Manager.GetWithPersistedResponse) must produce a byte-identical
+// session response. The golden builds the response the pre-cutover way (mgr.Get
+// for Info plus a separate store.Get projected through PersistedResponseFromBead);
+// the new path builds Info + PersistedResponse from the production composition,
+// so this pins the real Get path, not a dead method.
+func TestSessionGetEnrichedWireByteIdentical(t *testing.T) {
 	cfg := &config.City{}
 	for _, b := range wireSessionBeadFixtures() {
 		b := b
 		t.Run(b.ID, func(t *testing.T) {
 			store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
-			mgr := session.NewManager(store, runtime.NewFake())
+			mgr := session.NewManagerWithOptions(store, runtime.NewFake())
 
-			// Golden: the pre-S3 double-read. mgr.Get for the runtime-enriched
+			// Golden: the pre-cutover double-read. mgr.Get for the runtime-enriched
 			// Info, then a separate store.Get projected to PersistedResponse.
 			goldenInfo, err := mgr.Get(b.ID)
 			if err != nil {
@@ -89,10 +91,10 @@ func TestGetWithPersistedResponseWireByteIdentical(t *testing.T) {
 			}
 			golden := sessionResponseWithReason(goldenInfo, session.PersistedResponseFromBead(rawBead), cfg, nil, true)
 
-			// New: the single-fetch domain call.
-			gotInfo, pr, err := mgr.GetWithPersistedResponse(b.ID)
+			// New: the production Get composition the API handlers call.
+			gotInfo, pr, err := sessionGetEnriched(session.NewStore(beads.SessionStore{Store: store}), mgr, b.ID)
 			if err != nil {
-				t.Fatalf("GetWithPersistedResponse: %v", err)
+				t.Fatalf("sessionGetEnriched: %v", err)
 			}
 			got := sessionResponseWithReason(gotInfo, pr, cfg, nil, true)
 
@@ -175,14 +177,22 @@ func TestSessionResponseFromInfoWireByteIdentical(t *testing.T) {
 	for _, b := range wireSessionBeadFixtures() {
 		b := b
 		t.Run(b.ID, func(t *testing.T) {
-			info := session.InfoFromPersistedBead(b)
+			// Info + PR from the front-door single fetch: GetPersistedResponse runs
+			// both projection codecs at the store edge, so info/pr are byte-identical
+			// to the raw per-bead projections — but no raw codec is called in the
+			// test. The same info feeds both builders, so this stays a
+			// builder-vs-builder oracle (raw-bead path vs Info+PR path).
+			store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+			info, pr, err := session.NewStore(beads.SessionStore{Store: store}).GetPersistedResponse(b.ID)
+			if err != nil {
+				t.Fatalf("GetPersistedResponse: %v", err)
+			}
 
 			// Golden: built from the raw bead (the pre-S2 path).
 			golden := sessionResponseFromBead(info, &b, cfg, nil, true)
 
 			// New: built from Info + the persisted-response projection, with no
 			// raw *beads.Bead crossing into the response builder.
-			pr := session.PersistedResponseFromBead(b)
 			got := sessionResponseWithReason(info, pr, cfg, nil, true)
 
 			goldenJSON, err := json.Marshal(golden)

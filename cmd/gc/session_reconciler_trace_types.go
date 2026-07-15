@@ -190,6 +190,10 @@ const (
 	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
 	TraceReasonStart                         TraceReasonCode = "start"
+
+	TraceReasonMaxSessionAge TraceReasonCode = "max_session_age"
+	TraceReasonUserHold      TraceReasonCode = "user_hold"
+	TraceReasonQuarantine    TraceReasonCode = "quarantine"
 )
 
 type TraceOutcomeCode string
@@ -258,6 +262,23 @@ const (
 	TraceOutcomeHoldDeferred        TraceOutcomeCode = "hold_deferred"
 	TraceOutcomeHeld                TraceOutcomeCode = "held"
 	TraceOutcomeHealed              TraceOutcomeCode = "healed"
+
+	TraceOutcomeResolutionFailed    TraceOutcomeCode = "resolution_failed"
+	TraceOutcomeStartErrorConverged TraceOutcomeCode = "start_error_converged"
+	TraceOutcomeSessionInitializing TraceOutcomeCode = "session_initializing"
+	TraceOutcomeStartEnqueued       TraceOutcomeCode = "start_enqueued"
+	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
+	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
+	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
+
+	// TraceOutcomeSkippedLivenessError marks a destructive reconciler action
+	// (pending-create rollback, failed-create close, drain-ack finalize, or
+	// orphan close) skipped this tick because the runtime liveness probe
+	// returned an observation error. providerAlive=false then means
+	// "observation unavailable", not "confirmed dead", so the level-triggered
+	// loop fails closed and re-observes next tick rather than orphaning a
+	// possibly-live session (#3872-family).
+	TraceOutcomeSkippedLivenessError TraceOutcomeCode = "skipped_liveness_error"
 )
 
 type TraceCompletionStatus string
@@ -283,9 +304,7 @@ type TraceEvaluationStatus string
 const (
 	TraceEvaluationEligible          TraceEvaluationStatus = "eligible"
 	TraceEvaluationDependencyBlocked TraceEvaluationStatus = "dependency_blocked"
-	TraceEvaluationCapRejected       TraceEvaluationStatus = "cap_rejected"
 	TraceEvaluationStorePartial      TraceEvaluationStatus = "store_partial"
-	TraceEvaluationMissingTemplate   TraceEvaluationStatus = "missing_template"
 	TraceEvaluationSkipped           TraceEvaluationStatus = "skipped"
 )
 
@@ -319,28 +338,6 @@ const (
 	TraceArmSourceManual TraceArmSource = "manual"
 	TraceArmSourceAuto   TraceArmSource = "auto"
 )
-
-type TraceTextBlob struct {
-	Value         string `json:"value"`
-	OriginalBytes int    `json:"original_bytes"`
-	StoredBytes   int    `json:"stored_bytes"`
-	Truncated     bool   `json:"truncated"`
-}
-
-func NewTraceTextBlob(value string, maxBytes int) TraceTextBlob {
-	b := []byte(value)
-	blob := TraceTextBlob{
-		Value:         value,
-		OriginalBytes: len(b),
-		StoredBytes:   len(b),
-	}
-	if maxBytes > 0 && len(b) > maxBytes {
-		blob.Value = string(b[:maxBytes])
-		blob.StoredBytes = maxBytes
-		blob.Truncated = true
-	}
-	return blob
-}
 
 type SessionReconcilerTraceRecord struct {
 	TraceSchemaVersion    int                     `json:"trace_schema_version"`

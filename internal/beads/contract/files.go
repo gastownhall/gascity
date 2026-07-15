@@ -48,6 +48,19 @@ type ConfigState struct {
 	// When empty, the existing dolt.mode value is preserved.
 	DoltMode string
 	Dolt     DoltConfig
+	// CustomTypes is a caller-supplied list of bd custom bead types to ensure
+	// in the canonical `types.custom` config key. When non-empty,
+	// EnsureCanonicalConfig unions these with any types already on disk
+	// (never narrowing — pre-existing entries are preserved) and writes the
+	// merged `types.custom: a,b,c` line. When empty, the existing
+	// `types.custom` value is left untouched (passthrough). The list itself is
+	// opaque to this package; cmd/gc sources it from doctor.RequiredCustomTypes.
+	//
+	// This is the Go-owned replacement for gc-beads-bd.sh's former
+	// ensure_types_custom_in_yaml shell function; bd reads this YAML key as a
+	// fallback when its DB config table is unset, so materializing it here
+	// avoids bd's per-command auto-migrate cost on populated stores.
+	CustomTypes []string
 }
 
 // DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
@@ -525,6 +538,18 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = setString(root, "dolt.mode", mode) || changed
 	}
 
+	if len(state.CustomTypes) > 0 {
+		// Union with what's already on disk, never narrowing — pack/operator
+		// custom types beyond the GC baseline must survive. `types.custom` is a
+		// flat dotted top-level key (not nested `types: {custom:}`); this reads
+		// and writes that same flat form the shell and bd emit.
+		existing, _ := configStringValue(root, "types.custom")
+		merged := MergeCustomTypes(parseCustomTypesValue(existing), state.CustomTypes)
+		if len(merged) > 0 {
+			changed = setString(root, "types.custom", strings.Join(merged, ",")) || changed
+		}
+	}
+
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
 	if !changed {
 		return false, nil
@@ -665,6 +690,16 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
 		replacements["dolt.mode"] = "dolt.mode: " + mode
 	}
+	if len(state.CustomTypes) > 0 {
+		// Same never-narrow union as the main path, but sourced from the raw
+		// (post-repair) bytes: bd init emits a glued `sync.remote: "…"types.custom: …`
+		// line that routes here, and the shell's ensure_types_custom_in_yaml
+		// unioned regardless of YAML validity — so the fallback must too.
+		existing, _ := scanConfigLineValueFromData(data, "types.custom:")
+		if merged := MergeCustomTypes(parseCustomTypesValue(existing), state.CustomTypes); len(merged) > 0 {
+			replacements["types.custom"] = "types.custom: " + strings.Join(merged, ",")
+		}
+	}
 	disableEventFlush := doltDisableEventFlushFallbackValue(data, state)
 
 	lines := strings.Split(string(data), "\n")
@@ -720,6 +755,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"dolt.port",
 		"dolt.user",
 		"dolt.mode",
+		"types.custom",
 	}
 	for _, key := range orderedKeys {
 		want, ok := replacements[key]
@@ -740,6 +776,55 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		out = append(out, "")
 	}
 	return true, fs.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644)
+}
+
+// parseCustomTypesValue splits a raw `types.custom` value ("a,b,c") into
+// trimmed, unquoted, non-empty entries. A blank value yields nil.
+//
+// Quote stripping matters for the malformed-YAML fallback path, which scans
+// raw bytes rather than YAML-unquoted node values: a quoted `types.custom:
+// "alpha,beta"` line splits on the comma into `"alpha` and `beta"`, so each
+// entry must have its quote characters removed before comparison — otherwise
+// the union never matches the required set and re-appends corrupted duplicates.
+// Mirrors the deleted shell function's `gsub(/"/, "", t)`.
+func parseCustomTypesValue(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(strings.ReplaceAll(p, `"`, "")); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// MergeCustomTypes returns the union of current and required, current entries
+// first (preserving on-disk order), then any required entries not already
+// present. Empty/whitespace-only entries are dropped and duplicates removed.
+// Current-first ordering matches the shell's former merge, so re-running
+// against an unchanged set produces the identical value and setString
+// short-circuits (no mtime churn). Exported so higher layers (e.g. doctor)
+// share this one implementation rather than duplicating the union algorithm.
+func MergeCustomTypes(current, required []string) []string {
+	seen := make(map[string]bool, len(current)+len(required))
+	merged := make([]string, 0, len(current)+len(required))
+	add := func(list []string) {
+		for _, t := range list {
+			t = strings.TrimSpace(t)
+			if t == "" || seen[t] {
+				continue
+			}
+			seen[t] = true
+			merged = append(merged, t)
+		}
+	}
+	add(current)
+	add(required)
+	return merged
 }
 
 func isConfigParseError(err error) bool {

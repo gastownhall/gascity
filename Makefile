@@ -38,11 +38,41 @@ export CGO_LDFLAGS
 endif
 endif
 
+# Nix/Flox: when the installed gc binary links ICU from the Nix store, system
+# ICU headers in /usr/include may exist but link to the wrong libicuuc version,
+# causing a __vdso_gettimeofday dlopen error at test/run time. Detect the ICU
+# version the installed gc binary actually links (following symlinks to the real
+# Nix store path), find the matching dev package, point CGO at it, disable the
+# /usr/include fallback, and embed an rpath so the rebuilt binary finds its libs
+# without LD_LIBRARY_PATH (important for the systemd supervisor service unit).
+#
+# Gate: _NIX_ICU_RT must resolve (after readlink -f) to a /nix/store path.
+# This keeps the block inert in hermetic test environments where gc is not
+# installed pointing at Nix ICU (CC being a temp-dir fake binary is not a
+# reliable signal on Flox hosts where CC is system gcc but libs are Nix-managed).
+ifeq ($(shell uname),Linux)
+_GC_BIN         := $(shell command -v gc 2>/dev/null)
+_NIX_ICU_RT_RAW := $(shell ldd $(_GC_BIN) 2>/dev/null | grep -m1 'libicuuc' | awk '{print $$3}')
+_NIX_ICU_RT     := $(shell readlink -f '$(_NIX_ICU_RT_RAW)' 2>/dev/null)
+ifneq ($(filter /nix/store/%,$(_NIX_ICU_RT)),)
+_NIX_ICU_HASH   := $(shell printf '%s' "$(_NIX_ICU_RT)" | sed 's|/nix/store/\([^-]*\)-.*|\1|')
+_NIX_ICU_LIBDIR := $(dir $(_NIX_ICU_RT))
+_NIX_ICU_DEV    := $(shell for d in /nix/store/*-icu4c-*-dev; do grep -q "$(_NIX_ICU_HASH)" "$$d/nix-support/propagated-build-inputs" 2>/dev/null && printf '%s' "$$d" && break; done)
+ifneq ($(_NIX_ICU_DEV),)
+CGO_CPPFLAGS += -I$(_NIX_ICU_DEV)/include
+CGO_LDFLAGS  += -L$(_NIX_ICU_LIBDIR) -Wl,-rpath,$(_NIX_ICU_LIBDIR)
+export CGO_CPPFLAGS
+export CGO_LDFLAGS
+SYS_USR_CGO_FALLBACK := 0
+$(info Nix/Flox ICU detected: -I$(_NIX_ICU_DEV)/include -L$(_NIX_ICU_LIBDIR) -rpath $(_NIX_ICU_LIBDIR); SYS_USR_CGO_FALLBACK disabled)
+endif
+endif
+endif
 # Linux: some non-system compilers (Nix, Flox, etc.) don't search /usr/include
 # or /usr/lib by default. If system ICU headers exist but the compiler doesn't
 # see them, intentionally let system paths participate in the whole CGO build.
 # Set SYS_USR_CGO_FALLBACK=0 to disable this fallback for hermetic or cross-CGO
-# builds.
+# builds. (Nix block above sets SYS_USR_CGO_FALLBACK=0 when Nix ICU is found.)
 ifeq ($(shell uname),Linux)
 SYS_USR_CGO_FALLBACK ?= 1
 ifneq ($(SYS_USR_CGO_FALLBACK),0)
@@ -64,7 +94,8 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go
+.PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
 build:
@@ -73,8 +104,36 @@ ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 endif
 
+## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
+## Only enforced when the Nix/Flox ICU block above fired (_NIX_ICU_DEV set):
+## on those hosts a binary without an ICU RUNPATH loads interactively (the
+## shell has the Nix/Flox env) but silently boot-fails EVERY supervisor-spawned
+## agent, which has no LD_LIBRARY_PATH -> town-wide stall. This gate makes
+## that impossible to ship. On non-Nix hosts the target is a no-op.
+check-self-contained: build
+ifneq ($(_NIX_ICU_DEV),)
+	@set -e; \
+		bin="$(BUILD_DIR)/$(BINARY)"; \
+		if command -v readelf >/dev/null 2>&1; then \
+			if ! readelf -d "$$bin" 2>/dev/null | grep -qiE 'RUNPATH|RPATH'; then \
+				echo "FATAL: $$bin has no RUNPATH/RPATH — NOT self-contained."; \
+				echo "       Use 'make build' (bakes ICU -Wl,-rpath), not raw 'go build'."; \
+				exit 1; \
+			fi; \
+		else \
+			echo "WARN: readelf not found; skipping RUNPATH check (install discouraged)"; \
+		fi; \
+		if ! env -i HOME="$(HOME)" PATH=/usr/bin:/bin "$$bin" version >/dev/null 2>&1; then \
+			echo "FATAL: $$bin failed clean-env boot (no LD_LIBRARY_PATH)."; \
+			echo "       Supervisor-spawned agents will silently boot-fail on ICU."; \
+			echo "       Build with 'make build' so the ICU rpath is embedded."; \
+			exit 1; \
+		fi; \
+		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
+endif
+
 ## install: build and install gc to GOPATH/bin (same location as go install)
-install: build
+install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
 		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
@@ -109,7 +168,22 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-routed-test-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test
+
+## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
+check-release-dist-ignore:
+	@ tracked=$$(git ls-files -- dist); \
+	if [ -n "$$tracked" ]; then \
+		echo "ERROR: release output is tracked:" >&2; \
+		echo "$$tracked" >&2; \
+		exit 1; \
+	fi; \
+	if git check-ignore --no-index -q dist/metadata.json; then \
+		echo "check-release-dist-ignore: OK (/dist/ is ignored)"; \
+	else \
+		echo "ERROR: dist/metadata.json is not ignored; GoReleaser builds will report vcs.modified=true" >&2; \
+		exit 1; \
+	fi
 
 ## check-routed-test-rows: enforce the six-row matrix on read-path routed tests
 ## Prevents per-file read-path migrations (ga-h6w) from regressing below the
@@ -179,7 +253,7 @@ check-version-tag:
 	exit 1
 
 ## check-all: run all quality gates including integration tests (CI)
-check-all: fmt-check lint vet check-bd check-dolt check-docker test-integration check-docs
+check-all: fmt-check lint vet check-release-dist-ignore check-bd check-dolt check-docker test-integration check-docs
 
 LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
@@ -306,6 +380,12 @@ TEST_ENV = env -i \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
 
+## test-ci-policy: run the fast workflow-policy suite
+test-ci-policy:
+	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_runner_policy.py'
+	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
@@ -325,7 +405,7 @@ MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
 test-mac: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
 
-LOCAL_TEST_JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
+LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:
@@ -410,7 +490,16 @@ test-worker-inference-phase3: test-worker-inference
 ## target runs the command-heavy Tier A package serially; RC gate shards it.
 ACCEPTANCE_TIMEOUT ?= 15m
 test-acceptance:
-	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
+
+## test-bd-cli-contract: run only Gas City's external bd CLI compatibility contract.
+## Keep this separate from hermetic Tier A so each supported bd version can run
+## the same focused manifest without rebuilding gc or repeating unrelated flows.
+BD_CLI_CONTRACT_TIMEOUT ?= 10m
+test-bd-cli-contract:
+	@command -v bd >/dev/null 2>&1 || (echo "Error: bd not found; cannot run external CLI contract" >&2; exit 1)
+	$(TEST_ENV) go test -tags acceptance_bd_contract -timeout $(BD_CLI_CONTRACT_TIMEOUT) -count=1 \
+		-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
 
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 ACCEPTANCE_B_TIMEOUT ?= 10m
@@ -422,7 +511,7 @@ test-acceptance-c:
 	$(TEST_ENV) go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
 
 ## test-acceptance-all: run all acceptance tiers
-test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
+test-acceptance-all: test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c
 
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
@@ -503,7 +592,7 @@ test-integration-review-formulas-recovery-cover:
 
 ## test-integration-bdstore: run the bd store conformance shard in isolation
 test-integration-bdstore:
-	./scripts/test-integration-shard bdstore
+	GOFLAGS= GOENV=off GOWORK=off ./scripts/test-integration-shard bdstore
 
 ## test-integration-bdstore-cover: run the bdstore shard with a CI coverage profile
 test-integration-bdstore-cover:
@@ -734,9 +823,26 @@ dashboard-smoke: dashboard-build
 	cat "$$LOG" >&2; \
 	exit 1
 
-## dashboard-ci: rebuild the SPA bundle and fail if the embedded dist/ is stale.
-## Used by CI to enforce that internal/api/dashboardspa/dist/ matches the source.
+## dashboard-e2e-go: Layer A of the dashboard e2e — serve the real supervisor
+## stack (typed /v0 + host /api plane + embedded SPA) over a seeded event log +
+## bead store via api.ServeSeededCity and assert each view's JSON projection.
+## This is the run-view-break-catcher; it runs under the integration tier, not
+## the fast unit baseline. Picked up automatically by the packages integration
+## shard (go list ./...); this target runs it in isolation.
+dashboard-e2e-go:
+	$(TEST_ENV) go test -tags integration -timeout 10m ./test/dashport/...
+
+## dashboard-ci: regenerate the typed API client + rebuild the SPA bundle, and
+## fail if the generated gc-supervisor-client or the embedded dist/ is stale.
+## Used by CI to enforce that the dashboard's generated client (from
+## internal/api/openapi.json via openapi-ts.config.ts) and dist/ match sources.
 dashboard-ci: dashboard-check
+	cd internal/api/dashboardspa/web && npm run generate:client
+	@if ! git diff --quiet -- internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client; then \
+		echo "ERROR: dashboard API client is stale — run 'npm run generate:client' in internal/api/dashboardspa/web and commit." >&2; \
+		git --no-pager diff --stat -- internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client; \
+		exit 1; \
+	fi
 	@if ! git diff --quiet -- internal/api/dashboardspa/dist; then \
 		echo "ERROR: internal/api/dashboardspa/dist/ is stale — run 'make dashboard-build' and commit." >&2; \
 		git --no-pager diff --stat -- internal/api/dashboardspa/dist; \

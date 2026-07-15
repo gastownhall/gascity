@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -28,23 +28,23 @@ type FormulaListOutput struct {
 func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInput) (*FormulaListOutput, error) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
 		if status == 404 {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == 503 {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	items, err := buildFormulaCatalog(paths)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("formula catalog failed")
+		return nil, apierr.Internal.Msg("formula catalog failed")
 	}
 
 	out := &FormulaListOutput{}
@@ -64,16 +64,16 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
 		if status == 404 {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == 503 {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	limit := defaultFormulaRunsLimit
@@ -83,7 +83,7 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 
 	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("formula runs failed")
+		return nil, apierr.Internal.Msg("formula runs failed")
 	}
 
 	return &struct {
@@ -130,27 +130,27 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 ) {
 	name := strings.TrimSpace(rawName)
 	if name == "" {
-		return nil, huma.Error400BadRequest("formula name is required")
+		return nil, apierr.InvalidRequest.Msg("formula name is required")
 	}
 
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(rawScopeKind, rawScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	target := strings.TrimSpace(rawTarget)
 	if target == "" {
-		return nil, huma.Error400BadRequest("target is required")
+		return nil, apierr.InvalidRequest.Msg("target is required")
 	}
 
 	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
 		if status == 404 {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == 503 {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	// Workflow roots persist the routed agent identity as gc.routed_to
@@ -171,7 +171,7 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
-			return nil, huma.Error404NotFound(err.Error())
+			return nil, apierr.FormulaNotFound.Msg(err.Error())
 		}
 		errMsg := err.Error()
 		// A not-found target already failed the configured-agent identity
@@ -180,7 +180,7 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 		if !targetIsRoutingIdentity && errors.Is(err, beads.ErrNotFound) {
 			errMsg += "; target matches neither a bead/convoy nor a configured agent identity"
 		}
-		return nil, huma.Error400BadRequest(errMsg)
+		return nil, apierr.InvalidRequest.Msg(errMsg)
 	}
 
 	return &struct {
@@ -202,16 +202,16 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 ) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
-		return nil, huma.Error400BadRequest(scopeErr)
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
 		if status == http.StatusNotFound {
-			return nil, huma.Error404NotFound(msg)
+			return nil, apierr.ScopeNotFound.Msg(msg)
 		}
 		if status == http.StatusServiceUnavailable {
-			return nil, huma.Error503ServiceUnavailable(msg)
+			return nil, apierr.ServiceUnavailable.Msg(msg)
 		}
-		return nil, huma.Error400BadRequest(msg)
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
@@ -233,7 +233,7 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 
 	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("formula feed failed")
+		return nil, apierr.Internal.Msg("formula feed failed")
 	}
 
 	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
