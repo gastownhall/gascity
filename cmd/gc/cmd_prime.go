@@ -516,21 +516,34 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 	if err != nil {
 		return false
 	}
-	b, err := store.Get(sessionID)
-	if err != nil || !sessionpkg.IsSessionBeadOrRepairable(b) {
+	// Route the session-bead read through the session coordination-class store so
+	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
+	// primeHookSessionTemplate. The no-refresh config loader is deliberate on this
+	// hot hook path; a failed load yields nil cfg, which cliSessionStore treats as
+	// identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	// The front-door Get rejects a present-but-non-session bead
+	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
+	info, err := sessionFrontDoor(sessStore).Get(sessionID)
+	if err != nil {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(b.Status), "closed") {
+	if info.Closed {
 		return false
 	}
-	if strings.TrimSpace(b.Metadata["session_name"]) != sessionName {
+	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
+	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
+	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
 		return false
 	}
 	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
-		strings.TrimSpace(b.Metadata["template"]) != template {
+		strings.TrimSpace(info.Template) != template {
 		return false
 	}
-	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
+	// MetadataState is the RAW state metadata; Info.State is blanked on closed
+	// beads, so the raw mirror preserves the original exact comparison.
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
 		return true
 	default:
