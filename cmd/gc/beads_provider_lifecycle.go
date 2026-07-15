@@ -1053,6 +1053,35 @@ func initFileStoreForDir(cityPath, dir string) error {
 	return ensurePersistedScopeLocalFileStore(dir)
 }
 
+type healthyManagedRuntimePublicationDeps struct {
+	currentPort     func(string) string
+	lifecycleOwned  func(string) (bool, error)
+	publishIfOwned  func(string) error
+	waitScopesReady func(string, time.Duration) error
+}
+
+func reconcileHealthyManagedRuntimePublication(cityPath string, waitForScopes bool, deps healthyManagedRuntimePublicationDeps) error {
+	if deps.currentPort(cityPath) != "" {
+		return nil
+	}
+	owned, err := deps.lifecycleOwned(cityPath)
+	if err != nil {
+		return fmt.Errorf("determine managed dolt ownership: %w", err)
+	}
+	if !owned {
+		return nil
+	}
+	if err := deps.publishIfOwned(cityPath); err != nil {
+		return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", err)
+	}
+	if waitForScopes {
+		if err := deps.waitScopesReady(cityPath, 10*time.Second); err != nil {
+			return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", err)
+		}
+	}
+	return nil
+}
+
 // healthBeadsProvider checks the bead store's backing service health.
 // For exec providers, fires the "health" operation. For bd (dolt), runs
 // a three-layer health check and attempts recovery on failure. For file
@@ -1131,21 +1160,15 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 					return fmt.Errorf("recovered but store not ready: %w", waitErr)
 				}
 			}
-		} else if providerUsesBdStoreContract(provider) && currentManagedDoltPort(cityPath) == "" {
-			owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
-			if ownershipErr != nil {
-				return fmt.Errorf("determine managed dolt ownership: %w", ownershipErr)
+		} else if providerUsesBdStoreContract(provider) {
+			deps := healthyManagedRuntimePublicationDeps{
+				currentPort:     currentManagedDoltPort,
+				lifecycleOwned:  managedDoltLifecycleOwned,
+				publishIfOwned:  publishManagedDoltRuntimeStateIfOwned,
+				waitScopesReady: waitForAllBeadsScopesReadyAfterRecovery,
 			}
-			if !owned {
-				return nil
-			}
-			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
-				return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", pubErr)
-			}
-			if waitForScopes {
-				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
-					return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", waitErr)
-				}
+			if err := reconcileHealthyManagedRuntimePublication(cityPath, waitForScopes, deps); err != nil {
+				return err
 			}
 		}
 		return nil
