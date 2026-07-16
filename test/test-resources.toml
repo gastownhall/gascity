@@ -209,6 +209,13 @@ expires = "2026-10-01"
 [[reviewed_hermetic_body]]
 package_dir = "cmd/gc"
 package_name = "main"
+owner = "TestDoSessionWait_RegistersReadyWaitForRigDependency"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
 owner = "TestDoSessionWake_PokesManagedControllerAfterStateChange"
 effective_size = "medium"
 medium_reason = "package TestMain mutates process state"

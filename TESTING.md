@@ -37,8 +37,12 @@ resources absent from the catalog remain manual-review boundaries. In
 particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` and
 `TestDoSessionWake_PokesManagedControllerAfterStateChange` have reviewed
 hermetic bodies but still run as Medium because `cmd/gc` owns a process-mutating
-`TestMain`. `TestCmdSessionWait_AllowsRigDependencyBeads` remains the singular
-real managed-provider composition proof for wait, and
+`TestMain`. `TestDoSessionWait_RegistersReadyWaitForRigDependency` has the same
+reviewed-hermetic guarantee for the wait-registration use case.
+`TestCmdSessionWait_AllowsRigDependencyBeads` remains the singular
+CLI/config/file-store split-store composition proof for wait, while
+`TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind` owns the real
+managed-provider hard-kill/port-rebind boundary. Likewise,
 `TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart` remains the
 singular CLI/config/file-store/controller-socket composition proof for wake.
 Body review is not a reason to remove either boundary test.
@@ -147,6 +151,7 @@ all-source audit while staying outside untagged and Small debt.
 
 | Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
 | --- | --- | --- | --- |
+| `cmd/gc` package `main` — TestDoSessionWait_RegistersReadyWaitForRigDependency | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 | `cmd/gc` package `main` — TestDoSessionWake_PokesManagedControllerAfterStateChange | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart |
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->

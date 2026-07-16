@@ -308,6 +308,13 @@ var bootstrapPolicy = Ledger{
 		{
 			PackageDir:    "cmd/gc",
 			PackageName:   "main",
+			Owner:         "TestDoSessionWait_RegistersReadyWaitForRigDependency",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
 			Owner:         "TestDoSessionWake_PokesManagedControllerAfterStateChange",
 			EffectiveSize: "medium",
 			MediumReason:  "package TestMain mutates process state",
