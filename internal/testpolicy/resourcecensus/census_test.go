@@ -1581,8 +1581,8 @@ func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceNetListen)
-		if row.BaselineCalls != 92 || row.BaselineFiles != 34 {
-			t.Fatalf("net.Listen baseline = %d/%d, want 92/34", row.BaselineCalls, row.BaselineFiles)
+		if row.BaselineCalls != 91 || row.BaselineFiles != 34 {
+			t.Fatalf("net.Listen baseline = %d/%d, want 91/34", row.BaselineCalls, row.BaselineFiles)
 		}
 		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
 			t.Fatalf("net.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)

@@ -116,7 +116,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
+baseline_calls = 91
 baseline_files = 34
 reported_calls = 92
 reported_files = 34
@@ -209,6 +209,13 @@ expires = "2026-10-01"
 [[reviewed_hermetic_body]]
 package_dir = "cmd/gc"
 package_name = "main"
+owner = "TestDoSessionWake_PokesManagedControllerAfterStateChange"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
 owner = "TestPrepareWaitWakeState_ResolvesRigDependencyBeads"
 effective_size = "medium"
 medium_reason = "package TestMain mutates process state"
@@ -296,7 +303,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
+baseline_calls = 91
 baseline_files = 34
 reported_calls = 92
 reported_files = 34

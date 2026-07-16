@@ -76,6 +76,18 @@ var retainedRealOwners = []retainedRealOwner{
 		reviewed: runnableKey{
 			packageDir:  "cmd/gc",
 			packageName: "main",
+			owner:       "TestDoSessionWake_PokesManagedControllerAfterStateChange",
+		},
+		retained: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
+			owner:       "TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart",
+		},
+	},
+	{
+		reviewed: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
 			owner:       "TestPrepareWaitWakeState_ResolvesRigDependencyBeads",
 		},
 		retained: runnableKey{

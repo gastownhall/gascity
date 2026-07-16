@@ -219,7 +219,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   92,
+			BaselineCalls:   91,
 			BaselineFiles:   34,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
@@ -305,6 +305,13 @@ var bootstrapPolicy = Ledger{
 		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
+			Owner:         "TestDoSessionWake_PokesManagedControllerAfterStateChange",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
 		{
 			PackageDir:    "cmd/gc",
 			PackageName:   "main",
@@ -395,7 +402,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   92,
+			BaselineCalls:   91,
 			BaselineFiles:   34,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
