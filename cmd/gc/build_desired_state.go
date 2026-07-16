@@ -632,14 +632,20 @@ func buildDesiredStateWithSessionBeads(
 					namedOnDemandTemplates[template] = true
 				}
 				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
-				// Cross-store cold-wake for named-backing pools (vp-cl4): mirror the
-				// generic-pool guard (vp-s37 / #3078 line ~598). A cold rig pool that
-				// backs a named session and has no custom scale_check must also probe
-				// the city store so that routed demand delivered there (vp-kvp) can
-				// wake the pool. Same guard conditions apply: healthy own rig store,
-				// not city-aliased, not city-scoped. The named-session target list
+				// Cross-store demand for named-backing pools (vp-cl4): mirror the
+				// generic-pool guard (vp-s37 / #3078 below). A rig pool that backs
+				// a named session and has no custom scale_check must also probe
+				// the city store so that routed demand delivered there (vp-kvp)
+				// counts, warm or cold — like the generic-pool probe below, this
+				// is NOT gated on isCold: a warm named-backing pool that only
+				// probed its rig store would drop to zero demand between city
+				// beads and be orphan-drained, then re-glimpse city demand on the
+				// next cold tick and respawn (the same spawn/drain treadmill,
+				// amplitude clamped to 1 by the namedOnDemandTemplates clamp).
+				// Same guard conditions apply: healthy own rig store, not
+				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
-				if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
@@ -719,6 +725,13 @@ func buildDesiredStateWithSessionBeads(
 			}
 			continue
 		}
+		// Custom-scale_check pools deliberately KEEP the cold-only probe (unlike
+		// the default-probe branches above, which count cross-store demand warm
+		// or cold): the custom check is the authoritative count while the pool
+		// is awake, and this probe is clamped to 1 (coldWakeTemplates) so it can
+		// only wake a sleeping pool, never override the custom count. A custom
+		// scale_check that should scale on cross-store routed demand must count
+		// it itself, or the pool will churn at the warm/cold boundary.
 		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
@@ -1572,6 +1585,16 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 		group.templates[template] = struct{}{}
 	}
 
+	// countedBeads dedups counted bead IDs per template ACROSS store groups.
+	// Bead IDs are unique within a deployment, so a legitimate cross-store
+	// union never collides — but when a rig store aliases the city store as a
+	// distinct Store object (pointer inequality passes: a legacy unscoped
+	// file-store layout, or a rig dir whose missing .beads resolves bd's
+	// walk-up to the city DB), the same beads appear in both the "rig:<name>"
+	// and "city" groups and would double the template's demand. With the city
+	// probe no longer cold-gated, that double-count would be a persistent
+	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
+	countedBeads := make(map[string]map[string]struct{})
 	for key, group := range groups {
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
@@ -1594,6 +1617,15 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
+			seen := countedBeads[template]
+			if seen == nil {
+				seen = make(map[string]struct{})
+				countedBeads[template] = seen
+			}
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
 			counts[template]++
 			entry := demand[template]
 			entry.Count++
