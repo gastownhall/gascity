@@ -559,11 +559,9 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		defer w.Close() //nolint:errcheck // test cleanup
 
-		// Record in a goroutine after a short delay.
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-new"})
-		}()
+		// The watcher is attached before the event is recorded. Providers must
+		// deliver that event without requiring an authored settling delay.
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-new"})
 
 		e, err := w.Next()
 		if err != nil {
@@ -601,11 +599,8 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		defer w.Close() //nolint:errcheck // test cleanup
 
-		// Record a new event.
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			p.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker-1"})
-		}()
+		// Record after the watcher is positioned at the retained tail.
+		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker-1"})
 
 		e, err := w.Next()
 		if err != nil {
