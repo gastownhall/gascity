@@ -126,8 +126,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   443,
-			BaselineFiles:   159,
+			BaselineCalls:   441,
+			BaselineFiles:   158,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -154,8 +154,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   289,
-			BaselineFiles:   114,
+			BaselineCalls:   287,
+			BaselineFiles:   113,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -326,6 +326,13 @@ var bootstrapPolicy = Ledger{
 			EffectiveSize: "medium",
 			MediumReason:  "package TestMain mutates process state",
 		},
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
+			Owner:         "TestDoMailInbox_RendersMessagesFromReader",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
 	},
 	SmallDebt: []Baseline{
 		{
@@ -344,10 +351,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   289,
-			BaselineFiles:   114,
-			ReportedCalls:   289,
-			ReportedFiles:   114,
+			BaselineCalls:   287,
+			BaselineFiles:   113,
+			ReportedCalls:   287,
+			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners replace elapsed wall time with lifecycle signals",

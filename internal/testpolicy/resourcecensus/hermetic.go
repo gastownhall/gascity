@@ -108,6 +108,18 @@ var retainedRealOwners = []retainedRealOwner{
 			owner:       "TestCmdSessionWait_AllowsRigDependencyBeads",
 		},
 	},
+	{
+		reviewed: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
+			owner:       "TestDoMailInbox_RendersMessagesFromReader",
+		},
+		retained: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
+			owner:       "TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox",
+		},
+	},
 }
 
 func retainedRealOwnerFor(key runnableKey) (runnableKey, bool) {
