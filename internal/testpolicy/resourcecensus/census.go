@@ -113,8 +113,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   524,
-			BaselineFiles:   153,
+			BaselineCalls:   529,
+			BaselineFiles:   155,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -141,8 +141,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   397,
-			BaselineFiles:   107,
+			BaselineCalls:   402,
+			BaselineFiles:   109,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -167,7 +167,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4348,
+			BaselineCalls:   4332,
 			BaselineFiles:   200,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -193,7 +193,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   75,
+			BaselineCalls:   74,
 			BaselineFiles:   25,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -308,6 +308,13 @@ var bootstrapPolicy = Ledger{
 		{
 			PackageDir:    "cmd/gc",
 			PackageName:   "main",
+			Owner:         "TestDoSessionWake_PokesManagedControllerAfterStateChange",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
 			Owner:         "TestPrepareWaitWakeState_ResolvesRigDependencyBeads",
 			EffectiveSize: "medium",
 			MediumReason:  "package TestMain mutates process state",
@@ -317,8 +324,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   395,
-			BaselineFiles:   106,
+			BaselineCalls:   400,
+			BaselineFiles:   108,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -343,7 +350,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4342,
+			BaselineCalls:   4326,
 			BaselineFiles:   200,
 			ReportedCalls:   4339,
 			ReportedFiles:   199,
@@ -369,7 +376,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   75,
+			BaselineCalls:   74,
 			BaselineFiles:   25,
 			ReportedCalls:   75,
 			ReportedFiles:   25,

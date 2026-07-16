@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 524
-baseline_files = 153
+baseline_calls = 529
+baseline_files = 155
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 397
-baseline_files = 107
+baseline_calls = 402
+baseline_files = 109
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,7 +64,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4348
+baseline_calls = 4332
 baseline_files = 200
 reported_calls = 3960
 reported_files = 184
@@ -90,7 +90,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 75
+baseline_calls = 74
 baseline_files = 25
 reported_calls = 78
 reported_files = 27
@@ -209,6 +209,13 @@ expires = "2026-10-01"
 [[reviewed_hermetic_body]]
 package_dir = "cmd/gc"
 package_name = "main"
+owner = "TestDoSessionWake_PokesManagedControllerAfterStateChange"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
 owner = "TestPrepareWaitWakeState_ResolvesRigDependencyBeads"
 effective_size = "medium"
 medium_reason = "package TestMain mutates process state"
@@ -218,8 +225,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 395
-baseline_files = 106
+baseline_calls = 400
+baseline_files = 108
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -244,7 +251,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4342
+baseline_calls = 4326
 baseline_files = 200
 reported_calls = 4339
 reported_files = 199
@@ -270,7 +277,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 75
+baseline_calls = 74
 baseline_files = 25
 reported_calls = 75
 reported_files = 25
