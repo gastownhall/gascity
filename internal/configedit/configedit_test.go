@@ -1929,39 +1929,6 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 	}
 }
 
-func TestCreateRig(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTOML(t, dir, minimalCity())
-	ed := configedit.NewEditor(fsys.OSFS{}, path)
-
-	err := ed.CreateRig(config.Rig{Name: "new-rig", Path: "/tmp/new-rig"})
-	if err != nil {
-		t.Fatalf("CreateRig: %v", err)
-	}
-
-	cfg := readTOML(t, path)
-	found := false
-	for _, r := range cfg.Rigs {
-		if r.Name == "new-rig" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("rig 'new-rig' not found after create")
-	}
-}
-
-func TestCreateRig_Duplicate(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTOML(t, dir, cityWithRig())
-	ed := configedit.NewEditor(fsys.OSFS{}, path)
-
-	err := ed.CreateRig(config.Rig{Name: "my-rig", Path: "/tmp/x"})
-	if err == nil {
-		t.Error("expected error for duplicate rig")
-	}
-}
-
 func TestUpdateRig(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithRig())

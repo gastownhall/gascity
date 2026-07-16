@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/remotesource"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -91,36 +92,44 @@ func IsDeterministicControlDispatcher(agent *Agent) bool {
 }
 
 // PreferredDeterministicControlDispatcher returns the deterministic control-
-// dispatcher to route a scope's control beads to, binding-agnostic. The
-// city-level singleton (Dir == "") is preferred for every scope — given
-// max_active_sessions=1, it is the one whose session actually runs and claims
-// the control queue — and a rig-scoped instance (Dir == rigContext) is used only
-// when no city-level deterministic dispatcher is configured. Routing to a
-// rig-scoped copy when a city singleton exists strands the control bead, since
-// the singleton session never claims a <rig>/... route. This is the canonical
-// selection shared by the graph.v2 decoration path (internal/graphroute) and the
-// attempt-time control re-route path (internal/dispatch); keep them in lockstep.
+// dispatcher for a scope, binding-agnostic. A city graph (empty rigContext)
+// selects the city dispatcher; a rig graph selects only the dispatcher expanded
+// for that rig. This keeps the route identity aligned with the store that owns
+// the graph. It is the canonical selection shared by graph.v2 decoration and
+// attempt-time control re-routing; keep those paths in lockstep.
 func PreferredDeterministicControlDispatcher(cfg *City, rigContext string) (Agent, bool) {
 	if cfg == nil {
 		return Agent{}, false
 	}
 	rigContext = strings.TrimSpace(rigContext)
-	var rigScoped Agent
-	haveRigScoped := false
 	for _, a := range cfg.Agents {
 		if !IsDeterministicControlDispatcher(&a) {
 			continue
 		}
-		if strings.TrimSpace(a.Dir) == "" {
+		if strings.TrimSpace(a.Dir) == rigContext {
 			return a, true
 		}
-		if !haveRigScoped && strings.TrimSpace(a.Dir) == rigContext {
-			rigScoped = a
-			haveRigScoped = true
-		}
 	}
-	if haveRigScoped {
-		return rigScoped, true
+	return Agent{}, false
+}
+
+// ControlDispatcherForScope returns the configured control dispatcher whose
+// directory exactly matches rigContext. Deterministic dispatchers are preferred,
+// while an exact-scope plain dispatcher remains supported for minimal/custom
+// configs. It never substitutes a city dispatcher for a rig scope (or vice
+// versa), because those dispatchers read different bead stores.
+func ControlDispatcherForScope(cfg *City, rigContext string) (Agent, bool) {
+	if dispatcher, ok := PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+		return dispatcher, true
+	}
+	if cfg == nil {
+		return Agent{}, false
+	}
+	rigContext = strings.TrimSpace(rigContext)
+	for _, agent := range cfg.Agents {
+		if agent.Name == ControlDispatcherAgentName && strings.TrimSpace(agent.Dir) == rigContext {
+			return agent, true
+		}
 	}
 	return Agent{}, false
 }
@@ -1266,6 +1275,11 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
+	// in which cron order schedules are evaluated when an order does not set
+	// its own tz. Empty means the controller's process-local zone. Invalid
+	// names fail order discovery loudly rather than falling back silently.
+	Timezone string `toml:"timezone,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Suspended is the deprecated pre-runtime-state city suspension
@@ -1375,6 +1389,11 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
+	// byte-identical), "auto" (compare-and-swap where the store is capable,
+	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
+	// defaults to "off". Any other value fails config load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1407,6 +1426,20 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	default:
 		return BeadsBDCompatibility104
 	}
+}
+
+// NormalizedConditionalWrites returns the configured conditional-writes value,
+// mapping ONLY the empty string to the built-in default "off". Unlike
+// NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+// The string→rollout.Mode mapping deliberately lives in internal/rollout to keep
+// config free of a rollout import (cycle).
+func (b BeadsConfig) NormalizedConditionalWrites() string {
+	if b.ConditionalWrites == "" {
+		return "off"
+	}
+	return b.ConditionalWrites
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -2046,13 +2079,24 @@ type APIConfig struct {
 	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
-	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field.
+	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
+	// multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,
+	// no config field) additionally binds the gate to the controller's own
+	// city id: every grant must then carry that exact cid claim, failing
+	// closed on a mismatching or missing cid.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	// WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup
 	// error instead of silently disabling the gate, so a config that intends to
 	// gate writes fails closed if the key is ever dropped. The
 	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
 	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
+	// WriteAuthAllowUnverified acknowledges running a non-loopback bind with
+	// allow_mutations and NO write-auth verify key — an unauthenticated write
+	// plane fronted only by the network. Without it, that combination is a
+	// fail-closed startup error (gate G10) so a hardened deployment cannot boot
+	// wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for
+	// a network-fronted deployment that intentionally trusts its perimeter.
+	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
 	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
 	// already-registered city on the typed per-city API — the routes under
 	// /v0/city/{cityName} — to carry a signed read grant from a configured
@@ -3389,6 +3433,18 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// EffectiveDefaultSlingFormula returns the default sling formula for
+// this agent, or "" if none is set.
+func (a *Agent) EffectiveDefaultSlingFormula() string {
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
+	}
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
+}
+
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
 // provider at both city scope and each rig scope. A provider is configured
 // only when it appears in cfg.Providers; workspace.provider selects the
@@ -4345,7 +4401,25 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateConditionalWrites rejects an out-of-enum beads.conditional_writes
+// value at load time. This gate selects a correctness discipline: a typo like
+// "requre" silently meaning "off" would leave an operator believing the epoch
+// fence is enforced while every write runs unfenced, so the config fails to
+// load instead. The empty string (unset) is valid and defaults to off.
+func validateConditionalWrites(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

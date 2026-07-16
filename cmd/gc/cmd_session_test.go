@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,39 +153,6 @@ func TestSessionExplicitNameForNewSessionAliasKeepsGeneratedNameOff(t *testing.T
 	}
 	if got != "" {
 		t.Fatalf("explicit name = %q, want empty when --alias owns the manual identity", got)
-	}
-}
-
-func TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions(t *testing.T) {
-	cityDir, _ := setupManagedBdWaitTestCity(t)
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
-	if _, err := store.Create(beads.Bead{
-		Title:  "managed exec session",
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"session_name": "mayor",
-			"template":     "worker",
-			"state":        "asleep",
-		},
-	}); err != nil {
-		t.Fatalf("store.Create(session bead): %v", err)
-	}
-
-	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "mayor") {
-		t.Fatalf("stdout missing session name %q:\n%s", "mayor", stdout.String())
 	}
 }
 
@@ -1370,7 +1338,7 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1378,6 +1346,43 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	)
 	if reason != string(WakeAttached) {
 		t.Fatalf("sessionReason = %q, want %q", reason, WakeAttached)
+	}
+}
+
+// TestSessionReason_IndexMissReturnsDash pins the miss-path guard: a session
+// missing from the reason-projection index (infoIndex) must render "-", never a
+// zero-value session.Info fed to wakeReasonsInfo (which would silently emit a
+// wrong REASON cell). WI-6 R5: the projection reads only the typed Info snapshot
+// (the raw beadIndex is gone — Info.SessionCircuitState carries the last field
+// the display reason needed), so infoIndex is the single guarded index.
+func TestSessionReason_IndexMissReturnsDash(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-miss",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-miss",
+			"state":        "asleep",
+			"sleep_reason": "user-hold",
+		},
+	}
+	s := session.Info{
+		ID:          "gc-miss",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-miss",
+	}
+	full := seedSessionInfo(bead)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// Missing from infoIndex → "-".
+	if got := sessionReason(s, map[string]session.Info{}, cfg, nil, nil, nil); got != "-" {
+		t.Fatalf("sessionReason(missing from infoIndex) = %q, want -", got)
+	}
+	// Sanity: present renders the real reason, so the guard above is not trivially
+	// returning "-" for a resolvable session.
+	if got := sessionReason(s, map[string]session.Info{s.ID: full}, cfg, nil, nil, nil); got != "user-hold" {
+		t.Fatalf("sessionReason(present) = %q, want user-hold", got)
 	}
 }
 
@@ -1413,7 +1418,7 @@ func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		wrapped,
 		nil,
@@ -1458,7 +1463,7 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		provider,
 		nil,
@@ -1493,7 +1498,7 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		provider,
 		nil,
@@ -1528,7 +1533,7 @@ func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1562,7 +1567,7 @@ func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1683,7 +1688,7 @@ func TestSessionReason_PriorityMatrix(t *testing.T) {
 
 			reason := sessionReason(
 				newInfo(sessionName),
-				map[string]beads.Bead{bead.ID: bead},
+				map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 				tt.cfg,
 				provider,
 				tt.poolDesired,
@@ -1737,7 +1742,7 @@ func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		nil,
 		runtime.NewFake(),
 		nil,
@@ -1774,7 +1779,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 
 	reason := sessionReason(
 		info,
-		map[string]beads.Bead{bead.ID: bead},
+		map[string]session.Info{bead.ID: seedSessionInfo(bead)},
 		cfg,
 		runtime.NewFake(),
 		nil,
@@ -1789,7 +1794,7 @@ func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing
 // comma-joined REASON cell that `gc session` emits today. It is a
 // byte-identical gate: the wake-helper cleanup (ga-6aaj6q) retires the legacy
 // drain/dependency wake path but must not change what the CLI displays, which
-// still runs through evaluateWakeReasons. If a literal ever drifts, this test
+// still runs through evaluateWakeReasonsInfo. If a literal ever drifts, this test
 // fails and forces a deliberate decision rather than a silent regression.
 func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
 	const agentName = "worker"
@@ -1885,7 +1890,7 @@ func TestSessionReason_MultiReasonColumnCharacterization(t *testing.T) {
 			before := cloneSessionReasonMetadata(tt.bead.Metadata)
 			got := sessionReason(
 				tt.info,
-				map[string]beads.Bead{tt.bead.ID: tt.bead},
+				map[string]session.Info{tt.bead.ID: seedSessionInfo(tt.bead)},
 				cfg,
 				tt.provider,
 				tt.poolDesired,
@@ -3017,6 +3022,153 @@ func writeSessionListTestCity(t *testing.T) string {
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	return cityDir
+}
+
+func TestSessionListProviderConstructionFailureReturnsThroughRun(t *testing.T) {
+	if scenario, markerPath, stdoutPath, stderrPath, ok := sessionListProviderFailureHelperArgs(os.Args); ok {
+		runSessionListProviderFailureHelper(t, scenario, markerPath, stdoutPath, stderrPath)
+		return
+	}
+
+	for _, tc := range []struct {
+		name       string
+		scenario   string
+		wantJSON   bool
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "text",
+			scenario:   "text",
+			wantStderr: "gc session list: constructing session provider: injected provider failure\n",
+		},
+		{
+			name:       "json",
+			scenario:   "json",
+			wantJSON:   true,
+			wantStderr: "gc session list: constructing session provider: injected provider failure",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			helperRoot := t.TempDir()
+			cityDir := filepath.Join(helperRoot, "city")
+			writeNamedSessionCityTOML(t, cityDir)
+			markerPath := filepath.Join(helperRoot, "returned-through-run")
+			stdoutPath := filepath.Join(helperRoot, "run-stdout")
+			stderrPath := filepath.Join(helperRoot, "run-stderr")
+			cmd := exec.Command(
+				os.Args[0],
+				"-test.run=^TestSessionListProviderConstructionFailureReturnsThroughRun$",
+				"--",
+				"session-list-provider-failure-helper",
+				tc.scenario,
+				markerPath,
+				stdoutPath,
+				stderrPath,
+			)
+			cmd.Dir = cityDir
+			cmd.Env = sanitizedBaseEnv(
+				"GC_BEADS=file",
+				"GC_BEADS_SCOPE_ROOT=",
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CEILING_DIRECTORIES="+helperRoot,
+				"GC_HOME="+filepath.Join(helperRoot, "gc-home"),
+				"GC_SESSION=broken",
+				"OTEL_SDK_DISABLED=true",
+			)
+			var processStdout, processStderr bytes.Buffer
+			cmd.Stdout = &processStdout
+			cmd.Stderr = &processStderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("helper did not return through run: %v; stdout=%q stderr=%q", err, processStdout.String(), processStderr.String())
+			}
+			if marker, err := os.ReadFile(markerPath); err != nil {
+				t.Fatalf("run-return marker missing: %v", err)
+			} else if got, want := string(marker), "returned\n"; got != want {
+				t.Fatalf("run-return marker = %q, want %q", got, want)
+			}
+			stdout, err := os.ReadFile(stdoutPath)
+			if err != nil {
+				t.Fatalf("read run stdout: %v", err)
+			}
+			stderr, err := os.ReadFile(stderrPath)
+			if err != nil {
+				t.Fatalf("read run stderr: %v", err)
+			}
+
+			if !tc.wantJSON {
+				if got := string(stdout); got != tc.wantStdout {
+					t.Fatalf("stdout = %q, want %q", got, tc.wantStdout)
+				}
+				if got := string(stderr); got != tc.wantStderr {
+					t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+				}
+				return
+			}
+
+			var output cliJSONErrorOutput
+			if err := json.Unmarshal(stdout, &output); err != nil {
+				t.Fatalf("stdout is not a JSON error: %v; stdout=%q", err, stdout)
+			}
+			if got, want := output.Error.Code, "session_provider_failed"; got != want {
+				t.Fatalf("JSON error code = %q, want %q", got, want)
+			}
+			if got := output.Error.Message; got != tc.wantStderr {
+				t.Fatalf("JSON error message = %q, want %q", got, tc.wantStderr)
+			}
+			if output.OK || output.Error.ExitCode != 1 {
+				t.Fatalf("JSON error = %#v, want ok=false exit_code=1", output)
+			}
+			var diagnostic cliJSONDiagnostic
+			if err := json.Unmarshal(stderr, &diagnostic); err != nil {
+				t.Fatalf("stderr is not a JSON diagnostic: %v; stderr=%q", err, stderr)
+			}
+			if got, want := diagnostic.Code, "session_provider_failed"; got != want {
+				t.Fatalf("JSON diagnostic code = %q, want %q", got, want)
+			}
+			if got := diagnostic.Message; got != tc.wantStderr {
+				t.Fatalf("JSON diagnostic message = %q, want %q", got, tc.wantStderr)
+			}
+		})
+	}
+}
+
+func sessionListProviderFailureHelperArgs(args []string) (string, string, string, string, bool) {
+	for index, arg := range args {
+		if arg == "--" && index+6 == len(args) && args[index+1] == "session-list-provider-failure-helper" {
+			return args[index+2], args[index+3], args[index+4], args[index+5], true
+		}
+	}
+	return "", "", "", "", false
+}
+
+func runSessionListProviderFailureHelper(t *testing.T, scenario, markerPath, stdoutPath, stderrPath string) {
+	t.Helper()
+	defer func() {
+		if err := os.WriteFile(markerPath, []byte("returned\n"), 0o600); err != nil {
+			t.Errorf("write run-return marker: %v", err)
+		}
+	}()
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	args := []string{"session", "list"}
+	if scenario == "json" {
+		args = append(args, "--json")
+	} else if scenario != "text" {
+		t.Fatalf("unknown helper scenario %q", scenario)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run exit code = %d, want 1", code)
+	}
+	if err := os.WriteFile(stdoutPath, stdout.Bytes(), 0o600); err != nil {
+		t.Fatalf("write run stdout: %v", err)
+	}
+	if err := os.WriteFile(stderrPath, stderr.Bytes(), 0o600); err != nil {
+		t.Fatalf("write run stderr: %v", err)
+	}
 }
 
 // okSessionsHandler serves a session list with one entry matching the test

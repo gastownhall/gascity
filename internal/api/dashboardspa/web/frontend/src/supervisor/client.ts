@@ -4,8 +4,6 @@ import {
   getHealth,
   getV0Cities,
   getV0CityByCityNameAgents,
-  getV0CityByCityNameAgentByBasePrime,
-  getV0CityByCityNameAgentByDirByBasePrime,
   getV0CityByCityNameBeadById,
   getV0CityByCityNameBeads,
   getV0CityByCityNameEvents,
@@ -15,14 +13,14 @@ import {
   getV0CityByCityNameMail,
   getV0CityByCityNameMailThreadById,
   getV0CityByCityNameRigs,
+  getV0CityByCityNameRunsCensus,
   getV0CityByCityNameSessionByIdPending,
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
   getV0CityByCityNameStatus,
+  getV0CityByCityNameUsage,
   getV0CityByCityNameWorkflowByWorkflowId,
   patchV0CityByCityNameBeadById,
-  postV0CityByCityNameAgentByBaseByAction,
-  postV0CityByCityNameAgentByDirByBaseByAction,
   postV0CityByCityNameBeadByIdClose,
   postV0CityByCityNameSling,
   postV0CityByCityNameMailByIdArchive,
@@ -34,10 +32,8 @@ import {
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import type {
   Bead,
-  BeadCloseBody,
   BeadCreateInputBody,
   BeadUpdateBody,
-  AgentPrimeBody,
   FormulaFeedBody,
   GetV0CityByCityNameBeadsData,
   GetV0CityByCityNameEventsData,
@@ -64,12 +60,14 @@ import type {
   PostV0CityByCityNameMailByIdReadData,
   ReplyMailData,
   RespondSessionResponse,
+  RunsCensusOutputBody,
   SessionTranscriptGetResponse,
   SessionPendingResponse,
   SessionRespondInputBody,
   SlingInputBody,
   SlingResponse,
   SupervisorCitiesOutputBody,
+  UsageBody,
   WorkflowSnapshotResponse,
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import { SupervisorApiError, unwrapSupervisorResult, type SupervisorResult } from './errors';
@@ -92,6 +90,8 @@ export interface SupervisorApi {
   health(): Promise<GetHealthResponse>;
   cityHealth(cityName: string): Promise<GetV0CityByCityNameHealthResponse>;
   cityStatus(cityName: string): Promise<GetV0CityByCityNameStatusResponse>;
+  cityUsage(cityName: string): Promise<UsageBody>;
+  runCensus(cityName: string): Promise<RunsCensusOutputBody>;
   listCities(): Promise<SupervisorCitiesOutputBody>;
   listAgents(cityName: string): Promise<ListBodyAgentResponse>;
   listRigs(cityName: string): Promise<ListBodyRigResponse>;
@@ -106,9 +106,7 @@ export interface SupervisorApi {
   getBead(cityName: string, id: string): Promise<Bead>;
   createBead(cityName: string, body: BeadCreateInputBody): Promise<Bead>;
   updateBead(cityName: string, id: string, body: BeadUpdateBody): Promise<OkResponseBody>;
-  closeBead(cityName: string, id: string, body?: BeadCloseBody): Promise<OkResponseBody>;
-  nudgeAgent(cityName: string, agentAlias: string): Promise<OkResponseBody>;
-  agentPrime(cityName: string, agentAlias: string): Promise<AgentPrimeBody>;
+  closeBead(cityName: string, id: string): Promise<OkResponseBody>;
   sling(cityName: string, body: SlingInputBody): Promise<SlingResponse>;
   listMail(
     cityName: string,
@@ -220,6 +218,25 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor status response was empty',
       );
     },
+    cityUsage(cityName) {
+      return unwrapSupervisorResult<UsageBody>(
+        getV0CityByCityNameUsage({
+          client,
+          path: { cityName },
+          query: { aggregate_only: true },
+        }) as Promise<SupervisorResult<UsageBody>>,
+        'gc supervisor usage response was empty',
+      );
+    },
+    runCensus(cityName) {
+      return unwrapSupervisorResult<RunsCensusOutputBody>(
+        getV0CityByCityNameRunsCensus({
+          client,
+          path: { cityName },
+        }) as Promise<SupervisorResult<RunsCensusOutputBody>>,
+        'gc supervisor run census response was empty',
+      );
+    },
     listCities() {
       return unwrapSupervisorResult<SupervisorCitiesOutputBody>(
         getV0Cities({ client }) as Promise<SupervisorResult<SupervisorCitiesOutputBody>>,
@@ -295,55 +312,14 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor bead update response was empty',
       );
     },
-    closeBead(cityName, id, body) {
+    closeBead(cityName, id) {
       return unwrapSupervisorResult<OkResponseBody>(
         postV0CityByCityNameBeadByIdClose({
           client,
           path: { cityName, id },
           headers: GC_MUTATION_HEADERS,
-          ...(body === undefined ? {} : { body }),
         }) as Promise<SupervisorResult<OkResponseBody>>,
         'gc supervisor bead close response was empty',
-      );
-    },
-    nudgeAgent(cityName, agentAlias) {
-      const aliasPath = splitAgentAlias(agentAlias);
-      if ('dir' in aliasPath) {
-        return unwrapSupervisorResult<OkResponseBody>(
-          postV0CityByCityNameAgentByDirByBaseByAction({
-            client,
-            path: { cityName, dir: aliasPath.dir, base: aliasPath.base, action: 'nudge' },
-            headers: GC_MUTATION_HEADERS,
-          }) as Promise<SupervisorResult<OkResponseBody>>,
-          'gc supervisor agent nudge response was empty',
-        );
-      }
-      return unwrapSupervisorResult<OkResponseBody>(
-        postV0CityByCityNameAgentByBaseByAction({
-          client,
-          path: { cityName, base: aliasPath.base, action: 'nudge' },
-          headers: GC_MUTATION_HEADERS,
-        }) as Promise<SupervisorResult<OkResponseBody>>,
-        'gc supervisor agent nudge response was empty',
-      );
-    },
-    agentPrime(cityName, agentAlias) {
-      const aliasPath = splitAgentAlias(agentAlias);
-      if ('dir' in aliasPath) {
-        return unwrapSupervisorResult<AgentPrimeBody>(
-          getV0CityByCityNameAgentByDirByBasePrime({
-            client,
-            path: { cityName, dir: aliasPath.dir, base: aliasPath.base },
-          }) as Promise<SupervisorResult<AgentPrimeBody>>,
-          'gc supervisor agent prime response was empty',
-        );
-      }
-      return unwrapSupervisorResult<AgentPrimeBody>(
-        getV0CityByCityNameAgentByBasePrime({
-          client,
-          path: { cityName, base: aliasPath.base },
-        }) as Promise<SupervisorResult<AgentPrimeBody>>,
-        'gc supervisor agent prime response was empty',
       );
     },
     sling(cityName, body) {
@@ -545,22 +521,6 @@ export function resetSupervisorApiForTests(): void {
   testSupervisorApi = null;
   defaultSupervisorApi = null;
   requestBudgetSupervisorApis.clear();
-}
-
-function splitAgentAlias(agentAlias: string): { base: string } | { dir: string; base: string } {
-  const parts = agentAlias.trim().split('/');
-  if (parts.length === 1) {
-    const base = parts[0];
-    if (base !== undefined && base !== '') return { base };
-  }
-  if (parts.length === 2) {
-    const dir = parts[0];
-    const base = parts[1];
-    if (dir !== undefined && dir !== '' && base !== undefined && base !== '') {
-      return { dir, base };
-    }
-  }
-  throw new Error(`invalid agent alias: ${agentAlias}`);
 }
 
 function supervisorTimeoutMs(value: number | undefined): number {

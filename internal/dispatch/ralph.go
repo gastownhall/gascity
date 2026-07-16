@@ -20,6 +20,18 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
+// maxCheckInfraRetries bounds how many times a ralph check gate may be re-run
+// because it could not EXECUTE (GateError/GateTimeout) before that infra error
+// is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
+// transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
+// green PR (maintainer-city incident: 3 attempts burned in one outage). The
+// bound guarantees a gate that can never run (a missing script, a perpetual
+// timeout) still terminates the workflow instead of pending forever. The
+// counter is cloned into each next attempt, so this is the ralph loop's total
+// infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
+// outage.
+const maxCheckInfraRetries = 20
+
 func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	if bead.Metadata[beadmeta.TerminalMetadataKey] == "true" {
 		return ControlResult{}, nil
@@ -60,6 +72,32 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
 	if err := persistCheckResult(store, bead.ID, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
+	}
+
+	// Gate-exec infra errors must not burn a ralph attempt. GateError (the gate
+	// could not run) and GateTimeout (the gate did not finish) mean the gate
+	// never produced a verdict; only a gate that ran to completion and returned
+	// GateFail is a real failure. Re-run the gate via the benign
+	// ErrControlPending path (no attempt increment, no close), bounded by
+	// maxCheckInfraRetries so an unrunnable gate still terminates.
+	if result.Outcome == convergence.GateError || result.Outcome == convergence.GateTimeout {
+		infraRetries, _ := strconv.Atoi(bead.Metadata[beadmeta.CheckInfraRetryMetadataKey])
+		if infraRetries < maxCheckInfraRetries {
+			if err := store.SetMetadata(bead.ID, beadmeta.CheckInfraRetryMetadataKey, strconv.Itoa(infraRetries+1)); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return ControlResult{}, ErrControlPending
+				}
+				return ControlResult{}, fmt.Errorf("%s: recording gate infra-retry: %w", bead.ID, err)
+			}
+			opts.tracef("ralph check-infra-retry bead=%s outcome=%s infra_retry=%d/%d attempt=%d (attempt not burned)",
+				bead.ID, result.Outcome, infraRetries+1, maxCheckInfraRetries, attempt)
+			return ControlResult{}, ErrControlPending
+		}
+		// Infra-retry budget spent: fall through to the normal exhaust/retry
+		// path so a gate that never becomes runnable still terminates the
+		// workflow rather than pending forever.
+		opts.tracef("ralph check-infra-exhausted bead=%s outcome=%s infra_retry=%d attempt=%d (falling through)",
+			bead.ID, result.Outcome, infraRetries, attempt)
 	}
 
 	if result.Outcome == convergence.GatePass {
@@ -440,6 +478,11 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 		}
 		return existing, nil
 	}
+	// A routeConfig error is intentionally tolerated here: Ralph retry preserves
+	// the prior attempt's already-stamped routes rather than scope-routing, so a
+	// nil cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
+	// (control.go, fanout.go) fail closed on this error because they scope-route
+	// through applyAttemptControlStepRoute.
 	cfg, _ := opts.routeConfig()
 	if molecule.IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {

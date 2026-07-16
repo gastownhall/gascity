@@ -27,6 +27,7 @@ type restartRequestTestEnv struct {
 	desiredState map[string]TemplateParams
 	stdout       bytes.Buffer
 	stderr       bytes.Buffer
+	startOptions []startExecutionOption
 }
 
 func newRestartRequestTestEnv() *restartRequestTestEnv {
@@ -38,6 +39,10 @@ func newRestartRequestTestEnv() *restartRequestTestEnv {
 		rec:          events.Discard,
 		cfg:          &config.City{},
 		desiredState: make(map[string]TemplateParams),
+		startOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+		},
 	}
 }
 
@@ -103,6 +108,7 @@ func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []b
 		0,
 		&e.stdout,
 		&e.stderr,
+		e.startOptions...,
 	)
 }
 

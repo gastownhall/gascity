@@ -18,20 +18,17 @@ import (
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
-// staleKeyDetectDelay is how long to wait after starting a session before
-// checking if it died immediately (stale resume key detection). Tests that
-// drive the start path through a fake runtime can shorten this via
-// SetStaleKeyDetectDelayForTest to keep their wall-clock down.
-var staleKeyDetectDelay = 2 * time.Second
+// staleKeyDetectDelay is the immutable production window between a keyed
+// session start and the liveness probe that detects a stale resume key.
+const staleKeyDetectDelay = 2 * time.Second
 
-// SetStaleKeyDetectDelayForTest overrides the stale-key detection delay used
-// by ensureRunning/ensureRunningRuntimeOnly. The returned func restores the
-// previous value. Intended for tests only; production code should not call
-// this.
-func SetStaleKeyDetectDelayForTest(d time.Duration) func() {
-	prev := staleKeyDetectDelay
-	staleKeyDetectDelay = d
-	return func() { staleKeyDetectDelay = prev }
+// StaleKeyDetectionWaiter waits until a started keyed session is ready for its
+// stale-resume-key liveness probe. Implementations must return the context
+// error when the wait is canceled.
+type StaleKeyDetectionWaiter func(context.Context, string) error
+
+func waitForStaleKeyDetection(ctx context.Context, _ string) error {
+	return sleepWithContext(ctx, staleKeyDetectDelay)
 }
 
 const waitIdleNudgeTimeout = 30 * time.Second
@@ -426,7 +423,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// invalid (e.g., "No conversation found"). Clear the key and retry
 	// with a fresh start so the user isn't stuck with a dead pane.
 	if started && b.Metadata["session_key"] != "" {
-		if err := sleepWithContext(ctx, staleKeyDetectDelay); err != nil {
+		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
 			// Context canceled during stale-key sleep: the runtime session
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
@@ -541,7 +538,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		started = true
 	}
 	if started && b.Metadata["session_key"] != "" {
-		if err := sleepWithContext(ctx, staleKeyDetectDelay); err != nil {
+		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
 			if unroute != nil {
 				unroute()
 			}
@@ -1010,7 +1007,11 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		return "", err
 	}
 	if len(sameWorkDirSessions) > 1 {
-		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirSessions); path != "" {
+		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
+		for _, s := range sameWorkDirSessions {
+			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
+		}
+		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
 			return path, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same

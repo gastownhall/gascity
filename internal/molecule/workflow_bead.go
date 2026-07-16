@@ -73,11 +73,11 @@ func WorkflowBeadFromBead(b beads.Bead) WorkflowBead {
 
 // WorkflowStatus derives a workflow bead's presentation status from its bead
 // status and gc.outcome metadata: closed+fail -> "failed", closed+skipped ->
-// "skipped", closed -> "completed", in_progress with an assignee -> "active",
-// in_progress or open -> "pending". Any other raw status honors gc.outcome
-// (fail/skipped) and otherwise passes through trimmed. It is exported separately
-// so hot loops can derive status without paying the full-projection metadata
-// clone.
+// "skipped", closed+canceled -> "canceled", closed -> "completed", in_progress
+// with an assignee -> "active", in_progress or open -> "pending". Any other raw
+// status honors gc.outcome (fail/skipped/canceled) and otherwise passes through
+// trimmed. It is exported separately so hot loops can derive status without
+// paying the full-projection metadata clone.
 func WorkflowStatus(b beads.Bead) string {
 	outcome := strings.TrimSpace(b.Metadata[beadmeta.OutcomeMetadataKey])
 	hasAssignment := strings.TrimSpace(b.Assignee) != ""
@@ -88,6 +88,8 @@ func WorkflowStatus(b beads.Bead) string {
 			return "failed"
 		case beadmeta.OutcomeSkipped:
 			return "skipped"
+		case beadmeta.OutcomeCanceled:
+			return "canceled"
 		}
 		return "completed"
 	case "in_progress":
@@ -103,6 +105,8 @@ func WorkflowStatus(b beads.Bead) string {
 			return "failed"
 		case beadmeta.OutcomeSkipped:
 			return "skipped"
+		case beadmeta.OutcomeCanceled:
+			return "canceled"
 		}
 		return strings.TrimSpace(b.Status)
 	}

@@ -76,7 +76,7 @@ func TestCanonicalIdentityFromMetadata(t *testing.T) {
 	}
 }
 
-// TestInfoCanonicalIdentityAccessor proves InfoFromPersistedBead mirrors the two
+// TestInfoCanonicalIdentityAccessor proves infoFromPersistedBead mirrors the two
 // canonical keys verbatim and that the Info.CanonicalIdentity() accessor equals
 // CanonicalIdentityFromMetadata for every bead — the shared-helper drift guard
 // that keeps the two projections identical (S2-6).
@@ -92,7 +92,7 @@ func TestInfoCanonicalIdentityAccessor(t *testing.T) {
 	}
 	for _, meta := range metas {
 		b := beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: meta}
-		info := InfoFromPersistedBead(b)
+		info := infoFromPersistedBead(b)
 		if got, want := info.CanonicalInstanceNameMetadata, meta[CanonicalInstanceNameMetadata]; got != want {
 			t.Errorf("meta=%v: mirror CanonicalInstanceNameMetadata = %q, want %q", meta, got, want)
 		}

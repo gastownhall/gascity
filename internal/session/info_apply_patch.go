@@ -9,10 +9,10 @@ package session
 //
 // It is byte-identical to a full re-projection of the patched metadata:
 //
-//	info.ApplyPatch(p)  ==  InfoFromPersistedBead(bead{Status, Type, Title, ...,
+//	info.ApplyPatch(p)  ==  infoFromPersistedBead(bead{Status, Type, Title, ...,
 //	                            Metadata: p.Apply(meta)})
 //
-// for the metadata-derived fields, where info == InfoFromPersistedBead(bead).
+// for the metadata-derived fields, where info == infoFromPersistedBead(bead).
 // Only fields whose source key appears in the patch are re-derived, from that
 // key's raw patch value, using the same per-key logic as InfoFromPersistedBead;
 // every other field carries forward unchanged. Bead-level fields (ID, Type,
@@ -22,19 +22,19 @@ package session
 // a metadata patch — a status close is a separate refresh case (Store.Get) —
 // so ApplyPatch reads the carried-forward Closed and never flips it.
 //
-// The fold shares one codec table with InfoFromPersistedBead (info_codec.go):
+// The fold shares one codec table with infoFromPersistedBead (info_codec.go):
 // each key's setter is the SAME closure both directions run, so fold ==
 // re-projection by construction. TestInfoApplyPatchMatchesReprojection is kept
 // as the equivalence oracle that gates the two against drift, exactly as
 // TestSessionClassifierInfoEquivalence guards the classifier siblings.
 func (info Info) ApplyPatch(patch MetadataPatch) Info {
 	for key, v := range patch {
-		// A key InfoFromPersistedBead projects folds through its shared codec
+		// A key infoFromPersistedBead projects folds through its shared codec
 		// setter — the SAME closure the projection runs — so the fold is a
 		// re-projection of that one key by construction. Keys the projection
-		// does not read (e.g. live_hash, startup_dialog_verified, env.*) miss
-		// the index and carry no Info field, keeping ApplyPatch byte-identical
-		// to a full re-projection.
+		// does not read (e.g. env.*, wake_requested_at) miss the index and carry
+		// no Info field, keeping ApplyPatch byte-identical to a full
+		// re-projection.
 		if spec, ok := infoKeyIndex[key]; ok {
 			spec.set(&info, v)
 		}
@@ -60,8 +60,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 // re-projecting the raw working bead or issuing a store Get.
 //
 // TestInfoMarkClosedMatchesReprojection is the equivalence oracle: for any open
-// bead b, InfoFromPersistedBead(b).MarkClosed() equals
-// InfoFromPersistedBead(b with Status "closed").
+// bead b, infoFromPersistedBead(b).MarkClosed() equals
+// infoFromPersistedBead(b with Status "closed").
 func (info Info) MarkClosed() Info {
 	info.Closed = true
 	info.State = "" // closed beads have no runtime state

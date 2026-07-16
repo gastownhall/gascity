@@ -4164,6 +4164,39 @@ wait
 	waitForProviderTestPIDExit(t, pid, "provider op")
 }
 
+func TestRunProviderOpWithEnvContextParentCancellationKillsProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	childPIDFile := filepath.Join(dir, "child.pid")
+	script := filepath.Join(dir, "provider-op.sh")
+	content := `#!/bin/sh
+sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
+wait
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- runProviderOpWithEnvContext(ctx, script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
+	}()
+
+	pid := waitForProviderTestChildPID(t, childPIDFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("provider op error = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider op did not return after parent cancellation")
+	}
+	waitForProviderTestPIDExit(t, pid, "provider op with parent context")
+}
+
 func TestRunProviderProbeKillsProcessGroupOnTimeout(t *testing.T) {
 	cancelCh := useCancelableProviderLifecycleContext(t)
 
@@ -4958,33 +4991,6 @@ exit 2
 	opLines := strings.Fields(strings.TrimSpace(string(ops)))
 	if len(opLines) < 2 || opLines[0] != "health" || opLines[1] != "recover" {
 		t.Fatalf("provider ops = %q, want first health then recover", string(ops))
-	}
-}
-
-func TestHealthBeadsProviderPublishesManagedRuntimeStateWhenHealthyButUnpublished(t *testing.T) {
-	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
-	cityPath, _ := setupManagedBdWaitTestCity(t)
-
-	if err := os.Remove(managedDoltStatePath(cityPath)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("remove published dolt runtime state: %v", err)
-	}
-	if got := currentManagedDoltPort(cityPath); got != "" {
-		t.Fatalf("currentManagedDoltPort() = %q, want empty after removing published state", got)
-	}
-
-	if err := healthBeadsProvider(cityPath); err != nil {
-		t.Fatalf("healthBeadsProvider() error = %v", err)
-	}
-
-	state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
-	if err != nil {
-		t.Fatalf("read published dolt runtime state: %v", err)
-	}
-	if !state.Running {
-		t.Fatalf("published.Running = false, want true")
-	}
-	if got := currentManagedDoltPort(cityPath); got == "" {
-		t.Fatal("currentManagedDoltPort() = empty, want published managed port")
 	}
 }
 

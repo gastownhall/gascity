@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -25,31 +24,32 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
+	// Validate the cursor before the read-model listing and per-session
+	// runtime enrichment — a garbage cursor gets its 400 without paying the
+	// full probe cost (matching the convoy and mail handlers).
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
-	sessions := listResult.Sessions
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	for i := range listResult.Beads {
-		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
-	}
+	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
 	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, s.state.SessionProvider(), hasDeferredQueue)
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
-	// Pagination support.
+	// Pagination support. The session default page is the server cap, not the
+	// 50-row default other lists use — preserved from the offset-cursor era.
 	limit := maxPaginationLimit
 	if input.Limit > 0 {
 		limit = input.Limit
@@ -58,34 +58,26 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 	}
 
-	pp := pageParams{
-		Offset:   decodeCursor(input.Cursor),
-		Limit:    limit,
-		IsPaging: input.cursorPresent,
+	// items[i] mirrors sessions[i], and the read model returns them in the
+	// canonical (created_at DESC, id DESC) total order. The keyset boundary is
+	// compared and minted from the UNDERLYING session times (sessions[i]),
+	// never the response's RFC3339-formatted string, so sub-second precision
+	// survives the round trip — hence the index-keyed reuse of the shared
+	// helpers. Total keeps its full-match-count meaning, and a truncated
+	// response always carries next_cursor — cursor-less requests previously
+	// truncated silently, the #3208 defect class the bead list already fixed.
+	rowIdx := make([]int, len(items))
+	for i := range rowIdx {
+		rowIdx[i] = i
 	}
-
-	if !pp.IsPaging {
-		// No pagination cursor — capture the full match count BEFORE truncating
-		// so clients can tell how many items exist vs. how many fit the page.
-		total := len(items)
-		if pp.Limit < len(items) {
-			items = items[:pp.Limit]
-		}
-		return &ListOutput[sessionResponse]{
-			Index:     s.latestIndex(),
-			CacheAgeS: cacheAgeSeconds(store.Store),
-			Body: ListBody[sessionResponse]{
-				Items:         items,
-				Total:         total,
-				Partial:       len(partialErrors) > 0,
-				PartialErrors: partialErrors,
-			},
-		}, nil
+	infoKey := func(i int) keysetKey {
+		return keysetKey{CreatedAt: sessions[i].CreatedAt, ID: sessions[i].ID}
 	}
-
-	page, total, nextCursor := paginate(items, pp)
-	if page == nil {
-		page = []sessionResponse{}
+	pageIdx, total, hasMore := resolveKeysetPage(rowIdx, infoKey, seek, limit)
+	nextCursor := mintKeysetNextCursor(pageIdx, infoKey, hasMore)
+	page := make([]sessionResponse, len(pageIdx))
+	for j, i := range pageIdx {
+		page[j] = items[i]
 	}
 	return &ListOutput[sessionResponse]{
 		Index:     s.latestIndex(),
@@ -117,7 +109,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -349,7 +341,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	}
 	mgr := s.sessionManager(store.Store)
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -363,11 +355,11 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	// runtime that could be holding a pending decision. Pending() itself
 	// degrades gracefully (runtime-gone -> no pending), so over-including a
 	// dormant empty-state bead is harmless.
-	// ListFullFromBeads takes a comma-separated state filter; StateNone is the
-	// empty string, so this resolves to "active," — both states, closed beads
-	// still excluded by ListFullFromBeads' status guard.
+	// ListFromInfos takes a comma-separated state filter; StateNone is the empty
+	// string, so this resolves to "active," — both states, closed beads still
+	// excluded by the status guard (sessionMatchesFiltersInfo).
 	stateFilter := strings.Join([]string{string(session.StateActive), string(session.StateNone)}, ",")
-	sessions := mgr.ListFullFromBeads(all, stateFilter, "").Sessions
+	sessions := mgr.ListFromInfos(infos, stateFilter, "")
 
 	// Probe sessions concurrently with bounded fan-out. Pending() can be
 	// expensive per session (e.g. a tmux pane capture), so probing a

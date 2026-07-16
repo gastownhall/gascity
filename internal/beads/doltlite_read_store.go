@@ -615,6 +615,65 @@ func (s *DoltliteReadStore) DepRemove(id, dep string) error {
 	return err
 }
 
+// The four ConditionalWriter methods below shadow the ones promoted from the
+// embedded *BdStore so this wrapper does NOT falsely claim CAS capability. The
+// direct assertion in ConditionalWriterFor would otherwise succeed via the
+// embedding, but DoltliteReadStore.Get reads through direct SQL (scanBead) and
+// cannot supply a real revision until bd #4682 adds the revision column — so the
+// promoted fenced writes would read revision 0, disagree with the bd-subprocess
+// revision the write layer fences against, and fail every CAS with a permanent
+// precondition (an undebuggable "concurrent writer always wins" in the
+// GC_NATIVE_DOLTLITE_BEADS deployment). Degrade loudly with the typed veto
+// instead. The store still SATISFIES the interface — capability here is already
+// behavioral (BdStore itself latches unsupported at runtime), so callers handle
+// the typed veto regardless; hiding the interface would create a second,
+// structural capability channel that disagrees with the probe/latch model.
+//
+// Post-#4682 upgrade path (do not build yet): populate Revision in
+// scanBead/Get and replace these with real fenced writes that also invalidate
+// the order-run cache via resetOrderRunCache().
+
+// UpdateIfMatch reports ErrConditionalWriteUnsupported: the direct-SQL read path
+// cannot supply CAS revisions until bd #4682 adds the revision column. Parameters
+// are unused for the same reason (the fenced write is never issued).
+func (s *DoltliteReadStore) UpdateIfMatch(_ string, _ int64, _ UpdateOpts) error {
+	return ErrConditionalWriteUnsupported
+}
+
+// CloseIfMatch reports ErrConditionalWriteUnsupported (see UpdateIfMatch).
+func (s *DoltliteReadStore) CloseIfMatch(_ string, _ int64) error {
+	return ErrConditionalWriteUnsupported
+}
+
+// DeleteIfMatch reports ErrConditionalWriteUnsupported (see UpdateIfMatch).
+func (s *DoltliteReadStore) DeleteIfMatch(_ string, _ int64) error {
+	return ErrConditionalWriteUnsupported
+}
+
+// CompareAndSetMetadataKey reports ErrConditionalWriteUnsupported (see
+// UpdateIfMatch).
+func (s *DoltliteReadStore) CompareAndSetMetadataKey(_, _, _, _ string) (bool, error) {
+	return false, ErrConditionalWriteUnsupported
+}
+
+// The stamp carrier promotes from the embedded *BdStore; the capability prober
+// must NOT — a capable bd behind this wrapper would answer the seam "capable"
+// while the verbs above are hard-degraded, putting ResolveConditionalWriter's
+// verdict and the store's behavior in contradiction. The shadow keeps the
+// seam's degrade/refuse path aligned with the F2 veto.
+var (
+	_ conditionalWritesModeCarrier     = (*DoltliteReadStore)(nil)
+	_ conditionalWriteCapabilityProber = (*DoltliteReadStore)(nil)
+)
+
+// probeConditionalWriteCapability shadows the embedded BdStore's prober with
+// the F2 verdict: the doltlite read path serves Get/List from SQL rows that
+// carry no bead revision until bd #4682, so conditional writes must degrade
+// regardless of what the bd subprocess advertises.
+func (s *DoltliteReadStore) probeConditionalWriteCapability() (bool, string) {
+	return false, "doltlite read store supplies no bead revision (SQL read path, pre-#4682); conditional writes degrade"
+}
+
 func compactStrings(values []string) []string {
 	out := make([]string, 0, len(values))
 	seen := map[string]bool{}
@@ -807,6 +866,13 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		if len(sets) > 1 {
 			tableLimit = 0
 		}
+		// A seek boundary is applied Go-side (filterDoltliteBeforeTimes) after
+		// this fetch; a SQL LIMIT cut before that filter would silently drop
+		// page rows, so seeked reads fetch unbounded and let the Go
+		// filter+sort+limit below cut the exact page.
+		if query.SeekAfter != nil {
+			tableLimit = 0
+		}
 		rows, err := s.queryIssueTable(query, tables, extraWhere, extraArgs, tableLimit, orderBy)
 		if err != nil {
 			return nil, err
@@ -848,7 +914,8 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 		query.ParentID == "" &&
 		len(query.Metadata) == 0 &&
 		query.CreatedBefore.IsZero() &&
-		query.UpdatedBefore.IsZero()
+		query.UpdatedBefore.IsZero() &&
+		query.SeekAfter == nil
 }
 
 // queryBoundedTopN resolves a bounded multi-table read by selecting the exact
@@ -1337,7 +1404,7 @@ func doltliteSQLiteTime(t time.Time) string {
 }
 
 func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
-	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero()) {
+	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.SeekAfter == nil) {
 		return rows
 	}
 	out := rows[:0]
@@ -1346,6 +1413,13 @@ func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
 			continue
 		}
 		if !query.UpdatedBefore.IsZero() && !beadUpdatedReferenceTime(row).Before(query.UpdatedBefore) {
+			continue
+		}
+		// Exact Go-side seek: the compound (created_at, id) boundary is
+		// resolved here rather than in SQL so the tie-break stays identical to
+		// the in-memory sort, so the fetch above is a superset and this is
+		// where the page boundary is enforced (before the Go limit).
+		if query.SeekAfter != nil && !query.SeekAfter.After(row, query.Sort) {
 			continue
 		}
 		out = append(out, row)

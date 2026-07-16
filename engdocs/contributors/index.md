@@ -28,6 +28,12 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - Run `make check-docs` when changing navigation, cross-links, or docs
   structure.
 
+## Active Proposals
+
+- [Testing Pyramid Audit and Hardening Plan](testing-pyramid-hardening-plan.md)
+  for the proposed test-size, ownership, doubles, synchronization, and E2E
+  direction
+
 ## When to Update Docs
 
 - Update architecture docs when code behavior changes.

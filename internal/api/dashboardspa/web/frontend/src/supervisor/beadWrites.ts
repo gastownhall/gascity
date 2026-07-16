@@ -19,19 +19,8 @@ export interface CreateAndSlingSupervisorBeadResult {
   sling: SlingResponse;
 }
 
-export async function closeSupervisorBead(id: string, reason?: string): Promise<void> {
-  const trimmedReason = reason?.trim() ?? '';
-  await supervisorApi().closeBead(
-    activeCityOrThrow('close supervisor bead'),
-    id,
-    trimmedReason.length === 0 ? undefined : { reason: trimmedReason },
-  );
-}
-
-export async function nudgeSupervisorAgent(agentAlias: string): Promise<void> {
-  const trimmedAlias = agentAlias.trim();
-  if (trimmedAlias.length === 0) throw new Error('agent alias is required');
-  await supervisorApi().nudgeAgent(activeCityOrThrow('nudge supervisor agent'), trimmedAlias);
+export async function closeSupervisorBead(id: string): Promise<void> {
+  await supervisorApi().closeBead(activeCityOrThrow('close supervisor bead'), id);
 }
 
 export async function createAndSlingSupervisorBead(

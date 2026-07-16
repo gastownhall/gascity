@@ -3,6 +3,7 @@ package tmux
 import (
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestProviderEnvSkipsEscapeForPiAlias(t *testing.T) {
@@ -82,6 +83,127 @@ func TestComputeExcludingKillSet_ExcludedPaneLeaderSurvives(t *testing.T) {
 
 	if killPaneLeader {
 		t.Error("an excluded pane leader must not be killed directly")
+	}
+}
+
+func TestTerminateProcessSetReturnsWhenTerminatedProcessesExit(t *testing.T) {
+	alive := map[string]bool{"101": true, "102": true}
+	var signals []string
+	var sleeps []time.Duration
+	now := time.Unix(0, 0)
+
+	terminateProcessSet(
+		[]string{"101", "102"},
+		time.Second,
+		func(pid, signal string) {
+			signals = append(signals, signal+":"+pid)
+			if signal == "TERM" {
+				alive[pid] = false
+			}
+		},
+		func(pid string) bool { return alive[pid] },
+		func(delay time.Duration) {
+			sleeps = append(sleeps, delay)
+			now = now.Add(delay)
+		},
+		func() time.Time { return now },
+	)
+
+	if want := []string{"TERM:101", "TERM:102"}; !slices.Equal(signals, want) {
+		t.Fatalf("signals = %v, want %v", signals, want)
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("sleep calls = %v, want none after TERM made every process exit", sleeps)
+	}
+}
+
+func TestTerminateProcessSetKillsOnlyProcessesStillAliveAfterGracePeriod(t *testing.T) {
+	alive := map[string]bool{"201": true, "202": true}
+	var signals []string
+	var slept time.Duration
+	now := time.Unix(0, 0)
+
+	terminateProcessSet(
+		[]string{"201", "202"},
+		2*processExitCheckInterval,
+		func(pid, signal string) {
+			signals = append(signals, signal+":"+pid)
+			if signal == "TERM" && pid == "201" {
+				alive[pid] = false
+			}
+		},
+		func(pid string) bool { return alive[pid] },
+		func(delay time.Duration) {
+			slept += delay
+			now = now.Add(delay)
+		},
+		func() time.Time { return now },
+	)
+
+	want := []string{"TERM:201", "TERM:202", "KILL:202"}
+	if !slices.Equal(signals, want) {
+		t.Fatalf("signals = %v, want %v", signals, want)
+	}
+	if slept != 2*processExitCheckInterval {
+		t.Fatalf("slept = %s, want full grace period %s for surviving process", slept, 2*processExitCheckInterval)
+	}
+}
+
+func TestTerminateProcessSetReturnsWhenProcessExitsDuringGracePeriod(t *testing.T) {
+	var signals []string
+	checks := 0
+	slept := time.Duration(0)
+	now := time.Unix(0, 0)
+
+	terminateProcessSet(
+		[]string{"301"},
+		time.Second,
+		func(pid, signal string) { signals = append(signals, signal+":"+pid) },
+		func(string) bool {
+			checks++
+			return checks < 3
+		},
+		func(delay time.Duration) {
+			slept += delay
+			now = now.Add(delay)
+		},
+		func() time.Time { return now },
+	)
+
+	if want := []string{"TERM:301"}; !slices.Equal(signals, want) {
+		t.Fatalf("signals = %v, want %v", signals, want)
+	}
+	if slept != 2*processExitCheckInterval {
+		t.Fatalf("slept = %s, want two observations (%s)", slept, 2*processExitCheckInterval)
+	}
+}
+
+func TestTerminateProcessSetCountsProbeTimeAgainstGracePeriod(t *testing.T) {
+	var signals []string
+	slept := time.Duration(0)
+	now := time.Unix(0, 0)
+	probeDuration := 2 * processExitCheckInterval
+
+	terminateProcessSet(
+		[]string{"401"},
+		3*processExitCheckInterval,
+		func(pid, signal string) { signals = append(signals, signal+":"+pid) },
+		func(string) bool {
+			now = now.Add(probeDuration)
+			return true
+		},
+		func(delay time.Duration) {
+			slept += delay
+			now = now.Add(delay)
+		},
+		func() time.Time { return now },
+	)
+
+	if want := []string{"TERM:401", "KILL:401"}; !slices.Equal(signals, want) {
+		t.Fatalf("signals = %v, want %v", signals, want)
+	}
+	if slept != processExitCheckInterval {
+		t.Fatalf("slept = %s, want remaining grace budget %s after slow probe", slept, processExitCheckInterval)
 	}
 }
 

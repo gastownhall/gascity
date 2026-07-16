@@ -264,6 +264,8 @@ jobs:
           # so the whole binary doesn't panic mid-test.
           ACCEPTANCE_TIMEOUT: 20m
         run: make test-acceptance
+      - name: Run external bd CLI contract
+        run: make test-bd-cli-contract
 
   # Unit coverage pass — the Linux `Check` job's equivalent of
   # `make test-cover`. Kept best-effort while we discover Mac-specific

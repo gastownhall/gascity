@@ -109,13 +109,16 @@ func IsMoleculeAttachment(b beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(b.Type), "molecule")
 }
 
-// FindBlockingMolecule checks if the bead has any open attached molecule
-// or wisp children. Returns the blocking attachment's label and ID, or
-// empty strings if none. Read-only -- does not auto-burn.
-func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string) {
+// findBlockingMolecule is the error-returning core behind FindBlockingMolecule
+// and HasMoleculeChildren. It returns the first open attached molecule/wisp
+// child, and surfaces the attachment-probe error only when no live attachment
+// was found -- a discovered live attachment is definitive even if the probe was
+// partial. Callers that must fail closed can inspect the error to tell "no
+// attachment" apart from "probe failed". Read-only -- does not auto-burn.
+func findBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string, err error) {
 	parent, ok := BeadFromGetters(beadID, q, store)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
 	var childQuerier BeadChildQuerier
 	if cq, ok := q.(BeadChildQuerier); ok {
@@ -123,23 +126,35 @@ func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (labe
 	} else if cq, ok := any(store).(BeadChildQuerier); ok {
 		childQuerier = cq
 	}
-	attachments, err := CollectAttachedBeads(parent, store, childQuerier)
-	if err != nil && len(attachments) == 0 {
-		return "", ""
-	}
+	attachments, probeErr := CollectAttachedBeads(parent, store, childQuerier)
 	for _, attached := range attachments {
 		if attached.Status != "closed" {
-			return AttachmentLabel(attached), attached.ID
+			return AttachmentLabel(attached), attached.ID, nil
 		}
 	}
-	return "", ""
+	// No live attachment found. A probe error here means we cannot conclude the
+	// bead is unattached, so report it rather than a clean "none".
+	return "", "", probeErr
 }
 
-// HasMoleculeChildren reports whether the bead has any open attached
-// molecule or wisp children. Read-only -- does not auto-burn.
-func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) bool {
-	label, _ := FindBlockingMolecule(q, beadID, store)
-	return label != ""
+// FindBlockingMolecule checks if the bead has any open attached molecule
+// or wisp children. Returns the blocking attachment's label and ID, or
+// empty strings if none (or if the attachment probe could not complete).
+// Read-only -- does not auto-burn.
+func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string) {
+	label, id, _ = findBlockingMolecule(q, beadID, store)
+	return label, id
+}
+
+// HasMoleculeChildren reports whether the bead has any open attached molecule
+// or wisp children. The returned error is non-nil only when the attachment
+// probe could not complete and no live attachment was found, so a caller that
+// must fail closed -- such as the --on idempotency override -- can preserve its
+// safe state instead of mistaking a probe failure for "no molecule". Read-only
+// -- does not auto-burn.
+func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) (bool, error) {
+	label, _, err := findBlockingMolecule(q, beadID, store)
+	return label != "", err
 }
 
 // CloseAttachedSubtree closes an attached workflow or molecule root and any

@@ -142,7 +142,7 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
 		if fresh {
-			cursorFn = orders.CursorAcrossStores(storesFromWorkflowInfos(infos)...)
+			cursorFn = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
@@ -377,14 +377,21 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 	return infos, nil
 }
 
-func storesFromWorkflowInfos(infos []workflowStoreInfo) []beads.Store {
-	stores := make([]beads.Store, 0, len(infos))
+// orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
+// order front doors for the mixed orders+graph Cursor read. Each store is used
+// as both the orders leg and the graph leg (single-store colocation dedups to one
+// read); a graph-store split would supply a distinct graph leg here.
+func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store {
+	out := make([]*orders.Store, 0, len(infos))
 	for _, info := range infos {
 		if info.store != nil {
-			stores = append(stores, info.store)
+			out = append(out, orders.NewStoreWithGraph(
+				beads.OrdersStore{Store: info.store},
+				beads.GraphStore{Store: info.store},
+			))
 		}
 	}
-	return stores
+	return out
 }
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {

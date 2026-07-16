@@ -68,6 +68,48 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	}
 }
 
+// TestAutoSuspendSuspendsLabelLostActiveSession pins the deliberate union-feed
+// upgrade reaching autoSuspendChatSessions: catalog.List now routes through
+// Manager.List's type+label union (was label-only ListFull), so an active
+// session bead that LOST its gc:session label after a crash — invisible to the
+// old label-only listing and therefore never auto-suspended — is now surfaced by
+// the union's type leg and correctly suspended. This is the intended fix, not a
+// regression: the previously-stranded session gets reaped.
+func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := session.NewManagerWithOptions(store, sp)
+	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	s1, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "LabelLost", Command: "echo s1", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Strip the gc:session label but keep Type=session: the union's type leg still
+	// finds it, the retired label-only ListFull would not.
+	if err := store.Update(s1.ID, beads.UpdateOpts{RemoveLabels: []string{session.LabelSession}}); err != nil {
+		t.Fatalf("stripping label: %v", err)
+	}
+
+	sp.SetActivity(s1.SessionName, now.Add(-2*time.Hour))
+	sp.SetAttached(s1.SessionName, false)
+
+	var stdout, stderr bytes.Buffer
+	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+
+	got, err := mgr.Get(s1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != session.StateSuspended {
+		t.Errorf("label-lost session state = %q, want suspended (union feed must surface it)", got.State)
+	}
+	if !strings.Contains(stdout.String(), s1.ID) {
+		t.Errorf("stdout should mention suspended session ID %s, got: %s", s1.ID, stdout.String())
+	}
+}
+
 func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

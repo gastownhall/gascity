@@ -78,8 +78,12 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	}
 	add(assignee)
 	add(id)
-	if b, getErr := store.Get(id); getErr == nil {
-		for _, identity := range session.AssigneeIdentities(session.InfoFromPersistedBead(b)) {
+	// id is a resolved session id; read its identity forms through the session
+	// front door. A non-session or absent id (the front door rejects it) simply
+	// contributes no extra identity terms — the base assignee/id terms above still
+	// drive the ?assignee filter.
+	if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+		for _, identity := range session.AssigneeIdentities(info) {
 			add(identity)
 		}
 	}
@@ -105,15 +109,29 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		}
 		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
 	}
-	b, err := store.Get(id)
+	sessFront := session.NewStore(beads.SessionStore{Store: store})
+	info, err := sessFront.Get(id)
 	if err != nil {
+		// The front door rejects a present-but-non-session bead with
+		// ErrSessionNotFound — keep the "must resolve to a session" contract; any
+		// other error surfaces as the lookup failure.
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+		}
 		return "", fmt.Errorf("looking up resolved assignee session %q: %w", id, err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	if info.Closed {
 		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
 	}
-	session.RepairEmptyType(store, &b)
-	return session.AssigneeIdentifier(session.InfoFromPersistedBead(b)), nil
+	// Preserve the empty-type heal RepairEmptyType performed here: a repairable
+	// (type-lost) session bead is healed back to the canonical type as a side
+	// effect of being assigned. RepairTypeBestEffort writes only the type field
+	// and logs a failed write (as RepairEmptyType did), so this is byte-equivalent
+	// to the retired heal.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
+	}
+	return session.AssigneeIdentifier(info), nil
 }
 
 // findStore returns the bead store for the given rig. If rig is empty, returns

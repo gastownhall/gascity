@@ -231,6 +231,60 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.cachedReadyLocked(query)
+}
+
+func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// A cache-only deadline-sensitive read must never wait behind a writer
+	// after its caller has returned. A busy cache is a partial observation,
+	// not a reason to abandon a goroutine on RLock.
+	if !c.mu.TryRLock() {
+		return nil, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
+	}
+	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || len(c.dirty) > 0 {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
+	}
+
+	statusByID := make(map[string]string, len(c.beads))
+	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
+	for _, b := range c.beads {
+		if err := ctx.Err(); err != nil {
+			c.mu.RUnlock()
+			return nil, err
+		}
+		statusByID[b.ID] = b.Status
+		if !IsReadyCandidateForTier(b, now, query.TierMode) {
+			continue
+		}
+		if query.Assignee != "" && b.Assignee != query.Assignee {
+			continue
+		}
+		openBeads = append(openBeads, cloneBead(b))
+	}
+	depsByID := make(map[string][]Dep, len(openBeads))
+	for _, b := range openBeads {
+		if err := ctx.Err(); err != nil {
+			c.mu.RUnlock()
+			return nil, err
+		}
+		depsByID[b.ID] = cloneDeps(c.deps[b.ID])
+	}
+	c.mu.RUnlock()
+
+	// The maps above are a consistent snapshot, so sorting and dependency
+	// evaluation need not hold the cache lock or delay writers.
+	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, true)
+}
+
+func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
 		return nil, fmt.Errorf("reading ready beads from cache: %w", ErrCacheUnavailable)
 	}
@@ -248,18 +302,38 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
-	// Sort candidates before the limit-bounded loop below: c.beads is a map,
-	// so without this a Limit cuts an arbitrary, per-call-different subset —
-	// the #3208 bug class. Canonical ready order matches the SQL-backed
-	// ready readers.
-	sortBeadsReadyOrder(openBeads)
+	return cachedReadyRows(context.Background(), query, statusByID, openBeads, c.deps, c.depsComplete)
+}
+
+func cachedReadyRows(
+	ctx context.Context,
+	query ReadyQuery,
+	statusByID map[string]string,
+	openBeads []Bead,
+	depsByID map[string][]Dep,
+	depsComplete bool,
+) ([]Bead, error) {
+	cancellable := ctx != nil && ctx.Done() != nil
+	// Sort candidates before the limit-bounded loop below: the cache source is
+	// a map, so without this a Limit cuts an arbitrary subset. The context-aware
+	// path remains interruptible throughout this CPU work.
+	if !cancellable {
+		sortBeadsReadyOrder(openBeads)
+	} else if err := sortBeadsReadyOrderContext(ctx, openBeads); err != nil {
+		return nil, err
+	}
 
 	result := make([]Bead, 0, len(openBeads))
 	for _, b := range openBeads {
-		deps, ok := c.deps[b.ID]
+		if cancellable {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		deps, ok := depsByID[b.ID]
 		switch {
 		case ok:
-		case c.depsComplete:
+		case depsComplete:
 			deps = nil
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)

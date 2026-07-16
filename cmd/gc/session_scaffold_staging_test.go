@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -66,7 +67,7 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 	}
 
 	prepared, err := prepareStartCandidateForCity(startCandidate{
-		session: &session,
+		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "gascity/builder",
 			SessionName:  "builder-ga-ajw1no",

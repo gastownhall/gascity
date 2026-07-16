@@ -13,21 +13,161 @@ import (
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
-func waitFor(t *testing.T, d time.Duration, cond func() bool) { //nolint:unparam // helper kept general
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+type watchSignalProvider struct {
+	*events.Fake
+	floors  chan uint64
+	watches chan uint64
+}
+
+func newWatchSignalProvider() *watchSignalProvider {
+	return &watchSignalProvider{
+		Fake:    events.NewFake(),
+		floors:  make(chan uint64, 4),
+		watches: make(chan uint64, 4),
 	}
-	t.Fatalf("condition not met within %s", d)
+}
+
+func (p *watchSignalProvider) LatestSeq() (uint64, error) {
+	seq, err := p.Fake.LatestSeq()
+	if err != nil {
+		return 0, err
+	}
+	select {
+	case p.floors <- seq:
+	default:
+	}
+	return seq, nil
+}
+
+func (p *watchSignalProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	watcher, err := p.Fake.Watch(ctx, afterSeq)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case p.watches <- afterSeq:
+	default:
+	}
+	return watcher, nil
+}
+
+func requireFloorAt(t *testing.T, provider *watchSignalProvider, want uint64) {
+	t.Helper()
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	select {
+	case got := <-provider.floors:
+		if got != want {
+			t.Fatalf("provider floored at sequence %d, want %d", got, want)
+		}
+	case <-timer.C:
+		t.Fatalf("provider was not floored within %s", testutil.GoroutineRaceTimeout)
+	}
+}
+
+func requireNoFloorSample(t *testing.T, provider *watchSignalProvider) {
+	t.Helper()
+	select {
+	case got := <-provider.floors:
+		t.Fatalf("initialized provider head was sampled again at sequence %d", got)
+	default:
+	}
+}
+
+func requireWatchAfter(t *testing.T, provider *watchSignalProvider, want uint64) {
+	t.Helper()
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	select {
+	case got := <-provider.watches:
+		if got != want {
+			t.Fatalf("watch started after sequence %d, want %d", got, want)
+		}
+	case <-timer.C:
+		t.Fatalf("watch did not start within %s", testutil.GoroutineRaceTimeout)
+	}
+}
+
+func requireTaggedEvent(t *testing.T, received <-chan eventexport.TaggedEvent, city string, seq uint64) {
+	t.Helper()
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	select {
+	case got := <-received:
+		if got.City != city || got.Seq != seq {
+			t.Fatalf("received event %s:%d, want %s:%d", got.City, got.Seq, city, seq)
+		}
+	case <-timer.C:
+		t.Fatalf("event %s:%d not received within %s", city, seq, testutil.GoroutineRaceTimeout)
+	}
+}
+
+func TestMuxSource_PreservesInitializedZeroFloorAcrossRebuild(t *testing.T) {
+	provider := newWatchSignalProvider()
+	var acknowledged uint64
+	src := NewMuxSource(
+		func() map[string]events.Provider { return map[string]events.Provider{"c1": provider} },
+		func() map[string]uint64 {
+			if acknowledged == 0 {
+				return nil
+			}
+			return map[string]uint64{"c1": acknowledged}
+		},
+		time.Hour,
+		nil,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
+	defer src.closeWatcher()
+
+	if err := src.rebuild(ctx); err != nil {
+		t.Fatalf("initial rebuild: %v", err)
+	}
+	requireFloorAt(t, provider, 0)
+	requireWatchAfter(t, provider, 0)
+
+	// Cross a rebuild boundary with no acknowledged event. Recording after the
+	// first empty-city floor must not let the next rebuild advance that floor.
+	src.closeWatcher()
+	provider.Record(events.Event{Type: "bead.closed", Subject: "mc-1"})
+	if err := src.rebuild(ctx); err != nil {
+		t.Fatalf("second rebuild: %v", err)
+	}
+	requireNoFloorSample(t, provider)
+	requireWatchAfter(t, provider, 0)
+
+	got, err := src.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if got.City != "c1" || got.Seq != 1 {
+		t.Fatalf("Next returned %s:%d, want c1:1", got.City, got.Seq)
+	}
+
+	// Once the caller acknowledges an event, that durable cursor takes
+	// precedence over the initial floor on every later rebuild.
+	acknowledged = got.Seq
+	src.closeWatcher()
+	provider.Record(events.Event{Type: "bead.closed", Subject: "mc-2"})
+	if err := src.rebuild(ctx); err != nil {
+		t.Fatalf("acknowledged rebuild: %v", err)
+	}
+	requireNoFloorSample(t, provider)
+	requireWatchAfter(t, provider, acknowledged)
+
+	got, err = src.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next after acknowledgement: %v", err)
+	}
+	if got.City != "c1" || got.Seq != 2 {
+		t.Fatalf("Next after acknowledgement returned %s:%d, want c1:2", got.City, got.Seq)
+	}
 }
 
 func TestMuxSource_YieldsAndPicksUpNewCity(t *testing.T) {
 	var pmu sync.Mutex
-	provs := map[string]events.Provider{"c1": events.NewFake()}
+	f1 := newWatchSignalProvider()
+	provs := map[string]events.Provider{"c1": f1}
 	providers := func() map[string]events.Provider {
 		pmu.Lock()
 		defer pmu.Unlock()
@@ -53,57 +193,57 @@ func TestMuxSource_YieldsAndPicksUpNewCity(t *testing.T) {
 
 	src := NewMuxSource(providers, cursors, 15*time.Millisecond, nil)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	var gotMu sync.Mutex
-	got := map[string][]uint64{}
+	received := make(chan eventexport.TaggedEvent, 4)
+	consumerDone := make(chan struct{})
 	go func() {
+		defer close(consumerDone)
 		for {
 			te, err := src.Next(ctx)
 			if err != nil {
 				return
 			}
-			gotMu.Lock()
-			got[te.City] = append(got[te.City], te.Seq)
-			gotMu.Unlock()
 			cmu.Lock()
 			if te.Seq > consumed[te.City] {
 				consumed[te.City] = te.Seq
 			}
 			cmu.Unlock()
-		}
-	}()
-
-	// c1 is present + empty at first build (floor 0): live records are delivered.
-	time.Sleep(40 * time.Millisecond)
-	f1 := provs["c1"].(*events.Fake)
-	f1.Record(events.Event{Seq: 1, Type: "bead.closed", Ts: time.Now(), Actor: "a", Subject: "mc-1"})
-	f1.Record(events.Event{Seq: 2, Type: "order.fired", Ts: time.Now(), Actor: "a", Subject: "sweep"})
-
-	has := func(city string, seq uint64) bool {
-		gotMu.Lock()
-		defer gotMu.Unlock()
-		for _, s := range got[city] {
-			if s == seq {
-				return true
+			select {
+			case received <- te:
+			case <-ctx.Done():
+				return
 			}
 		}
-		return false
-	}
-	// The deadline races the consumer goroutine and the 15ms MuxSource rebuild
-	// loop; under the parallel fast-test CPU storm a 2s constant flakes
-	// ("condition not met within 2s"). See TESTING.md "Test deadline rule": use
-	// the shared goroutine-race floor since this timer is not the subject here.
-	waitFor(t, testutil.GoroutineRaceTimeout, func() bool { return has("c1", 1) && has("c1", 2) })
+	}()
+	t.Cleanup(func() {
+		cancel()
+		src.closeWatcher()
+		timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+		defer timer.Stop()
+		select {
+		case <-consumerDone:
+		case <-timer.C:
+			t.Errorf("MuxSource consumer did not stop within %s", testutil.GoroutineRaceTimeout)
+		}
+	})
+
+	// c1 is present + empty at first build (floor 0): live records are delivered.
+	requireFloorAt(t, f1, 0)
+	requireWatchAfter(t, f1, 0)
+	f1.Record(events.Event{Seq: 1, Type: "bead.closed", Ts: time.Now(), Actor: "a", Subject: "mc-1"})
+	f1.Record(events.Event{Seq: 2, Type: "order.fired", Ts: time.Now(), Actor: "a", Subject: "sweep"})
+	requireTaggedEvent(t, received, "c1", 1)
+	requireTaggedEvent(t, received, "c1", 2)
 
 	// add a second city after launch; it must be picked up on a rebuild.
-	f2 := events.NewFake()
+	f2 := newWatchSignalProvider()
 	pmu.Lock()
 	provs["c2"] = f2
 	pmu.Unlock()
-	time.Sleep(40 * time.Millisecond) // let a rebuild floor c2 at 0
+	requireFloorAt(t, f2, 0)
+	requireWatchAfter(t, f2, 0)
 	f2.Record(events.Event{Seq: 1, Type: "bead.created", Ts: time.Now(), Actor: "b", Subject: "mc-9"})
-	waitFor(t, testutil.GoroutineRaceTimeout, func() bool { return has("c2", 1) })
+	requireTaggedEvent(t, received, "c2", 1)
 }
 
 // TestAdapter_NoLeakFromPayload proves the events.Event -> primitive conversion

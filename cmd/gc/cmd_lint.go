@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -316,12 +317,18 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 	if err != nil {
 		return []lintDiagnostic{diagnosticFromError(sourcePath, err)}
 	}
-	_, body := promptmeta.Parse(string(data))
-	if !isPromptTemplatePath(target.templatePath) {
-		return nil
-	}
 
 	var diagnostics []lintDiagnostic
+	for _, finding := range bdflags.ScanUnknownFlags(data) {
+		diagnostics = append(diagnostics, newLintDiagnostic(sourcePath, finding.Line,
+			fmt.Sprintf("bd-unknown-flag: bd %s uses unrecognized flag %q", finding.Subcommand, finding.Flag)))
+	}
+
+	_, body := promptmeta.Parse(string(data))
+	if !isPromptTemplatePath(target.templatePath) {
+		return diagnostics
+	}
+
 	var tmpl *template.Template
 	tmpl = template.New("prompt").
 		Funcs(promptFuncMap("lint-city", "", nil, func() *template.Template { return tmpl })).

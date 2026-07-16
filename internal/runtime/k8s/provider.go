@@ -344,8 +344,10 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // The pod must be Running with a live tmux "main" session, else
 // [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
-// NOT re-run (provision-half); env is provision-half too (set in the pod spec at
-// create time, not re-injected — respawn-pane carries no env), matching tmux/ssh.
+// NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
+// too (set in the pod spec at create time, not re-injected — respawn-pane carries
+// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
+// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the

@@ -41,11 +41,15 @@
         },
         "write_auth_verify_key": {
           "type": "string",
-          "description": "WriteAuthVerifyKey, when set, requires every mutating request to an\nalready-registered city — the per-city routes under /v0/city/{cityName} —\nto carry a signed write grant from a configured trusted authority. It\ngates all per-city writes (beads, mail, sessions, agents, and config), not\nonly config edits. City registry creation (POST /v0/city) is not covered:\na grant binds a path-resident city name, which a not-yet-created city\nlacks, so creation stays governed by the supervisor-registry guards.\nBuilt-in callers (the bundled gc API client and dashboard SPA) send only\nthe CSRF header and mint no grant, so enabling this gate turns their direct\ncity mutations away with a clear 401; such deployments front mutations\nthrough the trusted authority that mints grants instead. The value is one\nor more \"kid:base64-ed25519-pubkey\" entries, comma separated.\nThe GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an\nepoch floor is an ops-plane control set only through the\nGC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field."
+          "description": "WriteAuthVerifyKey, when set, requires every mutating request to an\nalready-registered city — the per-city routes under /v0/city/{cityName} —\nto carry a signed write grant from a configured trusted authority. It\ngates all per-city writes (beads, mail, sessions, agents, and config), not\nonly config edits. City registry creation (POST /v0/city) is not covered:\na grant binds a path-resident city name, which a not-yet-created city\nlacks, so creation stays governed by the supervisor-registry guards.\nBuilt-in callers (the bundled gc API client and dashboard SPA) send only\nthe CSRF header and mint no grant, so enabling this gate turns their direct\ncity mutations away with a clear 401; such deployments front mutations\nthrough the trusted authority that mints grants instead. The value is one\nor more \"kid:base64-ed25519-pubkey\" entries, comma separated.\nThe GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an\nepoch floor is an ops-plane control set only through the\nGC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted\nmulti-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,\nno config field) additionally binds the gate to the controller's own\ncity id: every grant must then carry that exact cid claim, failing\nclosed on a mismatching or missing cid."
         },
         "write_auth_required": {
           "type": "boolean",
           "description": "WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup\nerror instead of silently disabling the gate, so a config that intends to\ngate writes fails closed if the key is ever dropped. The\nGC_CITY_WRITE_REQUIRED=1 env var has the same effect."
+        },
+        "write_auth_allow_unverified": {
+          "type": "boolean",
+          "description": "WriteAuthAllowUnverified acknowledges running a non-loopback bind with\nallow_mutations and NO write-auth verify key — an unauthenticated write\nplane fronted only by the network. Without it, that combination is a\nfail-closed startup error (gate G10) so a hardened deployment cannot boot\nwide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for\na network-fronted deployment that intentionally trusts its perimeter."
         },
         "read_auth_verify_key": {
           "type": "string",
@@ -1023,6 +1027,15 @@
             "bd-1.0.5"
           ],
           "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
+        },
+        "conditional_writes": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
         },
         "policies": {
           "additionalProperties": {
@@ -3155,6 +3168,10 @@
         "provider": {
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Timezone is the city-default IANA time zone (e.g. \"America/New_York\")\nin which cron order schedules are evaluated when an order does not set\nits own tz. Empty means the controller's process-local zone. Invalid\nnames fail order discovery loudly rather than falling back silently."
         },
         "start_command": {
           "type": "string",

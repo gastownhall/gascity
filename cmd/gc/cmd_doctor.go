@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -168,6 +169,10 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning    bool
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
+	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
+	// is set when resolving it failed (an out-of-enum config value).
+	RolloutFlags      rollout.Flags
+	RolloutResolveErr error
 }
 
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
@@ -180,7 +185,7 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 		if err != nil {
 			return time.Time{}, err
 		}
-		return orders.LastRunAcrossStores(unwrapOrdersStores(stores)...)(order.ScopedName())
+		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
 	}
 }
 
@@ -217,6 +222,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
+		// Rollout gates section: one advisory line per registered gate (value +
+		// origin + notices). Never blocks the exit code.
+		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
+			register(c)
+		}
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))
@@ -280,11 +290,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if cfgErr == nil && cfg != nil && !controllerRunning {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
-		sp := newSessionProvider()
-
-		register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
-		register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-		register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+		sp, err := newSessionProvider()
+		if err != nil {
+			register(doctor.ErrorCheck("session-provider", err.Error()))
+		} else {
+			register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+		}
 	}
 
 	storeFactory := openStoreForCity(cityPath)
@@ -414,12 +427,24 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io
 	supervisorRunning := supervisorAliveHook() != 0
 	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
+	// Resolve the rollout-gate snapshot for the doctor section from the on-disk
+	// config plus THIS doctor process's env (Resolve's default LookupEnv); a
+	// running controller may have latched a different value from its own boot
+	// env, so the rendered lines are advisory, not the live latch (guarded:
+	// Resolve errors on a nil cfg).
+	var rolloutFlags rollout.Flags
+	var rolloutResolveErr error
+	if cfgErr == nil && cfg != nil {
+		rolloutFlags, rolloutResolveErr = rollout.Resolve(cfg, rollout.ResolveOptions{})
+	}
 	for _, check := range buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
 		Stderr:               stderr,
 		ControllerRunning:    controllerRunning,
 		SupervisorRunning:    supervisorRunning,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
+		RolloutFlags:         rolloutFlags,
+		RolloutResolveErr:    rolloutResolveErr,
 	}) {
 		d.Register(check)
 	}

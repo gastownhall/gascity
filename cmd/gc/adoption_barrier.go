@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -67,10 +66,9 @@ func runAdoptionBarrier(
 	if sessFront == nil {
 		return result, false
 	}
-	// Session-bead list queries below go through the raw session-class store the
-	// front door wraps (sessionpkg.ListAllSessionBeads takes a raw store); creates
-	// go through the front door. Same underlying store, so behavior is unchanged.
-	store := sessFront.Store().Store
+	// Session-bead list queries below go through the typed session front door
+	// (sessFront.ListAll); creates go through the front door too. Same underlying
+	// store, so behavior is unchanged.
 
 	// Step 1: List all running sessions.
 	running, err := sp.ListRunning("")
@@ -92,32 +90,27 @@ func runAdoptionBarrier(
 	// lost their gc:session label (after a crash or partial write) still
 	// participate in adoption dedup. Without the union, those beads would
 	// be invisible here and adoption would re-create duplicates.
-	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
+	existing, err := sessFront.ListAll(sessionpkg.ListAllOptions{})
 	if err != nil {
 		fmt.Fprintf(stderr, "adoption barrier: listing beads: %v\n", err) //nolint:errcheck
 		return result, false
 	}
 	bySessionName := make(map[string]bool, len(existing))
-	for _, b := range existing {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if b.Status == "closed" {
+	for _, info := range existing {
+		// ListAll already filters via IsSessionBeadOrRepairable and excludes closed.
+		if info.Closed {
 			continue // closed beads don't count for dedup
 		}
-		if sn := sessionpkg.InfoFromPersistedBead(b).SessionNameMetadata; sn != "" {
+		if sn := info.SessionNameMetadata; sn != "" {
 			bySessionName[sn] = true
 		}
 	}
 
 	// Build config agent lookup: session_name -> agent config.
 	// Also build a reverse lookup by qualified name for pool instance resolution.
-	// Uses the already-loaded session beads to avoid N store queries.
+	// Uses the already-loaded session Infos to avoid N store queries.
 	st := cfg.Workspace.SessionTemplate
-	snapshot := &sessionBeadSnapshot{}
-	for _, b := range existing {
-		if b.Status != "closed" && sessionpkg.IsSessionBeadOrRepairable(b) {
-			snapshot.add(b)
-		}
-	}
+	snapshot := newSessionBeadSnapshotFromInfos(existing)
 	agentBySession := make(map[string]*config.Agent, len(cfg.Agents))
 	agentByQN := make(map[string]*config.Agent, len(cfg.Agents))
 	agentBaseSessionName := make(map[string]string, len(cfg.Agents))
@@ -295,21 +288,12 @@ func runAdoptionBarrier(
 }
 
 func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
-	existing, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
-		Metadata: map[string]string{"session_name": sessionName},
-		Live:     true,
-	})
-	if err != nil {
-		return false, fmt.Errorf("listing session beads for %q: %w", sessionName, err)
-	}
-	for _, b := range existing {
-		if b.Status == "closed" {
-			continue
-		}
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		return true, nil
-	}
-	return false, nil
+	// HasOpenSessionNamed is the Live-tier existence probe: a session_name-filtered,
+	// CachingStore-bypassing union scan so the adoption barrier observes just-created
+	// beads immediately. It is byte-equivalent to the prior inline Live ListAll +
+	// closed filter this wrapped. The Live bypass is pinned by
+	// TestHasOpenSessionNamed in internal/session.
+	return sessFront.HasOpenSessionNamed(sessionName)
 }
 
 // resolvePoolBase attempts to match a pool instance session name back to its

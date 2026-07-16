@@ -121,6 +121,41 @@ func TestWaitsForIdleAfterInterrupt_WrappedClaude(t *testing.T) {
 	}
 }
 
+// TestProviderFamilyFromInfoMatchesMetadata is the byte-identical oracle for the
+// ProviderFamilyFromInfo twin: for every representative provider-vocab shape, the
+// Info form (fed infoFromPersistedBead(b)) must agree with the metadata form on
+// the builtin_ancestor → provider_kind → provider precedence ladder. It is
+// self-sufficient (asserts the concrete family output, not only Info==metadata),
+// so mutating any precedence rung on either projection is caught here.
+func TestProviderFamilyFromInfoMatchesMetadata(t *testing.T) {
+	cases := []struct {
+		name     string
+		meta     map[string]string
+		fallback string
+		want     string
+	}{
+		{"empty-fallback-codex", map[string]string{}, "codex", "codex"},
+		{"provider-only", map[string]string{"provider": "codex"}, "", "codex"},
+		{"provider-kind-wins-over-provider", map[string]string{"provider": "claude", "provider_kind": "codex"}, "", "codex"},
+		{"builtin-ancestor-wins", map[string]string{"provider": "claude", "provider_kind": "gemini", "builtin_ancestor": "codex"}, "", "codex"},
+		{"wrapped-alias-provider", map[string]string{"provider": "my-pi"}, "", "pi"},
+		{"blank-rungs-fall-through", map[string]string{"builtin_ancestor": "   ", "provider_kind": "", "provider": "codex"}, "", "codex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := beads.Bead{ID: "s", Type: BeadType, Status: "open", Labels: []string{LabelSession}, Metadata: tc.meta}
+			fromMeta := ProviderFamilyFromMetadata(tc.meta, tc.fallback)
+			fromInfo := ProviderFamilyFromInfo(infoFromPersistedBead(b), tc.fallback)
+			if fromInfo != fromMeta {
+				t.Errorf("ProviderFamilyFromInfo = %q, ProviderFamilyFromMetadata = %q (want equal)", fromInfo, fromMeta)
+			}
+			if fromInfo != tc.want {
+				t.Errorf("ProviderFamilyFromInfo = %q, want %q", fromInfo, tc.want)
+			}
+		})
+	}
+}
+
 func TestInterruptStrategyUsesPiProviderFamilyAlias(t *testing.T) {
 	wrappedPi := beads.Bead{Metadata: map[string]string{
 		"provider": "my-pi/tmux",
@@ -715,6 +750,63 @@ func TestPollerKeyFromBeadFallbackOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PollerKeyFromBead(tc.bead); got != tc.want {
 				t.Fatalf("PollerKeyFromBead() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPollerKeyFromInfoMatchesBead pins PollerKeyFromInfo against its raw twin:
+// for each fixture it asserts the exact key (self-sufficient — a mutated
+// fallback order or a wrong field fails directly) AND that the Info projection of
+// the same bead yields the identical key, so the two forms cannot drift. The
+// session-name fixture specifically guards that PollerKeyFromInfo reads the RAW
+// SessionNameMetadata (not the sessionNameFor-filled SessionName).
+func TestPollerKeyFromInfoMatchesBead(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{
+			name: "session id wins over metadata",
+			bead: beads.Bead{ID: "session-id", Metadata: map[string]string{"alias": "alias", "session_name": "s-test"}, Title: "title"},
+			want: "session-id",
+		},
+		{
+			name: "alias fallback",
+			bead: beads.Bead{Metadata: map[string]string{"alias": "alias", "agent_name": "agent", "template": "template", "session_name": "s-test"}, Title: "title"},
+			want: "alias",
+		},
+		{
+			name: "agent name fallback",
+			bead: beads.Bead{Metadata: map[string]string{"agent_name": "agent", "template": "template", "session_name": "s-test"}, Title: "title"},
+			want: "agent",
+		},
+		{
+			name: "template fallback",
+			bead: beads.Bead{Metadata: map[string]string{"template": "template", "session_name": "s-test"}, Title: "title"},
+			want: "template",
+		},
+		{
+			name: "raw session_name fallback",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "s-test"}, Title: "title"},
+			want: "s-test",
+		},
+		{
+			name: "title fallback",
+			bead: beads.Bead{Title: "title"},
+			want: "title",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := infoFromPersistedBead(tc.bead)
+			got := PollerKeyFromInfo(info)
+			if got != tc.want {
+				t.Fatalf("PollerKeyFromInfo() = %q, want %q", got, tc.want)
+			}
+			if raw := PollerKeyFromBead(tc.bead); got != raw {
+				t.Fatalf("PollerKeyFromInfo() = %q diverged from PollerKeyFromBead() = %q", got, raw)
 			}
 		})
 	}
@@ -1500,7 +1592,7 @@ func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.
 func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {

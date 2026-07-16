@@ -108,8 +108,17 @@ export function FormulaRunDetailPage() {
       ),
     {
       matches: (event) => {
-        if (detail === null) return false;
         const identity = runEventIdentity(event);
+        // F4: before the detail loads (still warming, or the first load
+        // failed), anchor the match on the ROUTE's runId. A printed deep link
+        // lands here before the just-slung run's bead events exist, and
+        // requiring a loaded detail meant those eventual events could never
+        // nudge the page out of the failed state. An identity-less (ambient)
+        // event also matches — a root bead's own events may carry no run
+        // identity — mirroring the non-terminal ambient behavior below.
+        if (detail === null) {
+          return runId !== undefined && (identity.runIds.size === 0 || identity.runIds.has(runId));
+        }
         if (detail.progress.terminal && identityIsAmbient(identity)) return false;
         return formulaRunDetailEventMatches(identity, {
           runId: detail.runId,
@@ -137,6 +146,14 @@ export function FormulaRunDetailPage() {
   const handleActiveTabChange = useCallback((next: RunEvidenceTab) => setActiveTab(next), []);
 
   const pageError = routeError ?? loadError;
+  // F4: while the initial load polls the graced warming 503 (reason
+  // 'unknown_run': the projection is warm but has never seen this run — the
+  // just-slung deep-link window, or a genuinely dead link), the interim copy
+  // must be honest about BOTH possibilities instead of an anonymous spinner. A
+  // reason-less warming 503 (the projection itself is cold-replaying) keeps
+  // the plain loading copy: the run is not in doubt there.
+  const warmingUnknownRun =
+    runDetail.kind === 'loading' && runDetail.warming?.reason === 'unknown_run';
   const { selectedNodeId, selectedNode, toggleNode } = useRunNodeSelection(
     detail,
     initialNodeId,
@@ -220,6 +237,11 @@ export function FormulaRunDetailPage() {
             <StageLadder stages={skeletonLane.stages} label={skeletonLane.title} />
             <p className="text-body text-fg-muted italic mt-8">Loading run detail.</p>
           </>
+        ) : warmingUnknownRun ? (
+          <p className="text-body text-fg-muted italic" role="status">
+            This run may still be being recorded — new work can take a couple of minutes to appear —
+            or it may no longer exist.
+          </p>
         ) : (
           <p className="text-body text-fg-muted italic">Loading formula run.</p>
         )

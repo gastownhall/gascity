@@ -134,13 +134,13 @@ func routeMaintenanceStatus(c *api.Client, nilReason string, jsonOut bool, stdou
 		fmt.Fprintln(stderr, "gc maintenance status: "+err.Error()) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	if !api.ShouldFallbackForRead(err) {
+	if !api.ShouldFallbackForRead(c, err) {
 		logRoute(stderr, cmdName, "api", "error")
 		fmt.Fprintf(stderr, "gc maintenance status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	fmt.Fprintf(stderr, "gc maintenance status: supervisor unavailable (%s)\n", api.FallbackReason(err)) //nolint:errcheck // best-effort stderr
+	logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+	fmt.Fprintf(stderr, "gc maintenance status: supervisor unavailable (%s)\n", api.FallbackReason(c, err)) //nolint:errcheck // best-effort stderr
 	return 2
 }
 
@@ -170,13 +170,13 @@ func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool,
 		fmt.Fprintln(stderr, "gc maintenance dolt-gc: "+err.Error()) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	if !api.ShouldFallback(err) {
+	if !api.ShouldFallback(c, err) {
 		logRoute(stderr, cmdName, "api", "error")
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor unavailable (%s)\n", api.FallbackReason(err)) //nolint:errcheck // best-effort stderr
+	logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+	fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor unavailable (%s)\n", api.FallbackReason(c, err)) //nolint:errcheck // best-effort stderr
 	return 2
 }
 

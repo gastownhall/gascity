@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
@@ -89,7 +91,7 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 				t.Fatalf("store.Create(): %v", err)
 			}
 
-			if _, err := session.WakeSession(store, b, time.Now()); err != nil {
+			if _, err := session.NewStore(beads.SessionStore{Store: store}).WakeSession(b.ID, time.Now(), session.WakeOpts{}); err != nil {
 				t.Fatalf("WakeSession: %v", err)
 			}
 
@@ -131,13 +133,8 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 	}
 }
 
-func TestCmdSessionWake_ManagedBdPokesControllerAndMovesSuspendedToAsleep(t *testing.T) {
-	cityDir, _ := setupManagedBdWaitTestCity(t)
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
+func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
+	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
 		Title:  "managed wake session",
 		Type:   session.BeadType,
@@ -146,7 +143,7 @@ func TestCmdSessionWake_ManagedBdPokesControllerAndMovesSuspendedToAsleep(t *tes
 			"session_name": "s-gc-managed",
 			"template":     "worker",
 			"state":        "suspended",
-			"held_until":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"held_until":   "2026-07-16T01:00:00Z",
 			"sleep_reason": "user-hold",
 		},
 	})
@@ -154,79 +151,62 @@ func TestCmdSessionWake_ManagedBdPokesControllerAndMovesSuspendedToAsleep(t *tes
 		t.Fatalf("store.Create(session bead): %v", err)
 	}
 
-	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Listen(%q): %v", sockPath, err)
+	var calls []string
+	deps := sessionWakeDeps{
+		store:        store,
+		cityPath:     "/city",
+		cityResolved: true,
+		now: func() time.Time {
+			return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+		},
+		withdrawQueuedWaitNudges: func(cityPath string, nudgeIDs []string) error {
+			if cityPath != "/city" {
+				t.Fatalf("withdraw cityPath = %q, want /city", cityPath)
+			}
+			if len(nudgeIDs) != 0 {
+				t.Fatalf("withdraw nudge IDs = %v, want none", nudgeIDs)
+			}
+			calls = append(calls, "withdraw")
+			return nil
+		},
+		cityUsesManagedReconciler: func(cityPath string) bool {
+			if cityPath != "/city" {
+				t.Fatalf("managed-reconciler cityPath = %q, want /city", cityPath)
+			}
+			calls = append(calls, "managed")
+			return true
+		},
+		pokeController: func(cityPath string) error {
+			if cityPath != "/city" {
+				t.Fatalf("poke cityPath = %q, want /city", cityPath)
+			}
+			updated, getErr := store.Get(sessionBead.ID)
+			if getErr != nil {
+				t.Fatalf("store.Get(%s) during poke: %v", sessionBead.ID, getErr)
+			}
+			if got := updated.Metadata["state"]; got != "asleep" {
+				t.Fatalf("state during poke = %q, want asleep", got)
+			}
+			if got := updated.Metadata["wake_requested_at"]; got != "2026-07-16T00:00:00Z" {
+				t.Fatalf("wake_requested_at during poke = %q, want injected time", got)
+			}
+			calls = append(calls, "poke")
+			return nil
+		},
 	}
-	defer lis.Close() //nolint:errcheck
-
-	commands := make(chan string, 2)
-	errCh := make(chan error, 1)
-	go func() {
-		defer close(commands)
-		for range 2 {
-			conn, err := lis.Accept()
-			if err != nil {
-				errCh <- err
-				return
-			}
-			buf := make([]byte, 64)
-			n, err := conn.Read(buf)
-			if err != nil {
-				conn.Close() //nolint:errcheck
-				errCh <- err
-				return
-			}
-			cmd := string(buf[:n])
-			commands <- cmd
-			reply := "ok\n"
-			if cmd == "ping\n" {
-				reply = "123\n"
-			}
-			if _, err := conn.Write([]byte(reply)); err != nil {
-				conn.Close() //nolint:errcheck
-				errCh <- err
-				return
-			}
-			conn.Close() //nolint:errcheck
-		}
-	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+	if code := doSessionWake(sessionBead.ID, &stdout, &stderr, false, deps); code != 0 {
+		t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(calls, ","); got != "withdraw,managed,poke" {
+		t.Fatalf("effect calls = %q, want withdraw,managed,poke", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "wake requested") {
+		t.Fatalf("stdout = %q, want wake requested", got)
 	}
 
-	gotCommands := make([]string, 0, 2)
-	deadline := time.After(2 * time.Second)
-	for len(gotCommands) < 2 {
-		select {
-		case err := <-errCh:
-			if err != nil {
-				t.Fatalf("controller socket: %v", err)
-			}
-		case cmd, ok := <-commands:
-			if !ok {
-				t.Fatalf("controller commands = %v, want ping plus poke", gotCommands)
-			}
-			gotCommands = append(gotCommands, cmd)
-		case <-deadline:
-			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
-		}
-	}
-	wantCommands := []string{"ping\n", "poke\n"}
-	for i, want := range wantCommands {
-		if gotCommands[i] != want {
-			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
-		}
-	}
-
-	freshStore, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
-	updated, err := freshStore.Get(sessionBead.ID)
+	updated, err := store.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatalf("store.Get(%s): %v", sessionBead.ID, err)
 	}
@@ -241,6 +221,99 @@ func TestCmdSessionWake_ManagedBdPokesControllerAndMovesSuspendedToAsleep(t *tes
 	}
 }
 
+func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "worker",
+			"state":    "suspended",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	poked := false
+	deps := sessionWakeDeps{
+		store:        store,
+		cityPath:     "/city",
+		cityResolved: true,
+		now: func() time.Time {
+			return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+		},
+		withdrawQueuedWaitNudges: func(string, []string) error {
+			return nil
+		},
+		cityUsesManagedReconciler: func(string) bool {
+			return false
+		},
+		pokeController: func(string) error {
+			poked = true
+			return nil
+		},
+	}
+
+	if code := doSessionWake(sessionBead.ID, &bytes.Buffer{}, &bytes.Buffer{}, false, deps); code != 0 {
+		t.Fatalf("doSessionWake() = %d, want 0", code)
+	}
+	if poked {
+		t.Fatal("pokeController called for a city without a managed reconciler")
+	}
+}
+
+func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "worker",
+			"state":    "suspended",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	deps := sessionWakeDeps{
+		store:        store,
+		cityPath:     "/city",
+		cityResolved: true,
+		now: func() time.Time {
+			return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+		},
+		withdrawQueuedWaitNudges: func(string, []string) error {
+			return nil
+		},
+		cityUsesManagedReconciler: func(string) bool {
+			return true
+		},
+		pokeController: func(string) error {
+			return errors.New("dial failed")
+		},
+	}
+
+	var stderr bytes.Buffer
+	if code := doSessionWake(sessionBead.ID, &bytes.Buffer{}, &stderr, false, deps); code != 0 {
+		t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "warning: poke failed: dial failed") {
+		t.Fatalf("stderr = %q, want poke failure warning", got)
+	}
+	updated, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", sessionBead.ID, err)
+	}
+	if got := updated.Metadata["state"]; got != "asleep" {
+		t.Fatalf("state = %q, want asleep", got)
+	}
+}
+
+// This is the single real CLI/config/file-store/controller-socket composition
+// proof for session wake. Lower-level wake behavior belongs in doSessionWake
+// unit tests; managed-Dolt consistency has its own provider boundary owner.
 func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -314,7 +387,7 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 	}
 
 	gotCommands := make([]string, 0, 2)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(testutil.GoroutineRaceTimeout)
 	for len(gotCommands) < 2 {
 		select {
 		case err := <-errCh:
@@ -402,6 +475,11 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionWake() = %d, want rejection; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	// Pin the CLI wake-conflict artifact: the fused WakeSession returns a
+	// WakeConflictError the CLI renders as "session <id> is <state>".
+	if want := "gc session wake: session " + sessionID + " is archived"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderr.String())
 	}
 }
 

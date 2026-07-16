@@ -409,20 +409,12 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 	return requests
 }
 
-func poolSessionConsumesNewDemand(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == boolMetadata(true) {
-		return true
-	}
-	// This pure desired-state pass has no reconciler clock. Creating sessions
-	// still represent already-spent new demand; lifecycle code owns stale
-	// creating recovery with its clock-aware predicate.
-	state := strings.TrimSpace(session.Metadata["state"])
-	return state == "creating" || state == string(sessionpkg.StateStartPending)
-}
-
-// poolSessionConsumesNewDemandInfo is the session.Info sibling of
-// poolSessionConsumesNewDemand, reading PendingCreateClaim and the raw
-// MetadataState instead of raw bead metadata. Equivalence-proven.
+// poolSessionConsumesNewDemandInfo reports whether a pool session already
+// represents spent "new" demand: it holds an active pending_create_claim, or
+// its raw state is creating/start-pending. It reads PendingCreateClaim and the
+// raw MetadataState. This pure desired-state pass has no reconciler clock:
+// creating sessions still represent already-spent new demand; lifecycle code
+// owns stale-creating recovery with its clock-aware predicate.
 func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 	if info.PendingCreateClaim {
 		return true

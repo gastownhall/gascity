@@ -859,25 +859,23 @@ func setSessionCircuitBreakerForTest(b *sessionCircuitBreaker) func() {
 // we resolve to the named-session identity via session bead metadata the
 // same way the rest of the reconciler does.
 func computeNamedSessionProgressSignatures(
-	sessionBeads []beads.Bead,
+	sessionInfos []session.Info,
 	assignedWorkBeads []beads.Bead,
 ) map[string]string {
-	if len(sessionBeads) == 0 {
+	if len(sessionInfos) == 0 {
 		return nil
 	}
 	// Build: resolver key -> identity. Bare session names and aliases are
 	// ignored when more than one configured identity claims the same key.
-	resolve := make(map[string]string, len(sessionBeads)*3)
-	bareResolve := make(map[string]string, len(sessionBeads)*2)
+	resolve := make(map[string]string, len(sessionInfos)*3)
+	bareResolve := make(map[string]string, len(sessionInfos)*2)
 	ambiguous := make(map[string]bool)
 	knownIdentities := make(map[string]bool)
-	for _, sb := range sessionBeads {
-		// Read the identity/name/alias resolver keys through the typed Info
-		// projection instead of cracking sb.Metadata inline. This scan runs in
-		// Phase 0.5 before the reconciler's coherent infoByID snapshot exists, so
-		// it projects per bead (the same shape advanceSessionDrainsWithSessionsTraced uses); the
-		// projection is pure, so it is byte-identical to the raw reads.
-		info := session.InfoFromPersistedBead(sb)
+	for _, info := range sessionInfos {
+		// The SESSION side is typed session.Info (per-parameter split, WI-5 W3);
+		// only the identity/name/alias resolver keys are read. The assigned-work
+		// slice stays raw (ClassWork). The caller feeds the tick's per-bead
+		// projection until W4 hands this the reconciler's typed []Info feed.
 		identity := strings.TrimSpace(info.ConfiguredNamedIdentity)
 		if identity == "" {
 			continue

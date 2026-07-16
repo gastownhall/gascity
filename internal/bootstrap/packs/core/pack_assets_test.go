@@ -1,12 +1,125 @@
 package core
 
 import (
+	"bytes"
 	"io/fs"
 	"reflect"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
 )
+
+var (
+	bareBDSubcommand       = regexp.MustCompile(`\bbd[[:space:]\\]+(?:blocked|children|close|comment|comments|completion|config|count|create|delete|dep|doctor|dolt|epic|export|formula|gate|graph|help|hook|hooks|import|info|init|label|list|migrate|mol|orphans|prime|prune|ready|remember|rename-prefix|reopen|restore|search|show|sql|stale|stats|status|sync|update|version|where|worktree)\b`)
+	bareBDDynamicArg       = regexp.MustCompile(`\bbd[[:space:]\\]+["']\$(?:\{)?[A-Za-z_]`)
+	bareBDLeadingFlag      = regexp.MustCompile(`\bbd[[:space:]\\]+--[A-Za-z0-9]`)
+	bareBDCommand          = regexp.MustCompile(`\bcommand[[:space:]]+bd\b`)
+	bareBDSerializedArgv   = regexp.MustCompile(`["']bd["'][[:space:]]*,`)
+	bareBDSerializedScalar = regexp.MustCompile(`\b(?:command|cmd|executable)[ \t]*[:=][ \t]*["']?bd["']?(?:[ \t]|$)`)
+	bareBDYAMLArgv         = regexp.MustCompile(`(?m)^[ \t]*-[ \t]+bd[ \t]*(?:\r?\n)[ \t]*-[ \t]+[A-Za-z]`)
+	gcImmediatelyBefore    = regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])gc(?:[ \t]+--(?:city|rig)(?:=[^ \t\r\n]+|[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^ \t\r\n]+)))*(?:[ \t]|\\\r?\n)+$`)
+	gcSerializedBefore     = regexp.MustCompile(`["']gc["'][[:space:]]*,(?:(?:[[:space:]]*["']--(?:city|rig)=[^"']+["'][[:space:]]*,)|(?:[[:space:]]*["']--(?:city|rig)["'][[:space:]]*,[[:space:]]*["'][^"']+["'][[:space:]]*,))*[[:space:]]*$`)
+)
+
+func findBareBDCommands(data []byte) []int {
+	body := string(data)
+	offsets := make(map[int]struct{})
+
+	for _, pattern := range []*regexp.Regexp{bareBDSubcommand, bareBDDynamicArg, bareBDLeadingFlag} {
+		for _, match := range pattern.FindAllStringIndex(body, -1) {
+			if gcImmediatelyBefore.MatchString(body[:match[0]]) {
+				continue
+			}
+			offsets[match[0]] = struct{}{}
+		}
+	}
+	for _, match := range bareBDSerializedArgv.FindAllStringIndex(body, -1) {
+		if gcSerializedBefore.MatchString(body[:match[0]]) {
+			continue
+		}
+		offsets[match[0]] = struct{}{}
+	}
+	for _, pattern := range []*regexp.Regexp{bareBDCommand, bareBDSerializedScalar, bareBDYAMLArgv} {
+		for _, match := range pattern.FindAllStringIndex(body, -1) {
+			offsets[match[0]] = struct{}{}
+		}
+	}
+
+	result := make([]int, 0, len(offsets))
+	for offset := range offsets {
+		result = append(result, offset)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func TestCoreShippedAssetsRouteBDCommandsThroughGC(t *testing.T) {
+	err := fs.WalkDir(PackFS, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			return err
+		}
+		for _, offset := range findBareBDCommands(data) {
+			lineNumber := bytes.Count(data[:offset], []byte{'\n'}) + 1
+			lineStart := bytes.LastIndexByte(data[:offset], '\n') + 1
+			lineEnd := bytes.IndexByte(data[offset:], '\n')
+			if lineEnd < 0 {
+				lineEnd = len(data)
+			} else {
+				lineEnd += offset
+			}
+			t.Errorf("%s:%d: shipped bd commands must route through gc bd: %s", path, lineNumber, strings.TrimSpace(string(data[lineStart:lineEnd])))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking embedded core pack: %v", err)
+	}
+}
+
+func TestFindBareBDCommands(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "plain shell", body: `bd show ga-123`, want: 1},
+		{name: "wrapped shell", body: "bd \\\n  show ga-123", want: 1},
+		{name: "wrapped markdown", body: "`bd\nshow ga-123`", want: 1},
+		{name: "serialized argv", body: "[\"bd\",\n \"future-command\", \"ga-123\"]", want: 1},
+		{name: "dir-scoped command", body: `bd --dir /tmp/rig show ga-123`, want: 1},
+		{name: "leading passthrough flag", body: `bd --no-daemon list`, want: 1},
+		{name: "unknown leading passthrough flag", body: `bd --future-routing-bypass list`, want: 1},
+		{name: "dynamic subcommand", body: `bd "$verb"`, want: 1},
+		{name: "wrapped gc command", body: "gc bd \\\n  show ga-123"},
+		{name: "plain gc command", body: `gc bd show ga-123`},
+		{name: "explicit gc city", body: `gc --city /tmp/city bd show ga-123`},
+		{name: "quoted explicit gc city", body: `gc --city "$CITY" bd list`},
+		{name: "explicit gc rig", body: `gc --rig frontend bd list`},
+		{name: "explicit gc city and rig", body: `gc --city /tmp/city --rig frontend bd list`},
+		{name: "serialized gc argv", body: `["gc", "bd", "show", "ga-123"]`},
+		{name: "serialized scoped gc argv", body: `["gc", "--city", "/x", "--rig", "r", "bd", "show"]`},
+		{name: "binary prose", body: `the bd CLI reads a bd-managed store`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := len(findBareBDCommands([]byte(tt.body))); got != tt.want {
+				t.Fatalf("findBareBDCommands() found %d commands, want %d in %q", got, tt.want, tt.body)
+			}
+		})
+	}
+}
 
 func TestCoreMaintenanceExecAssets(t *testing.T) {
 	required := []string{

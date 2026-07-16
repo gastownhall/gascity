@@ -177,6 +177,43 @@ type StatusBody struct {
 	RigDetails          []StatusRigDetail          `json:"rig_details,omitempty" doc:"Per-rig detail (for CLI status views). Empty when none."`
 	NamedSessionDetails []StatusNamedSessionDetail `json:"named_session_details,omitempty" doc:"Per-named-session detail. Empty when none configured."`
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty" doc:"Active/suspended session counts. Omitted when unavailable."`
+	ConditionalWrites   *StatusConditionalWrites   `json:"conditional_writes,omitempty" doc:"Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface."`
+}
+
+// StatusConditionalWrites is the daemon's own latched conditional-writes
+// snapshot: the boot-resolved mode, real per-store probe/latch verdicts, and
+// retained rollout notices — never a re-derivation from config. Doctor and
+// the dashboard render this same block, so they agree by construction.
+type StatusConditionalWrites struct {
+	Mode      string                               `json:"mode" enum:"off,auto,require" doc:"Boot-latched beads.conditional_writes mode."`
+	Origin    string                               `json:"origin" enum:"builtin,config,env" doc:"Where the latched mode came from."`
+	Effective string                               `json:"effective" enum:"off,active,degraded,fail_closed,pending_restart" doc:"Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode)."`
+	Stores    []StatusConditionalWriteStoreVerdict `json:"stores,omitempty" doc:"Per-store verdicts, one row per controller-owned store."`
+	Notices   []StatusRolloutNotice                `json:"notices,omitempty" doc:"Retained rollout notices (env overrides, drift, invalid spellings)."`
+}
+
+// StatusConditionalWriteStoreVerdict is one store's conditional-writes
+// capability as the write path sees it. Probe and Latch are independent so
+// version-skew states stay legible: probe=capable latch=incapable means bd
+// rejected a real fenced write at runtime and the fix is a restart to
+// re-probe, not a bd upgrade.
+type StatusConditionalWriteStoreVerdict struct {
+	StoreID string `json:"store_id" doc:"Store scope: city, or rig/<name>."`
+	Kind    string `json:"kind" doc:"Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file)."`
+	Probe   string `json:"probe" enum:"capable,incapable,unprobed" doc:"Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet."`
+	Latch   string `json:"latch" enum:"incapable,unlatched" doc:"Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart."`
+	Capable bool   `json:"capable" doc:"What the write path uses today: false only on a definitive incapable verdict."`
+	Reason  string `json:"reason,omitempty" doc:"Incapable cause, verbatim from the probe or latch."`
+}
+
+// StatusRolloutNotice mirrors internal/rollout.Notice onto the typed wire.
+type StatusRolloutNotice struct {
+	Kind        string `json:"kind" doc:"Notice kind (env_overrides_config, pending_restart, invalid_value, ...)."`
+	FlagKey     string `json:"flag_key" doc:"Rollout gate key the notice is about."`
+	EnvVar      string `json:"env_var,omitempty" doc:"Environment variable involved, when env-related."`
+	ConfigValue string `json:"config_value,omitempty" doc:"Raw config spelling; empty when unset."`
+	EnvValue    string `json:"env_value,omitempty" doc:"Raw env spelling as found."`
+	Message     string `json:"message" doc:"Human-readable line carrying the gate and the outcome."`
 }
 
 // StatusAgentDetail mirrors the CLI's StatusAgentJSON with the additional

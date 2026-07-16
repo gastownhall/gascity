@@ -21,7 +21,10 @@ import (
 // are preserved).
 var (
 	// sessionsCacheTTL bounds how long a cached sessions read is served before a
-	// refetch. A var (not a const) so tests can shorten it.
+	// refetch. A var (not a const) so tests can shorten it — but it is captured
+	// by newRunTailerManager at construction (the sessions compute can run on
+	// the tailer loop's detached prime goroutine, where a live read of this var
+	// would race with a test mutating it), so set it BEFORE building the plane.
 	sessionsCacheTTL = 3 * time.Second
 	// formulaCacheTTL bounds how long a successfully-compiled formula detail is
 	// served. Compiled formulas change rarely (an authored TOML edit), so this is

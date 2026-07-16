@@ -447,6 +447,91 @@ func TestCloseWorkflowSubtreeClosesDeepestChildrenFirst(t *testing.T) {
 	}
 }
 
+// rootLastStrictStore rejects closing the run root while any of its members are
+// still open, mirroring a store with parent/child close constraints. It proves
+// CloseWorkflowSubtreeAs closes descendants before the root even when the
+// root-only metadata forces the root into its own (final) close batch.
+type rootLastStrictStore struct {
+	*beads.MemStore
+	rootID string
+}
+
+func (s *rootLastStrictStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if id != s.rootID {
+			continue
+		}
+		members, err := s.List(beads.ListQuery{
+			IncludeClosed: true,
+			Metadata:      map[string]string{"gc.root_bead_id": s.rootID},
+		})
+		if err != nil {
+			return 0, err
+		}
+		for _, m := range members {
+			if m.ID != s.rootID && m.Status != "closed" {
+				return 0, fmt.Errorf("root %s closed while member %s still open", s.rootID, m.ID)
+			}
+		}
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+// TestCloseWorkflowSubtreeAsClosesDescendantsBeforeRootWithRootOnlyMetadata pins
+// the run-cancel close contract: descendants close before the root (a strict
+// store accepts the batch), every bead gets the caller's outcome, and the
+// root-only marker (cancel intent) lands atomically on the root without smearing
+// onto members.
+func TestCloseWorkflowSubtreeAsClosesDescendantsBeforeRootWithRootOnlyMetadata(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "root", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	store := &rootLastStrictStore{MemStore: base, rootID: root.ID}
+
+	closed, err := CloseWorkflowSubtreeAs(store, root.ID, "canceled",
+		"run canceled via POST /runs/{id}/cancel",
+		map[string]string{"gc.cancel_requested": "true"})
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtreeAs: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed %d beads, want 2 (root + child)", closed)
+	}
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("root outcome = %q, want canceled", rootAfter.Metadata["gc.outcome"])
+	}
+	if rootAfter.Metadata["gc.cancel_requested"] != "true" {
+		t.Fatalf("root cancel_requested = %q, want true", rootAfter.Metadata["gc.cancel_requested"])
+	}
+
+	childAfter, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if childAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("child outcome = %q, want canceled", childAfter.Metadata["gc.outcome"])
+	}
+	if got := childAfter.Metadata["gc.cancel_requested"]; got != "" {
+		t.Fatalf("child cancel_requested = %q, want empty (root-only marker)", got)
+	}
+}
+
 func TestCloseWorkflowSubtreeOrdersBlockersBeforeBlocked(t *testing.T) {
 	store := &blockValidatingWorkflowStore{MemStore: beads.NewMemStore()}
 
