@@ -64,6 +64,8 @@ const (
 	RuntimeBuiltinCatalog = "runtime.builtin"
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
+	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
+	runtimeContractWaiverOwner = "ga-80po0c.3"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -154,25 +156,25 @@ func Catalog() []Entry {
 			"subprocess", "exact:subprocess", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBacked"),
-				"ga-80po0c.1.2",
-				"NewSeamBacked exact production-constructor proof binding is deferred to ga-80po0c.1.2",
+				"NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition",
 			),
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
-				"ga-80po0c.1.2",
-				"NewSeamBackedWithDir exact production-constructor proof binding is deferred to ga-80po0c.1.2",
+				"internal/runtime/subprocess/seam_conformance_test.go",
+				"TestSubprocessSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/testutil", "ShortTempDir"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"full conformance covers the raw ACP provider, not the NewSeamBacked production composition",
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
-				"ga-80po0c.3",
 				"full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition",
 			),
 		),
@@ -180,7 +182,6 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
 			),
 		),
@@ -188,7 +189,6 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the actual K8s production composition has no full shared runtime contract",
 			),
 		),
@@ -196,7 +196,6 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"ga-80po0c.3",
 				"the existing full conformance run skips in short mode or when the herdr executable is absent",
 			),
 		),
@@ -204,7 +203,6 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				"ga-80po0c.3",
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
 			),
 		),
@@ -212,12 +210,10 @@ func Catalog() []Entry {
 			"exec", "prefix:exec:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"full conformance covers the raw exec provider, not the production seam-backed prefix composition",
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
 			),
 		),
@@ -225,7 +221,6 @@ func Catalog() []Entry {
 			"ssh", "prefix:ssh:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the production SSH composition has no full shared runtime contract",
 			),
 		),
@@ -233,7 +228,6 @@ func Catalog() []Entry {
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"ga-80po0c.3",
 				"the existing full conformance run skips when the tmux executable is absent",
 			),
 		),
@@ -248,7 +242,6 @@ func Catalog() []Entry {
 				Reason:   "conditional transport composition is outside the runtime registry",
 			},
 			Claims: []ContractClaim{waivedRuntime(autoConstructor,
-				"ga-80po0c.3",
 				"the production auto base/ACP composition has no full shared runtime contract",
 			)},
 		},
@@ -299,13 +292,13 @@ func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...Sym
 	}
 }
 
-func waivedRuntime(constructor SymbolRef, owner, reason string) ContractClaim {
+func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
-			Owner:   owner,
+			Owner:   runtimeContractWaiverOwner,
 			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
 			Reason:  reason,
 		},
