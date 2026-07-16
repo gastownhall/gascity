@@ -33,4 +33,5 @@ func TestFakeConformance(t *testing.T) {
 	}
 	eventstest.RunProviderTests(t, factory)
 	eventstest.RunConcurrencyTests(t, factory)
+	eventstest.RunInMemoryWakeTests(t, factory)
 }
