@@ -275,6 +275,80 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
+#### PR static-check scope
+
+The `preflight-static` job has two fail-safe scopes. Only an effective
+`pull_request` event whose default checkout is validated as GitHub's two-parent
+synthetic merge, with its first parent equal to the event's exact base SHA, may
+use the changed scope. The checkout keeps the default `GITHUB_SHA` and uses
+`fetch-depth: 2` so that validation is local and exact. A missing or different
+base, a non-merge checkout, or an unknown event selects the full scope.
+
+Pushes to `main`, schedules, manual dispatches, and every other non-PR event run
+the full static suite. Reusable workflows inherit their caller's event; the
+reusable call itself grants no changed-scope exemption. An effective
+`pull_request` event may still qualify after the same synthetic-merge
+validation, while an invocation such as the current RC `workflow_dispatch`
+remains full. The classifier never guesses a base from `origin/main` or a
+merge-base calculation.
+
+Even a validated PR merge runs the full scope when its diff touches static
+analysis or build policy:
+
+- `go.mod`, `go.sum`, `go.work`, or `go.work.sum`
+- `.golangci.yml` or `Makefile`
+- `.github/workflows/**`, `.github/actions/**`, or `.githooks/**`
+- `vendor/**` or `scripts/cipolicy/**`
+- `scripts/ci-static-scope` and `scripts/ci-static-select`
+
+The two scopes own different commands:
+
+| Scope | Commands | Selection guarantee |
+| --- | --- | --- |
+| Changed PR | `make lint-affected`, `make fmt-check-changed` | Lint and vet every package owning a changed Go build input or embedded file, plus all transitive reverse dependents; format-check only changed regular `.go` files that still exist. |
+| Full/fail-safe | `make lint`, `make fmt-check`, `make vet` | Analyze and format-check the whole repository, then run standalone `go vet ./...`. |
+
+Affected-package discovery examines every changed path. It selects packages
+for changed Go-tool build inputs (`.go`, `.c`, `.cc`, `.cpp`, `.cxx`, `.m`,
+`.h`, `.hh`, `.hpp`, `.hxx`, `.f`, `.F`, `.for`, `.f90`, `.s`, `.S`, `.sx`,
+`.swig`, `.swigcxx`, and `.syso`) and maps changed embedded files to every
+owning package using `EmbedFiles`, `TestEmbedFiles`, and `XTestEmbedFiles` from
+the canonical records in one complete `go list -test -json ./...` graph.
+Additions, modifications, deletions, and both sides of cross-package moves are
+included. Git rename coalescing is disabled so a move cannot hide the old
+package. An unrelated non-build, non-embedded path remains a no-op.
+
+Reverse dependents are included because analyzers such as `govet` consume
+exported facts, including through test-only imports. If the package graph
+cannot be loaded completely, affected lint fails safe to `./...` instead of
+trusting a partial graph. This includes a deleted required embed input. A
+deleted glob member no longer appears in the current resolved embed inventory,
+so an otherwise-unclassified deletion beneath a package also fails safe to
+full scope. File selection is NUL-delimited. Formatting remains limited to
+changed `.go` paths, excludes deletions and symlinks, accepts only existing
+regular files, and never invokes the formatter with an empty file list.
+
+`lint-affected` is the conservative PR target. It runs the configured
+golangci linters with golangci's `govet` copy disabled, then runs the Go tool's
+`vet` over the exact same affected package closure. That avoids duplicate vet
+analysis without losing standalone-vet diagnostics in generated files or
+unchanged reverse dependents. `lint-changed` remains the faster
+local/pre-commit target and intentionally checks only packages that contain
+changed Go files. Both accept `LINT_CHANGED_SCOPE` and `LINT_CHANGED_REF`; CI
+uses `tracked` and the event's exact PR base SHA.
+
+The golangci configuration still enables `govet` explicitly for full lint.
+Golangci's `govet` execution is not assumed to be semantically equivalent to
+standalone `go vet ./...`: generated-file exclusions and analyzer/configuration
+drift can differ. Full-scope runs therefore retain standalone vet, while the
+changed lane directly invokes standalone vet on its conservative closure.
+
+`make test-ci-policy` runs independently of changed/full static selection and
+always executes the focused workflow-scope, golangci-`govet`, affected-target,
+and fail-closed-classifier contracts. A self-binding test in the existing CI
+policy package rejects any Makefile change that removes this focused Go suite
+from the target.
+
 #### Historical timing summaries
 
 The opt-in timing artifacts produced by `scripts/go-test-observable` can be

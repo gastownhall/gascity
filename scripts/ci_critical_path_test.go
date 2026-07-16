@@ -46,6 +46,7 @@ type ciCriticalPathNeeds []string
 
 type ciCriticalPathStep struct {
 	Name            string            `yaml:"name"`
+	ID              string            `yaml:"id"`
 	If              string            `yaml:"if"`
 	Run             string            `yaml:"run"`
 	Uses            string            `yaml:"uses"`
@@ -437,6 +438,146 @@ func TestStaticChecksUseOnlyTheGoToolchain(t *testing.T) {
 	}
 	if !hasSetupGo {
 		t.Error("static checks must install the pinned Go toolchain")
+	}
+}
+
+func TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job, ok := wf.Jobs["preflight-static"]
+	if !ok {
+		t.Fatal("CI workflow has no preflight-static job")
+	}
+
+	checkoutIndex := -1
+	classifierIndex := -1
+	var checkout, classifier ciCriticalPathStep
+	runCounts := make(map[string]int)
+	stepsByRun := make(map[string]struct {
+		index int
+		step  ciCriticalPathStep
+	})
+	for i, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			checkoutIndex = i
+			checkout = step
+		}
+		if step.ID == "static-scope" {
+			classifierIndex = i
+			classifier = step
+		}
+		if run := strings.TrimSpace(step.Run); run != "" {
+			runCounts[run]++
+			stepsByRun[run] = struct {
+				index int
+				step  ciCriticalPathStep
+			}{index: i, step: step}
+		}
+	}
+
+	if checkoutIndex < 0 {
+		t.Error("preflight-static must check out the synthetic merge commit")
+	} else {
+		if got := checkout.With["fetch-depth"]; got != "2" {
+			t.Errorf("preflight-static checkout fetch-depth = %q, want 2 so the synthetic merge base parent is present", got)
+		}
+		if ref := strings.TrimSpace(checkout.With["ref"]); ref != "" {
+			t.Errorf("preflight-static checkout ref = %q, want the default GITHUB_SHA synthetic merge", ref)
+		}
+	}
+
+	if classifierIndex < 0 {
+		t.Error("preflight-static must have a static-scope classifier step")
+	} else {
+		if classifierIndex <= checkoutIndex {
+			t.Errorf("static-scope classifier step %d must follow checkout step %d", classifierIndex, checkoutIndex)
+		}
+		wantEnv := map[string]string{
+			"EVENT_NAME":  "${{ github.event_name }}",
+			"PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+		}
+		for name, want := range wantEnv {
+			if got := classifier.Env[name]; got != want {
+				t.Errorf("static-scope %s = %q, want %q", name, got, want)
+			}
+		}
+		for _, marker := range []string{"scripts/ci-static-scope", "GITHUB_OUTPUT", "scope"} {
+			if !strings.Contains(classifier.Run, marker) {
+				t.Errorf("static-scope classifier must contain %q", marker)
+			}
+		}
+		for _, unsafeBase := range []string{"origin/main", "github.base_ref", "pull_request.head.sha", "merge-base"} {
+			if strings.Contains(classifier.Run, unsafeBase) {
+				t.Errorf("static-scope classifier uses unsafe PR base %q instead of the exact base SHA", unsafeBase)
+			}
+		}
+	}
+
+	changedCondition := "steps.static-scope.outputs.scope == 'changed'"
+	fullCondition := "steps.static-scope.outputs.scope != 'changed'"
+	for _, step := range job.Steps {
+		run := strings.TrimSpace(step.Run)
+		if strings.Contains(run, "make vet") || strings.Contains(run, "go vet") {
+			if got := strings.TrimSpace(step.If); got != fullCondition {
+				t.Errorf("vet step %q condition = %q, want full scope so ordinary PRs do not duplicate full-repository vet", step.Name, step.If)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		run       string
+		condition string
+		changed   bool
+	}{
+		{run: "make lint-affected", condition: changedCondition, changed: true},
+		{run: "make fmt-check-changed", condition: changedCondition, changed: true},
+		{run: "make lint", condition: fullCondition},
+		{run: "make fmt-check", condition: fullCondition},
+		{run: "make vet", condition: fullCondition},
+	} {
+		if got := runCounts[tc.run]; got != 1 {
+			t.Errorf("preflight-static %q step count = %d, want exactly 1", tc.run, got)
+		}
+		entry, ok := stepsByRun[tc.run]
+		if !ok {
+			t.Errorf("preflight-static has no %q step", tc.run)
+			continue
+		}
+		if classifierIndex >= 0 && entry.index <= classifierIndex {
+			t.Errorf("%q step %d must follow static-scope classifier step %d", tc.run, entry.index, classifierIndex)
+		}
+		if got := strings.TrimSpace(entry.step.If); got != tc.condition {
+			t.Errorf("%q condition = %q, want %q", tc.run, entry.step.If, tc.condition)
+		}
+		if tc.changed {
+			if got := entry.step.Env["LINT_CHANGED_SCOPE"]; got != "tracked" {
+				t.Errorf("%q LINT_CHANGED_SCOPE = %q, want tracked", tc.run, got)
+			}
+			if got := entry.step.Env["LINT_CHANGED_REF"]; got != "${{ github.event.pull_request.base.sha }}" {
+				t.Errorf("%q LINT_CHANGED_REF = %q, want exact pull-request base SHA", tc.run, got)
+			}
+		}
+	}
+}
+
+func TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet(t *testing.T) {
+	path := filepath.Join(repoRoot(t), ".golangci.yml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var cfg struct {
+		Linters struct {
+			Enable  []string `yaml:"enable"`
+			Disable []string `yaml:"disable"`
+		} `yaml:"linters"`
+	}
+	if err := yaml.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if !slices.Contains(cfg.Linters.Enable, "govet") {
+		t.Fatalf(".golangci.yml linters.enable = %v, want explicit govet ownership for full static lint", cfg.Linters.Enable)
+	}
+	if slices.Contains(cfg.Linters.Disable, "govet") {
+		t.Fatalf(".golangci.yml disables govet for full static lint")
 	}
 }
 
