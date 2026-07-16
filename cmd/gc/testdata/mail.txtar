@@ -149,7 +149,7 @@ stderr 'usage:'
 stderr 'missing message ID'
 
 ! exec gc mail read gc-999
-stderr 'bead not found'
+stderr 'message not found'
 
 # --- Error: missing subcommand ---
 
