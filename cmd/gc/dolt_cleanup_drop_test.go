@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -615,28 +617,41 @@ func TestPSEnumerationTimeoutExceedsProcEnumerationTimeout(t *testing.T) {
 	}
 }
 
-// TestResolveCleanupDoltUserHonorsGCDoltUserEnv is a regression guard for
-// gascity#4123: the DROP stage's SQL client hardcoded "root" regardless of
-// the resolved external-Dolt credentials, so every DROP-stage query on an
-// external endpoint (authed as a non-root user like GC_DOLT_USER=superlzy)
-// failed with "Access denied for user 'root'" even though the same city's
-// `gc dolt sql` connections succeeded. The SCAN/list stage shares this same
-// client, so the failure surfaces on the very first ListDatabases call.
-func TestResolveCleanupDoltUserHonorsGCDoltUserEnv(t *testing.T) {
-	t.Setenv("GC_DOLT_USER", "superlzy")
-	got := resolveCleanupDoltUser(t.TempDir(), "127.0.0.1", 3306)
-	if got != "superlzy" {
-		t.Fatalf("resolveCleanupDoltUser() = %q, want %q", got, "superlzy")
+// TestOpenSQLCleanupDoltClientUsesResolvedAuth guards gascity#4123 at the
+// connection boundary: the DROP stage must pass the resolved external-Dolt
+// user to its SQL opener instead of hardcoding the managed-local root user.
+func TestOpenSQLCleanupDoltClientUsesResolvedAuth(t *testing.T) {
+	cityDir := t.TempDir()
+	var gotScope, gotFallback, gotResolveHost string
+	var gotResolvePort int
+	resolve := func(scopeRoot, fallbackUser, host string, port int) doltauth.Resolved {
+		gotScope = scopeRoot
+		gotFallback = fallbackUser
+		gotResolveHost = host
+		gotResolvePort = port
+		return doltauth.Resolved{User: "superlzy"}
 	}
-}
 
-// TestResolveCleanupDoltUserDefaultsToRootWhenUnset preserves today's
-// correct behavior for the managed-local Dolt server, which always
-// provisions a root user and has no GC_DOLT_USER override.
-func TestResolveCleanupDoltUserDefaultsToRootWhenUnset(t *testing.T) {
-	t.Setenv("GC_DOLT_USER", "")
-	got := resolveCleanupDoltUser(t.TempDir(), "127.0.0.1", 3306)
-	if got != "root" {
-		t.Fatalf("resolveCleanupDoltUser() = %q, want %q", got, "root")
+	var gotOpenHost, gotOpenPort, gotOpenUser string
+	stopAfterCapture := errors.New("stop after capturing SQL open")
+	open := func(host, port, user string) (*sql.DB, error) {
+		gotOpenHost = host
+		gotOpenPort = port
+		gotOpenUser = user
+		return nil, stopAfterCapture
+	}
+
+	client, err := openSQLCleanupDoltClient(cityDir, "127.0.0.1", "3306", resolve, open)
+	if !errors.Is(err, stopAfterCapture) {
+		t.Fatalf("openSQLCleanupDoltClient error = %v, want %v", err, stopAfterCapture)
+	}
+	if client != nil {
+		t.Fatalf("openSQLCleanupDoltClient client = %#v, want nil after open error", client)
+	}
+	if gotScope != cityDir || gotFallback != "root" || gotResolveHost != "127.0.0.1" || gotResolvePort != 3306 {
+		t.Fatalf("resolve args = (%q, %q, %q, %d), want (%q, root, 127.0.0.1, 3306)", gotScope, gotFallback, gotResolveHost, gotResolvePort, cityDir)
+	}
+	if gotOpenHost != "127.0.0.1" || gotOpenPort != "3306" || gotOpenUser != "superlzy" {
+		t.Fatalf("open args = (%q, %q, %q), want (127.0.0.1, 3306, superlzy)", gotOpenHost, gotOpenPort, gotOpenUser)
 	}
 }
