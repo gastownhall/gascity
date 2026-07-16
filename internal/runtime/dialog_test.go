@@ -56,6 +56,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "pi trust dialog",
+			content: "Trust project folder?\n/home/user/project\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.\n\n\u2192 Trust\n  Trust parent folder (/home/user)\n  Trust (this session only)\n  Do not trust\n  Do not trust (this session only)",
+			want:    true,
+		},
+		{
 			name:    "normal prompt text",
 			content: "> waiting for input",
 			want:    false,
@@ -112,6 +117,32 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 				return "Do you trust the files in this folder?\n● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust", nil
 			}
 			return "Type your message or @path/to/file", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsPiTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return "Trust project folder?\n/home/user/project\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.\n\n\u2192 Trust\n  Trust parent folder (/home/user)\n  Trust (this session only)\n  Do not trust\n  Do not trust (this session only)", nil
+			}
+			return "\u276f ", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -1362,6 +1393,38 @@ func TestContainsRateLimitDialog(t *testing.T) {
 	}
 }
 
+// spendLimitTokensScatteredScrollback simulates a pane that merely happens to
+// contain the spend-limit modal's three anchor tokens on unrelated, far-apart
+// scrollback lines (e.g. a session paging through these test fixtures). All
+// three tokens are present, but no small window of consecutive lines holds them
+// together, so this must NOT be classified as a rate-limit screen — otherwise a
+// crashed session viewing this content would be wrongly quarantined and its
+// crash masked.
+const spendLimitTokensScatteredScrollback = `$ less internal/runtime/dialog_test.go
+comment: the fixture mentions Usage credit balance in a doc comment here
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+comment: another fixture names Adjust monthly spend limit as a menu option
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+scrollback line unrelated to any modal
+comment: and a third names Wait for limit to reset as the confirm arm`
+
 func TestContainsProviderRateLimitScreen(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1373,6 +1436,9 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
+		{name: "claude spend limit modal", content: "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel", want: true},
+		{name: "spend limit words without reset option", content: "notes mention Adjust monthly spend limit and Usage credit balance while documenting billing", want: false},
+		{name: "spend limit tokens scattered across unrelated scrollback", content: spendLimitTokensScatteredScrollback, want: false},
 		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
 		{name: "generic lower-case mention", content: "rate limit exceeded", want: false},
 		{name: "normal output", content: "Hello world", want: false},

@@ -21,13 +21,21 @@ type Filter struct {
 	Since    time.Time // match events at or after this time
 	Until    time.Time // match events at or before this time
 	AfterSeq uint64    // match events with Seq > AfterSeq (0 = no filter)
-	Limit    int       // cap results at this count (0 or negative = unlimited)
+	// BeforeSeq matches events with Seq < BeforeSeq (0 = no filter). The
+	// keyset page boundary for descending event walks: the log is
+	// append-only and seq-ordered, so "strictly before this seq" is a
+	// stable resume point regardless of concurrent appends.
+	BeforeSeq uint64
+	Limit     int // cap results at this count (0 or negative = unlimited)
 }
 
 // matchesFilter reports whether e satisfies all non-zero predicates in f.
 // It does not enforce Limit — that is applied by the caller.
 func matchesFilter(e Event, f Filter) bool {
 	if f.AfterSeq > 0 && e.Seq <= f.AfterSeq {
+		return false
+	}
+	if f.BeforeSeq > 0 && e.Seq >= f.BeforeSeq {
 		return false
 	}
 	if f.Type != "" && e.Type != f.Type {
@@ -558,6 +566,16 @@ func ReadFrom(path string, offset int64) ([]Event, int64, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	return readEventsFrom(f, offset)
+}
+
+// readEventsFrom scans events from an already-open active log starting at offset,
+// returning the decoded events and the offset advanced past every complete line.
+// A trailing partial line (no newline) does not advance the offset, so a later
+// read re-reads it once the writer completes it. Reading from a caller-supplied
+// fd (rather than re-opening by path) lets a tailer pin the file identity across
+// a concurrent rotation.
+func readEventsFrom(f *os.File, offset int64) ([]Event, int64, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, offset, fmt.Errorf("seeking events: %w", err)
 	}

@@ -5729,7 +5729,7 @@ provider = "file"
 
 	fakeProvider := runtime.NewFake()
 	oldProvider := dispatchControlSessionProvider
-	dispatchControlSessionProvider = func() runtime.Provider { return fakeProvider }
+	dispatchControlSessionProvider = func() (runtime.Provider, error) { return fakeProvider, nil }
 	t.Cleanup(func() { dispatchControlSessionProvider = oldProvider })
 
 	var stdout bytes.Buffer

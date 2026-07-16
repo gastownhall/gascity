@@ -748,6 +748,9 @@ func runAgentScriptCommandInStore(stdout, stderr io.Writer, dir string, env []st
 	if env != nil {
 		cmd.Env = workQueryEnvForDir(env, dir)
 	}
+	if name == "gc" {
+		disableProductMetricsForChild(cmd)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

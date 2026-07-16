@@ -1,6 +1,9 @@
 package beads
 
 import (
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -325,5 +328,114 @@ func TestListQueryMatchesIgnoresUpdatedAtWhenUpdatedBeforeZero(t *testing.T) {
 
 	if !(ListQuery{}).Matches(bead) {
 		t.Fatal("Matches() = false, want true when UpdatedBefore is zero")
+	}
+}
+
+// TestConditionalWriterErrorIdentity pins the errors.As/Is identity of the four
+// ConditionalWriter error classes. The load-bearing case: exhaustion (the store
+// could not get a clean shot) must be distinguishable from a genuine precondition
+// failure (the caller lost the race) — the C6 self-win contract depends on it.
+func TestConditionalWriterErrorIdentity(t *testing.T) {
+	pfe := &PreconditionFailedError{ID: "gc-1", Expected: 4, Current: 7, Raw: `{"code":"precondition_failed"}`}
+	cas := &CASRetriesExhaustedError{ID: "gc-1", Key: "gc.exclusive_drain_reservation", Attempts: 4, LastRevision: 12}
+	gre := &GateRefusalError{ID: "gc-1", Verb: "close", Code: "close-authority", Raw: `{"code":"close-authority"}`}
+
+	var asPFE *PreconditionFailedError
+	if !errors.As(error(pfe), &asPFE) {
+		t.Fatal("errors.As did not match *PreconditionFailedError")
+	}
+	if asPFE.Expected != 4 || asPFE.Current != 7 {
+		t.Fatalf("Expected/Current = %d/%d, want 4/7", asPFE.Expected, asPFE.Current)
+	}
+	if s := pfe.Error(); !strings.Contains(s, "gc-1") || !strings.Contains(s, "4") || !strings.Contains(s, "7") {
+		t.Fatalf("PreconditionFailedError.Error() = %q, want ID+Expected+Current", s)
+	}
+
+	// Exhaustion is a DISTINCT type from precondition-failed, both directions.
+	var pfeFromCAS *PreconditionFailedError
+	if errors.As(error(cas), &pfeFromCAS) {
+		t.Fatal("CASRetriesExhaustedError must NOT match *PreconditionFailedError")
+	}
+	var casFromPFE *CASRetriesExhaustedError
+	if errors.As(error(pfe), &casFromPFE) {
+		t.Fatal("PreconditionFailedError must NOT match *CASRetriesExhaustedError")
+	}
+	var asCAS *CASRetriesExhaustedError
+	if !errors.As(error(cas), &asCAS) {
+		t.Fatal("errors.As did not match *CASRetriesExhaustedError")
+	}
+
+	// Gate refusal is distinct and is NOT the unsupported sentinel (a policy
+	// refusal must never latch the store incapable).
+	var asGRE *GateRefusalError
+	if !errors.As(error(gre), &asGRE) {
+		t.Fatal("errors.As did not match *GateRefusalError")
+	}
+	if errors.Is(error(gre), ErrConditionalWriteUnsupported) {
+		t.Fatal("GateRefusalError must not be ErrConditionalWriteUnsupported")
+	}
+
+	// The unsupported sentinel matches itself and no structured class.
+	if !errors.Is(ErrConditionalWriteUnsupported, ErrConditionalWriteUnsupported) {
+		t.Fatal("ErrConditionalWriteUnsupported must match itself")
+	}
+	var pfeFromSentinel *PreconditionFailedError
+	if errors.As(ErrConditionalWriteUnsupported, &pfeFromSentinel) {
+		t.Fatal("ErrConditionalWriteUnsupported must not match *PreconditionFailedError")
+	}
+
+	// IsX helpers mirror the IsPartialResult convention (bdstore.go).
+	if !IsConditionalWriteUnsupported(ErrConditionalWriteUnsupported) {
+		t.Fatal("IsConditionalWriteUnsupported(sentinel) = false")
+	}
+	if !IsPreconditionFailed(error(pfe)) || IsPreconditionFailed(error(cas)) {
+		t.Fatal("IsPreconditionFailed misclassified")
+	}
+	if !IsCASRetriesExhausted(error(cas)) || IsCASRetriesExhausted(error(pfe)) {
+		t.Fatal("IsCASRetriesExhausted misclassified")
+	}
+	if !IsGateRefusal(error(gre)) || IsGateRefusal(error(pfe)) {
+		t.Fatal("IsGateRefusal misclassified")
+	}
+}
+
+// TestBeadRevisionWireInvisible proves the store-internal Revision field stays
+// off every JSON wire path (json:"-"), so TestOpenAPISpecInSync and the bd
+// decode corpus are byte-untouched until the S4 wire promotion flips the tag.
+func TestBeadRevisionWireInvisible(t *testing.T) {
+	data, err := json.Marshal(Bead{ID: "gc-1", Revision: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "revision") {
+		t.Fatalf("Bead JSON leaked the revision field: %s", data)
+	}
+	var b Bead
+	if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":42}`), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Revision != 0 {
+		t.Fatalf("Bead.Revision decoded from wire = %d, want 0 (field is json:%q)", b.Revision, "-")
+	}
+}
+
+// TestBdIssueDecodesRevision proves the store-internal revision is carried by the
+// bd decode envelope (bdIssue) and stamped onto Bead by toBead — the population
+// path that survives Bead's json:"-" wire tag. Pre-#4682 bd omits the key → 0.
+func TestBdIssueDecodesRevision(t *testing.T) {
+	var present bdIssue
+	if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":7}`), &present); err != nil {
+		t.Fatal(err)
+	}
+	if got := present.toBead().Revision; got != 7 {
+		t.Fatalf("toBead().Revision (present) = %d, want 7", got)
+	}
+
+	var absent bdIssue
+	if err := json.Unmarshal([]byte(`{"id":"gc-1"}`), &absent); err != nil {
+		t.Fatal(err)
+	}
+	if got := absent.toBead().Revision; got != 0 {
+		t.Fatalf("toBead().Revision (absent) = %d, want 0", got)
 	}
 }

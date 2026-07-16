@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -26,6 +27,13 @@ func (s *recordingPolicyReadStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 	}
 	s.readyQueries = append(s.readyQueries, q)
 	return s.MemStore.Ready(q)
+}
+
+func (s *recordingPolicyReadStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.Ready(query...)
 }
 
 func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
@@ -269,5 +277,21 @@ func TestBeadPolicyStoreHandleReadsArePolicyAware(t *testing.T) {
 				t.Fatalf("handle Ready TierMode = %v, want TierBoth", backing.readyQueries[0].TierMode)
 			}
 		})
+	}
+}
+
+func TestBeadPolicyStoreContextReadyIsPolicyAware(t *testing.T) {
+	backing := &recordingPolicyReadStore{MemStore: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	reader, ok := store.(beads.ContextReadyReader)
+	if !ok {
+		t.Fatalf("policy store type %T does not preserve ContextReadyReader", store)
+	}
+
+	if _, err := reader.ReadyContext(context.Background()); err != nil {
+		t.Fatalf("ReadyContext: %v", err)
+	}
+	if len(backing.readyQueries) != 1 || backing.readyQueries[0].TierMode != beads.TierBoth {
+		t.Fatalf("ReadyContext queries = %#v, want one TierBoth query", backing.readyQueries)
 	}
 }

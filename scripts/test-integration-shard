@@ -105,6 +105,7 @@ rest_smoke_tests=(
 # integration tag. Keep this manifest exact: validate_cmd_gc_integration_tests
 # compares it with Go's tagged and untagged discovery before executing it.
 cmd_gc_integration_tests=(
+  TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof

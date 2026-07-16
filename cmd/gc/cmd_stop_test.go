@@ -192,8 +192,8 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 	oldHook := stopBodyLifecycleHook
 	var bodyDone <-chan struct{}
 	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
-		return sp
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return sp, nil
 	}
 	t.Cleanup(func() {
 		sp.release()
@@ -421,9 +421,9 @@ func TestCmdStopExplicitRegisteredRigPathUsesSharedResolver(t *testing.T) {
 	oldFactory := sessionProviderForStopCity
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 	var gotCityPath string
-	sessionProviderForStopCity = func(_ *config.City, cityPath string) runtime.Provider {
+	sessionProviderForStopCity = func(_ *config.City, cityPath string) (runtime.Provider, error) {
 		gotCityPath = cityPath
-		return runtime.NewFake()
+		return runtime.NewFake(), nil
 	}
 
 	var stdout, stderr lockedBuffer
@@ -487,9 +487,9 @@ func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *test
 			oldFactory := sessionProviderForStopCity
 			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 			var gotCityPath string
-			sessionProviderForStopCity = func(_ *config.City, cityPath string) runtime.Provider {
+			sessionProviderForStopCity = func(_ *config.City, cityPath string) (runtime.Provider, error) {
 				gotCityPath = cityPath
-				return runtime.NewFake()
+				return runtime.NewFake(), nil
 			}
 
 			var stdout, stderr lockedBuffer
@@ -973,13 +973,13 @@ func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 
 	var gotPath, gotName, gotProvider string
-	sessionProviderForStopCity = func(cfg *config.City, cityPath string) runtime.Provider {
+	sessionProviderForStopCity = func(cfg *config.City, cityPath string) (runtime.Provider, error) {
 		gotPath = cityPath
 		if cfg != nil {
 			gotName = cfg.Workspace.Name
 			gotProvider = cfg.Session.Provider
 		}
-		return runtime.NewFake()
+		return runtime.NewFake(), nil
 	}
 
 	var stdout, stderr lockedBuffer

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
@@ -122,6 +124,10 @@ func TestDeriveRunStatus(t *testing.T) {
 		// F2 regression: a failed run whose lane phase is NOT complete (a lingering
 		// open source bead) must still report failed because the root is closed.
 		{"closed-fail-phase-active", "active", closedRoot("fail"), true, 5, RunStatusFailed},
+		// Cancel: a terminal canceled outcome is a distinct terminal status.
+		{"closed-canceled", "complete", closedRoot("canceled"), true, 3, RunStatusCanceled},
+		// Cancel: an open root carrying the intent marker reports canceling.
+		{"open-cancel-requested", "active", beads.Bead{Status: "open", Metadata: map[string]string{"gc.cancel_requested": "true"}}, true, 2, RunStatusCanceling},
 		// Defensive: a dangling root (filtered upstream in practice) is non-terminal.
 		{"root-missing", "complete", beads.Bead{}, false, 0, RunStatusPending},
 	}
@@ -155,6 +161,7 @@ func TestDeriveRunStepStatus(t *testing.T) {
 		{"closed-pass", step("closed", "pass"), RunStepStatusCompleted},
 		{"closed-fail", step("closed", "fail"), RunStepStatusFailed},
 		{"closed-skipped", step("closed", "skipped"), RunStepStatusSkipped},
+		{"closed-canceled", step("closed", "canceled"), RunStepStatusCanceled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,6 +202,222 @@ func TestRunsListEndpoint(t *testing.T) {
 	}
 	if run.StartedAt == "" {
 		t.Errorf("started_at empty, want RFC3339 timestamp")
+	}
+	if out.Body.StatusCounts.Active != 1 {
+		t.Errorf("status_counts.active = %d, want 1", out.Body.StatusCounts.Active)
+	}
+}
+
+type fakeRunCensusSource struct {
+	value runproj.CanonicalRunCensus
+	ok    bool
+}
+
+func (f fakeRunCensusSource) RunCensus(context.Context, string) (runproj.CanonicalRunCensus, bool) {
+	return f.value, f.ok
+}
+
+func TestRunsCensusEndpointUsesWarmProjectionWithoutRows(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:        true,
+			StatusCounts: runproj.CanonicalRunStatusCounts{Active: 2, Waiting: 1},
+		},
+	}
+
+	out, err := s.humaHandleRunsCensus(context.Background(), &RunsCensusInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunsCensus error: %v", err)
+	}
+	want := RunStatusCounts{Active: 2, Waiting: 1}
+	if out.Body.StatusCounts != want {
+		t.Fatalf("status_counts = %+v, want %+v", out.Body.StatusCounts, want)
+	}
+	if out.Body.Partial || len(out.Body.PartialErrors) != 0 {
+		t.Fatalf("complete census reported partial: %+v", out.Body)
+	}
+}
+
+func TestRunsCensusEndpointReportsWarmingWithoutInternalDetails(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Partial:        true,
+			PartialReasons: []string{"read /private/path/events.jsonl: permission denied"},
+		},
+	}
+
+	_, err := s.humaHandleRunsCensus(context.Background(), &RunsCensusInput{
+		CityScope: CityScope{CityName: "test-city"},
+	})
+	if err == nil {
+		t.Fatal("humaHandleRunsCensus error = nil, want warming 503")
+	}
+	var statusErr huma.StatusError
+	if !errors.As(err, &statusErr) || statusErr.GetStatus() != http.StatusServiceUnavailable {
+		t.Fatalf("error = %T %v, want Huma 503", err, err)
+	}
+	if strings.Contains(err.Error(), "/private/path") || strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("warming error leaked internal detail: %v", err)
+	}
+}
+
+func TestRunsCensusWireContainsOnlyCountsAndPartialProvenance(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:        true,
+			StatusCounts: runproj.CanonicalRunStatusCounts{Pending: 1, Active: 2},
+		},
+	}
+	h := newTestCityHandlerWith(t, s.state, s)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(s.state, "/runs/census"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &fields); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(fields) != 1 || fields["status_counts"] == nil {
+		t.Fatalf("response keys = %v, want only status_counts", fields)
+	}
+	for _, forbidden := range []string{"runs", "title", "target", "scope", "last_error", "assignee"} {
+		if strings.Contains(rec.Body.String(), `"`+forbidden+`"`) {
+			t.Fatalf("census response contains forbidden field %q: %s", forbidden, rec.Body.String())
+		}
+	}
+}
+
+func TestRunsCensusWireReturnsSanitized503WhileWarming(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Partial:        true,
+			PartialReasons: []string{"read /private/path/events.jsonl: permission denied"},
+		},
+	}
+	h := newTestCityHandlerWith(t, s.state, s)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(s.state, "/runs/census"), nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/private/path") || strings.Contains(rec.Body.String(), "permission denied") {
+		t.Fatalf("warming response leaked internal detail: %s", rec.Body.String())
+	}
+}
+
+func TestRunsCensusWireSanitizesReadyPartialReasons(t *testing.T) {
+	s := newRunServer(t)
+	s.runCensusSource = fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:          true,
+			Partial:        true,
+			PartialReasons: []string{"read /private/path/events.jsonl: permission denied"},
+		},
+	}
+	h := newTestCityHandlerWith(t, s.state, s)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(s.state, "/runs/census"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/private/path") || strings.Contains(rec.Body.String(), "permission denied") {
+		t.Fatalf("partial response leaked internal detail: %s", rec.Body.String())
+	}
+	var body RunsCensusOutput
+	if err := json.Unmarshal(rec.Body.Bytes(), &body.Body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Body.Partial || len(body.Body.PartialErrors) != 1 || body.Body.PartialErrors[0] != "run projection is incomplete" {
+		t.Fatalf("partial response = %+v, want one sanitized incomplete reason", body.Body)
+	}
+}
+
+func TestSupervisorMuxThreadsRunCensusSourceIntoLazyCityServer(t *testing.T) {
+	state := newFakeState(t)
+	mux := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
+	mux.WithRunCensusSource(fakeRunCensusSource{
+		ok: true,
+		value: runproj.CanonicalRunCensus{
+			Ready:        true,
+			StatusCounts: runproj.CanonicalRunStatusCounts{Waiting: 3},
+		},
+	})
+	h := wrapTestSupervisorMiddleware(mux)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/runs/census"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body RunsCensusOutput
+	if err := json.Unmarshal(rec.Body.Bytes(), &body.Body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Body.StatusCounts.Waiting != 3 {
+		t.Fatalf("status_counts = %+v, want waiting=3", body.Body.StatusCounts)
+	}
+}
+
+func TestRunsListStatusCountsAreNotTruncatedByLimit(t *testing.T) {
+	completed := runRootBead("run-complete", "mol-adopt-pr-v2", "closed")
+	completed.Metadata["gc.outcome"] = "pass"
+	s := newRunServer(t,
+		beadCreatedEvent(1, runRootBead("run-active", "mol-adopt-pr-v2", "open")),
+		beadCreatedEvent(2, runChildBead("run-active.step", "run-active", "in_progress", nil)),
+		beadCreatedEvent(3, completed),
+	)
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Body.Runs) != 1 {
+		t.Fatalf("len(runs) = %d, want limit 1", len(out.Body.Runs))
+	}
+	if out.Body.StatusCounts.Active != 1 || out.Body.StatusCounts.Completed != 1 {
+		t.Fatalf("status_counts = %+v, want active=1 completed=1", out.Body.StatusCounts)
+	}
+	if !out.Body.Partial {
+		t.Fatal("Partial = false, want true when the row list is limited")
+	}
+}
+
+func TestRunsListStatusCountsIncludeHistoryBeyondTheLaneCap(t *testing.T) {
+	const completedRuns = 55
+	events := make([]events.Event, 0, completedRuns)
+	for i := range completedRuns {
+		root := runRootBead(runFixtureID(i), "mol-adopt-pr-v2", "closed")
+		root.Metadata["gc.outcome"] = "pass"
+		events = append(events, beadCreatedEvent(uint64(i+1), root))
+	}
+	s := newRunServer(t, events...)
+
+	out, err := s.humaHandleRunsList(context.Background(), &RunsListInput{
+		CityScope: CityScope{CityName: "test-city"},
+		Limit:     maxRunsListLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Body.StatusCounts.Completed != completedRuns {
+		t.Fatalf("status_counts.completed = %d, want %d", out.Body.StatusCounts.Completed, completedRuns)
+	}
+	if len(out.Body.Runs) != 50 || !out.Body.Partial {
+		t.Fatalf("rows/partial = %d/%v, want capped 50/true", len(out.Body.Runs), out.Body.Partial)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -19,6 +21,15 @@ import (
 // constructors returned by its registry factory.
 type RuntimeRegistration struct {
 	Key          string
+	Constructors []SymbolRef
+}
+
+const runtimeDoubleBoundaryFile = "fake.go"
+
+// ReusableDouble is one exported provider-double type from the designated type
+// boundary and the package-level constructors that return it.
+type ReusableDouble struct {
+	Type         SymbolRef
 	Constructors []SymbolRef
 }
 
@@ -53,6 +64,242 @@ func newBindingInfo(fset *token.FileSet, file *ast.File) *bindingInfo {
 
 type emptyPackageImporter struct {
 	packages map[string]*types.Package
+}
+
+type standardOrEmptyImporter struct {
+	standard types.Importer
+	empty    *emptyPackageImporter
+}
+
+func (i *standardOrEmptyImporter) Import(importPath string) (*types.Package, error) {
+	// Runtime's module-local imports are currently body-only. Empty packages
+	// keep those ignored bodies hermetic; any selector used by a declaration
+	// remains unresolved and makes the guard fail closed below.
+	if strings.HasPrefix(importPath, moduleImportPath+"/") {
+		return i.empty.Import(importPath)
+	}
+	return i.standard.Import(importPath)
+}
+
+// DiscoverRuntimeProviderDoubles discovers every exported concrete type in
+// internal/runtime/fake.go that implements runtime.Provider. It scans all
+// buildable non-test files in that package for exported receiverless
+// constructors whose first result implements Provider as an exact discovered
+// type or pointer to one.
+func DiscoverRuntimeProviderDoubles(runtimeDir string) ([]ReusableDouble, error) {
+	entries, err := os.ReadDir(runtimeDir)
+	if err != nil {
+		return nil, fmt.Errorf("read runtime package %q: %w", runtimeDir, err)
+	}
+
+	fset := token.NewFileSet()
+	var files []*ast.File
+	var boundary *ast.File
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		matches, err := build.Default.MatchFile(runtimeDir, name)
+		if err != nil {
+			return nil, fmt.Errorf("match runtime package file %q: %w", name, err)
+		}
+		if !matches {
+			continue
+		}
+		path := filepath.Join(runtimeDir, name)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read runtime package file %q: %w", name, err)
+		}
+		file, err := parser.ParseFile(fset, path, source, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, fmt.Errorf("parse runtime package file %q: %w", name, err)
+		}
+		if file.Name.Name != "runtime" {
+			if name == runtimeDoubleBoundaryFile {
+				return nil, fmt.Errorf("%s must declare package runtime", runtimeDoubleBoundaryFile)
+			}
+			return nil, fmt.Errorf("runtime package file %s must declare package runtime", name)
+		}
+		if name == runtimeDoubleBoundaryFile {
+			boundary = file
+		}
+		files = append(files, file)
+	}
+	if boundary == nil {
+		return nil, fmt.Errorf("designated runtime double boundary %s is missing", runtimeDoubleBoundaryFile)
+	}
+
+	info := types.Info{Defs: make(map[*ast.Ident]types.Object)}
+	var typeProblems []string
+	config := types.Config{
+		Importer: &standardOrEmptyImporter{
+			standard: importer.Default(),
+			empty:    &emptyPackageImporter{packages: make(map[string]*types.Package)},
+		},
+		DisableUnusedImportCheck: true,
+		IgnoreFuncBodies:         true,
+		Error: func(err error) {
+			typeProblems = append(typeProblems, err.Error())
+		},
+	}
+	pkg, _ := config.Check(moduleImportPath+"/internal/runtime", fset, files, &info)
+	if len(typeProblems) > 0 {
+		sort.Strings(typeProblems)
+		return nil, fmt.Errorf("type-check runtime double boundary: %s", strings.Join(typeProblems, "; "))
+	}
+	if pkg == nil {
+		return nil, errors.New("type-check runtime double boundary returned no package")
+	}
+	providerName, ok := pkg.Scope().Lookup("Provider").(*types.TypeName)
+	if !ok || providerName.IsAlias() {
+		return nil, errors.New("runtime.Provider must be exactly one declared interface")
+	}
+	providerNamed, ok := providerName.Type().(*types.Named)
+	if !ok {
+		return nil, errors.New("runtime.Provider must be exactly one declared interface")
+	}
+	provider, ok := providerNamed.Underlying().(*types.Interface)
+	if !ok {
+		return nil, errors.New("runtime.Provider must be exactly one declared interface")
+	}
+	provider.Complete()
+
+	var doubles []ReusableDouble
+	trackedTypes := make(map[*types.TypeName]bool)
+	for _, decl := range boundary.Decls {
+		declaration, ok := decl.(*ast.GenDecl)
+		if !ok || declaration.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range declaration.Specs {
+			typeSpec := spec.(*ast.TypeSpec)
+			if !typeSpec.Name.IsExported() || typeSpec.Assign.IsValid() {
+				continue
+			}
+			typeName, ok := info.Defs[typeSpec.Name].(*types.TypeName)
+			if !ok {
+				return nil, fmt.Errorf("resolve exported type %s in %s", typeSpec.Name.Name, runtimeDoubleBoundaryFile)
+			}
+			named, ok := typeName.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			if named.TypeParams() != nil && named.TypeParams().Len() > 0 {
+				return nil, fmt.Errorf("generic exported type %s in %s cannot be classified as a reusable provider double", typeName.Name(), runtimeDoubleBoundaryFile)
+			}
+			if _, isInterface := named.Underlying().(*types.Interface); isInterface {
+				continue
+			}
+			if !types.Implements(named, provider) && !types.Implements(types.NewPointer(named), provider) {
+				continue
+			}
+
+			constructors := runtimeDoubleConstructors(files, info, named, provider)
+			typeRef := repoSymbol("internal/runtime", typeName.Name())
+			if len(constructors) == 0 {
+				return nil, fmt.Errorf("runtime provider double %s has no exported receiverless constructor", renderSymbolRef(typeRef))
+			}
+			doubles = append(doubles, ReusableDouble{Type: typeRef, Constructors: constructors})
+			trackedTypes[named.Obj()] = true
+		}
+	}
+	for _, decl := range boundary.Decls {
+		declaration, ok := decl.(*ast.GenDecl)
+		if !ok || declaration.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range declaration.Specs {
+			typeSpec := spec.(*ast.TypeSpec)
+			if !typeSpec.Name.IsExported() || !typeSpec.Assign.IsValid() {
+				continue
+			}
+			typeName, ok := info.Defs[typeSpec.Name].(*types.TypeName)
+			if !ok {
+				return nil, fmt.Errorf("resolve exported alias %s in %s", typeSpec.Name.Name, runtimeDoubleBoundaryFile)
+			}
+			canonical, isProvider := runtimeProviderAliasTarget(typeName.Type(), provider)
+			if !isProvider {
+				continue
+			}
+			if canonical == nil || !trackedTypes[canonical.Obj()] {
+				return nil, fmt.Errorf("exported provider alias %s in %s resolves to an untracked concrete type", typeName.Name(), runtimeDoubleBoundaryFile)
+			}
+		}
+	}
+	if len(doubles) == 0 {
+		return nil, fmt.Errorf("%s declares no exported runtime.Provider double", runtimeDoubleBoundaryFile)
+	}
+	sort.Slice(doubles, func(i, j int) bool { return symbolRefLess(doubles[i].Type, doubles[j].Type) })
+	return doubles, nil
+}
+
+func runtimeDoubleConstructors(files []*ast.File, info types.Info, doubleType *types.Named, provider *types.Interface) []SymbolRef {
+	var constructors []SymbolRef
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Recv != nil || !function.Name.IsExported() {
+				continue
+			}
+			object, ok := info.Defs[function.Name].(*types.Func)
+			if !ok {
+				continue
+			}
+			signature, ok := object.Type().(*types.Signature)
+			if !ok || signature.Results().Len() == 0 {
+				continue
+			}
+			named, ok := runtimeProviderConstructorType(signature.Results().At(0).Type(), provider)
+			if !ok || named.Obj() != doubleType.Obj() {
+				continue
+			}
+			constructors = append(constructors, repoSymbol("internal/runtime", function.Name.Name))
+		}
+	}
+	return normalizeSymbolRefs(constructors)
+}
+
+func runtimeProviderAliasTarget(alias types.Type, provider *types.Interface) (*types.Named, bool) {
+	target := types.Unalias(alias)
+	if _, isInterface := target.Underlying().(*types.Interface); isInterface {
+		return nil, false
+	}
+	implements := types.Implements(target, provider)
+	if !implements {
+		if _, isPointer := target.(*types.Pointer); !isPointer {
+			implements = types.Implements(types.NewPointer(target), provider)
+		}
+	}
+	if !implements {
+		return nil, false
+	}
+	switch target := target.(type) {
+	case *types.Named:
+		return target, true
+	case *types.Pointer:
+		named, _ := types.Unalias(target.Elem()).(*types.Named)
+		return named, true
+	default:
+		return nil, true
+	}
+}
+
+func runtimeProviderConstructorType(result types.Type, provider *types.Interface) (*types.Named, bool) {
+	result = types.Unalias(result)
+	if !types.Implements(result, provider) {
+		return nil, false
+	}
+	switch result := result.(type) {
+	case *types.Named:
+		return result, true
+	case *types.Pointer:
+		named, ok := types.Unalias(result.Elem()).(*types.Named)
+		return named, ok
+	default:
+		return nil, false
+	}
 }
 
 func (i *emptyPackageImporter) Import(importPath string) (*types.Package, error) {
@@ -543,6 +790,89 @@ func CompareRuntimeCatalog(entries []Entry, discovered []RuntimeRegistration) er
 		}
 	}
 	sort.Strings(problems)
+	return joinProblems(problems)
+}
+
+// CompareReusableDoubles checks discovered reusable-double constructors and
+// their concrete types against reusable-double ledger ownership in both
+// directions.
+func CompareReusableDoubles(entries []Entry, discovered []ReusableDouble) error {
+	type owner struct {
+		entryID    string
+		doubleType SymbolRef
+	}
+
+	ledger := make(map[SymbolRef][]owner)
+	var problems []string
+	for _, entry := range entries {
+		if !hasRole(entry.Roles, RoleReusableDouble) {
+			continue
+		}
+		if entry.DoubleType == nil {
+			problems = append(problems, fmt.Sprintf("entry %q reusable_double role requires a double type", entry.ID))
+			continue
+		}
+		if entry.DoubleBoundary != runtimeDoubleBoundaryPath {
+			problems = append(problems, fmt.Sprintf("entry %q reusable double boundary is %q, want %q", entry.ID, entry.DoubleBoundary, runtimeDoubleBoundaryPath))
+			continue
+		}
+		for _, constructor := range entry.Constructors {
+			ledger[constructor] = append(ledger[constructor], owner{entryID: entry.ID, doubleType: *entry.DoubleType})
+		}
+	}
+
+	production := make(map[SymbolRef][]SymbolRef)
+	seenTypes := make(map[SymbolRef]bool)
+	for _, double := range discovered {
+		if seenTypes[double.Type] {
+			problems = append(problems, fmt.Sprintf("runtime provider double %s is discovered more than once", renderSymbolRef(double.Type)))
+		}
+		seenTypes[double.Type] = true
+		if len(double.Constructors) == 0 {
+			problems = append(problems, fmt.Sprintf("runtime provider double %s has no exported receiverless constructor", renderSymbolRef(double.Type)))
+		}
+		seenConstructors := make(map[SymbolRef]bool)
+		for _, constructor := range double.Constructors {
+			if seenConstructors[constructor] {
+				problems = append(problems, fmt.Sprintf("runtime provider double %s repeats constructor %s", renderSymbolRef(double.Type), renderSymbolRef(constructor)))
+			}
+			seenConstructors[constructor] = true
+			production[constructor] = append(production[constructor], double.Type)
+		}
+	}
+
+	for constructor, doubleTypes := range production {
+		if len(doubleTypes) > 1 {
+			problems = append(problems, fmt.Sprintf("reusable double %s constructs multiple declared types: %s", renderSymbolRef(constructor), renderSymbolRefs(doubleTypes)))
+			continue
+		}
+		owners := ledger[constructor]
+		sort.Slice(owners, func(i, j int) bool { return owners[i].entryID < owners[j].entryID })
+		switch len(owners) {
+		case 0:
+			problems = append(problems, fmt.Sprintf("reusable double %s is missing from the ledger", renderSymbolRef(constructor)))
+		case 1:
+			if owners[0].doubleType != doubleTypes[0] {
+				problems = append(problems, fmt.Sprintf(
+					"reusable double %s constructs %s, ledger declares %s",
+					renderSymbolRef(constructor),
+					renderSymbolRef(doubleTypes[0]),
+					renderSymbolRef(owners[0].doubleType),
+				))
+			}
+		default:
+			ids := make([]string, len(owners))
+			for i, owner := range owners {
+				ids[i] = strconv.Quote(owner.entryID)
+			}
+			problems = append(problems, fmt.Sprintf("reusable double %s is owned by multiple ledger entries: %s", renderSymbolRef(constructor), strings.Join(ids, ", ")))
+		}
+	}
+	for constructor := range ledger {
+		if _, ok := production[constructor]; !ok {
+			problems = append(problems, fmt.Sprintf("ledger reusable double %s is not discovered for type boundary %s", renderSymbolRef(constructor), runtimeDoubleBoundaryPath))
+		}
+	}
 	return joinProblems(problems)
 }
 

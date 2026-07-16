@@ -2,33 +2,105 @@
 
 ## Checked source-level resource ratchets
 
-`test/test-resources.toml` is the P0.4a source call-site ratchet. It scans
-tracked `*_test.go` files through parsed Go syntax and import identity, freezes
-four subprocess and fixed-sleep call/file totals, rejects growth, and requires
-a baseline reduction whenever source debt falls. The Go-owned
-`bootstrapPolicy` pins every row's ceiling, historical totals, owner,
-invariant, resource owner, migration, and expiry. Ordinary source growth fails
-against that ceiling, and TOML-only normalization or metadata edits fail
-against the policy before the live census is compared.
+`test/test-resources.toml` is the checked P0.4 resource ledger. It scans tracked
+Go source through parsed syntax and import identity, while only `*_test.go`
+files contribute resource occurrences. The raw audit and source-debt rows
+freeze process, sleep, environment, CWD, slow-process, HTTP test-server, and
+package-level `net.Listen`, `net.ListenConfig.Listen`, `net.ListenUnixgram`,
+and direct `syscall.Listen` call/file totals.
+Exact Medium rows name a repository-relative directory, package clause,
+top-level runnable owner, and resource list. Small-debt rows apply those exact
+owners without weakening the raw anti-growth ratchets.
+
+The Go-owned `bootstrapPolicy` pins every row's ceiling, historical totals,
+owner, invariant, resource owner, migration, and expiry. Ordinary source
+growth fails against that ceiling, and TOML-only normalization, relabeling, or
+metadata edits fail against the policy before the live census is compared.
 
 Changing `bootstrapPolicy` together with the TOML and generated table is an
 explicit policy change that requires the same staged-diff council review as
 other test-infrastructure changes. The guard makes ordinary drift visible; it
 does not claim that self-modifying source can be cryptographically forbidden.
 
-This bootstrap does **not** classify a test as Small, Medium, or Large, infer
-runtime ownership through helper calls, or claim to be a complete inventory of
-test resources. The next source-resource scope is owned by `ga-80po0c.2.3`.
-E1 separately owns Large journey and provider entries.
+`[[reviewed_hermetic_body]]` rows record a narrower fact than a Small-test
+classification: the exact untagged top-level test body and every statically
+resolved receiverless helper in the same package contain none of the resource
+identities cataloged below. A row is exact, code-owned, and stale-checked; it
+cannot use a wildcard, silently move to another test, or claim an effective
+Small size while package setup remains Medium. The checked call graph follows
+direct helper calls and references used as local function aliases across Go
+files in the same package, and terminates safely on cycles.
+
+This is intentionally not a universal hermeticity proof. Cross-package calls,
+method and interface dispatch, package-level callback indirection, and
+resources absent from the catalog remain manual-review boundaries. In
+particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` and
+`TestDoSessionWake_PokesManagedControllerAfterStateChange` have reviewed
+hermetic bodies but still run as Medium because `cmd/gc` owns a process-mutating
+`TestMain`. `TestDoSessionWait_RegistersReadyWaitForRigDependency` has the same
+reviewed-hermetic guarantee for the wait-registration use case.
+`TestCmdSessionWait_AllowsRigDependencyBeads` remains the singular
+CLI/config/file-store split-store composition proof for wait, while
+`TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind` owns the real
+managed-provider hard-kill/port-rebind boundary. Likewise,
+`TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart` remains the
+singular CLI/config/file-store/controller-socket composition proof for wake.
+`TestDoMailInbox_RendersMessagesFromReader` owns inbox rendering through the
+consumer's one-method reader port, while
+`TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox` remains the singular
+CLI/mail/`exec:gc-beads-bd` managed-city composition proof. Managed-provider
+recovery stays with the exact provider-store owner instead of being repeated by
+each command consumer. Body review is not a reason to remove a retained
+boundary test.
+
+The canonical identity is package directory plus package clause plus top-level
+`Test`, `Benchmark`, `Fuzz`, or `TestMain` name. Nested function literals and
+subtests retain that top-level lexical owner. Methods, wrong signatures, and
+helper functions are not runnable owners; resources lexically inside helpers
+remain Small debt even when a Medium test calls the helper. Likewise, a
+`TestMain` row classifies inherited package setup but exempts only matching
+calls inside `TestMain`, never sibling tests.
+
+This bootstrap does **not** infer resources recursively through arbitrary
+helper calls or claim a complete shared-resource inventory. P0.4c currently
+covers the three `net/http/httptest` constructors that open loopback servers
+and the exact package-level `net.Listen` and `net.ListenUnixgram` constructors,
+`net.ListenConfig.Listen` on lexically identified receivers, and direct
+`syscall.Listen`. Direct `syscall.Socket`/`Bind` setup calls, typed and
+packet-specific `net` constructors, helper-backed listeners whose constructors
+live outside test source, tmux, Dolt, and other shared-host resources remain
+explicit follow-up catalogs. A Medium resource may describe a helper-backed
+runtime cost, but only syntax-owned calls in that exact runnable declaration
+leave Small-debt accounting. The `ListenConfig` matcher uses lexical Go types
+to follow same-file values, pointers, parameters, aliases, and typed factory
+results rooted in the imported `net.ListenConfig` type; it does not load
+cross-file package bodies or host toolchain export data.
+`ga-80po0c.2.2` owns the listener, tmux, Dolt, and shared-host catalogs. E1
+separately owns Large journey and provider entries.
 
 The scanner recognizes direct calls to `os/exec.Command{,Context}` and
-`time.Sleep`, including import aliases and parenthesized call expressions.
-Import matches use lexical object identity, so local shadows do not count.
-Targeted dot imports of `os/exec` or `time` are rejected with file and import
-context because their calls cannot be attributed safely; blank imports remain
-harmless. Explicit constraints follow Go's leading-header rules: a pre-package
-`//go:build` line is effective, while a legacy `// +build` line must live in a
-leading `//` comment block separated from the package clause by a blank line.
+`time.Sleep`; package-level `net.Listen` and `net.ListenUnixgram`;
+`net.ListenConfig.Listen` on identified receivers; direct `syscall.Listen`;
+`net/http/httptest.NewServer`,
+`NewTLSServer`, and `NewUnstartedServer`; `os.Setenv`, `os.Unsetenv`,
+`os.Clearenv`, and `os.Chdir`; and
+`Setenv` or `Chdir` on function parameters typed exactly as `*testing.T` or
+`testing.TB`. It also recognizes the receiverless
+`skipSlowCmdGCTest(*testing.T, string)` definition and its same-package calls.
+An unresolved cross-file call counts only when that directory and package own
+the canonical helper. Import, parameter, and same-file helper matches use
+lexical object identity; top-level sibling declarations are indexed by
+directory and package so cross-file shadows do not masquerade as resources.
+Local shadows and wrong signatures do not count. Parenthesized call
+expressions retain the same ownership.
+
+Targeted dot imports of `net`, `os/exec`, `time`, `os`, `syscall`, `testing`,
+or `net/http/httptest` are rejected with file and import context because their
+resources cannot be attributed safely; blank imports remain harmless.
+Explicit constraints follow Go's leading-header
+rules: a pre-package `//go:build` line is effective, while a legacy
+`// +build` line must live in a leading `//` comment block separated from the
+package clause by a blank line.
 Misplaced and directive-like comments do not tag a file. An untagged scope
 means the source file has neither an effective explicit constraint nor a
 recognized `_GOOS`, `_GOARCH`, or `_GOOS_GOARCH` filename suffix. Implicit
@@ -36,7 +108,8 @@ filename constraints use the portion before the first dot, matching Go's
 filename semantics. The code-owned platform set mirrors the Go standard
 library's [`internal/syslist.KnownOS` and `KnownArch`](https://go.dev/src/internal/syslist/syslist.go):
 the past, present, and future values Go owns for filename matching. Scanning
-does not invoke the Go tool or network.
+does not invoke the Go tool or network. The `cmd/gc+untagged` scope additionally
+requires the source path to be beneath `cmd/gc/`.
 
 Run the focused check with:
 
@@ -45,16 +118,49 @@ go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedge
 ```
 
 The historical regex totals remain visible as point-in-time audit evidence.
-They can differ because comments and strings matched, while the AST census
-counts only recognized calls.
+They can be higher because comments and strings matched, or lower where the old
+needle covered only `t.Setenv` or direct `os.Chdir` and the AST census now
+recognizes the full families above. Historical `cmd/gc` needles also included
+build-tagged files; the live `cmd/gc+untagged` ratchets do not.
+`internal/bdflags/freshness_test.go` is integration-tagged because it invokes
+the externally installed `bd` CLI; its process call remains visible in the
+all-source audit while staying outside untagged and Small debt.
 
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 443 calls / 156 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 490 calls / 135 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 291 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 374 calls / 97 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 441 calls / 158 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 528 calls / 154 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Medium owner | `cmd/gc` package `main` | TestMain: environment | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner; only environment calls lexically inside TestMain leave Small debt | P0.4b | 2026-10-01 |
+| Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
+| Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-80po0c.2.1 | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | cwd: 284 calls / 43 files | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | environment: 4326 calls / 200 files (historical regex census: 4339 / 199) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 74 calls / 25 files (historical regex census: 75 / 25) | ga-80po0c.2.1 | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 287 calls / 113 files | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | http_test_server: 300 calls / 66 files | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | subprocess: 399 calls / 107 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | cwd: 284 calls / 43 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment: 4332 calls / 200 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 74 calls / 25 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 287 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | http_test_server: 300 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged net.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 401 calls / 108 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+
+| Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
+| --- | --- | --- | --- |
+| `cmd/gc` package `main` — TestDoMailInbox_RendersMessagesFromReader | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox |
+| `cmd/gc` package `main` — TestDoSessionWait_RegistersReadyWaitForRigDependency | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
+| `cmd/gc` package `main` — TestDoSessionWake_PokesManagedControllerAfterStateChange | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart |
+| `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
 
 ## Three tiers, clear boundaries
@@ -127,7 +233,10 @@ make test-integration-shards-parallel
 make test-local-full-parallel
 ```
 
-On large local machines, tune parallelism explicitly:
+By default, the local runners bound concurrency by both detected CPUs and
+available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
+If memory cannot be detected, they use three jobs. An explicit override always
+wins:
 
 ```bash
 LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
@@ -158,6 +267,98 @@ GC_FAST_UNIT=0 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
 Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
+
+#### Historical timing summaries
+
+The opt-in timing artifacts produced by `scripts/go-test-observable` can be
+aggregated offline across caller-curated successful `main` push runs:
+
+```bash
+go run ./scripts/test-timing-summary.go /path/to/downloaded-artifacts \
+  >> "$GITHUB_STEP_SUMMARY"
+```
+
+Use the same strict parser to emit the versioned machine-readable history
+snapshot:
+
+```bash
+go run ./scripts/test-timing-summary.go --format=json \
+  /path/to/downloaded-artifacts > timing-history-v1.json
+```
+
+The summarizer recursively reads schema-v1 JSON artifacts, deduplicates
+identical downloads, and rejects conflicting artifacts with the same workflow,
+run, attempt, job, shard, and variant identity. It emits the ten slowest
+top-level tests by observed p95 and the ten highest-variance top-level tests
+for each comparable `(job, variant, runner label, OS, architecture, CPU count)`
+profile. Ephemeral runner names do not split profiles. Package terminal rows
+are shard totals rather than independently scheduled work, and nested subtests
+are diagnostic until the shard manifest explicitly promotes them, so neither
+is ranked. Statistics use successful durations only while retaining failure
+and skip counts. Percentiles use the empirical nearest-rank method, variance
+is population variance in seconds squared, and samples are not trimmed.
+
+The JSON snapshot groups units by that same comparable profile and preserves
+every successful observation with its exact artifact identity and tested SHA.
+Profiles and units have canonical ordering. Observations compare the raw string
+tuple `(workflow, run_id, run_attempt, job, shard_id, variant)` lexically, then
+tested SHA and duration; run IDs and attempts are opaque strings, so `002`,
+`10`, and `2` remain distinct and sort in that order. Identical artifact
+downloads increment `duplicate_artifact_count` without duplicating samples.
+Units that have only failed or skipped remain present with empty successful
+observations and `null` statistics. `p75_authoritative` becomes true at five
+successful samples and `p95_authoritative` at twenty. `last_success_sha` is the
+SHA of the final successful observation in canonical artifact-identity order;
+schema v1 has no trustworthy timestamp, so this field is deterministic but not
+a claim about chronological recency.
+
+Timing artifact schema v1 does not record the event, ref, or workflow
+conclusion, so the tool
+cannot prove protected-branch provenance. The caller must supply artifacts
+from successful `main` push runs. The JSON snapshot is workflow-neutral input,
+not a protected store or planner decision. An observed p75 with fewer than five
+successful samples and p95 with fewer than twenty are diagnostic, not
+planner-authoritative. The seven-day artifact retention window is not a
+protected historical timing database, and this one-shot builder does not prune
+observations. Renamed tests remain separate histories.
+
+The storage-boundary mutation mode persists caller-authenticated cohorts
+without merging report snapshots:
+
+```bash
+go run ./scripts/test-timing-summary.go \
+  --update-history timing-history-db-v1.json \
+  --run-envelope trusted-run-v1.json \
+  --retain-runs 50 \
+  --format=json \
+  /path/to/this-run-artifacts > timing-history-v1.json
+```
+
+All three mutation flags are required together, and retention has no hidden
+default. The versioned run envelope names the repository, event, ref, workflow,
+run ID, run attempt, tested SHA, conclusion, and RFC3339 completion time. The
+database stores each envelope and artifact once, then stores normalized
+pass/fail/skip samples by artifact reference. Replaying identical artifacts is
+therefore a byte-for-byte no-op; conflicting copies or envelope metadata fail
+before the existing database changes. Retention removes whole oldest cohorts
+by parsed completion time and recomputes snapshot statistics and the 5/20
+authority thresholds from the retained evidence. Publication uses a synced
+temporary sibling and atomic rename.
+
+This command validates envelope shape and checks each timing artifact's
+`workflow`, `run_id`, `run_attempt`, and `tested_sha` against it. It does not
+authenticate who supplied the envelope, prove that the cohort contains every
+expected shard, serialize multiple writers, publish `ci-metrics`, or make the
+result planner-authoritative. Those are responsibilities of the later trusted
+default-branch workflow. Until that workflow lands, use the database as
+deterministic storage-boundary evidence only.
+
+In timing artifact schema v1, `commit_sha` is the exact Git revision checked out and tested
+(`GITHUB_SHA`). On `pull_request` runs, GitHub sets it to the synthetic merge
+commit, not the contributor branch head. Consumers must not interpret it as
+source/head identity. A future schema that needs both identities must add
+distinct `tested_sha` and `source_sha` fields; schema v1 must not be
+reinterpreted.
 
 Tier A command acceptance and external-provider compatibility are separate
 gates. `make test-acceptance` uses controlled subprocess and file providers; it
@@ -472,48 +673,86 @@ the constructor-specific source of truth.
 | `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | See the checked runtime ledger below |
 | `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec |
 | `events.Recorder` | `internal/events/eventstest/conformance.go` | FileRecorder, exec |
+| `fsys.FS` | `internal/fsys/fsystest/conformance.go` | OSFS, Fake |
+
+The `fsys.FS` suite currently proves the portable namespace core: parent and
+file/directory collisions, regular-file copying and modes, `ReadDir` errors,
+file and directory-tree rename, empty/non-empty removal, and chmod. Symlink
+resolution/replacement, atomic-write composition, and operation-scoped fault
+and recording decorators remain follow-up contract slices; do not delete their
+OS-backed coverage based on the namespace suite alone.
 
 Builtin runtime production compositions are source-bound to `cmd/gc`'s
 registry, their constructor-specific contract dispositions, and the table
 below. The auto composition lives outside that registry and is bound to the
-exact production function and `runtime/auto.New` result it returns. The known
-`runtime.NewFake` and `runtime.NewFailFake` rows are explicitly
-classified as reusable doubles; automatic discovery of newly exported reusable
-doubles is deferred to `ga-80po0c.1.1` and is not claimed by this slice. A waiver
-is a visible contract gap, not evidence that conformance passes.
+exact production function and `runtime/auto.New` result it returns. A waiver is
+a visible contract gap, not evidence that conformance passes.
+
+A proved row names one runnable test whose final top-level statement invokes
+the declared shared contract with an inline factory. The source guard requires
+that factory to return the row's exact constructor directly, rejects pre-run
+helper gates and direct skip syntax, and permits only named testing operations
+plus explicitly ledgered setup functions. E1 separately proves that
+build-tagged rows execute in their required CI lane; a source-bound proof does
+not claim cadence ownership by itself.
+
+Reusable-double discovery is intentionally bounded, not repository-wide. The
+designated boundary is `internal/runtime/fake.go` for the `runtime.Provider`
+port. The guard type-checks its declared runtime type context, discovers every
+exported concrete type in that file whose value or pointer implements
+`runtime.Provider`, and scans the package's buildable non-test files for each
+exported receiverless function whose first result itself implements
+`runtime.Provider` and resolves to that exact type, either as the value or its
+pointer. Constructors may return additional results such as `error`; function
+bodies are outside the source guard. A value-returning constructor counts only
+when the value method set implements the port. The current surface is
+`runtime.Fake` through `runtime.NewFake` and `runtime.NewFailFake`. Aliases do
+not create a second double type and collapse to their tracked concrete type; an
+exported provider alias that exposes an otherwise-untracked type fails closed.
+Caller-local types, methods, unexported helpers, and provider types declared in
+other files are outside this boundary. An exported generic concrete type in the
+boundary fails closed because an uninstantiated generic has no single provider
+method set to inventory.
+
+Other reusable-support boundaries remain explicit follow-up work:
+`beadstest.RecordingStore`, the events and mail fakes, `fsys.Fake`, and
+`clock.Fake` are not claimed by this table.
 
 The hybrid row deliberately chooses `cmd/gc.newHybridProvider` as its
 construction boundary because that is the wrapper returned directly by the
 runtime registry. This ledger does not recursively claim the wrapper's internal
 tmux, K8s, or hybrid constructors.
 
-This first ledger slice records only owned, expiring waivers and explicit
-not-applicable dispositions. `ga-80po0c.1.2` owns structural binding of the
-existing Fake/subprocess conformance evidence to these exact production
-constructors and the resulting proof-row upgrades. E1 (`ga-80po0c.6`)
-separately owns the Large provider/E2E manifest and its required lane/cadence
-execution; it does not own these constructor bindings.
+`runtime.NewFake` and `subprocess.NewSeamBackedWithDir` are source-bound to the
+shared runtime contract below. The seam-backed proof is the only full
+subprocess runtime contract; the duplicate raw full-contract invocation is
+removed. Focused raw subprocess tests remain, including legacy overlap that
+later consolidation may remove case by case. The default subprocess constructor
+remains a separate H5-owned gap because its reachable empty-city-path branch
+uses shared temporary state. E1 (`ga-80po0c.6`) owns the Large provider/E2E
+manifest and required lane/cadence execution; it does not own
+constructor-to-contract source binding.
 
 <!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->
 This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.
 
-| Provider path | Roles | Port | Constructor | Discovery | Contract | Status |
-|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw ACP provider, not the NewSeamBacked production composition |
-| `runtime.builtin.acp` | production_provider | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition |
-| `runtime.builtin.exec` | production_provider | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw exec provider, not the production seam-backed prefix composition |
-| `runtime.builtin.exec` | production_provider | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
-| `runtime.builtin.fail` | production_provider, reusable_double | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
-| `runtime.builtin.fake` | production_provider, reusable_double | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: existing full conformance is not yet structurally bound to runtime.NewFake; exact proof binding is deferred to ga-80po0c.1.2 |
-| `runtime.builtin.herdr` | production_provider | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips in short mode or when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
-| `runtime.builtin.k8s` | production_provider | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the actual K8s production composition has no full shared runtime contract |
-| `runtime.builtin.ssh` | production_provider | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production SSH composition has no full shared runtime contract |
-| `runtime.builtin.subprocess` | production_provider | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: NewSeamBacked exact production-constructor proof binding is deferred to ga-80po0c.1.2 |
-| `runtime.builtin.subprocess` | production_provider | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-80po0c.1.2 through 2026-08-12: NewSeamBackedWithDir exact production-constructor proof binding is deferred to ga-80po0c.1.2 |
-| `runtime.builtin.t3bridge` | production_provider | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production T3 bridge composition has focused tests but no full shared runtime contract |
-| `runtime.builtin.tmux` | production_provider | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips when the tmux executable is absent |
-| `runtime.composition.auto` | production_provider | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production auto base/ACP composition has no full shared runtime contract |
+| Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
+|---|---|---|---|---|---|---|---|
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw ACP provider, not the NewSeamBacked production composition |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw exec provider, not the production seam-backed prefix composition |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
+| `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
+| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips in short mode or when the herdr executable is absent |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the actual K8s production composition has no full shared runtime contract |
+| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production SSH composition has no full shared runtime contract |
+| `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition |
+| `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production auto base/ACP composition has no full shared runtime contract |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 
 Conformance tests verify the behavioral contract (create/read/update/delete,

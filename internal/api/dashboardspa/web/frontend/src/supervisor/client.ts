@@ -13,10 +13,12 @@ import {
   getV0CityByCityNameMail,
   getV0CityByCityNameMailThreadById,
   getV0CityByCityNameRigs,
+  getV0CityByCityNameRunsCensus,
   getV0CityByCityNameSessionByIdPending,
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
   getV0CityByCityNameStatus,
+  getV0CityByCityNameUsage,
   getV0CityByCityNameWorkflowByWorkflowId,
   patchV0CityByCityNameBeadById,
   postV0CityByCityNameBeadByIdClose,
@@ -58,12 +60,14 @@ import type {
   PostV0CityByCityNameMailByIdReadData,
   ReplyMailData,
   RespondSessionResponse,
+  RunsCensusOutputBody,
   SessionTranscriptGetResponse,
   SessionPendingResponse,
   SessionRespondInputBody,
   SlingInputBody,
   SlingResponse,
   SupervisorCitiesOutputBody,
+  UsageBody,
   WorkflowSnapshotResponse,
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import { SupervisorApiError, unwrapSupervisorResult, type SupervisorResult } from './errors';
@@ -86,6 +90,8 @@ export interface SupervisorApi {
   health(): Promise<GetHealthResponse>;
   cityHealth(cityName: string): Promise<GetV0CityByCityNameHealthResponse>;
   cityStatus(cityName: string): Promise<GetV0CityByCityNameStatusResponse>;
+  cityUsage(cityName: string): Promise<UsageBody>;
+  runCensus(cityName: string): Promise<RunsCensusOutputBody>;
   listCities(): Promise<SupervisorCitiesOutputBody>;
   listAgents(cityName: string): Promise<ListBodyAgentResponse>;
   listRigs(cityName: string): Promise<ListBodyRigResponse>;
@@ -210,6 +216,25 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           path: { cityName },
         }) as Promise<SupervisorResult<GetV0CityByCityNameStatusResponse>>,
         'gc supervisor status response was empty',
+      );
+    },
+    cityUsage(cityName) {
+      return unwrapSupervisorResult<UsageBody>(
+        getV0CityByCityNameUsage({
+          client,
+          path: { cityName },
+          query: { aggregate_only: true },
+        }) as Promise<SupervisorResult<UsageBody>>,
+        'gc supervisor usage response was empty',
+      );
+    },
+    runCensus(cityName) {
+      return unwrapSupervisorResult<RunsCensusOutputBody>(
+        getV0CityByCityNameRunsCensus({
+          client,
+          path: { cityName },
+        }) as Promise<SupervisorResult<RunsCensusOutputBody>>,
+        'gc supervisor run census response was empty',
       );
     },
     listCities() {

@@ -6,30 +6,18 @@ package api
 // These types drive the OpenAPI spec for all /v0/session* endpoints.
 
 import (
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // SessionListInput is the Huma input for GET /v0/city/{cityName}/sessions.
+// Keyset cursors made the old "cursor present but empty" distinction moot: an
+// empty cursor is first-page paging, anything else must be a valid v1 token.
 type SessionListInput struct {
 	CityScope
 	PaginationParam
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
 	Peek     bool   `query:"peek" required:"false" doc:"Include last output preview."`
-
-	// cursorPresent is set by Resolve to distinguish "cursor absent" from
-	// "cursor present but empty" in the query string. Huma gives "" for both.
-	cursorPresent bool
-}
-
-// Resolve implements huma.Resolver to detect whether the cursor query
-// parameter was explicitly provided (even as an empty string).
-func (s *SessionListInput) Resolve(ctx huma.Context) []error {
-	// huma.Context.URL() returns the parsed URL; check raw query for cursor key.
-	u := ctx.URL()
-	s.cursorPresent = u.Query().Has("cursor")
-	return nil
 }
 
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.

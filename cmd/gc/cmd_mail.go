@@ -569,7 +569,7 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
 					return 0
 				}
-			} else if !api.ShouldFallbackForRead(err) {
+			} else if !api.ShouldFallbackForRead(c, err) {
 				logRoute(stderr, cmdName, "api", "error")
 				if api.IsStoreSlowError(err) {
 					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
@@ -591,12 +591,12 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 			logRoute(stderr, cmdName, "api", "")
 			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -1915,16 +1915,20 @@ func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer)
 	return doMailInboxTargetWithJSON(mp, target, jsonOut, stdout, stderr)
 }
 
+type mailInboxReader interface {
+	Inbox(recipient string) ([]mail.Message, error)
+}
+
 // doMailInbox lists unread messages for a recipient.
-func doMailInbox(mp mail.Provider, recipient string, stdout, stderr io.Writer) int {
+func doMailInbox(mp mailInboxReader, recipient string, stdout, stderr io.Writer) int {
 	return doMailInboxTarget(mp, resolvedMailTarget{display: recipient, recipients: []string{recipient}}, stdout, stderr)
 }
 
-func doMailInboxTarget(mp mail.Provider, target resolvedMailTarget, stdout, stderr io.Writer) int {
+func doMailInboxTarget(mp mailInboxReader, target resolvedMailTarget, stdout, stderr io.Writer) int {
 	return doMailInboxTargetWithJSON(mp, target, false, stdout, stderr)
 }
 
-func doMailInboxTargetWithJSON(mp mail.Provider, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
+func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
 	messages, err := collectMailMessages(mp.Inbox, target.recipients)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -2014,9 +2018,12 @@ func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "gc mail peek: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		return doMailPeekFallback(args, jsonOut, stdout, stderr)
+	}
+	if isRemote {
+		return routeMailPeek("", args, remoteC, "", jsonOut, stdout, stderr)
 	}
 	c, reason := mailPeekAPIClient(cityPath)
 	return routeMailPeek(cityPath, args, c, reason, jsonOut, stdout, stderr)
@@ -2058,12 +2065,12 @@ func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jso
 			}
 			return 0
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc mail peek: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -2559,12 +2566,12 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 			}
 			return 0
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}

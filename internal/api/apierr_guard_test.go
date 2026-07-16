@@ -2,10 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -27,12 +27,6 @@ import (
 // "urn:gascity:error:" concatenated with a code is caught as well.
 var urnLiteralRe = regexp.MustCompile("urn:gascity:error:[^\"\\s`]*")
 
-// guardSkipDirs are directory names pruned from the source walk: VCS/build/vendor
-// noise plus nested worktree state, none of which is shipped Gas City Go.
-var guardSkipDirs = map[string]bool{
-	".git": true, ".claude": true, "node_modules": true, "vendor": true, "testdata": true,
-}
-
 // TestEveryEmittedErrorCodeIsRegistered is the error-contract analog of
 // TestEveryKnownEventTypeHasRegisteredPayload: it guarantees the API cannot ship
 // a problem-type URN the registry doesn't know about. Every urn:gascity:error:<x>
@@ -40,8 +34,7 @@ var guardSkipDirs = map[string]bool{
 // root, …) must resolve via apierr.LookupURN, and the apierr package is the sole
 // place allowed to author a URN literal — every other site must mint errors
 // through the catalog constructors (which derive the URN from the registry) so
-// the type can never drift from a registered code. Mirrors the source-walk in
-// cmd/gc/worker_boundary_import_test.go.
+// the type can never drift from a registered code.
 func TestEveryEmittedErrorCodeIsRegistered(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -49,31 +42,33 @@ func TestEveryEmittedErrorCodeIsRegistered(t *testing.T) {
 	}
 	repoRoot := filepath.Join(filepath.Dir(currentFile), "..", "..")
 
-	// Walk the whole module, not just internal/+cmd/, so a raw literal cannot hide
-	// in pkg/, a module-root file, scripts/, or examples/.
-	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if guardSkipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
+	// Scan git-tracked Go source, not a filesystem walk. A raw WalkDir over
+	// repoRoot descends into nested Gas City runtime state — checked-out worktrees
+	// under .gc/ and .worktrees/ — whose historical copies of shipped files
+	// legitimately carry pre-migration raw URN literals, so the guard would fail on
+	// stale non-shipped source instead of on what the module actually ships.
+	// `git ls-files` is the precise definition of shipped source: it excludes
+	// untracked worktrees and build output while still seeing every tracked .go
+	// under internal/, cmd/, pkg/, the module root, examples/, and so on.
+	out, err := exec.Command("git", "-C", repoRoot, "ls-files", "-z", "--", "*.go").Output()
+	if err != nil {
+		t.Fatalf("git ls-files in %s: %v", repoRoot, err)
+	}
+	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if rel == "" || strings.HasSuffix(rel, "_test.go") {
+			continue
 		}
 		// The apierr package is the registry itself: it authors the URN prefix and
-		// (in its own docs) sample URNs. It is the one sanctioned definer. Match the
-		// exact package path so an unrelated ".../api/apierr/..." directory elsewhere
-		// is not accidentally exempted.
-		if strings.Contains(filepath.ToSlash(path), "/internal/api/apierr/") {
-			return nil
+		// (in its own docs) sample URNs. It is the one sanctioned definer. Anchor the
+		// exact package path at the module root so an unrelated ".../api/apierr/..."
+		// directory elsewhere is not accidentally exempted.
+		if strings.HasPrefix(filepath.ToSlash(rel), "internal/api/apierr/") {
+			continue
 		}
+		path := filepath.Join(repoRoot, rel)
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return readErr
+			t.Fatalf("read %s: %v", path, readErr)
 		}
 		for _, urn := range urnLiteralRe.FindAllString(string(data), -1) {
 			if _, ok := apierr.LookupURN(urn); !ok {
@@ -82,10 +77,6 @@ func TestEveryEmittedErrorCodeIsRegistered(t *testing.T) {
 				t.Errorf("%s authors a raw error URN literal %q — mint the error through the apierr catalog constructor instead so the URN derives from the registry", path, urn)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk %s: %v", repoRoot, err)
 	}
 }
 

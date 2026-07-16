@@ -1184,6 +1184,17 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return fmt.Errorf("relaunch: %w: %s (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
+	// Run pre_start before respawning: relaunch re-homes the agent into a
+	// possibly different (or not-yet-prepared) WorkDir, and launching into an
+	// unprepared workDir can point agents at the wrong repo — the same
+	// rationale that makes pre_start failures fatal in doStartSession.
+	if err := runPreStart(ctx, ops, name, cfg, setupTimeout); err != nil {
+		return fmt.Errorf("relaunch: running pre_start: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
 	if err != nil {
 		return err

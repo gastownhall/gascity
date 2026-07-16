@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type failingMetadataBatchStore struct {
@@ -853,7 +854,6 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 }
 
 func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testing.T) {
-	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)}
@@ -917,6 +917,8 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 		5*time.Second,
 		ioDiscard{},
 		ioDiscard{},
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)
@@ -1301,6 +1303,8 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		5*time.Second,
 		ioDiscard{},
 		ioDiscard{},
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
 	if woken != budget {
 		t.Fatalf("woken = %d, want %d", woken, budget)
@@ -5486,8 +5490,240 @@ func fakeRuntimeCallCount(fake *runtime.Fake, method string) int {
 	return count
 }
 
+type manualStartStabilityGate struct {
+	entered      chan struct{}
+	released     chan struct{}
+	exited       chan struct{}
+	enteredOnce  sync.Once
+	releasedOnce sync.Once
+	exitedOnce   sync.Once
+}
+
+type manualStartStabilityWaiter struct {
+	mu     sync.Mutex
+	gates  map[string]*manualStartStabilityGate
+	closed bool
+}
+
+func newManualStartStabilityWaiter(t *testing.T) *manualStartStabilityWaiter {
+	t.Helper()
+	waiter := &manualStartStabilityWaiter{gates: make(map[string]*manualStartStabilityGate)}
+	t.Cleanup(waiter.close)
+	return waiter
+}
+
+func (w *manualStartStabilityWaiter) wait(ctx context.Context, name string) bool {
+	gate := w.gate(name)
+	gate.enteredOnce.Do(func() { close(gate.entered) })
+	defer gate.exitedOnce.Do(func() { close(gate.exited) })
+	select {
+	case <-gate.released:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (w *manualStartStabilityWaiter) gate(name string) *manualStartStabilityGate {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if gate := w.gates[name]; gate != nil {
+		return gate
+	}
+	gate := &manualStartStabilityGate{
+		entered:  make(chan struct{}),
+		released: make(chan struct{}),
+		exited:   make(chan struct{}),
+	}
+	if w.closed {
+		gate.releasedOnce.Do(func() { close(gate.released) })
+	}
+	w.gates[name] = gate
+	return gate
+}
+
+func (w *manualStartStabilityWaiter) release(name string) {
+	gate := w.gate(name)
+	gate.releasedOnce.Do(func() { close(gate.released) })
+}
+
+func (w *manualStartStabilityWaiter) close() {
+	w.mu.Lock()
+	w.closed = true
+	gates := make([]*manualStartStabilityGate, 0, len(w.gates))
+	for _, gate := range w.gates {
+		gates = append(gates, gate)
+	}
+	w.mu.Unlock()
+	for _, gate := range gates {
+		gate.releasedOnce.Do(func() { close(gate.released) })
+	}
+}
+
+func awaitStartStabilitySignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func immediateStartStabilityWaiter(context.Context, string) bool {
+	return true
+}
+
+func immediateSessionStaleKeyDetectionWaiter(context.Context, string) error {
+	return nil
+}
+
+func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *testing.T) {
+	sp := runtime.NewFake()
+	newItem := func(id, name string) preparedStart {
+		return preparedStart{
+			candidate: startCandidate{
+				info: sessionpkg.Info{
+					ID:                  id,
+					SessionName:         name,
+					SessionNameMetadata: name,
+					SessionKey:          "resume-key",
+					Template:            "worker",
+				},
+				tp: TemplateParams{
+					Command:      "claude --resume resume-key",
+					SessionName:  name,
+					TemplateName: "worker",
+				},
+			},
+			cfg: runtime.Config{Command: "claude --resume resume-key"},
+		}
+	}
+	waiter := newManualStartStabilityWaiter(t)
+	resultsCh := make(chan []startResult, 1)
+	go func() {
+		resultsCh <- executePreparedStartWaveForCity(
+			context.Background(),
+			[]preparedStart{
+				newItem("gc-first", "first-agent"),
+				newItem("gc-second", "second-agent"),
+			},
+			"",
+			sp,
+			nil,
+			nil,
+			10*time.Second,
+			2,
+			withStartStabilityWaiter(waiter.wait),
+		)
+	}()
+
+	firstGate := waiter.gate("first-agent")
+	secondGate := waiter.gate("second-agent")
+	awaitStartStabilitySignal(t, firstGate.entered, "first-agent stability entry")
+	awaitStartStabilitySignal(t, secondGate.entered, "second-agent stability entry")
+	isRunningCallsBeforeProbe := fakeRuntimeCallCount(sp, "IsRunning")
+
+	waiter.release("first-agent")
+	awaitStartStabilitySignal(t, firstGate.exited, "first-agent stability exit")
+	select {
+	case <-secondGate.exited:
+		t.Fatal("releasing first-agent also released second-agent")
+	default:
+	}
+	select {
+	case results := <-resultsCh:
+		t.Fatalf("parallel wave completed while second-agent remained gated: %+v", results)
+	default:
+	}
+
+	waiter.release("second-agent")
+	var results []startResult
+	select {
+	case results = <-resultsCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for independently released start wave")
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	for i, result := range results {
+		if result.err != nil || result.outcome != TraceOutcomeSuccess {
+			t.Fatalf("result[%d] = {outcome:%q err:%v}, want successful start", i, result.outcome, result.err)
+		}
+	}
+	if got := fakeRuntimeCallCount(sp, "IsRunning"); got != isRunningCallsBeforeProbe+2 {
+		t.Fatalf("IsRunning calls after both stability signals = %d, want %d", got, isRunningCallsBeforeProbe+2)
+	}
+}
+
+func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := sessionpkg.NewManagerWithOptions(store, sp)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly: true,
+		Template: "worker",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    "--resume",
+			SessionIDFlag: "--session-id",
+		},
+		ExtraMeta: map[string]string{"session_origin": "named"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			info: info,
+			tp: TemplateParams{
+				Command:      "claude --resume " + info.SessionKey,
+				SessionName:  info.SessionName,
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude --resume " + info.SessionKey},
+	}
+	waiter := newManualStartStabilityWaiter(t)
+	resultsCh := make(chan []startResult, 1)
+	go func() {
+		resultsCh <- executePreparedStartWave(
+			context.Background(),
+			[]preparedStart{item},
+			sp,
+			store,
+			10*time.Second,
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(func(ctx context.Context, name string) error {
+				if waiter.wait(ctx, name) {
+					return nil
+				}
+				return ctx.Err()
+			}),
+		)
+	}()
+
+	gate := waiter.gate(info.SessionName)
+	awaitStartStabilitySignal(t, gate.entered, "inner session stability entry")
+	select {
+	case results := <-resultsCh:
+		t.Fatalf("start wave completed before inner stability release: %+v", results)
+	default:
+	}
+	waiter.release(info.SessionName)
+	select {
+	case results := <-resultsCh:
+		if len(results) != 1 || results[0].err != nil || results[0].outcome != TraceOutcomeSuccess {
+			t.Fatalf("results = %+v, want one successful start", results)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for worker-boundary start after inner stability release")
+	}
+}
+
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
-	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -5513,6 +5749,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		sp,
 		nil,
 		10*time.Second,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
 	if len(results) != 1 {
@@ -5556,6 +5793,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 		sp,
 		nil,
 		10*time.Second,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
 	if len(results) != 1 {
@@ -5655,7 +5893,6 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 }
 
 func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T) {
-	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -5687,6 +5924,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 		sp,
 		nil,
 		10*time.Second,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
 	if len(results) != 1 {
@@ -6037,6 +6275,7 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 	item := preparedStart{
 		candidate: startCandidate{
 			info: sessionpkg.Info{
+				ID:                  "gc-runtime-only",
 				SessionName:         "test-agent",
 				SessionNameMetadata: "test-agent",
 				SessionKey:          "still-valid-key",
@@ -6060,6 +6299,7 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 		sp,
 		nil,
 		10*time.Second,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
 	if len(results) != 1 {
@@ -6119,6 +6359,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		&config.City{},
 		10*time.Second,
 		1,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
@@ -6211,6 +6452,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 		&config.City{},
 		10*time.Second,
 		1,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))

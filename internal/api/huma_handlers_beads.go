@@ -545,7 +545,7 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
 	// released on any error, so every fallible step lives in the closure.
-	b, err := withIdempotency(s, "/v0/beads", input.IdempotencyKey, input.Body,
+	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
 		func() (beads.Bead, error) {
 			store := s.findStore(input.Body.Rig)
 			if store == nil {

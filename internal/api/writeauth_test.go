@@ -355,17 +355,39 @@ func TestWriteAuthMiddleware_RejectsControlCharPath(t *testing.T) {
 	}
 }
 
-func TestWriteAuthMiddleware_ExemptsSvc(t *testing.T) {
+func TestWriteAuthMiddleware_RefusesSvcMutation(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	pub, _ := mustKeypair(t)
 	var seen bool
 	var got []byte
 	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, echoNext(&seen, &got))
-	req := httptest.NewRequest(http.MethodPost, "/v0/city/acme/svc/foo", strings.NewReader(`{}`))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if !seen {
-		t.Fatal("/svc/ pass-through must be exempt from write-auth")
+
+	// G11: on a hardened city, a /svc mutation bypasses the grant gate
+	// (cityScopedObjectMutation excludes /svc), so it is refused outright rather
+	// than passed through unauthenticated. This holds for standard verbs AND for
+	// non-standard mutating verbs the mutation allowlist omits (MKCOL/COPY/…),
+	// which the /svc proxy would otherwise forward verbatim.
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, "MKCOL", "COPY", "post"} {
+		seen = false
+		req := httptest.NewRequest(method, "/v0/city/acme/svc/foo", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if seen {
+			t.Fatalf("a /svc %s must be refused when write-auth is active, not passed through", method)
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, want 403", method, rec.Code)
+		}
+	}
+
+	// A /svc safe read passes through (reads are open by design).
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
+		seen = false
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, "/v0/city/acme/svc/foo", nil))
+		if !seen {
+			t.Fatalf("a /svc %s (safe read) must pass through the write-auth gate", method)
+		}
 	}
 }
 
@@ -883,7 +905,7 @@ func TestInstallWriteAuth(t *testing.T) {
 		t.Setenv("GC_CITY_WRITE_PUBKEY", "")
 		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
 		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
-		if err := InstallWriteAuth(sm, "k1:"+b64, false); err != nil {
+		if err := InstallWriteAuth(sm, "k1:"+b64, false, WriteAuthBindContext{}); err != nil {
 			t.Fatalf("install: %v", err)
 		}
 		if sm.writeAuth == nil {
@@ -894,7 +916,7 @@ func TestInstallWriteAuth(t *testing.T) {
 		t.Setenv("GC_CITY_WRITE_PUBKEY", "")
 		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
 		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
-		if err := InstallWriteAuth(sm, "", false); err != nil {
+		if err := InstallWriteAuth(sm, "", false, WriteAuthBindContext{}); err != nil {
 			t.Fatalf("install: %v", err)
 		}
 		if sm.writeAuth != nil {
@@ -905,8 +927,49 @@ func TestInstallWriteAuth(t *testing.T) {
 		t.Setenv("GC_CITY_WRITE_PUBKEY", "")
 		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
 		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
-		if err := InstallWriteAuth(sm, "", true); err == nil {
+		if err := InstallWriteAuth(sm, "", true, WriteAuthBindContext{}); err == nil {
 			t.Fatal("expected fail-closed error")
+		}
+	})
+	t.Run("G10: non-loopback + mutations + no key refuses boot", func(t *testing.T) {
+		t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+		t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+		t.Setenv("GC_CITY_WRITE_ALLOW_UNVERIFIED", "")
+		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
+		if err := InstallWriteAuth(sm, "", false, WriteAuthBindContext{NonLocal: true, AllowMutations: true}); err == nil {
+			t.Fatal("an unverified non-loopback write plane must refuse to boot")
+		}
+	})
+}
+
+// writeAuthBootGate (G10) refuses only the genuinely-open combination and lets
+// every safe bind through.
+func TestWriteAuthBootGate(t *testing.T) {
+	t.Setenv("GC_CITY_WRITE_ALLOW_UNVERIFIED", "")
+	cases := []struct {
+		name        string
+		haveKey     bool
+		bind        WriteAuthBindContext
+		wantRefused bool
+	}{
+		{"open write plane refused", false, WriteAuthBindContext{NonLocal: true, AllowMutations: true}, true},
+		{"config ack allows", false, WriteAuthBindContext{NonLocal: true, AllowMutations: true, AllowUnverified: true}, false},
+		{"loopback is safe", false, WriteAuthBindContext{NonLocal: false, AllowMutations: true}, false},
+		{"read-only is safe", false, WriteAuthBindContext{NonLocal: true, AllowMutations: false}, false},
+		{"verifier present is safe", true, WriteAuthBindContext{NonLocal: true, AllowMutations: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := writeAuthBootGate(tc.haveKey, tc.bind)
+			if tc.wantRefused != (err != nil) {
+				t.Fatalf("refused=%v, want %v (err=%v)", err != nil, tc.wantRefused, err)
+			}
+		})
+	}
+	t.Run("env ack allows", func(t *testing.T) {
+		t.Setenv("GC_CITY_WRITE_ALLOW_UNVERIFIED", "1")
+		if err := writeAuthBootGate(false, WriteAuthBindContext{NonLocal: true, AllowMutations: true}); err != nil {
+			t.Fatalf("env ack must allow boot: %v", err)
 		}
 	})
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -120,7 +121,8 @@ type State interface {
 	// Read paths with their own short request budget (e.g. GET /status) use
 	// this instead of reading through the shared store so a slow bd command
 	// cannot pin a Dolt connection past the caller's own deadline
-	// (gascity ga-cdmx6x).
+	// (gascity ga-cdmx6x). Implementations must observe ctx during resolution
+	// and finish any work they start before returning after cancellation.
 	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
 
 	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
@@ -258,6 +260,15 @@ type WebhookDispatchProvider interface {
 	WebhookDispatcher() orderdispatch.Dispatcher
 }
 
+// RolloutFlagsProvider is optionally implemented by State to expose the
+// boot-latched rollout-gate snapshot resolved once at controller construction
+// (internal/rollout). Modeled on RawConfigProvider/WebhookDispatchProvider so
+// the test fakes are not forced to grow it: a State without it gets a
+// Resolve-from-Config() fallback at Server construction (see newServer).
+type RolloutFlagsProvider interface {
+	RolloutFlags() rollout.Flags
+}
+
 // AgentVisibilityWaiter is an optional capability for states whose Config()
 // snapshot may briefly lag a successful agent mutation. Callers that need
 // strict read-after-write semantics for agent target resolution can type-assert
@@ -308,6 +319,30 @@ type StateMutator interface {
 
 	// CreateRig adds a new rig to city.toml.
 	CreateRig(r config.Rig) error
+
+	// ProvisionRigFromGit clones gitURL into the rig's working tree and
+	// provisions the rig, reusing CreateRig's config-write handshake under the
+	// per-city guard. The clone runs OUTSIDE that guard (a WAN fetch must not
+	// freeze config writes); the git URL host is SSRF-fenced (fail-closed)
+	// before any clone. When r.Path is empty the server derives rigs/<name>.
+	// onStep, when non-nil, receives incremental provisioning progress (step
+	// name, human detail, warn flag) for typed-event projection. onManifest,
+	// when non-nil, is called record-then-create at each resource-creation
+	// checkpoint (before the clone with CreatedDir set; after init with any
+	// minted DoltDB) so the caller can persist the G14 rollback manifest and
+	// capture it for teardown. It returns the provisioned rig so the caller can
+	// report its resolved prefix/branch. This is the async server-side rig-add
+	// path (C4b/C4c); the sync CreateRig stays git-blind.
+	ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error)
+
+	// TeardownPartialRig removes the created rig working tree and drops the
+	// managed Dolt database named in the manifest (best-effort), then repairs
+	// routes from the on-disk config. It is the physical half of the G14 atomic
+	// rollback the async goroutine, the re-clone poison pre-drop, and the boot
+	// sweep all share. It never removes a dir or store the manifest does not
+	// claim this request created. A non-nil return means debris may remain, so
+	// the caller must not mark the idempotency record rolled_back.
+	TeardownPartialRig(ctx context.Context, m RigProvisionManifest) error
 
 	// UpdateRig partially updates a rig in city.toml.
 	UpdateRig(name string, patch RigUpdate) error

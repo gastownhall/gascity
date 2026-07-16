@@ -73,6 +73,15 @@ func TestAnchorRunProjection(t *testing.T) {
 		}
 	})
 
+	t.Run("run census (typed event-log projection)", func(t *testing.T) {
+		var census genclient.RunsCensusOutputBody
+		h.getJSON(h.cityURL("/runs/census"), &census)
+
+		if census.StatusCounts.Active != 1 {
+			t.Fatalf("run census active = %d, want 1 seeded active run", census.StatusCounts.Active)
+		}
+	})
+
 	t.Run("run detail (event-log projection)", func(t *testing.T) {
 		var detail runproj.FormulaRunDetail
 		h.getJSON(h.apiURL("/runs/"+anchorRunID+"/detail"), &detail)

@@ -41,6 +41,12 @@ type Order struct {
 	Interval string `toml:"interval,omitempty"`
 	// Schedule is a cron-like expression (for cron triggers).
 	Schedule string `toml:"schedule,omitempty"`
+	// TZ is the IANA time zone (e.g. "America/New_York") in which cron
+	// schedule fields are evaluated. Empty inherits the city-wide
+	// [workspace] timezone default (stamped at scan time), then falls back
+	// to the process-local zone. Invalid names are rejected at order
+	// validation — never silently ignored.
+	TZ string `toml:"tz,omitempty"`
 	// Check is a shell command that returns exit 0 when the formula should run (for condition triggers).
 	Check string `toml:"check,omitempty"`
 	// On is the event type to match (for event triggers). E.g., "bead.closed".
@@ -115,6 +121,7 @@ type orderDecode struct {
 	Gate         string                `toml:"gate,omitempty"`
 	Interval     string                `toml:"interval,omitempty"`
 	Schedule     string                `toml:"schedule,omitempty"`
+	TZ           string                `toml:"tz,omitempty"`
 	Check        string                `toml:"check,omitempty"`
 	On           string                `toml:"on,omitempty"`
 	Pool         string                `toml:"pool,omitempty"`
@@ -140,6 +147,7 @@ func (d orderDecode) normalized() Order {
 		Trigger:      trigger,
 		Interval:     d.Interval,
 		Schedule:     d.Schedule,
+		TZ:           d.TZ,
 		Check:        d.Check,
 		On:           d.On,
 		Pool:         d.Pool,
@@ -275,6 +283,13 @@ func Validate(a Order) error {
 		}
 		if d <= 0 {
 			return fmt.Errorf("order %q: check_timeout %q must be a positive duration", a.Name, a.CheckTimeout)
+		}
+	}
+	// Validate tz if set. A bad zone must fail loudly at load time; a silent
+	// fallback would move the order's schedule to a different wall clock.
+	if a.TZ != "" {
+		if _, err := time.LoadLocation(a.TZ); err != nil {
+			return fmt.Errorf("order %q: invalid tz %q: %w", a.Name, a.TZ, err)
 		}
 	}
 	switch a.Trigger {

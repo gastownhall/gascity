@@ -1,7 +1,9 @@
 package resourcecensus
 
 import (
+	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"io/fs"
@@ -95,6 +97,764 @@ func TestLocalNamesAreNotStdlibCalls() {
 	assertCount(t, got, ScopeUntagged, ResourceSubprocess, 2, 1)
 	assertCount(t, got, ScopeAll, ResourceFixedSleep, 3, 3)
 	assertCount(t, got, ScopeUntagged, ResourceFixedSleep, 1, 1)
+}
+
+func TestScanCountsHTTPTestServerConstructorsByImportIdentity(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/httptest"
+	servers "net/http/httptest"
+	"testing"
+)
+
+type localServers struct{}
+func (localServers) NewServer(any) {}
+func (localServers) NewTLSServer(any) {}
+func (localServers) NewUnstartedServer(any) {}
+
+func TestHTTPTestServers(t *testing.T) {
+	_ = ((servers.NewServer))(nil)
+	_ = (((servers)).NewTLSServer)(nil)
+	t.Run("nested", func(t *testing.T) {
+		_ = ((servers.NewUnstartedServer))(nil)
+	})
+
+	local := localServers{}
+	local.NewServer(nil)
+	local.NewTLSServer(nil)
+	local.NewUnstartedServer(nil)
+	foreign.NewServer(nil)
+	foreign.NewTLSServer(nil)
+	foreign.NewUnstartedServer(nil)
+	_ = "servers.NewServer(nil); servers.NewTLSServer(nil); servers.NewUnstartedServer(nil)"
+	// servers.NewServer(nil)
+	// servers.NewTLSServer(nil)
+	// servers.NewUnstartedServer(nil)
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	"net/http/httptest"
+	"testing"
+)
+func TestTaggedHTTPTestServer(t *testing.T) {
+	_ = httptest.NewServer(nil)
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceHTTPTestServer, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceHTTPTestServer, 3, 1)
+
+	for _, occurrence := range got.Occurrences {
+		if occurrence.Resource != ResourceHTTPTestServer {
+			continue
+		}
+		wantOwner := "TestHTTPTestServers"
+		wantTagged := false
+		if occurrence.Path == "sample/tagged_test.go" {
+			wantOwner = "TestTaggedHTTPTestServer"
+			wantTagged = true
+		}
+		if occurrence.PackageDir != "sample" || occurrence.PackageName != "sample" || occurrence.Owner != wantOwner || !occurrence.Runnable || occurrence.Tagged != wantTagged {
+			t.Errorf("HTTP test server occurrence = %+v, want package sample/sample owner=%s runnable=true tagged=%t", occurrence, wantOwner, wantTagged)
+		}
+	}
+}
+
+func TestScanCountsNetListenByImportIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+
+type localNet struct{}
+func (localNet) Listen(string, string) (any, error) { return nil, nil }
+
+func TestNetListen(t *testing.T) {
+	_, _ = ((sockets.Listen))("tcp", "127.0.0.1:0")
+	t.Run("nested", func(t *testing.T) {
+		_, _ = (((sockets)).Listen)("unix", "socket")
+	})
+
+	local := localNet{}
+	_, _ = local.Listen("tcp", "local shadow")
+	_, _ = foreign.Listen("tcp", "foreign package")
+	lc := sockets.ListenConfig{}
+	_, _ = lc.Listen(t.Context(), "tcp", "listen config method")
+	_, _ = sockets.ListenTCP("tcp", nil)
+	_ = "sockets.Listen(\"tcp\", \"string literal\")"
+	// sockets.Listen("tcp", "comment")
+}
+
+func helper() {
+	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedNetListen(t *testing.T) {
+	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localNet struct{}
+func (localNet) Listen(string, string) (any, error) { return nil, nil }
+var sockets localNet
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_, _ = sockets.Listen("tcp", "cross-file shadow")
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceNetListen, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListen, 3, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListen, "TestNetListen", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListen, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListen, "TestTaggedNetListen", true, true)
+}
+
+func TestScanCountsNetListenUnixgramByImportIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+
+type localNet struct{}
+func (localNet) ListenUnixgram(string, *sockets.UnixAddr) (any, error) { return nil, nil }
+
+func TestNetListenUnixgram(t *testing.T) {
+	_, _ = ((sockets.ListenUnixgram))("unixgram", nil)
+	t.Run("nested", func(t *testing.T) {
+		_, _ = (((sockets)).ListenUnixgram)("unixgram", nil)
+	})
+
+	local := localNet{}
+	_, _ = local.ListenUnixgram("unixgram", nil)
+	_, _ = foreign.ListenUnixgram("unixgram", nil)
+	lc := sockets.ListenConfig{}
+	_, _ = lc.Listen(t.Context(), "unixgram", "listen config method")
+	_, _ = sockets.ListenUnix("unixgram", nil)
+	_, _ = sockets.ListenUDP("udp", nil)
+	_ = "sockets.ListenUnixgram(\"unixgram\", nil)"
+	// sockets.ListenUnixgram("unixgram", nil)
+}
+
+func helper() {
+	_, _ = sockets.ListenUnixgram("unixgram", nil)
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedNetListenUnixgram(t *testing.T) {
+	_, _ = sockets.ListenUnixgram("unixgram", nil)
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localNet struct{}
+func (localNet) ListenUnixgram(string, any) (any, error) { return nil, nil }
+var sockets localNet
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_, _ = sockets.ListenUnixgram("unixgram", nil)
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceNetListenUnixgram, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListenUnixgram, 3, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "TestNetListenUnixgram", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenUnixgram, "TestTaggedNetListenUnixgram", true, true)
+}
+
+func TestScanCountsSyscallListenByImportIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/syscall"
+	calls "syscall"
+	"testing"
+)
+
+type localSyscall struct{}
+func (localSyscall) Listen(int, int) error { return nil }
+
+func TestSyscallListen(t *testing.T) {
+	_ = ((calls.Listen))(1, 1)
+	t.Run("nested", func(t *testing.T) {
+		_ = (((calls)).Listen)(2, 1)
+	})
+
+	local := localSyscall{}
+	_ = local.Listen(3, 1)
+	_ = foreign.Listen(4, 1)
+	_, _ = calls.Socket(calls.AF_UNIX, calls.SOCK_STREAM, 0)
+	_ = calls.Bind(5, nil)
+	_ = "calls.Listen(6, 1)"
+	// calls.Listen(7, 1)
+}
+
+func helper() {
+	_ = calls.Listen(8, 1)
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	calls "syscall"
+	"testing"
+)
+func TestTaggedSyscallListen(t *testing.T) {
+	_ = calls.Listen(9, 1)
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localSyscall struct{}
+func (localSyscall) Listen(int, int) error { return nil }
+var calls localSyscall
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_ = calls.Listen(10, 1)
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceSyscallListen, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceSyscallListen, 3, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceSyscallListen, "TestSyscallListen", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceSyscallListen, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceSyscallListen, "TestTaggedSyscallListen", true, true)
+}
+
+func TestScanCountsNetListenConfigByReceiverIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+
+type localListenConfig struct{}
+func (localListenConfig) Listen(any, string, string) (any, error) { return nil, nil }
+func newListenConfig() sockets.ListenConfig { return sockets.ListenConfig{} }
+func newListenConfigPointer() *sockets.ListenConfig { return &sockets.ListenConfig{} }
+type listenConfigAlias = sockets.ListenConfig
+
+func TestNetListenConfig(t *testing.T) {
+	value := sockets.ListenConfig{}
+	_, _ = ((value.Listen))(nil, "tcp", "127.0.0.1:0")
+	pointer := &sockets.ListenConfig{}
+	_, _ = pointer.Listen(nil, "tcp", "127.0.0.1:0")
+	var typed sockets.ListenConfig
+	_, _ = typed.Listen(nil, "tcp", "127.0.0.1:0")
+	var typedPointer *sockets.ListenConfig
+	_, _ = typedPointer.Listen(nil, "tcp", "127.0.0.1:0")
+	alias := value
+	_, _ = alias.Listen(nil, "tcp", "127.0.0.1:0")
+	factory := newListenConfig()
+	_, _ = factory.Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = newListenConfigPointer().Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = new(sockets.ListenConfig).Listen(nil, "tcp", "127.0.0.1:0")
+	holder := struct{ Config sockets.ListenConfig }{}
+	_, _ = holder.Config.Listen(nil, "tcp", "127.0.0.1:0")
+	configs := []sockets.ListenConfig{{}}
+	_, _ = configs[0].Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = (&listenConfigAlias{}).Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = (&sockets.ListenConfig{}).Listen(nil, "tcp", "127.0.0.1:0")
+
+	local := localListenConfig{}
+	_, _ = local.Listen(nil, "tcp", "local shadow")
+	foreignConfig := foreign.ListenConfig{}
+	_, _ = foreignConfig.Listen(nil, "tcp", "foreign package")
+	_, _ = value.ListenPacket(nil, "udp", "127.0.0.1:0")
+	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
+	_ = "value.Listen(nil, \"tcp\", \"string literal\")"
+	// value.Listen(nil, "tcp", "comment")
+}
+
+func helper(config sockets.ListenConfig) {
+	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedNetListenConfig(t *testing.T) {
+	config := sockets.ListenConfig{}
+	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localListenConfig struct{}
+func (localListenConfig) Listen(any, string, string) (any, error) { return nil, nil }
+var config localListenConfig
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_, _ = config.Listen(nil, "tcp", "cross-file shadow")
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceNetListenConfig, 14, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListenConfig, 13, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenConfig, "TestNetListenConfig", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenConfig, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenConfig, "TestTaggedNetListenConfig", true, true)
+}
+
+func TestResolveBindingsRetainsOnlyNetListenReceiverTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source string
+		want   int
+	}{
+		{
+			name: "net Listen receiver only",
+			source: `package sample
+import sockets "net"
+func exercise() {
+	config := sockets.ListenConfig{}
+	_ = 1 + 2
+	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+}
+`,
+			want: 1,
+		},
+		{
+			name: "no net import",
+			source: `package sample
+type localConfig struct{}
+func (localConfig) Listen(any, string, string) (any, error) { return nil, nil }
+func exercise() {
+	config := localConfig{}
+	_ = 1 + 2
+	_, _ = config.Listen(nil, "tcp", "local")
+}
+`,
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, "sample/resources_test.go", tt.source, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatalf("ParseFile: %v", err)
+			}
+			bindings := resolveBindings(fileSet, file, newEmptyPackageImporter(), "resourcecensus.local/test")
+			if got := len(bindings.expressionTypes); got != tt.want {
+				t.Fatalf("retained expression types = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanCountsCmdGCProcessGlobalsByLexicalOwnership(t *testing.T) {
+	t.Parallel()
+
+	const resources = `package main
+
+import (
+	operating "os"
+	testpkg "testing"
+)
+
+type localOS struct{}
+func (localOS) Setenv(string, string) {}
+func (localOS) Unsetenv(string) {}
+func (localOS) Clearenv() {}
+func (localOS) Chdir(string) {}
+
+type localTesting struct{}
+func (localTesting) Setenv(string, string) {}
+func (localTesting) Chdir(string) {}
+
+func skipSlowCmdGCTest(t *testpkg.T, reason string) {}
+
+func TestResources(t *testpkg.T) {
+	((t)).Setenv("KEY", "value")
+	t.Chdir("testing-dir")
+	((operating).Setenv)("DIRECT", "value")
+	operating.Unsetenv("DIRECT")
+	operating.Clearenv()
+	operating.Chdir("elsewhere")
+	((skipSlowCmdGCTest))(t, "process-backed")
+	func(inner *testpkg.T) {
+		inner.Setenv("INNER", "value")
+		inner.Chdir("inner-dir")
+	}(t)
+	func(tb testpkg.TB) {
+		tb.Setenv("TB", "value")
+		tb.Chdir("tb-dir")
+	}(t)
+	func(value testpkg.T) {
+		value.Setenv("VALUE", "does not count")
+		value.Chdir("does-not-count")
+	}(testpkg.T{})
+	func(pointer *testpkg.TB) {
+		pointer.Setenv("POINTER", "does not count")
+		pointer.Chdir("does-not-count")
+	}(nil)
+	{
+		operating := localOS{}
+		operating.Setenv("SHADOW", "value")
+		operating.Unsetenv("SHADOW")
+		operating.Clearenv()
+		operating.Chdir("shadow-dir")
+		t := localTesting{}
+		t.Setenv("SHADOW", "value")
+		t.Chdir("shadow-dir")
+		skipSlowCmdGCTest := func(*testpkg.T, string) {}
+		skipSlowCmdGCTest(nil, "shadow")
+	}
+	_ = "os.Setenv and t.Chdir in strings do not count"
+}
+	`
+	taggedResources := strings.Replace(resources, "func skipSlowCmdGCTest(t *testpkg.T, reason string) {}\n\n", "", 1)
+	files := fstest.MapFS{
+		"cmd/gc/resources_test.go": &fstest.MapFile{Data: []byte(resources)},
+		"cmd/gc/tagged_test.go":    &fstest.MapFile{Data: []byte("//go:build integration\n\n" + taggedResources)},
+		"other/resources_test.go":  &fstest.MapFile{Data: []byte(strings.Replace(resources, "package main", "package other", 1))},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+
+	assertCount(t, got, ScopeAll, ResourceEnvironment, 18, 3)
+	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 12, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceEnvironment, 6, 1)
+	assertCount(t, got, ScopeAll, ResourceCWD, 12, 3)
+	assertCount(t, got, ScopeUntagged, ResourceCWD, 8, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceCWD, 4, 1)
+	assertCount(t, got, ScopeAll, ResourceSlowProcessGate, 5, 3)
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 4, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceSlowProcessGate, 2, 1)
+}
+
+func TestScanRecognizesOnlyExactTestingParameterTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		parameter string
+		want      int
+	}{
+		{name: "pointer testing T", parameter: "*testpkg.T", want: 1},
+		{name: "testing TB", parameter: "testpkg.TB", want: 1},
+		{name: "testing T value", parameter: "testpkg.T", want: 0},
+		{name: "pointer testing TB", parameter: "*testpkg.TB", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf(`package sample
+import testpkg "testing"
+func exercise(t %s) {
+	t.Setenv("KEY", "value")
+	t.Chdir("work")
+}
+`, tt.parameter)
+			got, err := ScanFS(fstest.MapFS{
+				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+			})
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			assertCount(t, got, ScopeUntagged, ResourceEnvironment, tt.want, tt.want)
+			assertCount(t, got, ScopeUntagged, ResourceCWD, tt.want, tt.want)
+		})
+	}
+}
+
+func TestScanCountsEachDirectOSProcessGlobalMutation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		call     string
+		resource Resource
+	}{
+		{name: "setenv", call: `operating.Setenv("KEY", "value")`, resource: ResourceEnvironment},
+		{name: "unsetenv", call: `operating.Unsetenv("KEY")`, resource: ResourceEnvironment},
+		{name: "clearenv", call: `operating.Clearenv()`, resource: ResourceEnvironment},
+		{name: "chdir", call: `operating.Chdir("work")`, resource: ResourceCWD},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf(`package sample
+import operating "os"
+func exercise() { %s }
+`, tt.call)
+			got, err := ScanFS(fstest.MapFS{
+				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+			})
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			assertCount(t, got, ScopeUntagged, tt.resource, 1, 1)
+		})
+	}
+}
+
+func TestScanResolvesProcessGlobalShadowsFromSiblingSource(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"sample/shadow.go": &fstest.MapFile{Data: []byte(`package sample
+import "os"
+type localProcess struct{}
+func (localProcess) Setenv(string, string) {}
+func (localProcess) Chdir(string) {}
+var process localProcess
+func productionMutationIsContextOnly() { os.Setenv("KEY", "value") }
+`)},
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+func TestResources() {
+	process.Setenv("KEY", "value")
+	process.Chdir("work")
+}
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	if len(got.Occurrences) != 0 {
+		t.Fatalf("cross-file local receivers counted as resources: %+v", got.Occurrences)
+	}
+}
+
+func TestScanAllowsVersionedDefaultImportWhosePackageNameDiffersFromPathBase(t *testing.T) {
+	t.Parallel()
+
+	for _, importPath := range []string{"example.test/process/v2", "gopkg.in/process.v2"} {
+		importPath := importPath
+		t.Run(importPath, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf(`package sample
+import %q
+func TestResources() {
+	process.Setenv("KEY", "value")
+	process.Chdir("work")
+}
+	`, importPath)
+			got, err := ScanFS(fstest.MapFS{
+				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+			})
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			if len(got.Occurrences) != 0 {
+				t.Fatalf("non-target default import counted as resources: %+v", got.Occurrences)
+			}
+		})
+	}
+}
+
+func TestScanSlowHelperUsesLexicalObjectsAndCrossFileOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"owned/helper_test.go": &fstest.MapFile{Data: []byte(`package owned
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+func TestSameFile(t *testing.T) { skipSlowCmdGCTest(t, "same file") }
+`)},
+		"owned/cross_file_test.go": &fstest.MapFile{Data: []byte(`package owned
+import "testing"
+func TestCrossFile(t *testing.T) { skipSlowCmdGCTest(t, "cross file") }
+`)},
+		"owned/shadow_test.go": &fstest.MapFile{Data: []byte(`package owned
+import "testing"
+func TestShadows(t *testing.T) {
+	skipSlowCmdGCTest := func(*testing.T, string) {}
+	skipSlowCmdGCTest(t, "local variable")
+	func(skipSlowCmdGCTest func(*testing.T, string)) {
+		skipSlowCmdGCTest(t, "parameter")
+	}(skipSlowCmdGCTest)
+}
+`)},
+		"wrong/helper_test.go": &fstest.MapFile{Data: []byte(`package wrong
+func skipSlowCmdGCTest() {}
+`)},
+		"wrong/cross_file_test.go": &fstest.MapFile{Data: []byte(`package wrong
+func TestWrongSignature() { skipSlowCmdGCTest() }
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 3, 2)
+}
+
+func TestSlowHelperOwnershipRequiresDirectoryAndPackage(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"owned/helper_test.go": &fstest.MapFile{Data: []byte(`package shared
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+		"elsewhere/call_test.go": &fstest.MapFile{Data: []byte(`package shared
+import "testing"
+func TestDifferentDirectory(t *testing.T) { skipSlowCmdGCTest(t, "not owned") }
+`)},
+		"owned/external_test.go": &fstest.MapFile{Data: []byte(`package shared_test
+import "testing"
+func TestDifferentPackage(t *testing.T) { skipSlowCmdGCTest(t, "not owned") }
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 1, 1)
+}
+
+func TestSlowHelperRequiresReceiverlessExactSignature(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"receiver/helper_test.go": &fstest.MapFile{Data: []byte(`package receiver
+import "testing"
+type helper struct{}
+func (helper) skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+		"wrong_type/helper_test.go": &fstest.MapFile{Data: []byte(`package wrongtype
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason int) {}
+func TestWrongType(t *testing.T) { skipSlowCmdGCTest(t, 1) }
+`)},
+		"wrong_first/helper_test.go": &fstest.MapFile{Data: []byte(`package wrongfirst
+type localT struct{}
+func skipSlowCmdGCTest(t *localT, reason string) {}
+func TestWrongFirstType() { skipSlowCmdGCTest(nil, "not owned") }
+`)},
+		"result/helper_test.go": &fstest.MapFile{Data: []byte(`package result
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) bool { return false }
+func TestResult(t *testing.T) { skipSlowCmdGCTest(t, "not owned") }
+`)},
+		"arity/helper_test.go": &fstest.MapFile{Data: []byte(`package arity
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+func TestWrongArity(t *testing.T) { skipSlowCmdGCTest(t) }
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 1, 1)
+}
+
+func TestScanDoesNotCountUnownedSlowHelperName(t *testing.T) {
+	t.Parallel()
+
+	got, err := ScanFS(fstest.MapFS{
+		"sample/sample_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "testing"
+func TestUnresolvedName(t *testing.T) {
+	skipSlowCmdGCTest(t, "there is no package helper")
+}
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 0, 0)
+}
+
+func TestScanRejectsMultipleCanonicalSlowHelpersPerPackage(t *testing.T) {
+	t.Parallel()
+
+	_, err := ScanFS(fstest.MapFS{
+		"sample/first_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+		"sample/second_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "testing"
+func skipSlowCmdGCTest(t *testing.T, reason string) {}
+`)},
+	})
+	requireErrorContains(t, err, "package sample has multiple canonical declarations")
+}
+
+func TestCmdGCUntaggedScopeRequiresExactPathSegment(t *testing.T) {
+	t.Parallel()
+
+	census := Census{Occurrences: []Occurrence{
+		{Path: "cmd/gc/owned_test.go", Resource: ResourceEnvironment},
+		{Path: "cmd/gc-extra/not_owned_test.go", Resource: ResourceEnvironment},
+		{Path: "cmd/gc/tagged_test.go", Tagged: true, Resource: ResourceEnvironment},
+	}}
+	assertCount(t, census, ScopeCmdGCUntagged, ResourceEnvironment, 1, 1)
 }
 
 func TestScanTreatsImplicitPlatformFilenameConstraintsAsTagged(t *testing.T) {
@@ -210,7 +970,15 @@ func TestScanFailsClosedWhenCandidateQualifierBindingIsMissing(t *testing.T) {
 
 	_, err := ScanFS(fstest.MapFS{
 		"sample/unresolved_test.go": &fstest.MapFile{Data: []byte(`package sample
-func TestResource() { missing.Command("worker") }
+import (
+	"example.test/process/v2"
+	"fmt"
+)
+func TestResource() {
+	_ = fmt.Sprint
+	process.Setenv("KEY", "value")
+	missing.Command("worker")
+}
 `)},
 	})
 	requireErrorContains(t, err, `resource candidate qualifier "missing" has no lexical binding`)
@@ -325,6 +1093,51 @@ import . "time"
 func TestResource() { Sleep(1) }
 `,
 		},
+		{
+			name:       "os",
+			path:       "sample/dot_os_test.go",
+			importPath: "os",
+			source: `package sample
+import . "os"
+func TestResource() { Setenv("KEY", "value") }
+`,
+		},
+		{
+			name:       "testing",
+			path:       "sample/dot_testing_test.go",
+			importPath: "testing",
+			source: `package sample
+import . "testing"
+func TestResource(t *T) { t.Setenv("KEY", "value") }
+`,
+		},
+		{
+			name:       "net",
+			path:       "sample/dot_net_test.go",
+			importPath: "net",
+			source: `package sample
+import . "net"
+func TestResource() { _, _ = Listen("tcp", "127.0.0.1:0") }
+`,
+		},
+		{
+			name:       "net http httptest",
+			path:       "sample/dot_httptest_test.go",
+			importPath: "net/http/httptest",
+			source: `package sample
+import . "net/http/httptest"
+func TestResource() { _ = NewServer(nil) }
+`,
+		},
+		{
+			name:       "syscall",
+			path:       "sample/dot_syscall_test.go",
+			importPath: "syscall",
+			source: `package sample
+import . "syscall"
+func TestResource() { _ = Listen(1, 1) }
+`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -343,7 +1156,12 @@ func TestScanAllowsBlankImportsOfTargetedPackages(t *testing.T) {
 	files := fstest.MapFS{
 		"sample/blank_import_test.go": &fstest.MapFile{Data: []byte(`package sample
 import (
+	_ "net"
+	_ "net/http/httptest"
+	_ "os"
 	_ "os/exec"
+	_ "syscall"
+	_ "testing"
 	_ "time"
 )
 func TestResource() {}
@@ -353,8 +1171,9 @@ func TestResource() {}
 	if err != nil {
 		t.Fatalf("ScanFS: %v", err)
 	}
-	assertCount(t, got, ScopeAll, ResourceSubprocess, 0, 0)
-	assertCount(t, got, ScopeAll, ResourceFixedSleep, 0, 0)
+	if len(got.Occurrences) != 0 {
+		t.Fatalf("blank imports produced resource occurrences: %+v", got.Occurrences)
+	}
 }
 
 func TestScanMatchesGoLeadingBuildHeaderPlacement(t *testing.T) {
@@ -606,6 +1425,44 @@ func TestValidateAllowsHistoricalNeedleToDifferFromASTCensus(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNarrowerHistoricalCmdGCNeedle(t *testing.T) {
+	t.Parallel()
+
+	census := Census{Occurrences: []Occurrence{
+		{Path: "cmd/gc/a_test.go", Resource: ResourceEnvironment},
+		{Path: "cmd/gc/b_test.go", Resource: ResourceEnvironment},
+	}}
+	policy := validLedger(census)
+	row := findRow(t, policy.Debt, ScopeCmdGCUntagged, ResourceEnvironment)
+	row.ReportedCalls = 1
+	row.ReportedFiles = 1
+	ledger := cloneLedger(policy)
+
+	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+		t.Fatalf("Validate rejected narrower historical cmd/gc source needle: %v", err)
+	}
+}
+
+func TestValidateRejectsCoordinatedCmdGCCensusAndManifestGrowth(t *testing.T) {
+	t.Parallel()
+
+	policy := validLedger(Census{})
+	ledger := cloneLedger(policy)
+	row := findRow(t, ledger.Debt, ScopeCmdGCUntagged, ResourceEnvironment)
+	row.BaselineCalls = 1
+	row.BaselineFiles = 1
+	census := Census{Occurrences: []Occurrence{{
+		Path:     "cmd/gc/new_test.go",
+		Resource: ResourceEnvironment,
+	}}}
+
+	err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+	requireErrorContains(t, err, "baseline_calls = 1, bootstrap policy requires 0")
+	if strings.Contains(err.Error(), "source resource census") {
+		t.Fatalf("live census was compared before cmd/gc policy drift was rejected: %v", err)
+	}
+}
+
 func TestValidateRejectsBootstrapPolicyDriftBeforeLiveCensus(t *testing.T) {
 	t.Parallel()
 
@@ -708,9 +1565,86 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 	}
 }
 
+func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceHTTPTestServer)
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListen)
+		if row.BaselineCalls != 92 || row.BaselineFiles != 34 {
+			t.Fatalf("net.Listen baseline = %d/%d, want 92/34", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListenConfig)
+		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
+			t.Fatalf("net.ListenConfig.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.ListenConfig.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsNetListenUnixgramDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListenUnixgram)
+		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
+			t.Fatalf("net.ListenUnixgram baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.ListenUnixgram owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceSyscallListen)
+		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
+			t.Fatalf("syscall.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("syscall.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
 func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 	t.Parallel()
 
+	removeDebt := func(scope Scope, resource Resource) func(*Ledger) {
+		return func(ledger *Ledger) {
+			for index, row := range ledger.Debt {
+				if row.Scope == scope && row.Resource == resource {
+					ledger.Debt = append(ledger.Debt[:index], ledger.Debt[index+1:]...)
+					return
+				}
+			}
+		}
+	}
 	tests := []struct {
 		name   string
 		mutate func(*Ledger)
@@ -729,6 +1663,21 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 				ledger.Debt = ledger.Debt[1:]
 			},
 			want: `missing required debt baseline: scope=untagged resource=subprocess`,
+		},
+		{
+			name:   "missing cmd gc environment row",
+			mutate: removeDebt(ScopeCmdGCUntagged, ResourceEnvironment),
+			want:   `missing required debt baseline: scope=cmd/gc+untagged resource=environment`,
+		},
+		{
+			name:   "missing cmd gc cwd row",
+			mutate: removeDebt(ScopeCmdGCUntagged, ResourceCWD),
+			want:   `missing required debt baseline: scope=cmd/gc+untagged resource=cwd`,
+		},
+		{
+			name:   "missing cmd gc slow-process row",
+			mutate: removeDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate),
+			want:   `missing required debt baseline: scope=cmd/gc+untagged resource=slow_process_gate`,
 		},
 		{
 			name: "unexpected audit row",
@@ -792,7 +1741,7 @@ func TestParseLedgerRejectsUndeclaredFields(t *testing.T) {
 	requireErrorContains(t, err, "unknown ledger field: mystery")
 }
 
-func TestParseLedgerRejectsClassificationFields(t *testing.T) {
+func TestParseLedgerRejectsUndeclaredClassificationFields(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -800,8 +1749,8 @@ func TestParseLedgerRejectsClassificationFields(t *testing.T) {
 		data string
 		want string
 	}{
-		{"medium rows", "version = 1\n[[medium]]\npackage = 'sample'\n", "unknown ledger field: medium"},
-		{"small debt rows", "version = 1\n[[small_debt]]\nscope = 'untagged'\n", "unknown ledger field: small_debt"},
+		{"medium field", "version = 2\n[[medium]]\npackage_dir = 'sample'\nmystery = true\n", "unknown ledger field: medium.mystery"},
+		{"small debt field", "version = 2\n[[small_debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: small_debt.intended_size"},
 		{"size field", "version = 1\n[[debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: debt.intended_size"},
 	}
 	for _, tt := range tests {
@@ -816,12 +1765,19 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 	t.Parallel()
 
 	ledger := Ledger{
-		Version: 1,
+		Version: 2,
 		AuditBaseline: []Baseline{
 			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
 		},
 		Debt: []Baseline{
 			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD, 2, 1),
+		},
+		Medium: []MediumOwner{
+			validMediumOwner("sample", "sample", "TestOwned", ResourceSubprocess),
+		},
+		SmallDebt: []Baseline{
+			validDebt(ScopeUntagged, ResourceFixedSleep, 1, 1),
 		},
 	}
 	got := RenderMarkdown(ledger)
@@ -829,6 +1785,9 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 4 calls / 2 files | P0.4 | source census only; does not classify tests; audit owner | P0.4a | 2026-10-01 |
+| Medium owner | ` + "`sample`" + ` package ` + "`sample`" + ` | TestOwned: subprocess | ga-test | exact runnable owner; lexical declaration | P0.4b | 2026-10-01 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 1 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
+| Source debt ratchet | ` + "`cmd/gc`" + ` untagged test source | cwd: 2 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D5/D6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | subprocess: 3 calls / 2 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
 <!-- END CHECKED TEST RESOURCE LEDGER -->`
 	if got != want {
@@ -891,8 +1850,11 @@ func validLedger(census Census) Ledger {
 	allSleep := census.Count(ScopeAll, ResourceFixedSleep)
 	untaggedSubprocess := census.Count(ScopeUntagged, ResourceSubprocess)
 	untaggedSleep := census.Count(ScopeUntagged, ResourceFixedSleep)
+	cmdGCEnvironment := census.Count(ScopeCmdGCUntagged, ResourceEnvironment)
+	cmdGCCWD := census.Count(ScopeCmdGCUntagged, ResourceCWD)
+	cmdGCSlowProcessGate := census.Count(ScopeCmdGCUntagged, ResourceSlowProcessGate)
 	return Ledger{
-		Version: 1,
+		Version: 2,
 		AuditBaseline: []Baseline{
 			validAudit(ScopeAll, ResourceSubprocess, allSubprocess.Calls, allSubprocess.Files),
 			validAudit(ScopeAll, ResourceFixedSleep, allSleep.Calls, allSleep.Files),
@@ -900,6 +1862,16 @@ func validLedger(census Census) Ledger {
 		Debt: []Baseline{
 			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
 			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD, cmdGCCWD.Calls, cmdGCCWD.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate, cmdGCSlowProcessGate.Calls, cmdGCSlowProcessGate.Files),
+		},
+		SmallDebt: []Baseline{
+			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
+			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD, cmdGCCWD.Calls, cmdGCCWD.Files),
+			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate, cmdGCSlowProcessGate.Calls, cmdGCSlowProcessGate.Files),
 		},
 	}
 }
@@ -919,6 +1891,10 @@ func validAudit(scope Scope, resource Resource, calls, files int) Baseline {
 }
 
 func validDebt(scope Scope, resource Resource, calls, files int) Baseline {
+	migration := "D1/D2"
+	if scope == ScopeCmdGCUntagged {
+		migration = "D5/D6"
+	}
 	return Baseline{
 		Scope:           scope,
 		Resource:        resource,
@@ -927,7 +1903,7 @@ func validDebt(scope Scope, resource Resource, calls, files int) Baseline {
 		OwnerBead:       "P0.4",
 		Invariant:       "existing debt cannot grow",
 		ResourceOwner:   "owning test cleanup",
-		MigrationTarget: "D1/D2",
+		MigrationTarget: migration,
 		Expires:         "2026-10-01",
 	}
 }
@@ -936,6 +1912,11 @@ func cloneLedger(source Ledger) Ledger {
 	clone := source
 	clone.AuditBaseline = append([]Baseline(nil), source.AuditBaseline...)
 	clone.Debt = append([]Baseline(nil), source.Debt...)
+	clone.SmallDebt = append([]Baseline(nil), source.SmallDebt...)
+	clone.Medium = append([]MediumOwner(nil), source.Medium...)
+	for index := range clone.Medium {
+		clone.Medium[index].Resources = append([]Resource(nil), source.Medium[index].Resources...)
+	}
 	return clone
 }
 

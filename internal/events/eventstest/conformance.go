@@ -6,6 +6,7 @@ package eventstest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -600,6 +601,58 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		if e.Seq <= lastSeq {
 			t.Errorf("Seq = %d, want > %d", e.Seq, lastSeq)
+		}
+	})
+
+	// WatchReplaysRetainedHistory pins the Watch contract: a watcher attached
+	// with afterSeq below the retained head must replay every retained event
+	// with Seq > afterSeq, in order, exactly once — including events recorded
+	// before Watch was called. This is provider-neutral (no rotation); the
+	// FileRecorder-specific resume-across-rotation case lives in RunRotationTests.
+	t.Run("WatchReplaysRetainedHistory", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		for i := 0; i < 5; i++ {
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: fmt.Sprintf("h-%d", i)})
+		}
+		all, err := p.List(events.Filter{})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(all) < 5 {
+			t.Fatalf("need 5 events, got %d", len(all))
+		}
+		// Resume from the 2nd event's seq: expect events 3,4,5 (indices 2,3,4).
+		afterSeq := all[1].Seq
+		want := all[2:]
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		w, err := p.Watch(ctx, afterSeq)
+		if err != nil {
+			t.Fatalf("Watch: %v", err)
+		}
+		defer w.Close() //nolint:errcheck // test cleanup
+
+		for i, wantEv := range want {
+			type res struct {
+				e   events.Event
+				err error
+			}
+			ch := make(chan res, 1)
+			go func() { e, err := w.Next(); ch <- res{e, err} }()
+			select {
+			case r := <-ch:
+				if r.err != nil {
+					t.Fatalf("Next %d: %v", i, r.err)
+				}
+				if r.e.Seq != wantEv.Seq {
+					t.Fatalf("replay event %d seq = %d, want %d (pre-Watch history skipped?)", i, r.e.Seq, wantEv.Seq)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("replay event %d (seq %d) never delivered", i, wantEv.Seq)
+			}
 		}
 	})
 

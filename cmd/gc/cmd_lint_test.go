@@ -225,6 +225,55 @@ inject_fragments = ["missing-footer"]
 	}
 }
 
+func TestLintCleanBdInvocationsProduceNoFindings(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-clean", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd update <id> --claim`\n`gc bd ready --unassigned --json`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestLintReportsUnknownBdFlag(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-typo", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd update <id> --asignee bob`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "bd-unknown-flag") || !strings.Contains(errText, `"--asignee"`) {
+		t.Fatalf("stderr missing bd-unknown-flag diagnostic:\n%s", errText)
+	}
+	if !strings.Contains(errText, "worker.template.md:2:") {
+		t.Fatalf("stderr missing correct line number for bd-unknown-flag diagnostic:\n%s", errText)
+	}
+}
+
+func TestLintSkipsOutOfScopeBdSubcommand(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-out-of-scope", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd formula show some-formula --made-up-flag`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (out-of-scope subcommand silently skipped)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestLintJSONReportsDiagnostics(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "json-bad", "worker", "prompts/worker.template.md")

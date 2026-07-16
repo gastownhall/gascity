@@ -109,6 +109,22 @@ func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 			// gc bd is an explicit passthrough: bd owns the payload shape.
 			return nil
 		}
+		if path == "schemas/metrics/example/result.schema.json" {
+			// metrics example --json is deliberately the byte-exact product-
+			// metrics network fixture, not a normal CLI result envelope. Keep
+			// the exception explicit and self-describing so another raw result
+			// schema cannot bypass the top-level success discriminator silently.
+			var rawResult struct {
+				RawJSON bool `json:"x-gc-raw-json"`
+			}
+			if err := json.Unmarshal(data, &rawResult); err != nil {
+				return err
+			}
+			if !rawResult.RawJSON {
+				missing = append(missing, path)
+			}
+			return nil
+		}
 		if schema.Type != "object" {
 			nonObject = append(nonObject, path)
 			return nil

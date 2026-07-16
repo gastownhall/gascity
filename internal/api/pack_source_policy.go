@@ -1,30 +1,14 @@
 package api
 
 import (
-	"context"
+	"errors"
 	"fmt"
-	"net"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/importsvc"
+	"github.com/gastownhall/gascity/internal/ssrf"
 )
-
-// packSourceHostResolver resolves a hostname to its IP addresses for the SSRF
-// fence. It is a package var so tests can stub DNS without touching the network;
-// the default uses the process resolver.
-var packSourceHostResolver = func(host string) ([]net.IP, error) {
-	addrs, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
-	if err != nil {
-		return nil, err
-	}
-	ips := make([]net.IP, len(addrs))
-	for i, a := range addrs {
-		ips[i] = a.IP
-	}
-	return ips, nil
-}
 
 // validateHTTPPackSource is the HTTP-layer SSRF fence for POST /packs. The
 // import service shells `git ls-remote <source>` synchronously and documents
@@ -101,137 +85,21 @@ func packSourceHost(source string) (host string, local, file bool) {
 
 // ensurePublicPackSourceHost rejects a host that names or resolves to an
 // internal destination (loopback, private, link-local, unique-local,
-// unspecified, or a cloud metadata IP such as 169.254.169.254). Hostnames are
-// resolved through packSourceHostResolver; a resolution error is not treated as
-// a block, since the subsequent git fetch performs its own resolution and will
-// surface the failure — the fence only blocks on a positively-internal address.
+// unspecified, or a cloud metadata IP such as 169.254.169.254). It delegates to
+// the shared ssrf fence (also used by the rig-clone path) so the two callers
+// cannot drift, and maps the fence's outcome onto importsvc.ErrInvalidSource for
+// the 400 mapping. A resolution error is not treated as a block, since the
+// subsequent git fetch performs its own resolution and will surface the failure.
 func ensurePublicPackSourceHost(host string) error {
-	lower := strings.ToLower(strings.TrimSpace(host))
-	if lower == "" {
-		return fmt.Errorf("%w: could not determine a host from the pack source", importsvc.ErrInvalidSource)
-	}
-	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
-		return blockedPackHostErr(host, "loopback host")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if isInternalIP(ip) {
-			return blockedPackHostErr(host, "internal IP address")
-		}
-		return nil
-	}
-	if ip := parseLooseIPv4(host); ip != nil {
-		// Encoded numeric literal (hex, octal, or dotless integer) that net.ParseIP
-		// rejects but git's C resolver (getaddrinfo) still decodes to a real
-		// address — 0x7f000001, 2130706433, and 0177.0.0.1 all reach 127.0.0.1, and
-		// 0xA9FEA9FE reaches the 169.254.169.254 metadata endpoint. Classify the
-		// decoded destination so these forms cannot slip an internal target past
-		// the fence on a resolver that errors for them.
-		if isInternalIP(ip) {
-			return blockedPackHostErr(host, "internal IP address")
-		}
-		return nil
-	}
-	ips, err := packSourceHostResolver(host)
-	if err != nil {
-		return nil
-	}
-	for _, ip := range ips {
-		if isInternalIP(ip) {
-			return blockedPackHostErr(host, "host resolves to an internal IP address")
-		}
-	}
-	return nil
-}
-
-// isInternalIP reports whether ip is one an internet-facing pack source must
-// never be. IsPrivate covers RFC1918 and IPv6 unique-local (fc00::/7);
-// link-local covers 169.254.0.0/16 (including the 169.254.169.254 metadata
-// endpoint) and fe80::/10.
-func isInternalIP(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() ||
-		ip.IsUnspecified()
-}
-
-// parseLooseIPv4 decodes the legacy inet_aton host forms that net.ParseIP
-// rejects but the C resolver (getaddrinfo, which git and libcurl use) still
-// accepts: a dotless 32-bit integer, hex (0x…) or octal (leading 0) parts, and
-// the short a.b / a.b.c groupings. It returns the decoded IPv4 address, or nil
-// when host is not one of those numeric forms (a normal hostname, or a form
-// net.ParseIP already handled). Classifying the decoded address lets the SSRF
-// fence see the destination git will actually connect to rather than trusting
-// net.ParseIP to recognize every literal the resolver decodes.
-func parseLooseIPv4(host string) net.IP {
-	if host == "" {
-		return nil
-	}
-	parts := strings.Split(host, ".")
-	if len(parts) > 4 {
-		return nil
-	}
-	vals := make([]uint64, len(parts))
-	for i, p := range parts {
-		v, ok := parseInetAtonPart(p)
-		if !ok {
-			return nil
-		}
-		vals[i] = v
-	}
-	// inet_aton spreads the trailing part across the low-order bytes: a.b puts b
-	// in the low 24 bits, a.b.c puts c in the low 16, a.b.c.d is one byte each.
-	var addr uint64
-	switch len(parts) {
-	case 1:
-		addr = vals[0]
-	case 2:
-		if vals[0] > 0xFF || vals[1] > 0xFFFFFF {
-			return nil
-		}
-		addr = vals[0]<<24 | vals[1]
-	case 3:
-		if vals[0] > 0xFF || vals[1] > 0xFF || vals[2] > 0xFFFF {
-			return nil
-		}
-		addr = vals[0]<<24 | vals[1]<<16 | vals[2]
-	case 4:
-		for _, v := range vals {
-			if v > 0xFF {
-				return nil
-			}
-		}
-		addr = vals[0]<<24 | vals[1]<<16 | vals[2]<<8 | vals[3]
-	}
-	if addr > 0xFFFFFFFF {
-		return nil
-	}
-	return net.IPv4(byte(addr>>24), byte(addr>>16), byte(addr>>8), byte(addr))
-}
-
-// parseInetAtonPart parses one component of a loose IPv4 literal with C
-// inet_aton radix rules: a 0x/0X prefix is hex, a leading 0 is octal, everything
-// else is decimal. It rejects an empty or malformed component.
-func parseInetAtonPart(p string) (uint64, bool) {
-	base := 10
-	digits := p
+	err := ssrf.EnsurePublicHost(host)
 	switch {
-	case len(p) >= 2 && (p[0:2] == "0x" || p[0:2] == "0X"):
-		base, digits = 16, p[2:]
-	case len(p) >= 2 && p[0] == '0':
-		base, digits = 8, p[1:]
+	case err == nil:
+		return nil
+	case errors.Is(err, ssrf.ErrEmptyHost):
+		return fmt.Errorf("%w: could not determine a host from the pack source", importsvc.ErrInvalidSource)
+	default:
+		// Wrap both sentinels so callers can match ErrInvalidSource (for the 400)
+		// and ssrf.ErrBlockedHost (the underlying cause) alike.
+		return fmt.Errorf("%w: pack source host is blocked: %w", importsvc.ErrInvalidSource, err)
 	}
-	if digits == "" {
-		return 0, false
-	}
-	v, err := strconv.ParseUint(digits, base, 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
-}
-
-func blockedPackHostErr(host, why string) error {
-	return fmt.Errorf("%w: pack source host %q is blocked (%s)", importsvc.ErrInvalidSource, host, why)
 }

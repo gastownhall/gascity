@@ -22,7 +22,7 @@ type idemVal struct {
 func TestWithIdempotency_FirstCallRunsCreate(t *testing.T) {
 	s := newIdemTestServer()
 	calls := 0
-	got, err := withIdempotency(s, "/v0/things", "key-1", map[string]string{"a": "1"},
+	got, err := withIdempotency(s.idem, "/v0/things", "key-1", map[string]string{"a": "1"},
 		func() (idemVal, error) {
 			calls++
 			return idemVal{ID: "t1", Body: "1"}, nil
@@ -46,12 +46,12 @@ func TestWithIdempotency_ReplayReturnsCachedWithoutRerunning(t *testing.T) {
 		calls++
 		return idemVal{ID: "t1", Body: "first"}, nil
 	}
-	if _, err := withIdempotency(s, "/v0/things", "key-1", body, create); err != nil {
+	if _, err := withIdempotency(s.idem, "/v0/things", "key-1", body, create); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	// Second call: same key + same body. create must NOT run again; the cached
 	// value (not a fresh "second" run) must come back.
-	got, err := withIdempotency(s, "/v0/things", "key-1", body,
+	got, err := withIdempotency(s.idem, "/v0/things", "key-1", body,
 		func() (idemVal, error) {
 			calls++
 			return idemVal{ID: "t2", Body: "second"}, nil
@@ -69,12 +69,12 @@ func TestWithIdempotency_ReplayReturnsCachedWithoutRerunning(t *testing.T) {
 
 func TestWithIdempotency_MismatchReturns422(t *testing.T) {
 	s := newIdemTestServer()
-	if _, err := withIdempotency(s, "/v0/things", "key-1", map[string]string{"a": "1"},
+	if _, err := withIdempotency(s.idem, "/v0/things", "key-1", map[string]string{"a": "1"},
 		func() (idemVal, error) { return idemVal{ID: "t1"}, nil }); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	calls := 0
-	_, err := withIdempotency(s, "/v0/things", "key-1", map[string]string{"a": "DIFFERENT"},
+	_, err := withIdempotency(s.idem, "/v0/things", "key-1", map[string]string{"a": "DIFFERENT"},
 		func() (idemVal, error) { calls++; return idemVal{}, nil })
 	if calls != 0 {
 		t.Fatalf("create ran on a body mismatch (calls=%d); it must not", calls)
@@ -96,7 +96,7 @@ func TestWithIdempotency_InFlightReturns409(t *testing.T) {
 	s.idem.reserve(scoped, hashBody(body))
 
 	calls := 0
-	_, err := withIdempotency(s, "/v0/things", "key-1", body,
+	_, err := withIdempotency(s.idem, "/v0/things", "key-1", body,
 		func() (idemVal, error) { calls++; return idemVal{}, nil })
 	if calls != 0 {
 		t.Fatalf("create ran while another request was in-flight (calls=%d)", calls)
@@ -114,7 +114,7 @@ func TestWithIdempotency_ErrorReleasesReservation(t *testing.T) {
 	s := newIdemTestServer()
 	body := map[string]string{"a": "1"}
 	sentinel := errors.New("create boom")
-	_, err := withIdempotency(s, "/v0/things", "key-1", body,
+	_, err := withIdempotency(s.idem, "/v0/things", "key-1", body,
 		func() (idemVal, error) { return idemVal{}, sentinel })
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("error = %v, want the create error propagated verbatim", err)
@@ -122,7 +122,7 @@ func TestWithIdempotency_ErrorReleasesReservation(t *testing.T) {
 	// The reservation must be released: a retry with the same key succeeds and
 	// runs create again (no leaked 409).
 	calls := 0
-	got, err := withIdempotency(s, "/v0/things", "key-1", body,
+	got, err := withIdempotency(s.idem, "/v0/things", "key-1", body,
 		func() (idemVal, error) { calls++; return idemVal{ID: "t1"}, nil })
 	if err != nil {
 		t.Fatalf("retry after failed create: %v (reservation leaked?)", err)
@@ -137,14 +137,14 @@ func TestWithIdempotency_PanicReleasesReservation(t *testing.T) {
 	body := map[string]string{"a": "1"}
 	func() {
 		defer func() { _ = recover() }()
-		_, _ = withIdempotency(s, "/v0/things", "key-1", body,
+		_, _ = withIdempotency(s.idem, "/v0/things", "key-1", body,
 			func() (idemVal, error) { panic("boom") })
 		t.Fatal("expected panic to propagate")
 	}()
 	// The reservation must be released even though create() panicked: a retry
 	// with the same key runs create again (no key wedged for the TTL).
 	calls := 0
-	got, err := withIdempotency(s, "/v0/things", "key-1", body,
+	got, err := withIdempotency(s.idem, "/v0/things", "key-1", body,
 		func() (idemVal, error) { calls++; return idemVal{ID: "t1"}, nil })
 	if err != nil {
 		t.Fatalf("retry after panic: %v (reservation leaked on panic?)", err)
@@ -162,7 +162,7 @@ func TestWithIdempotency_WrongTypedEntryFallsThroughToCreate(t *testing.T) {
 	// through to create() rather than serve a wrong-typed/zero replay.
 	s.idem.storeResponse("POST:/v0/things:key-1", hashBody(body), "not-an-idemVal")
 	calls := 0
-	got, err := withIdempotency(s, "/v0/things", "key-1", body,
+	got, err := withIdempotency(s.idem, "/v0/things", "key-1", body,
 		func() (idemVal, error) { calls++; return idemVal{ID: "fresh"}, nil })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -176,10 +176,10 @@ func TestWithIdempotency_EmptyKeyPassthrough(t *testing.T) {
 	s := newIdemTestServer()
 	calls := 0
 	create := func() (idemVal, error) { calls++; return idemVal{ID: "t"}, nil }
-	if _, err := withIdempotency(s, "/v0/things", "", nil, create); err != nil {
+	if _, err := withIdempotency(s.idem, "/v0/things", "", nil, create); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if _, err := withIdempotency(s, "/v0/things", "", nil, create); err != nil {
+	if _, err := withIdempotency(s.idem, "/v0/things", "", nil, create); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	if calls != 2 {
@@ -191,12 +191,12 @@ func TestWithIdempotency_DistinctKeysAndPathsIndependent(t *testing.T) {
 	s := newIdemTestServer()
 	body := map[string]string{"a": "1"}
 	mk := func() (idemVal, error) { return idemVal{ID: "x"}, nil }
-	if _, err := withIdempotency(s, "/v0/things", "key-1", body, mk); err != nil {
+	if _, err := withIdempotency(s.idem, "/v0/things", "key-1", body, mk); err != nil {
 		t.Fatalf("k1: %v", err)
 	}
 	// Same key, different path → must not collide (independent create).
 	calls := 0
-	if _, err := withIdempotency(s, "/v0/others", "key-1", body,
+	if _, err := withIdempotency(s.idem, "/v0/others", "key-1", body,
 		func() (idemVal, error) { calls++; return idemVal{ID: "y"}, nil }); err != nil {
 		t.Fatalf("other path: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestWithIdempotency_DistinctKeysAndPathsIndependent(t *testing.T) {
 	// pins that the KEY participates in the cache scope (dropping it from
 	// scopedKey would make key-2 replay key-1's response).
 	calls = 0
-	if _, err := withIdempotency(s, "/v0/things", "key-2", body,
+	if _, err := withIdempotency(s.idem, "/v0/things", "key-2", body,
 		func() (idemVal, error) { calls++; return idemVal{ID: "z"}, nil }); err != nil {
 		t.Fatalf("second key: %v", err)
 	}

@@ -66,6 +66,8 @@ const (
 	RunStepStatusFailed RunStepStatus = "failed"
 	// RunStepStatusSkipped is a step that terminated as skipped.
 	RunStepStatusSkipped RunStepStatus = "skipped"
+	// RunStepStatusCanceled is a step closed because its run was canceled.
+	RunStepStatusCanceled RunStepStatus = "canceled"
 )
 
 // Schema registers RunStepStatus as a named, closed string enum.
@@ -74,6 +76,7 @@ func (RunStepStatus) Schema(r huma.Registry) *huma.Schema {
 		"Closed lifecycle state of a run step.",
 		string(RunStepStatusPending), string(RunStepStatusActive), string(RunStepStatusBlocked),
 		string(RunStepStatusCompleted), string(RunStepStatusFailed), string(RunStepStatusSkipped),
+		string(RunStepStatusCanceled),
 	)
 }
 
@@ -104,6 +107,20 @@ type Run struct {
 	StartedAt string        `json:"started_at,omitempty" doc:"RFC3339 run start time (root creation)."`
 	UpdatedAt string        `json:"updated_at,omitempty" doc:"RFC3339 time of the run's most recent activity."`
 	LastError *RunLastError `json:"last_error,omitempty" doc:"Structured failure reason for a terminal run."`
+}
+
+// RunStatusCounts is a complete census of the closed RunStatus enum. Keeping
+// every field typed lets generated clients switch exhaustively and makes the
+// counts stable even when the response's run rows are limited.
+type RunStatusCounts struct {
+	Pending   int `json:"pending" doc:"Runs created but not yet started."`
+	Active    int `json:"active" doc:"Runs with work in progress."`
+	Waiting   int `json:"waiting" doc:"Runs waiting on a dependency or gate."`
+	Canceling int `json:"canceling" doc:"Runs winding down after cancellation."`
+	Completed int `json:"completed" doc:"Runs completed successfully."`
+	Failed    int `json:"failed" doc:"Runs completed with failure."`
+	Canceled  int `json:"canceled" doc:"Runs terminated by cancellation."`
+	Skipped   int `json:"skipped" doc:"Runs completed as a no-op or skip."`
 }
 
 // RunStep is one step of a run (a child bead), projected to a stable shape.
@@ -139,9 +156,26 @@ type RunsListInput struct {
 // RunsListOutput is the response body for the run list.
 type RunsListOutput struct {
 	Body struct {
-		Runs          []Run    `json:"runs" doc:"Runs in the city, newest activity first."`
-		Partial       bool     `json:"partial,omitempty" doc:"True when some runs could not be fully projected."`
-		PartialErrors []string `json:"partial_errors,omitempty" doc:"Reasons the projection was partial."`
+		Runs          []Run           `json:"runs" doc:"Runs in the city, newest activity first."`
+		StatusCounts  RunStatusCounts `json:"status_counts" doc:"All projected runs by canonical lifecycle state; not truncated by the row limit."`
+		Partial       bool            `json:"partial,omitempty" doc:"True when some runs could not be fully projected."`
+		PartialErrors []string        `json:"partial_errors,omitempty" doc:"Reasons the projection was partial."`
+	}
+}
+
+// RunsCensusInput is the request for the bounded, row-free run census.
+type RunsCensusInput struct {
+	CityScope
+}
+
+// RunsCensusOutput is the response body for GET
+// /v0/city/{cityName}/runs/census. It deliberately contains no run rows or
+// operator-authored prose.
+type RunsCensusOutput struct {
+	Body struct {
+		StatusCounts  RunStatusCounts `json:"status_counts" doc:"Every projected run by canonical lifecycle state."`
+		Partial       bool            `json:"partial,omitempty" doc:"True when the incremental projection is incomplete."`
+		PartialErrors []string        `json:"partial_errors,omitempty" doc:"Sanitized reasons the census may be incomplete."`
 	}
 }
 
@@ -167,5 +201,20 @@ type RunStepsOutput struct {
 	Body struct {
 		RunID string    `json:"run_id" doc:"Run identifier the steps belong to."`
 		Steps []RunStep `json:"steps" doc:"Steps of the run."`
+	}
+}
+
+// RunCancelInput is the request for POST /v0/city/{cityName}/runs/{run_id}/cancel.
+type RunCancelInput struct {
+	CityScope
+	RunID string `path:"run_id" minLength:"1" pattern:"\\S" doc:"Run identifier."`
+}
+
+// RunCancelOutput is the response body for a run cancel (HTTP 202).
+type RunCancelOutput struct {
+	Body struct {
+		RunID  string    `json:"run_id" doc:"The canceled run."`
+		Status RunStatus `json:"status" doc:"Run status after the cancel wind-down."`
+		Closed int       `json:"closed" doc:"Count of the run's beads closed by the cancel."`
 	}
 }
