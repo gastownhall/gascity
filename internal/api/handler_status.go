@@ -45,6 +45,15 @@ var statusResponseTTLFloor = 3 * time.Second
 // work, by the status endpoint's work-count buckets.
 var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
 
+type statusPartialReporter interface {
+	StatusPartial() bool
+}
+
+func statusProviderPartial(sp any) bool {
+	reporter, ok := sp.(statusPartialReporter)
+	return ok && reporter.StatusPartial()
+}
+
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
@@ -206,6 +215,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				}
 			}
 		}
+	}
+
+	if statusProviderPartial(sp) {
+		partialErrors = append(partialErrors, "runtime status probe incomplete; non-running agent rows are unknown")
 	}
 
 	// Count rigs by state + collect per-rig detail rows.

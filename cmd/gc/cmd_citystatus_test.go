@@ -1278,3 +1278,45 @@ func TestControllerStatusGuidance(t *testing.T) {
 		})
 	}
 }
+
+type slowStatusRunningProvider struct {
+	runtime.Provider
+	delay   time.Duration
+	running bool
+}
+
+func (p slowStatusRunningProvider) IsRunning(string) bool {
+	time.Sleep(p.delay)
+	return p.running
+}
+
+func TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	base := slowStatusRunningProvider{Provider: runtime.NewFake(), delay: 100 * time.Millisecond, running: true}
+	sp := newBoundedStatusProvider(base)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatusWithStoreAndSnapshot(sp, newFakeDrainOps(), cfg, "", nil, newSessionBeadSnapshot(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker") || !strings.Contains(out, "unknown  (partial status)") {
+		t.Fatalf("stdout = %q, want worker rendered as unknown partial", out)
+	}
+	if strings.Contains(out, "worker                  stopped") || strings.Contains(out, "worker\tstopped") {
+		t.Fatalf("stdout = %q, must not render timeout fallback as authoritative stopped", out)
+	}
+}
