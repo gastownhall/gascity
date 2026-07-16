@@ -668,17 +668,35 @@ func buildDesiredStateWithSessionBeads(
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
-			// Cross-store cold-wake (FR-S0.1 / vp-s37): a cold rig pool's routed
-			// demand may live in the city store (vp-kvp cross-store delivery),
-			// which the own-rig probe above cannot see while the pool sleeps —
-			// so a sleeping rig pool would never wake to discover it. Add a
-			// city-store probe for cold rig pools so their demand reflects
-			// routed work in either store. No clamp: unlike a custom-scale_check
-			// pool — where the probe is clamped so it cannot override the custom
-			// count (see coldWakeTemplates below) — the default probe IS the
+			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
+			// may live in the city store (vp-kvp cross-store delivery), which
+			// the own-rig probe above cannot see. Add a city-store probe so the
+			// pool's demand reflects routed work in either store — matching the
+			// claim path, where a rig agent's work_query already federates
+			// across stores and claims city-delivered work.
+			//
+			// NOT gated on isCold. This probe began as a cold-wake assist (a
+			// sleeping pool can't discover city-store demand), but gating it on
+			// isCold left a WARM rig pool structurally blind to the same
+			// demand: its count stayed pinned at the rig-store total while
+			// routed beads sat unclaimed in the city store, and a pool at the
+			// warm/cold boundary oscillated pool_desired N↔0 (cold ticks
+			// glimpsed city demand and spawned; warm ticks went blind and the
+			// reconciler orphan-drained the sessions it had just started).
+			// Observed in production: a warm worker pool pinned at
+			// poolDesired=1 against 1 rig-store + 9 city-store routed beads,
+			// serializing every live workflow behind one session and starving
+			// all dep-downstream control beads. Demand a pool can claim is
+			// demand it must be able to count, warm or cold.
+			//
+			// No clamp: unlike a custom-scale_check pool — where the probe is
+			// clamped so it cannot override the custom count (see
+			// coldWakeTemplates below) — the default probe IS the
 			// authoritative count, so it scales to total routed demand (bounded
 			// by max_active and the daemon's max_wakes_per_tick), matching the
-			// retired cold-pool-spawner's scale-to-want. A city-scoped pool's
+			// retired cold-pool-spawner's scale-to-want. Counts sum across
+			// store groups and the beads are distinct per store, so probing
+			// both yields the correct union demand. A city-scoped pool's
 			// own target is already the city store, so it needs no extra probe.
 			//
 			// Gated on a healthy own rig store: when the rig store is missing or
@@ -696,7 +714,7 @@ func buildDesiredStateWithSessionBeads(
 			// Control dispatchers are deliberately store-scoped: a rig copy cannot
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
-			if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue
