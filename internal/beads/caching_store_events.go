@@ -728,7 +728,7 @@ func depsChanged(old, fresh []Dep) bool {
 // that is valid JSON on both sides as equal when their canonical JSON forms
 // match. Metadata is map[string]string, but a value is often a JSON blob (or a
 // bare JSON number). The Dolt rig-store scan and the cache can re-serialize such
-// a value differently — object key order, insignificant whitespace, 1 vs 1.0 —
+// a value differently — object key order or insignificant whitespace —
 // so an exact maps.Equal compare reports a spurious change on every ~80s
 // reconcile pass and drives a re-absorb flood of update-only wisps (ga-ocypq2
 // follow-up). A representation-insensitive compare collapses those
