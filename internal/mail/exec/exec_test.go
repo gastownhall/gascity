@@ -2,6 +2,7 @@ package exec //nolint:revive // internal package, always imported with alias
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,26 @@ import (
 
 	"github.com/gastownhall/gascity/internal/mail"
 )
+
+func TestNormalizeMessageErrorRequiresProtocolMarker(t *testing.T) {
+	infrastructureErr := errors.New("message store not found")
+	got := normalizeMessageError("get", infrastructureErr)
+	if !errors.Is(got, infrastructureErr) {
+		t.Fatalf("unmarked error = %v, want original %v", got, infrastructureErr)
+	}
+	if errors.Is(got, mail.ErrNotFound) {
+		t.Fatalf("unmarked error = %v, must not wrap ErrNotFound", got)
+	}
+
+	notFoundErr := errors.New(messageNotFoundMarker + ": message m-1 not found")
+	got = normalizeMessageError("get", notFoundErr)
+	if !errors.Is(got, mail.ErrNotFound) {
+		t.Fatalf("marked error = %v, want ErrNotFound", got)
+	}
+	if !errors.Is(got, notFoundErr) {
+		t.Fatalf("marked error = %v, want original %v", got, notFoundErr)
+	}
+}
 
 // writeScript creates an executable shell script in dir and returns its path.
 func writeScript(t *testing.T, dir, content string) string {

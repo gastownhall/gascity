@@ -1664,8 +1664,8 @@ func TestMailReadNotFound(t *testing.T) {
 	if code != 1 {
 		t.Errorf("doMailRead = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "bead not found") {
-		t.Errorf("stderr = %q, want 'bead not found'", stderr.String())
+	if !strings.Contains(stderr.String(), "message not found") {
+		t.Errorf("stderr = %q, want 'message not found'", stderr.String())
 	}
 }
 

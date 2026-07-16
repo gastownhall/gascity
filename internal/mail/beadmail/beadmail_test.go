@@ -1115,7 +1115,7 @@ func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	if _, err := p.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
 		t.Fatalf("Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }

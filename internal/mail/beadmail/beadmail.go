@@ -265,7 +265,7 @@ func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) 
 func (p *Provider) Get(id string) (mail.Message, error) {
 	b, err := p.store.Get(id)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail get: %w", err)
+		return mail.Message{}, beadmailError("get", err)
 	}
 	if b.Type != messageBeadType {
 		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
@@ -278,7 +278,7 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 func (p *Provider) Read(id string) (mail.Message, error) {
 	b, err := p.store.Get(id)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail read: %w", err)
+		return mail.Message{}, beadmailError("read", err)
 	}
 	if !hasLabel(b.Labels, "read") {
 		if err := p.store.Update(id, beads.UpdateOpts{
@@ -296,7 +296,7 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 // MarkRead marks a message as read (adds "read" label).
 func (p *Provider) MarkRead(id string) error {
 	if _, err := p.store.Get(id); err != nil {
-		return fmt.Errorf("beadmail mark-read: %w", err)
+		return beadmailError("mark-read", err)
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
@@ -307,7 +307,7 @@ func (p *Provider) MarkRead(id string) error {
 // MarkUnread marks a message as unread (removes "read" label).
 func (p *Provider) MarkUnread(id string) error {
 	if _, err := p.store.Get(id); err != nil {
-		return fmt.Errorf("beadmail mark-unread: %w", err)
+		return beadmailError("mark-unread", err)
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		RemoveLabels: []string{"read"},
@@ -530,7 +530,7 @@ func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	original, err := p.store.Get(id)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
+		return mail.Message{}, beadmailError("reply", err)
 	}
 	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
 	to := toSessionID
@@ -579,6 +579,13 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+func beadmailError(operation string, err error) error {
+	if errors.Is(err, beads.ErrNotFound) {
+		err = mail.ErrNotFound
+	}
+	return fmt.Errorf("beadmail %s: %w", operation, err)
 }
 
 // deriveReplyTitle returns a non-empty title for a reply message. Callers
