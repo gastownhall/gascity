@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -249,6 +250,38 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// trusted roots below; for those, work_dir is only the process cwd.
 		if !filepath.IsAbs(checkPath) && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
 			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
+		}
+
+		// gastownhall/gascity#4021 (narrowed): a graph.v2 ralph control bead
+		// inherits a member step's gc.work_dir, but by the time the controller
+		// runs its gc.check_path gate that worktree may have been reaped on
+		// session drain (internal/runtime/t3bridge). Left in place, a reaped
+		// work_dir breaks the gate two ways: as the relative-check_path base it
+		// makes ResolveConditionPath/EvalSymlinks ENOENT/ENOTDIR, and as the
+		// process cwd it makes RunCondition's chdir fail → GateError, spinning
+		// #4176's infra-retry budget and ultimately burning Ralph attempts.
+		// Classify the worktree by stat-ing it directly:
+		//
+		//   - IsNotExist (reaped): blank work_dir so BOTH the script base and the
+		//     cwd revert to the durable store root — exactly the empty-work_dir
+		//     behavior, mirroring the #3008 fs.ErrNotExist fallback below. The
+		//     durable, pack-shipped gate then resolves and runs normally.
+		//   - other stat error (EACCES/ELOOP, or an ENOTDIR from a parent path
+		//     component turned into a file): do NOT silently re-point scope on an
+		//     ambiguous, possibly-transient filesystem fault. Surface a GateError
+		//     so it enters #4176's bounded infra-retry channel instead of burning
+		//     a Ralph attempt or masking a real fault behind the durable root.
+		//   - stat OK (healthy worktree): unchanged; the #3008 pack-missing
+		//     fallback still applies if the script is not shipped under it.
+		if _, statErr := os.Stat(resolvedWorkDir); statErr != nil {
+			if os.IsNotExist(statErr) {
+				resolvedWorkDir = ""
+			} else {
+				return convergence.GateResult{
+					Outcome: convergence.GateError,
+					Stderr:  fmt.Sprintf("%s: work_dir %q inaccessible resolving check path: %v", bead.ID, resolvedWorkDir, statErr),
+				}, nil
+			}
 		}
 	}
 	scriptBase := storePath
