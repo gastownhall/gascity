@@ -903,12 +903,12 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 	}
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
+	// The exec env now projects the controller's GH_TOKEN/GITHUB_TOKEN into the
+	// child, so any order that echoes one would leak it. Redact the exec error
+	// and combined output against the projected env on both the failure and
+	// success paths, matching the controller dispatch path (order_dispatch.go).
+	redactionEnv := append(os.Environ(), env...)
 	if err != nil {
-		// The exec env now projects the controller's GH_TOKEN/GITHUB_TOKEN into
-		// the child, so a failing order that echoes one would leak it to stderr.
-		// Redact the exec error and combined output against the projected env,
-		// matching the controller dispatch path (order_dispatch.go).
-		redactionEnv := append(os.Environ(), env...)
 		fmt.Fprintf(stderr, "gc order run: exec failed: %s\n", execenv.RedactText(err.Error(), redactionEnv)) //nolint:errcheck
 		if len(output) > 0 {
 			fmt.Fprintf(stderr, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
@@ -916,7 +916,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
 	}
 	if len(output) > 0 {
-		fmt.Fprintf(stdout, "%s", output) //nolint:errcheck
+		fmt.Fprintf(stdout, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Order %q executed (exec)\n", a.Name) //nolint:errcheck
 	return orderRunExecResult{code: 0}

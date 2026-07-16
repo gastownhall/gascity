@@ -28,6 +28,10 @@ type FactoryConfig struct {
 	UsageSink             usage.Sink
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
+	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
+	// a keyed start is probed for stale resume-key failure. Nil preserves the
+	// session package production timer.
+	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
@@ -49,20 +53,17 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	var manager *sessionpkg.Manager
-	switch {
-	case cfg.ResolveTransport != nil:
-		manager = sessionpkg.NewManagerWithOptions(
-			cfg.Store,
-			cfg.Provider,
-			sessionpkg.WithCityPath(cfg.CityPath),
-			sessionpkg.WithTransportResolver(cfg.ResolveTransport),
-		)
-	case cfg.CityPath != "":
-		manager = sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, sessionpkg.WithCityPath(cfg.CityPath))
-	default:
-		manager = sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider)
+	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
+		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
+	if cfg.ResolveTransport != nil {
+		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.StaleKeyDetectionWaiter != nil {
+		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	}
+	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.UsageSink, cfg.ResolveSessionRuntime, cfg.Pricing)
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/remotesource"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -1274,6 +1275,11 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
+	// in which cron order schedules are evaluated when an order does not set
+	// its own tz. Empty means the controller's process-local zone. Invalid
+	// names fail order discovery loudly rather than falling back silently.
+	Timezone string `toml:"timezone,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Suspended is the deprecated pre-runtime-state city suspension
@@ -1383,6 +1389,11 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
+	// byte-identical), "auto" (compare-and-swap where the store is capable,
+	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
+	// defaults to "off". Any other value fails config load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1415,6 +1426,20 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	default:
 		return BeadsBDCompatibility104
 	}
+}
+
+// NormalizedConditionalWrites returns the configured conditional-writes value,
+// mapping ONLY the empty string to the built-in default "off". Unlike
+// NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+// The string→rollout.Mode mapping deliberately lives in internal/rollout to keep
+// config free of a rollout import (cycle).
+func (b BeadsConfig) NormalizedConditionalWrites() string {
+	if b.ConditionalWrites == "" {
+		return "off"
+	}
+	return b.ConditionalWrites
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -2072,6 +2097,44 @@ type APIConfig struct {
 	// wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for
 	// a network-fronted deployment that intentionally trusts its perimeter.
 	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
+	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
+	// already-registered city on the typed per-city API — the routes under
+	// /v0/city/{cityName} — to carry a signed read grant from a configured
+	// trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding
+	// in-process, grant-based admission control to the typed city read surface
+	// (beads, mail, sessions, agent transcripts) instead of trusting network
+	// position.
+	//
+	// Scope boundary: this gate covers ONLY the typed /v0/city/{cityName} read
+	// routes. It does NOT cover other surfaces on the same listener that can also
+	// expose per-city data: the supervisor-scope aggregate event feed (/v0/events
+	// and /v0/events/stream, which multiplex every running city's events), the
+	// default-on dashboard host plane (/api/*, including its /api/city/{cityName}/*
+	// samplers, run detail, run diff, and config reads), and the supervisor-scope
+	// routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the
+	// OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the
+	// only complete mitigation is to front the whole listener with the
+	// grant-minting authority/edge (the intended deployment), which protects
+	// every surface above. Disabling the dashboard host plane with
+	// GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*
+	// only, while the supervisor-scope event feed /v0/events and
+	// /v0/events/stream stays readable by network position until the follow-up
+	// supervisor-scope grant lands. Gating those feeds is tracked as that
+	// follow-up work.
+	//
+	// Built-in callers (the bundled gc API client and dashboard SPA) mint no
+	// grant, so enabling this gate turns their direct /v0/city reads away with a
+	// clear 401; such deployments front reads through the authority that mints
+	// grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma
+	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
+	// via an epoch floor is an ops-plane control set only through the
+	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
+	// instead of silently disabling the gate, so a config that intends to gate
+	// reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1
+	// env var has the same effect.
+	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
@@ -4338,7 +4401,25 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateConditionalWrites rejects an out-of-enum beads.conditional_writes
+// value at load time. This gate selects a correctness discipline: a typo like
+// "requre" silently meaning "off" would leave an operator believing the epoch
+// fence is enforced while every write runs unfenced, so the config fails to
+// load instead. The empty string (unset) is valid and defaults to off.
+func validateConditionalWrites(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

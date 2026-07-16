@@ -264,15 +264,18 @@ the canonical route, not the legacy route.
   must route through `worker.Handle` — enforced by
   `TestGCNonTestFilesStayOnWorkerBoundary` in
   `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
-  files from importing `session.NewManager(`, `worker.SessionHandle`,
-  `sessionlog`, and similar bypass paths in `cmd/gc`. The remaining
-  manager-construction/direct-create bypasses are split by category:
-  `internal/api/session_manager.go` constructs `session.Manager` values
-  for API handlers. (`internal/api/session_resolution.go`'s named-session
-  create was converted to the worker boundary — it now routes through
+  files from importing `session.NewManagerWithOptions(`,
+  `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
+  `cmd/gc`. The remaining manager-construction/direct-create bypasses
+  are split by category: `internal/api/session_manager.go` constructs
+  `session.Manager` values for API handlers.
+  (`internal/api/session_resolution.go`'s named-session create was
+  converted to the worker boundary — it now routes through
   `worker.Handle.Create(ctx, worker.CreateModeStarted)` via
   `newResolvedWorkerSessionHandle`, no longer calling
-  `mgr.CreateAliasedNamedWithTransportAndMetadata(...)` directly.) This
+  `mgr.CreateSession(...)` directly.) Session creation goes through the
+  single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
+  point (`NewManagerWithOptions` is the sole Manager constructor). This
   list is not a sessionlog read-site inventory; stream and transcript
   readers in `internal/api/` and `internal/session/` still read
   session logs directly. Package-internal helpers in `internal/session/`
@@ -404,14 +407,30 @@ full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
 the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
 ~10 cascading cache-miss errors across the executor pool.
 
-**Safe alternative for cold builds:**
+**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
+shim already routes the default `GOCACHE` to a shared **on-disk** cache
+(`~/.cache/go-build`) and pins compile/link temp to disk
+(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
+corrupted by a normal build.
+
+**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
+RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
+tool-output capture dir. A bare `mktemp -d` (no `-p` dir) resolves against the
+unset `$TMPDIR`, which defaults to `/tmp` — one cold cache built there is
+2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent
+on the host (incident gm-tkz1r / ga-x9k9b9, 2026-07). The shim deliberately
+does **not** relocate a `GOCACHE` you set explicitly, so an explicit `/tmp` path
+defeats it.
+
+**If you truly need an isolated cold build** (a from-scratch compile without
+`go clean -cache`), put the throwaway cache **on disk** and remove it
+unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
+linker's own scratch also stays off tmpfs:
 
 ```bash
-GOCACHE=$(mktemp -d) go build ./cmd/gc/
+tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
+GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
 ```
-
-This isolates the cache to a throwaway directory without touching the shared
-pool. Clean up with `rm -rf` after if disk space matters.
 
 **Exception:** `go clean -testcache` is explicitly allowed. It clears only the
 test-result cache, not the compiled-object cache, and does not corrupt

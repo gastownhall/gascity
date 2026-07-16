@@ -69,6 +69,15 @@ type CloneOptions struct {
 	// The zero value injects nothing and the clone runs anonymously; a populated
 	// value keeps the secret in env/helper so the URL carries no userinfo.
 	Cred gitcred.Injection
+	// ResolveOverrides pins hostname→address resolution for the clone, mirroring
+	// curl --resolve. Each entry is "HOST:PORT:ADDRESS[,ADDRESS]" and becomes an
+	// `http.curloptResolve` -c override so git connects to a caller-validated
+	// address instead of resolving the name itself — closing the SSRF
+	// DNS-rebinding TOCTOU between an upstream host fence and this fetch. TLS
+	// still verifies against HOST (libcurl --resolve preserves SNI/host), so a
+	// rebind to an internal target cannot complete the handshake. The zero value
+	// pins nothing (anonymous/literal-IP clones do not need it).
+	ResolveOverrides []string
 }
 
 // cloneRunner executes the assembled clone argv with the assembled env. It is a
@@ -247,23 +256,21 @@ func assembleCloneArgs(url, dst string, opts CloneOptions) []string {
 	return args
 }
 
-// rigCloneStalledLowSpeedLimit / rigCloneStalledLowSpeedTime kill a stalled
-// HTTPS transfer from the inside: git aborts the fetch once the transfer stays
-// under rigCloneStalledLowSpeedLimit bytes/sec for rigCloneStalledLowSpeedTime
-// seconds. This is defense in depth beneath the caller's outer clone deadline —
-// a slow-loris git server that trickles bytes to dodge the wall-clock timeout is
-// still cut off here so the provisioning goroutine and its rig-name reservation
-// cannot be pinned indefinitely.
-const (
-	rigCloneStalledLowSpeedLimit = "1000" // bytes/sec
-	rigCloneStalledLowSpeedTime  = "60"   // seconds below the limit before abort
-)
-
 // rigCloneHardeningArgs returns the leading `git -c` overrides that harden the
 // rig clone. It is the stricter sibling of UntrustedRemoteGitConfigArgs: file
 // and ext transports are DENIED (the pack path allows file:// for CLI-local
 // packs; the rig path must not), and redirects are refused so a fenced public
 // host cannot bounce the fetch to an internal target after the SSRF check.
+//
+// It also closes the DNS-rebinding residual the host fence alone cannot:
+//   - http.sslVerify=true is PINNED on argv (a -c override beats the legacy
+//     GIT_SSL_NO_VERIFY env), so an inherited TLS-bypass cannot silently reopen
+//     rebinding-to-internal-plaintext — the TLS backstop that makes a rebind to
+//     an internal host unable to present a valid cert for the requested name.
+//   - opts.ResolveOverrides pin the fence-approved address (http.curloptResolve),
+//     so git does not re-resolve the name at fetch time at all.
+//   - http.lowSpeedLimit/lowSpeedTime make git self-abort a trickle/black-hole
+//     peer instead of hanging the fetch (a second bound under the caller ctx).
 func rigCloneHardeningArgs(opts CloneOptions) []string {
 	args := []string{
 		"-c", "protocol.allow=never",
@@ -276,23 +283,49 @@ func rigCloneHardeningArgs(opts CloneOptions) []string {
 		"-c", "protocol.ext.allow=never",
 		"-c", "protocol.file.allow=never",
 		"-c", "http.followRedirects=false",
-		"-c", "http.lowSpeedLimit="+rigCloneStalledLowSpeedLimit,
-		"-c", "http.lowSpeedTime="+rigCloneStalledLowSpeedTime,
+		"-c", "http.sslVerify=true",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
+		"-c", fmt.Sprintf("http.lowSpeedLimit=%d", cloneLowSpeedLimitBytes),
+		"-c", fmt.Sprintf("http.lowSpeedTime=%d", cloneLowSpeedTimeSeconds),
 	)
+	for _, r := range opts.ResolveOverrides {
+		if strings.TrimSpace(r) != "" {
+			args = append(args, "-c", "http.curloptResolve="+r)
+		}
+	}
 	if !opts.RecurseSubmodules {
 		args = append(args, "-c", "submodule.recurse=false")
 	}
 	return args
 }
 
+// cloneLowSpeedLimitBytes / cloneLowSpeedTimeSeconds bound a trickle clone: git
+// aborts when the transfer stays under the byte/sec limit for the whole window.
+// It is a second, transport-level bound beneath the caller's context deadline —
+// a slow-loris peer that dribbles one byte per interval keeps a context alive but
+// trips this limit. Values are deliberately generous so a merely-slow-but-real
+// WAN fetch is never killed.
+const (
+	cloneLowSpeedLimitBytes  = 1024 // bytes/sec
+	cloneLowSpeedTimeSeconds = 120  // sustained-below-limit seconds before abort
+)
+
 // cloneEnv builds the clone process environment on HermeticEnv (which strips
 // repo-discovery vars and pins GIT_CONFIG_NOSYSTEM=1 / GIT_CONFIG_GLOBAL=/dev/null
-// so no system or user git config rewrites the URL or leaks a credential), then
-// adds the prompt/askpass/LFS knobs and finally the credential injection's env.
+// so no system or user git config rewrites the URL or leaks a credential), drops
+// the TLS/proxy-bypass vars an inherited environment could carry, then adds the
+// prompt/askpass/LFS knobs and finally the credential injection's env.
 func cloneEnv(opts CloneOptions) []string {
-	env := append(HermeticEnv(),
+	base := HermeticEnv()
+	env := make([]string, 0, len(base)+5)
+	for _, e := range base {
+		if k, _, ok := strings.Cut(e, "="); ok && cloneEnvBypassBlacklist[k] {
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env,
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/bin/false",
 		"SSH_ASKPASS=/bin/false",
@@ -300,6 +333,24 @@ func cloneEnv(opts CloneOptions) []string {
 	)
 	env = append(env, opts.Cred.Env...)
 	return env
+}
+
+// cloneEnvBypassBlacklist names environment variables that could weaken the
+// clone's TLS or transport hardening if inherited from the parent process, so
+// cloneEnv strips them: GIT_SSL_NO_VERIFY would disable certificate verification
+// (the DNS-rebinding backstop, though the argv -c http.sslVerify=true already
+// overrides it, this removes the ambiguity), and the proxy vars could route the
+// fetch through an operator-unintended (or SSRF-bypassing) proxy. Both lower/
+// upper case proxy spellings are covered because libcurl honors either.
+var cloneEnvBypassBlacklist = map[string]bool{
+	"GIT_SSL_NO_VERIFY": true,
+	"GIT_PROXY_COMMAND": true,
+	"http_proxy":        true,
+	"https_proxy":       true,
+	"all_proxy":         true,
+	"HTTP_PROXY":        true,
+	"HTTPS_PROXY":       true,
+	"ALL_PROXY":         true,
 }
 
 // defaultCloneRunner runs `git <args>` with env and returns a combined-output
@@ -325,7 +376,8 @@ func scrubCloneError(err error, rawURL string) error {
 	}
 	msg := err.Error()
 	scrubbed := msg
-	if u, parseErr := url.Parse(strings.TrimSpace(rawURL)); parseErr == nil && u.User != nil {
+	trimmed := strings.TrimSpace(rawURL)
+	if u, parseErr := url.Parse(trimmed); parseErr == nil && u.User != nil {
 		if pw, ok := u.User.Password(); ok && pw != "" {
 			scrubbed = strings.ReplaceAll(scrubbed, pw, "***")
 		}
@@ -333,11 +385,15 @@ func scrubCloneError(err error, rawURL string) error {
 		if userinfo := u.User.String(); userinfo != "" {
 			scrubbed = strings.ReplaceAll(scrubbed, userinfo, "***")
 		}
-	} else if userinfo := rawURLUserinfo(strings.TrimSpace(rawURL)); userinfo != "" {
-		// url.Parse rejected the credential URL (e.g. an invalid %-escape or a raw
-		// space in the userinfo) but git may still have echoed the raw token. Mask
-		// the substring extracted directly from the URL so no secret survives — the
-		// fail-open path this replaces leaked it into the returned error.
+	}
+	// Also mask the RAW userinfo substring, unconditionally. url.User.Password()
+	// returns the DECODED password and url.User.String() re-encodes/normalizes, so
+	// a percent-encoded credential git echoes verbatim (e.g. "user:se%63ret")
+	// matches neither — and the raw-substring scrub previously ran only when
+	// url.Parse failed. Extracting the authority userinfo straight from the URL
+	// string closes the leak for a parseable-but-encoded credential and a
+	// url.Parse-rejected one alike.
+	if userinfo := rawURLUserinfo(trimmed); userinfo != "" {
 		scrubbed = strings.ReplaceAll(scrubbed, userinfo, "***")
 	}
 	if scrubbed == msg {

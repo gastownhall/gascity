@@ -60,6 +60,43 @@ func TestTeardownPartialRigRemovesDirAndDropsDB(t *testing.T) {
 	}
 }
 
+// TestTeardownPartialRigRederivesDoltDBFromDisk proves the managed-DB orphan
+// fix: when a provision fails AFTER InitStore minted the managed Dolt DB but
+// BEFORE the success path recorded it, the manifest carries only CreatedDir.
+// Teardown must re-derive the DB name from the on-disk .beads/metadata.json
+// (before RemoveAll destroys it) and drop it, so the DB is not orphaned and
+// cannot collide with a later same-name add.
+func TestTeardownPartialRigRederivesDoltDBFromDisk(t *testing.T) {
+	t.Setenv("GC_DOLT", "") // the managed DB must not be skip-deferred
+	cs := &controllerState{cityPath: t.TempDir()}
+	rigDir := filepath.Join(cs.cityPath, "rigs", "web")
+	writeRigStore(t, rigDir) // .beads/metadata.json names dolt_database "web"
+
+	var dropped []string
+	orig := controllerDropManagedDoltDatabase
+	controllerDropManagedDoltDatabase = func(_ *controllerState, _ context.Context, name string) error {
+		dropped = append(dropped, name)
+		return nil
+	}
+	defer func() { controllerDropManagedDoltDatabase = orig }()
+
+	// The bug's pre-fix state: the manifest recorded the created dir but NOT the
+	// minted DB (the success-path onManifest never ran).
+	err := cs.TeardownPartialRig(context.Background(), api.RigProvisionManifest{
+		RigName:    "web",
+		CreatedDir: rigDir,
+	})
+	if err != nil {
+		t.Fatalf("TeardownPartialRig = %v, want nil", err)
+	}
+	if _, statErr := os.Stat(rigDir); !os.IsNotExist(statErr) {
+		t.Fatalf("rig dir still present after teardown (stat err = %v)", statErr)
+	}
+	if len(dropped) != 1 || dropped[0] != "web" {
+		t.Fatalf("dropped = %v, want [web] re-derived from on-disk metadata.json", dropped)
+	}
+}
+
 // TestTeardownPartialRigZeroManifestIsNoOp proves a zero manifest removes
 // nothing and drops nothing — the safe default that never deletes data the
 // machine cannot prove it created.
@@ -184,9 +221,38 @@ func TestEnsurePublicGitHostFailsClosed(t *testing.T) {
 	ssrf.HostResolver = func(string) ([]net.IP, error) { return nil, errors.New("SERVFAIL") }
 	defer func() { ssrf.HostResolver = origResolver }()
 
-	err := ensurePublicGitHost("https://rebind.attacker.example/repo.git")
+	_, err := ensurePublicGitHost("https://rebind.attacker.example/repo.git")
 	if err == nil || !errors.Is(err, ssrf.ErrBlockedHost) {
 		t.Fatalf("ensurePublicGitHost on resolution error = %v, want ErrBlockedHost (fail-closed)", err)
+	}
+}
+
+// TestEnsurePublicGitHostPinsResolvedAddress proves the fence returns an
+// http.curloptResolve override that pins the fence-approved public IP for the
+// clone, so git connects to exactly that address instead of re-resolving the
+// name (closing the DNS-rebinding TOCTOU). A literal-IP host has no name to pin.
+func TestEnsurePublicGitHostPinsResolvedAddress(t *testing.T) {
+	origResolver := ssrf.HostResolver
+	ssrf.HostResolver = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+	defer func() { ssrf.HostResolver = origResolver }()
+
+	pin, err := ensurePublicGitHost("https://example.com/repo.git")
+	if err != nil {
+		t.Fatalf("ensurePublicGitHost = %v, want nil", err)
+	}
+	if pin != "example.com:443:93.184.216.34" {
+		t.Fatalf("resolve override = %q, want %q", pin, "example.com:443:93.184.216.34")
+	}
+
+	// A literal-IP host names the address directly; there is no name to pin.
+	pin, err = ensurePublicGitHost("https://93.184.216.34/repo.git")
+	if err != nil {
+		t.Fatalf("ensurePublicGitHost(literal) = %v, want nil", err)
+	}
+	if pin != "" {
+		t.Fatalf("resolve override for literal IP = %q, want empty", pin)
 	}
 }
 

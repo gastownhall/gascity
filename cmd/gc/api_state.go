@@ -34,6 +34,8 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rig"
+	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
@@ -94,6 +96,27 @@ type controllerState struct {
 	// until the loop observes and applies the same or a newer on-disk config.
 	configMutationPending atomic.Bool
 	pendingConfigRev      string
+
+	// rolloutFlags is the boot-latched rollout-gate snapshot: written once in
+	// newControllerState, never reassigned (reads are lock-free by construction,
+	// like version/startedAt). The beads CAS gate is deliberately NOT re-resolved
+	// on reload — a legacy writer racing a CAS writer inside one process is the
+	// corruption it gates — so a divergent on-disk change surfaces as a
+	// pending-restart notice via noteRolloutDrift rather than flipping mid-run.
+	rolloutFlags rollout.Flags
+	// rolloutDriftMu guards rolloutDrift and rolloutDriftSig.
+	rolloutDriftMu sync.Mutex
+	// rolloutDrift holds a NoticePendingRestart when a reloaded config's beads
+	// gate diverges from the boot latch (or resolves invalid); nil when
+	// convergent (level-triggered: a later convergent reload clears it).
+	rolloutDrift *rollout.Notice
+	// rolloutDriftSig is the current drift signature, so noteRolloutDrift logs
+	// one stderr line per transition (into drift, into an invalid on-disk value,
+	// or back in sync) rather than one per reload. "" means in sync.
+	rolloutDriftSig string
+	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
+	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
+	rolloutLogf func(format string, args ...any)
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -103,7 +126,9 @@ var beadEventWatcherRetryDelay = time.Second
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
 // and skip spawning managed dolt (~12s per call).
-var newControllerStateOpenCityStore = openCityStoreResultAt
+var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true)
+}
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
 // the same native-selection factory as direct city/rig store opens. Tests swap
@@ -142,6 +167,14 @@ func newControllerState(
 			beadEventStartSeqOK = true
 		}
 	}
+	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
+	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
+	// Flags is degraded-safe (legacy paths), and this constructor returns no
+	// error — mirroring the best-effort city-store warn below.
+	rolloutFlags, rolloutErr := rollout.Resolve(cfg, rollout.ResolveOptions{})
+	if rolloutErr != nil {
+		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
+	}
 	cs := &controllerState{
 		cfg:                 cfg,
 		sp:                  sp,
@@ -156,6 +189,14 @@ func newControllerState(
 		adapterReg:          extmsg.NewAdapterRegistry(),
 		beadEventStartSeq:   beadEventStartSeq,
 		beadEventStartSeqOK: beadEventStartSeqOK,
+		rolloutFlags:        rolloutFlags,
+	}
+	// Boot-resolved rollout notices are retained on the Flags value; echo
+	// them once at startup so an env override contradicting explicit config
+	// (or an ignored invalid env value) is visible in the boot log, not only
+	// to whoever thinks to run doctor.
+	for _, n := range cs.rolloutFlags.Notices() {
+		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
@@ -163,7 +204,7 @@ func newControllerState(
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
 	// Open city-level store for session beads and mail (best-effort).
-	if opened, err := newControllerStateOpenCityStore(cityPath); err != nil {
+	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites()); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
@@ -173,6 +214,7 @@ func newControllerState(
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
+	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
 }
@@ -268,9 +310,23 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	var sharedLegacyFileStore beads.Store
 	var sharedLegacyCachedStore beads.Store
 	if cityProvider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
-		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
+		// Through the factory so the shared legacy store carries the
+		// boot-latched conditional-writes stamp like every other store; a
+		// direct open here left legacy-file cities silently unfenced.
+		result, err := beads.OpenStoreAtForCity(cs.cacheCtx, beads.StoreOpenOptions{
+			ScopeRoot:                   cs.cityPath,
+			CityPath:                    cs.cityPath,
+			Provider:                    "file",
+			ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+			OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "city"),
+			OpenFileStore: func() (beads.Store, error) {
+				return openCompatibleFileStore(cs.cityPath, cs.cityPath)
+			},
+		})
 		if err == nil {
-			sharedLegacyFileStore = wrapStoreWithBeadPolicies(store, cfg)
+			sharedLegacyFileStore = wrapStoreWithBeadPolicies(result.Store, cfg)
+		} else {
+			cs.rolloutWarnf("api: shared legacy file store: %v\n", err)
 		}
 	}
 
@@ -337,25 +393,13 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		s.SetEnv(env)
 		return s, nil
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
-		store, err := openExecStore()
-		if err != nil {
-			return unavailableStore{err: fmt.Errorf("open exec rig store %s: %w", scopeRoot, err)}
-		}
-		return wrapStoreWithBeadPolicies(store, cfg)
-	}
-	if provider == "file" {
-		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
-		if err != nil {
-			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
-		}
-		return wrapStoreWithBeadPolicies(store, cfg)
-	}
 	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:        scopeRoot,
-		CityPath:         cs.cityPath,
-		Provider:         provider,
-		PreflightChecker: newBeadsPreflightChecker(cs.cityPath, provider),
+		ScopeRoot:                   scopeRoot,
+		CityPath:                    cs.cityPath,
+		Provider:                    provider,
+		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider),
+		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),
 		OpenFileStore: func() (beads.Store, error) {
 			store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 			if err != nil {
@@ -656,6 +700,10 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
+	// The beads CAS gate is boot-latched: a reload that would change it only
+	// records a pending-restart notice, it does not flip the process mid-run.
+	cs.noteRolloutDrift(cfg)
+
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
@@ -666,7 +714,10 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// reload instead of writing to the old sink until the controller restarts.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	// Reopen city-level store for session beads and mail.
-	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath)
+	// Reopen carries the BOOT-latched mode: re-resolving from the (possibly
+	// edited) on-disk config here would flip the city store's write
+	// discipline mid-process while rig stores keep the boot mode.
+	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -810,6 +861,9 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
+	// The beads CAS gate is boot-latched (see update).
+	cs.noteRolloutDrift(cfg)
+
 	// Recompute the usage sink so a changed [usage].provider takes effect even on
 	// the store-reuse reload path.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
@@ -822,6 +876,110 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	cs.sp = sp
 	cs.usageSink = usageSink
 	cs.mu.Unlock()
+}
+
+// noteRolloutDrift level-compares the effective beads.conditional_writes gate a
+// reloaded config WOULD resolve to against the boot latch and records the
+// divergence for operators. It NEVER re-latches the gate: changing the CAS
+// discipline mid-process is the corruption being gated, so the on-disk change
+// waits for a restart. Three level-triggered states, each logging one line per
+// transition (not per reload):
+//   - in sync: on-disk resolves to the boot value → drift cleared.
+//   - drift: on-disk resolves to a different valid value → NoticePendingRestart
+//     carrying the raw on-disk spelling; a restart would apply it.
+//   - invalid: on-disk fails to resolve (an out-of-enum typo — config.Parse does
+//     NOT enum-validate, internal/rollout does) → NoticePendingRestart noting the
+//     value is invalid, because a restart would warn and fall back to legacy
+//     (Off), so a previously recorded "restart to apply <X>" must not stand.
+func (cs *controllerState) noteRolloutDrift(next *config.City) {
+	boot := cs.rolloutFlags.BeadsConditionalWrites()
+	raw := next.Beads.ConditionalWrites
+
+	var (
+		notice  *rollout.Notice
+		sig     string // drift signature; "" means in sync
+		logLine string
+	)
+	if nextFlags, err := rollout.Resolve(next, rollout.ResolveOptions{}); err != nil {
+		sig = "invalid:" + err.Error()
+		notice = &rollout.Notice{
+			Kind:        rollout.NoticePendingRestart,
+			FlagKey:     rollout.KeyBeadsConditionalWrites,
+			ConfigValue: raw,
+			Message:     fmt.Sprintf("beads.conditional_writes on disk (%q) is invalid (%v); the process stays latched to %q and a restart would fall back to legacy (off)", raw, err, boot),
+		}
+		logLine = fmt.Sprintf("api: rollout: reloaded beads.conditional_writes is invalid (%v); process stays latched to %q, on-disk value will NOT apply on restart\n", err, boot)
+	} else if onDisk := nextFlags.BeadsConditionalWrites(); onDisk != boot {
+		sig = "drift:" + string(onDisk)
+		notice = &rollout.Notice{
+			Kind:        rollout.NoticePendingRestart,
+			FlagKey:     rollout.KeyBeadsConditionalWrites,
+			ConfigValue: raw,
+			Message:     fmt.Sprintf("beads.conditional_writes on disk resolves to %q but the process latched %q at boot; restart to apply", onDisk, boot),
+		}
+		logLine = fmt.Sprintf("api: rollout: beads.conditional_writes on disk resolves to %q but the process is latched to %q; restart to apply\n", onDisk, boot)
+	}
+
+	cs.rolloutDriftMu.Lock()
+	defer cs.rolloutDriftMu.Unlock()
+	prevSig := cs.rolloutDriftSig
+	cs.rolloutDrift = notice
+	cs.rolloutDriftSig = sig
+	if sig == prevSig { // no transition — stay quiet
+		return
+	}
+	if sig == "" {
+		cs.rolloutWarnf("api: rollout: beads.conditional_writes back in sync with the running process (%s)\n", boot)
+		return
+	}
+	cs.rolloutWarnf("%s", logLine)
+}
+
+// preflightConditionalWrites probes every controller-owned store's
+// conditional-write resolution eagerly at boot. Under require this converts
+// "starts healthy, refuses on the first fenced write" into a loud startup
+// ERROR line per incapable store; under auto the resolve itself fires the
+// once-latched degrade surface. Reads stay functional either way — fenced
+// writes fail closed per-operation, which is the contract.
+func (cs *controllerState) preflightConditionalWrites() {
+	if cs.rolloutFlags.BeadsConditionalWrites() != rollout.Require {
+		return
+	}
+	probe := func(name string, store beads.Store) {
+		if store == nil {
+			return
+		}
+		if _, _, err := beads.ResolveConditionalWriter(store); err != nil {
+			cs.rolloutWarnf("api: rollout: ERROR: conditional_writes=require but store %s cannot fence: %v\n", name, err)
+		}
+	}
+	for rigName, store := range cs.beadStores {
+		probe("rig/"+rigName, store)
+	}
+	probe("city", cs.cityBeadStore)
+}
+
+// rolloutWarnf routes noteRolloutDrift's transition lines to the injected sink
+// (tests) or os.Stderr (production default).
+func (cs *controllerState) rolloutWarnf(format string, args ...any) {
+	if cs.rolloutLogf != nil {
+		cs.rolloutLogf(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+// RolloutDriftNotices returns the pending-restart notices recorded by reloads
+// (nil when the on-disk config agrees with the boot latch). The S4 status wire
+// merges these with RolloutFlags().Notices(); in PR-1c the stderr transition
+// line is the live operator surface.
+func (cs *controllerState) RolloutDriftNotices() []rollout.Notice {
+	cs.rolloutDriftMu.Lock()
+	defer cs.rolloutDriftMu.Unlock()
+	if cs.rolloutDrift == nil {
+		return nil
+	}
+	return []rollout.Notice{*cs.rolloutDrift}
 }
 
 func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City) bool {
@@ -1054,6 +1212,13 @@ func (cs *controllerState) Config() *config.City {
 	defer cs.mu.RUnlock()
 	return cs.cfg
 }
+
+// RolloutFlags returns the boot-latched rollout-gate snapshot (api.RolloutFlagsProvider).
+// Lock-free: rolloutFlags is written once at construction and never reassigned;
+// reloads record drift via noteRolloutDrift rather than re-latching.
+func (cs *controllerState) RolloutFlags() rollout.Flags { return cs.rolloutFlags }
+
+var _ api.RolloutFlagsProvider = (*controllerState)(nil)
 
 // SessionProvider returns the current session provider.
 func (cs *controllerState) SessionProvider() runtime.Provider {
@@ -1628,15 +1793,6 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 	return err
 }
 
-// rigCloneTimeout is the outer wall-clock bound on a git_url clone. The detached
-// provisioning goroutine (C4b) runs the clone under context.Background() so the
-// fetch outlives the request that triggered it; without this deadline a hung or
-// slow-loris git server on an attacker-controlled public host would block the
-// clone subprocess — and keep the idempotency name reservation live — forever.
-// It is generous (a large repo over a slow WAN link is legitimate) and complements
-// the inner http.lowSpeedLimit guard in rigCloneHardeningArgs.
-const rigCloneTimeout = 10 * time.Minute
-
 // ProvisionRigFromGit is the async server-side rig-add path (C4b). It clones
 // gitURL into the rig's working tree OUTSIDE the per-city config lock (a WAN
 // fetch must not freeze config writes), SSRF-fencing the host first, then
@@ -1681,7 +1837,8 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	// git_url is passed to git via argv and is visible in the process table to a
 	// same-user observer. Move to an askpass/credential-helper handoff if that
 	// residual is ever tightened.
-	if err := ensurePublicGitHost(gitURL); err != nil {
+	resolveOverride, err := ensurePublicGitHost(gitURL)
+	if err != nil {
 		return config.Rig{}, err
 	}
 
@@ -1705,14 +1862,13 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	if onStep != nil {
 		onStep("clone", "  Cloning rig working tree from git", false)
 	}
-	// Bound the WAN clone with rigCloneTimeout so a stalled/hung remote cannot
-	// pin the provisioning goroutine and its rig-name reservation indefinitely.
-	// cancel is deferred (not called inline) purely to satisfy vet's lostcancel;
-	// cloneCtx is used only by the clone, so holding the timer until the function
-	// returns is harmless.
-	cloneCtx, cancelClone := context.WithTimeout(ctx, rigCloneTimeout)
-	defer cancelClone()
-	if err := rigCloneGit(cloneCtx, gitURL, r.Path, git.CloneOptions{}); err != nil {
+	cloneOpts := git.CloneOptions{}
+	if resolveOverride != "" {
+		// Pin the fence-approved address so git connects to the exact IP the SSRF
+		// fence validated, defeating a DNS rebind between the fence and the fetch.
+		cloneOpts.ResolveOverrides = []string{resolveOverride}
+	}
+	if err := rigCloneGit(ctx, gitURL, r.Path, cloneOpts); err != nil {
 		// Wrap with rig.ErrCloneFailed so the async failure mapper classifies it
 		// as clone_failed (distinct from provision_failed). git.Clone already
 		// redacted any embedded credential from the error.
@@ -1827,7 +1983,7 @@ var controllerDropManagedDoltDatabase = func(cs *controllerState, ctx context.Co
 	if err := fatalPortResolutionError(resolution); err != nil {
 		return fmt.Errorf("resolving dolt port: %w", err)
 	}
-	client, err := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
+	client, err := newSQLCleanupDoltClient(cs.cityPath, host, strconv.Itoa(resolution.Port))
 	if err != nil {
 		return fmt.Errorf("opening dolt connection: %w", err)
 	}
@@ -1851,6 +2007,20 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 		ctx = context.Background()
 	}
 	var errs error
+	// Resolve the managed Dolt DB to drop BEFORE the RemoveAll destroys the
+	// metadata.json it is read from. A provision that failed after Step-13
+	// InitStore minted the managed DB but before the success path recorded it into
+	// the manifest (a NormalizeScopes / config-write / packs / routes failure —
+	// all reachable) leaves the DB named only in the created dir's
+	// .beads/metadata.json. Re-deriving it here reaps the otherwise-orphaned DB
+	// that would survive the dir removal and collide with a later same-name add.
+	// This covers both the runtime rollback and the boot sweep, which share this
+	// teardown, and is crash-safe (it does not depend on the durable manifest
+	// having captured the DB). The drop guard below still fences a crafted name.
+	doltDB := strings.TrimSpace(m.DoltDB)
+	if doltDB == "" && m.CreatedDir != "" {
+		doltDB = cs.provisionedManagedDoltDatabase(m.CreatedDir)
+	}
 	if m.CreatedDir != "" {
 		// Re-assert city-root containment before the RemoveAll. CreatedDir is read
 		// back from the durable idempotency record by the boot sweep and the
@@ -1862,15 +2032,15 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 			errs = errors.Join(errs, fmt.Errorf("removing rig dir %s: %w", m.CreatedDir, err))
 		}
 	}
-	if m.DoltDB != "" {
+	if doltDB != "" {
 		// Defense-in-depth: the DoltDB name is derived from the CLONED repo's
 		// .beads/metadata.json, so a crafted repo could name the city's own
 		// database or a cross-tenant rig's. Refuse the drop (hard error, never a
 		// silent skip) unless the name is safe to drop for THIS rig.
-		if err := cs.assertDroppableManagedDoltDatabase(m.RigName, m.DoltDB); err != nil {
+		if err := cs.assertDroppableManagedDoltDatabase(m.RigName, doltDB); err != nil {
 			errs = errors.Join(errs, err)
-		} else if err := controllerDropManagedDoltDatabase(cs, ctx, m.DoltDB); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("dropping dolt database %q: %w", m.DoltDB, err))
+		} else if err := controllerDropManagedDoltDatabase(cs, ctx, doltDB); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("dropping dolt database %q: %w", doltDB, err))
 		}
 	}
 	// Routes repair (best-effort, non-gating): after a refresh-failure rollback
@@ -1946,15 +2116,8 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 	// Without it, Provision's re-add semantics would make same-name+same-path an
 	// idempotent success and same-name+different-path a plain 500. Config-level
 	// re-add idempotency is owned by the C4 request_id state machine.
-	cs.mu.RLock()
-	cfg := cs.cfg
-	cs.mu.RUnlock()
-	if cfg != nil {
-		for _, existing := range cfg.Rigs {
-			if existing.Name == r.Name {
-				return config.Rig{}, fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
-			}
-		}
+	if err := cs.assertRigNameAvailableSnapshot(r.Name); err != nil {
+		return config.Rig{}, err
 	}
 
 	var depOnStep func(rig.ProvisionStep)
@@ -1962,75 +2125,101 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 		depOnStep = func(s rig.ProvisionStep) { onStep(s.Name, s.Detail, s.Warn) }
 	}
 
-	var (
-		postErr        error
-		provisionedRig config.Rig
-	)
+	var provisionedRig config.Rig
 	if err := cs.SerializeConfigWrite(func() error {
 		return cs.mutateAndPoke(func() error {
-			// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
-			// writing city.toml from the composed snapshot would bake expansions
-			// into the file.
-			editCfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-			// Authoritative under-lock duplicate-name guard: the pre-lock check on
-			// the composed snapshot can be stale (a concurrent create, or a local
-			// `gc rig add` the reconciler has not reloaded). Matches the retired
-			// configedit.Editor.CreateRig 409-on-any-name-match contract; config-level
-			// re-add idempotency is owned by the C4 request_id state machine.
-			for _, existing := range editCfg.Rigs {
-				if existing.Name == r.Name {
-					return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
-				}
-			}
-			// Register the city dolt config so the beads-init path can read the
-			// process-global lifecycle fields — but only if absent: the controller
-			// owns a persistent boot-time registration (startBeadsLifecycle) that this
-			// per-request window must never delete. (The CLI wrapper registers
-			// unconditionally because it is a short-lived process that owns its map.)
-			if cityUsesBdStoreContract(cs.cityPath) && cityDoltConfigHasLifecycleFields(editCfg.Dolt) {
-				if registerCityDoltConfigIfAbsent(cs.cityPath, editCfg.Dolt) {
-					defer clearCityDoltConfig(cs.cityPath)
-				}
-			}
-
-			deps := cs.buildRigProvisionDeps(editCfg, depOnStep, r.Name)
-
-			resultRig, res, err := rig.Provision(deps, rig.ProvisionRequest{
-				Name:          r.Name,
-				Path:          r.Path,
-				Prefix:        r.Prefix,
-				DefaultBranch: r.DefaultBranch,
-			})
-			if err != nil {
-				return err
-			}
-			// Capture PostProvision's (best-effort) error and return nil so
-			// mutateAndPoke runs its refresh/poke — the rig IS committed to disk,
-			// so returning the error here would leave disk and controller state
-			// split-brained (mutateAndPoke treats a mutate error as "nothing
-			// committed").
-			provisionedRig = resultRig
-			postErr = res.PostProvisionErr
-			return nil
+			var err error
+			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
+			return err
 		})
 	}); err != nil {
 		return config.Rig{}, err
 	}
-	if postErr != nil {
-		log.Printf("api: rig create: post-provision: %v", postErr)
-	}
 	return provisionedRig, nil
 }
 
-// buildRigProvisionDeps assembles the rig.Deps the controller injects into
-// rig.Provision for an API-driven rig create. Extracted from provisionRigLocked
-// so that function's control flow stays flat; editCfg is the raw for-edit config
-// (never the composed snapshot), depOnStep bridges progress to the caller, and
-// rigName is threaded into the PostProvision hook.
-func (cs *controllerState) buildRigProvisionDeps(editCfg *config.City, depOnStep func(rig.ProvisionStep), rigName string) rig.Deps {
+// assertRigNameAvailableSnapshot rejects a rig name that already exists in the
+// composed config snapshot (cs.cfg). It is the pre-lock half of the
+// 409-on-existing-name guard; provisionRigWrite re-checks authoritatively under
+// the config-write lock against the raw for-edit config.
+func (cs *controllerState) assertRigNameAvailableSnapshot(name string) error {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	cs.mu.RUnlock()
+	if rigConfigHasRigNamed(cfg, name) {
+		return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, name)
+	}
+	return nil
+}
+
+// rigConfigHasRigNamed reports whether cfg already declares a rig named name.
+func rigConfigHasRigNamed(cfg *config.City, name string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, existing := range cfg.Rigs {
+		if existing.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// provisionRigWrite performs the config-mutating half of a git_url rig add. It
+// MUST run inside cs.SerializeConfigWrite → cs.mutateAndPoke (the per-city write
+// lock plus refresh/poke): it loads the raw for-edit config, re-asserts the
+// duplicate-name guard authoritatively under the lock, registers the city dolt
+// config for the beads-init path, and runs rig.Provision. A best-effort
+// PostProvision failure is logged, not returned, so mutateAndPoke still commits
+// the rig that was written to disk — returning it would make mutateAndPoke treat
+// the committed rig as "nothing committed" and split-brain disk vs controller.
+func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.ProvisionStep)) (config.Rig, error) {
+	// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
+	// writing city.toml from the composed snapshot would bake expansions into the
+	// file.
+	editCfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+	if err != nil {
+		return config.Rig{}, fmt.Errorf("loading config: %w", err)
+	}
+	// Authoritative under-lock duplicate-name guard: the pre-lock check on the
+	// composed snapshot can be stale (a concurrent create, or a local `gc rig add`
+	// the reconciler has not reloaded). Matches the retired
+	// configedit.Editor.CreateRig 409-on-any-name-match contract; config-level
+	// re-add idempotency is owned by the C4 request_id state machine.
+	if rigConfigHasRigNamed(editCfg, r.Name) {
+		return config.Rig{}, fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
+	}
+	// Register the city dolt config so the beads-init path can read the
+	// process-global lifecycle fields — but only if absent: the controller owns a
+	// persistent boot-time registration (startBeadsLifecycle) that this per-request
+	// window must never delete. (The CLI wrapper registers unconditionally because
+	// it is a short-lived process that owns its map.)
+	if cityUsesBdStoreContract(cs.cityPath) && cityDoltConfigHasLifecycleFields(editCfg.Dolt) {
+		if registerCityDoltConfigIfAbsent(cs.cityPath, editCfg.Dolt) {
+			defer clearCityDoltConfig(cs.cityPath)
+		}
+	}
+
+	resultRig, res, err := rig.Provision(cs.rigProvisionDeps(editCfg, r, depOnStep), rig.ProvisionRequest{
+		Name:          r.Name,
+		Path:          r.Path,
+		Prefix:        r.Prefix,
+		DefaultBranch: r.DefaultBranch,
+	})
+	if err != nil {
+		return config.Rig{}, err
+	}
+	if res.PostProvisionErr != nil {
+		log.Printf("api: rig create: post-provision: %v", res.PostProvisionErr)
+	}
+	return resultRig, nil
+}
+
+// rigProvisionDeps assembles the rig.Deps for a controller-side git_url provision.
+// It is split out of provisionRigWrite so the wide Deps literal and its
+// PostProvision hook do not dominate that function's complexity; the wiring is
+// unchanged.
+func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, depOnStep func(rig.ProvisionStep)) rig.Deps {
 	return rig.Deps{
 		FS:           fsys.OSFS{},
 		CityPath:     cs.cityPath,
@@ -2049,67 +2238,85 @@ func (cs *controllerState) buildRigProvisionDeps(editCfg *config.City, depOnStep
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		OnStep:        depOnStep,
-		PostProvision: cs.rigCreatePostProvision(rigName),
+		PostProvision: func(pc rig.ProvisionContext) error {
+			cs.rigPostProvisionLocal(r.Name, pc)
+			return nil
+		},
 	}
 }
 
-// rigCreatePostProvision returns the PostProvision hook for the API rig-create
-// path: rig-local infrastructure the CLI installs (.gitignore, agent hooks,
-// resolved formulas, .beads/.env). Every step is best-effort and logged, never
-// fatal — the rig is already committed to disk when this runs. It deliberately
-// DROPS the CLI's controller-reload + store-accessible wait: G17 forbids the
-// controller dialing its own socket mid-request, and mutateAndPoke's refresh
-// already makes the controller see the rig.
-func (cs *controllerState) rigCreatePostProvision(rigName string) func(rig.ProvisionContext) error {
-	return func(pc rig.ProvisionContext) error {
-		if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
-			log.Printf("api: rig create: writing .gitignore: %v", err)
+// rigPostProvisionLocal runs the rig-local infrastructure the CLI installs after a
+// provision commits: .gitignore entries, agent hooks, formula resolution, and the
+// .beads/.env root marker. Every step is best-effort — a failure is logged, never
+// returned, because the rig is already committed to disk. It deliberately DROPS the
+// CLI's controller-reload + store-accessible wait: G17 forbids the controller
+// dialing its own socket mid-request, and mutateAndPoke's refresh already makes the
+// controller see the rig. Split out of the Deps literal to keep provisionRigWrite's
+// nesting shallow; the behavior is unchanged.
+func (cs *controllerState) rigPostProvisionLocal(rigName string, pc rig.ProvisionContext) {
+	if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
+		log.Printf("api: rig create: writing .gitignore: %v", err)
+	}
+	if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
+		resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
+		if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
+			log.Printf("api: rig create: installing agent hooks: %v", err)
 		}
-		if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-			resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
-			if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
-				log.Printf("api: rig create: installing agent hooks: %v", err)
+	}
+	reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+	if reloadedCfg != nil {
+		layers, ok := reloadedCfg.FormulaLayers.Rigs[rigName]
+		if !ok || len(layers) == 0 {
+			layers = reloadedCfg.FormulaLayers.City
+		}
+		if len(layers) > 0 {
+			if rfErr := ResolveFormulas(pc.RigPath, layers); rfErr != nil {
+				log.Printf("api: rig create: resolving formulas: %v", rfErr)
 			}
 		}
-		reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
-		if reloadedCfg != nil {
-			layers, ok := reloadedCfg.FormulaLayers.Rigs[rigName]
-			if !ok || len(layers) == 0 {
-				layers = reloadedCfg.FormulaLayers.City
-			}
-			if len(layers) > 0 {
-				if rfErr := ResolveFormulas(pc.RigPath, layers); rfErr != nil {
-					log.Printf("api: rig create: resolving formulas: %v", rfErr)
-				}
-			}
-		}
-		if err := writeBeadsEnvGTRoot(fsys.OSFS{}, pc.RigPath, cs.cityPath); err != nil {
-			log.Printf("api: rig create: writing .beads/.env: %v", err)
-		}
-		return nil
+	}
+	if err := writeBeadsEnvGTRoot(fsys.OSFS{}, pc.RigPath, cs.cityPath); err != nil {
+		log.Printf("api: rig create: writing .beads/.env: %v", err)
 	}
 }
 
 // ensurePublicGitHost SSRF-fences the host of a rig-clone git URL before git
 // runs, delegating to the shared internal/ssrf fence (also used by the pack
 // import path) so the two callers cannot drift. The clone path uses the
-// FAIL-CLOSED EnsurePublicHostStrict variant: a resolution error blocks (the
+// FAIL-CLOSED ResolvePublicHostStrict variant: a resolution error blocks (the
 // clone is a fresh SSRF surface where an attacker can force a SERVFAIL to slip
 // past a fail-open fence and then win the DNS-rebinding TOCTOU at git's own
-// re-resolution). The pack path stays on the fail-open EnsurePublicHost. A
-// non-URL form (scp/bare/ext) has no host to fence here; git.Clone's scheme
-// allowlist refuses every such network-reaching form before it connects, so
-// there is no unfenced path. A blocked host is a validation error so the async
-// handler maps it to a blocked_host request.failed code.
-func ensurePublicGitHost(gitURL string) error {
-	u, err := url.Parse(strings.TrimSpace(gitURL))
-	if err != nil || u == nil || u.Hostname() == "" {
-		return nil
+// re-resolution). The pack path stays on the fail-open EnsurePublicHost.
+//
+// On success it returns the http.curloptResolve override (HOST:PORT:ADDR[,ADDR])
+// that PINS the fence-approved address for the clone, so git connects to exactly
+// the IP the fence validated instead of re-resolving the name — the connection-
+// time destination control that closes the DNS-rebinding TOCTOU. It returns ""
+// (with a nil error) when there is nothing to pin: a non-URL form (scp/bare/ext,
+// which git.Clone's scheme allowlist refuses before it connects) or a literal-IP
+// host (the URL already names the address). A blocked host is a validation error
+// so the async handler maps it to a blocked_host request.failed code.
+func ensurePublicGitHost(gitURL string) (resolveOverride string, err error) {
+	u, perr := url.Parse(strings.TrimSpace(gitURL))
+	if perr != nil || u == nil || u.Hostname() == "" {
+		return "", nil
 	}
-	if err := ssrf.EnsurePublicHostStrict(u.Hostname()); err != nil {
-		return fmt.Errorf("%w: git host is blocked: %w", configedit.ErrValidation, err)
+	ips, rerr := ssrf.ResolvePublicHostStrict(u.Hostname())
+	if rerr != nil {
+		return "", fmt.Errorf("%w: git host is blocked: %w", configedit.ErrValidation, rerr)
 	}
-	return nil
+	if len(ips) == 0 {
+		return "", nil // literal-IP host: git connects to the named address, no name to pin
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443" // https-only per git.Clone's scheme allowlist
+	}
+	addrs := make([]string, len(ips))
+	for i, ip := range ips {
+		addrs[i] = ip.String()
+	}
+	return fmt.Sprintf("%s:%s:%s", u.Hostname(), port, strings.Join(addrs, ",")), nil
 }
 
 // UpdateRig partially updates a rig in city.toml.

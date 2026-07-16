@@ -222,3 +222,56 @@ func waitForEventType(t *testing.T, prov events.Provider, eventType string, time
 	t.Fatalf("event %q not observed within %s", eventType, timeout)
 	return events.Event{}
 }
+
+// TestRigCreateAsyncProvisionHasDeadline proves the async provision runs under a
+// server-owned bounded context (not context.Background()), so a stalled clone
+// cannot hang the detached goroutine forever.
+func TestRigCreateAsyncProvisionHasDeadline(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	h := newTestCityHandler(t, state)
+
+	body := `{"name":"boundrig","git_url":"https://example.com/repo.git","request_id":"req-bound-0001"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/rigs"), strings.NewReader(body)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body = %s", rec.Code, rec.Body.String())
+	}
+	// Drive to the terminal event so the provision has certainly run.
+	waitForEventType(t, state.eventProv, events.RequestResultRigCreate, 3*time.Second)
+	if !state.provisionHadDeadline() {
+		t.Fatal("ProvisionRigFromGit ran under a context with no deadline (unbounded async provision)")
+	}
+}
+
+// TestRigCreateAsyncStalledCloneTerminalizes proves a clone that never returns
+// terminalizes through the rollback + request.failed path once the server-owned
+// provisioning deadline elapses, instead of leaking the goroutine and wedging
+// the rig name / request_id forever.
+func TestRigCreateAsyncStalledCloneTerminalizes(t *testing.T) {
+	origTimeout := rigProvisionTimeout
+	rigProvisionTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { rigProvisionTimeout = origTimeout })
+
+	state := newFakeMutatorState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.provisionGate = make(chan struct{}) // never closed: the "clone" hangs
+	h := newTestCityHandler(t, state)
+
+	body := `{"name":"stallrig","git_url":"https://example.com/repo.git","request_id":"req-stall-0001"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/rigs"), strings.NewReader(body)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// The provisioning deadline elapses -> terminalize via request.failed.
+	failed := waitForEventType(t, state.eventProv, events.RequestFailed, 3*time.Second)
+	var payload RequestFailedPayload
+	if err := json.Unmarshal(failed.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal request.failed payload: %v", err)
+	}
+	if payload.RequestID != "req-stall-0001" {
+		t.Fatalf("request.failed request_id = %q, want req-stall-0001", payload.RequestID)
+	}
+}

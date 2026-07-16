@@ -51,6 +51,15 @@ type runFoldResult struct {
 	decodeMisses int
 }
 
+const runCensusPartialReason = "run projection is incomplete"
+
+// RunCensusSource serves canonical counts from an incremental per-city
+// projector. The bool is false when the requested city is unknown to the
+// source.
+type RunCensusSource interface {
+	RunCensus(context.Context, string) (runproj.CanonicalRunCensus, bool)
+}
+
 // runFold reads the city event log, folds it into the latest bead snapshot per
 // id, and keeps only run-participating beads. The result is memoized in the
 // Server response cache keyed by the event log's modification time, so repeated
@@ -99,20 +108,24 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	if err != nil {
 		return nil, runProjectionUnavailable(err)
 	}
-	summary := runproj.BuildRunSummary(fold.beads)
+	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(fold.beads)
 	byID := beadsByID(fold.beads)
+	startedByRun := countStartedMembersByRun(fold.beads, censusLanes)
 
 	limit := normalizeRunsListLimit(input.Limit)
 	lanes := allRunLanes(summary)
+	rowCount := min(limit, len(lanes))
+	projected := make([]Run, 0, rowCount)
+	for i := range rowCount {
+		lane := lanes[i]
+		projected = append(projected, laneToRun(lane, byID, startedByRun[lane.ID]))
+	}
 
 	out := &RunsListOutput{}
-	out.Body.Runs = make([]Run, 0, len(lanes))
-	for i := range lanes {
-		if len(out.Body.Runs) >= limit {
-			break
-		}
-		out.Body.Runs = append(out.Body.Runs, laneToRun(lanes[i], byID, fold.beads))
-	}
+	out.Body.StatusCounts = runStatusCountsFromProjection(
+		runproj.CountCanonicalRunStatuses(fold.beads, censusLanes),
+	)
+	out.Body.Runs = projected
 
 	// Do not silently hide incompleteness: the projection caps the historical
 	// lane list, the caller-supplied limit can drop runs, and a corrupt event
@@ -130,6 +143,36 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	return out, nil
 }
 
+func (s *Server) humaHandleRunsCensus(ctx context.Context, input *RunsCensusInput) (*RunsCensusOutput, error) {
+	if s.runCensusSource == nil {
+		return nil, apierr.ServiceUnavailable.Msg("run census is unavailable")
+	}
+	census, ok := s.runCensusSource.RunCensus(ctx, input.CityName)
+	if !ok {
+		return nil, apierr.ServiceUnavailable.Msg("run census is unavailable")
+	}
+	if !census.Ready {
+		return nil, apierr.ServiceUnavailable.Msg("run census is warming")
+	}
+	out := &RunsCensusOutput{}
+	out.Body.StatusCounts = runStatusCountsFromProjection(census.StatusCounts)
+	out.Body.Partial = census.Partial
+	if census.Partial {
+		// The source may carry local diagnostics. The public typed endpoint exposes
+		// only this closed, operator-safe reason so paths and error prose never leak.
+		out.Body.PartialErrors = []string{runCensusPartialReason}
+	}
+	return out, nil
+}
+
+func runStatusCountsFromProjection(counts runproj.CanonicalRunStatusCounts) RunStatusCounts {
+	return RunStatusCounts{
+		Pending: counts.Pending, Active: counts.Active, Waiting: counts.Waiting,
+		Canceling: counts.Canceling, Completed: counts.Completed, Failed: counts.Failed,
+		Canceled: counts.Canceled, Skipped: counts.Skipped,
+	}
+}
+
 // humaHandleRunGet is the Huma-typed handler for
 // GET /v0/city/{cityName}/runs/{run_id}. It resolves the single run off the fold
 // via BuildRunLane, so a completed run beyond the list's historical cap is still
@@ -143,7 +186,7 @@ func (s *Server) humaHandleRunGet(_ context.Context, input *RunGetInput) (*RunGe
 	if !ok {
 		return nil, apierr.RunNotFound.Msgf("run not found: %s", input.RunID)
 	}
-	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), fold.beads)}, nil
+	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), countStartedMembers(fold.beads, lane.ID))}, nil
 }
 
 // humaHandleRunSteps is the Huma-typed handler for
@@ -309,12 +352,8 @@ func findWorkflowRoots(store beads.Store, runID string) ([]beads.Bead, error) {
 // bead (when present) for start time, target, and terminal outcome. The started
 // member count (used only to split pending from active) is computed just for
 // non-terminal runs.
-func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, beadList []beads.Bead) Run {
+func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, started int) Run {
 	root, rootFound := byID[lane.ID]
-	started := 0
-	if !rootFound || !isClosedStatus(root.Status) {
-		started = countStartedMembers(beadList, lane.ID)
-	}
 	run := Run{
 		RunID:  lane.ID,
 		Title:  lane.Title,
@@ -346,35 +385,11 @@ func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, beadList []bead
 // indefinitely. Extending run lifecycle (cancellation) grows this function;
 // nothing else interprets run status.
 func deriveRunStatus(lane runproj.RunLane, root beads.Bead, rootFound bool, startedCount int) RunStatus {
-	if rootFound && isClosedStatus(root.Status) {
-		switch strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey]) {
-		case beadmeta.OutcomeFail:
-			return RunStatusFailed
-		case beadmeta.OutcomeSkipped:
-			return RunStatusSkipped
-		case beadmeta.OutcomeCanceled:
-			return RunStatusCanceled
-		}
-		return RunStatusCompleted
+	var rootPtr *beads.Bead
+	if rootFound {
+		rootPtr = &root
 	}
-	// A cancel was requested but the root's terminal close is not yet durably
-	// recorded: on a non-atomic store the gc.cancel_requested marker persisted
-	// while the following root close failed, so cancelRun returned a retryable
-	// 5xx and the operator's retry finishes the wind-down. (On an atomic store a
-	// failed close rolls the marker back, so this state is not reachable there.)
-	// Report canceling meanwhile.
-	if rootFound && strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
-		return RunStatusCanceling
-	}
-	switch lane.Phase {
-	case "blocked":
-		return RunStatusWaiting
-	default: // active/in-flight
-		if startedCount == 0 {
-			return RunStatusPending
-		}
-		return RunStatusActive
-	}
+	return RunStatus(runproj.CanonicalRunStatusForLane(lane, rootPtr, startedCount))
 }
 
 // deriveRunStepStatus maps one run-step (child bead) onto the closed
@@ -468,6 +483,50 @@ func countStartedMembers(beadList []beads.Bead, rootID string) int {
 		}
 	}
 	return n
+}
+
+// countStartedMembersByRun indexes started membership for every projected run
+// in one pass. A bead may match more than one nested dotted root; candidates
+// are de-duplicated per bead to mirror runMemberBeads exactly without an
+// O(runs*beads) scan on the polled list endpoint.
+func countStartedMembersByRun(beadList []beads.Bead, lanes []runproj.RunLane) map[string]int {
+	roots := make(map[string]struct{}, len(lanes))
+	counts := make(map[string]int, len(lanes))
+	for _, lane := range lanes {
+		roots[lane.ID] = struct{}{}
+		counts[lane.ID] = 0
+	}
+	for _, bead := range beadList {
+		if !runStepStarted(bead.Status) {
+			continue
+		}
+		candidates := make(map[string]struct{}, 4)
+		for _, rootID := range []string{
+			bead.ParentID,
+			bead.Metadata[beadmeta.RootBeadIDMetadataKey],
+			strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]),
+		} {
+			if _, ok := roots[rootID]; ok {
+				candidates[rootID] = struct{}{}
+			}
+		}
+		for offset, char := range bead.ID {
+			if char != '.' {
+				continue
+			}
+			if rootID := bead.ID[:offset]; rootID != "" {
+				if _, ok := roots[rootID]; ok {
+					candidates[rootID] = struct{}{}
+				}
+			}
+		}
+		for rootID := range candidates {
+			if bead.ID != rootID {
+				counts[rootID]++
+			}
+		}
+	}
+	return counts
 }
 
 func runStepStarted(status string) bool {

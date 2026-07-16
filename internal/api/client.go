@@ -246,16 +246,18 @@ func ShouldFallback(c *Client, err error) bool {
 
 // FallbackReason returns a stable reason code for err when
 // ShouldFallbackForRead(c, err) is true. The set is closed: "remote",
-// "cache-not-live", "read-only", "client-init", "conn-refused". A REMOTE client
-// yields "remote" — reported for observability, never used to pick a local path
-// (the caller gates on ShouldFallbackForRead first, which returns false for
-// remote, so a remote error is surfaced, not fallen back). Generic 5xx server
-// errors collapse to "conn-refused" since from the CLI's read-path perspective
-// an unhealthy server is equivalent to an unreachable one. Non-fallbackable
-// error types such as store_slow are intentionally absent from this set.
-// Returns "unknown" for non-fallbackable errors so callers that invoke
-// FallbackReason unconditionally produce a token instead of panicking; gate on
-// ShouldFallbackForRead first to avoid that sentinel. c is nil-safe.
+// "cache-not-live", "read-only", "client-init", "route-missing", "conn-refused".
+// A REMOTE client yields "remote" — reported for observability, never used to
+// pick a local path (the caller gates on ShouldFallbackForRead first, which
+// returns false for remote, so a remote error is surfaced, not fallen back).
+// "route-missing" is a new-CLI/old-server route gap (a 404 with no problem+json
+// body). Generic 5xx server errors collapse to "conn-refused" since from the
+// CLI's read-path perspective an unhealthy server is equivalent to an
+// unreachable one. Non-fallbackable error types such as store_slow are
+// intentionally absent from this set. Returns "unknown" for non-fallbackable
+// errors so callers that invoke FallbackReason unconditionally produce a token
+// instead of panicking; gate on ShouldFallbackForRead first to avoid that
+// sentinel. c is nil-safe.
 func FallbackReason(c *Client, err error) string {
 	if c.IsRemote() {
 		return "remote"

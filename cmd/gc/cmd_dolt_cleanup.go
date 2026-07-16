@@ -914,7 +914,7 @@ can still return successfully after emitting the report.`,
 				host = "127.0.0.1"
 			}
 			if fatalPortResolutionError(resolution) == nil {
-				client, openErr := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
+				client, openErr := newSQLCleanupDoltClient(cityPath, host, strconv.Itoa(resolution.Port))
 				if openErr != nil {
 					opts.DoltClientOpenErr = openErr
 				} else {

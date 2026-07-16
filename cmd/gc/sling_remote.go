@@ -16,7 +16,7 @@ import (
 // refused with a clear message: inline text (needs a locally-created bead), the
 // 1-arg form (infers the target from local rig config), and the local
 // batch/dry-run flags the server API does not model.
-func cmdSlingRemote(c *api.Client, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
 	fail := func(code, message string) int {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, code, message, 1)
@@ -80,6 +80,14 @@ func cmdSlingRemote(c *api.Client, args []string, isFormula, doNudge, force bool
 		req.Formula = args[1]
 	} else {
 		req.Bead = args[1]
+	}
+
+	// Echo the resolved target (human mode only) so the operator can see which
+	// control plane this mutation is about to hit — matching `gc rig add` and
+	// guarding against a silent write to a remote city selected by a stale env or
+	// sticky-default context.
+	if !jsonOutput {
+		fmt.Fprintln(stderr, formatRemoteTarget(target)) //nolint:errcheck // best-effort stderr
 	}
 
 	res, err := c.Sling(req)

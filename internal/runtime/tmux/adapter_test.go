@@ -40,8 +40,6 @@ func TestTmuxConformance(t *testing.T) {
 	runtimetest.RunProviderTestsWithOptions(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		id := atomic.AddInt64(&counter, 1)
 		name := fmt.Sprintf("gc-test-conform-%d", id)
-		// Safety cleanup for orphan prevention.
-		t.Cleanup(func() { _ = p.Stop(name) })
 		return p, runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),

@@ -2093,6 +2093,69 @@ func TestOrderDispatchExecFailureRedactsSecrets(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchExecFailureRedactsProjectedGitHubToken pins the controller
+// dispatch path for the specific tokens projectGitHubTokenExecEnv injects. The
+// exec env now projects the controller's ambient GH_TOKEN/GITHUB_TOKEN into
+// every exec order, so a failing order that echoes one must have it redacted
+// from both the logged output and the OrderFailed event message. The general
+// TestOrderDispatchExecFailureRedactsSecrets covers an order-scoped secret;
+// this one is scoped to the newly projected GitHub auth keys.
+func TestOrderDispatchExecFailureRedactsProjectedGitHubToken(t *testing.T) {
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GH_TOKEN", secret)
+	t.Setenv("GITHUB_TOKEN", secret)
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:leaky-exec",
+		Labels: []string{"order-run:leaky-exec", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Echo the projected token to combined output and the error, then fail so the
+	// controller failure branch redacts both against the projected env.
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return []byte("GITHUB_TOKEN=" + secret + "\n"), fmt.Errorf("auth failed for token=%s", secret)
+	}
+
+	aa := []orders.Order{{
+		Name:     "leaky-exec",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/fail.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.stderr = &stderr
+
+	logs := captureCmdOrderLogs(t, func() {
+		mad.dispatchExec(context.Background(), orders.NewStore(beads.OrdersStore{Store: store}), execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID, nil)
+	})
+
+	combined := logs + "\n" + stderr.String()
+	if strings.Contains(combined, secret) {
+		t.Fatalf("order exec logs leaked projected GitHub token:\n%s", combined)
+	}
+	if !strings.Contains(combined, "[redacted]") {
+		t.Fatalf("order exec logs = %q, want redaction marker", combined)
+	}
+	sawFailed := false
+	for _, event := range rec.events {
+		if event.Type == events.OrderFailed {
+			sawFailed = true
+		}
+		if strings.Contains(event.Message, secret) {
+			t.Fatalf("order failed event leaked projected GitHub token: %#v", event)
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("expected an OrderFailed event; got %#v", rec.events)
+	}
+}
+
 func TestOrderDispatchFormulaCookFailureLabelsTrackingBead(t *testing.T) {
 	store := beads.NewMemStore()
 	var rec memRecorder

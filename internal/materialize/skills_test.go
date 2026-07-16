@@ -804,6 +804,111 @@ func TestMaterializeAgentAliasedOwnedRoot(t *testing.T) {
 	}
 }
 
+// TestMaterializeAgentSelfHealsAfterOwnedRootMoves pins
+// gastownhall/gascity#4130: a pinned pack sha bump moves an imported
+// catalog's OwnedRoots entry to a brand-new content-addressed cache
+// checkout (unrelated path — cache keys are sha256(source+commit), no
+// stable parent to widen ownership to). The symlink materialize wrote
+// under the OLD root is no longer under any CURRENT owned root, so
+// without the ownership manifest the cleanup walk would misclassify it
+// as user-placed and the create step would report "user-owned symlink
+// at sink path" forever, instead of self-healing to the new sha.
+func TestMaterializeAgentSelfHealsAfterOwnedRootMoves(t *testing.T) {
+	t.Parallel()
+	// Two unrelated cache checkouts, standing in for sha A and sha B —
+	// deliberately NOT nested under a shared parent, matching the real
+	// sha256(source+commit) cache-key scheme that gives each pin its own
+	// unrelated directory name.
+	shaA := filepath.Join(t.TempDir(), "cache-aaaa")
+	mkSkill(t, shaA, "alpha")
+	shaB := filepath.Join(t.TempDir(), "cache-bbbb")
+	mkSkill(t, shaB, "alpha")
+	sink := filepath.Join(t.TempDir(), "skills")
+
+	// Pass 1: pin resolves to sha A.
+	res1, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "alpha", Source: filepath.Join(shaA, "alpha"), Origin: "city"}},
+		OwnedRoots: []string{shaA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res1.Materialized, []string{"alpha"}) {
+		t.Fatalf("pass 1 materialized = %v, want [alpha]", res1.Materialized)
+	}
+
+	// Pass 2: pin bumps to sha B. OwnedRoots no longer includes shaA at
+	// all — the pre-fix bug: cleanup sees the existing symlink still
+	// pointing at shaA, finds it under no current owned root, leaves it
+	// alone as "external", and the create step then finds the sink path
+	// occupied and reports it as user-owned instead of replacing it.
+	res2, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "alpha", Source: filepath.Join(shaB, "alpha"), Origin: "city"}},
+		OwnedRoots: []string{shaB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res2.Materialized, []string{"alpha"}) {
+		t.Fatalf("pass 2 materialized = %v (want [alpha] via self-heal); skipped=%+v warnings=%v",
+			res2.Materialized, res2.Skipped, res2.Warnings)
+	}
+	if len(res2.Skipped) != 0 {
+		t.Fatalf("sha-bump symlink misclassified as user-owned: %+v", res2.Skipped)
+	}
+	got, err := os.Readlink(filepath.Join(sink, "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(shaB, "alpha") {
+		t.Errorf("symlink target = %q, want %q (still pointing at the old sha A checkout)", got, filepath.Join(shaB, "alpha"))
+	}
+}
+
+// TestMaterializeAgentSelfHealDoesNotAdoptGenuineUserSymlink guards the
+// safety property #4130's fix must preserve: the ownership manifest only
+// recognizes a symlink as gc's own when its CURRENT on-disk target
+// matches what THIS materializer previously wrote for that exact name.
+// A symlink a user placed themselves at a name gc also wants to manage —
+// pointing at a path gc never wrote — must still be left alone as
+// user-owned, manifest or no manifest.
+func TestMaterializeAgentSelfHealDoesNotAdoptGenuineUserSymlink(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	mkSkill(t, src, "alpha")
+	userTarget := t.TempDir()
+	mkSkill(t, userTarget, "override")
+	sink := filepath.Join(t.TempDir(), "skills")
+
+	// User places their own override symlink at the sink path gc also
+	// wants to manage, pointing at a location gc never wrote.
+	mustSymlink(t, filepath.Join(userTarget, "override"), filepath.Join(sink, "alpha"))
+
+	res, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "alpha", Source: filepath.Join(src, "alpha"), Origin: "city"}},
+		OwnedRoots: []string{src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Materialized) != 0 {
+		t.Fatalf("materialized = %v, want none — user's symlink must be left alone", res.Materialized)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Name != "alpha" {
+		t.Fatalf("Skipped = %+v, want alpha reported as user-owned", res.Skipped)
+	}
+	got, err := os.Readlink(filepath.Join(sink, "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(userTarget, "override") {
+		t.Errorf("user's symlink target changed to %q, want untouched %q", got, filepath.Join(userTarget, "override"))
+	}
+}
+
 // TestMaterializeAgentRelativeSymlinkLeftAlone is the regression for
 // the pass-2 Codex finding: a sink entry that is a relative-target
 // symlink (which the materializer never writes — it always uses

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -19,10 +20,16 @@ type goTestShardFixture struct {
 	tmpDir          string
 	productArgsFile string
 	productEnvFile  string
+	allTestArgsFile string
 	probeFile       string
 }
 
 func newGoTestShardFixture(t *testing.T) goTestShardFixture {
+	t.Helper()
+	return newGoTestShardFixtureWithExit(t, 23)
+}
+
+func newGoTestShardFixtureWithExit(t *testing.T, productExit int) goTestShardFixture {
 	t.Helper()
 
 	repoRoot := repoRoot(t)
@@ -33,6 +40,7 @@ func newGoTestShardFixture(t *testing.T) goTestShardFixture {
 	}
 	productArgsFile := filepath.Join(tmpDir, "product-args")
 	productEnvFile := filepath.Join(tmpDir, "product-env")
+	allTestArgsFile := filepath.Join(tmpDir, "all-test-args")
 	probeFile := filepath.Join(tmpDir, "metadata-probes")
 	fakeGo := fmt.Sprintf(`#!/bin/sh
 set -eu
@@ -53,6 +61,7 @@ case "${1:-}" in
     printf '%%s\n' 'github.com/gastownhall/gascity'
     ;;
   test)
+    printf '%%s\n' "$@" >> %q
     is_list=0
     is_json=0
     for arg in "$@"; do
@@ -63,8 +72,8 @@ case "${1:-}" in
       printf '%%s\n' TestAlpha TestBeta TestGamma 'ok  github.com/gastownhall/gascity/example  0.001s'
       exit 0
     fi
-    printf '%%s\n' "$@" > %q
-    env | LC_ALL=C sort > %q
+    printf '%%s\n' "$@" >> %q
+    env | LC_ALL=C sort >> %q
     if [ "$is_json" = 1 ]; then
       printf '%%s\n' \
         '{"Action":"run","Package":"github.com/gastownhall/gascity/example","Test":"TestAlpha"}' \
@@ -77,7 +86,7 @@ case "${1:-}" in
     ;;
   *) exit 99 ;;
 esac
-`, filepath.Join(tmpDir, "gopath"), filepath.Join(tmpDir, "gocache"), filepath.Join(tmpDir, "gomodcache"), filepath.Join(tmpDir, "gotmp"), filepath.Join(tmpDir, "goroot"), probeFile, productArgsFile, productEnvFile, 23)
+`, filepath.Join(tmpDir, "gopath"), filepath.Join(tmpDir, "gocache"), filepath.Join(tmpDir, "gomodcache"), filepath.Join(tmpDir, "gotmp"), filepath.Join(tmpDir, "goroot"), probeFile, allTestArgsFile, productArgsFile, productEnvFile, productExit)
 	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
@@ -96,6 +105,7 @@ esac
 		tmpDir:          tmpDir,
 		productArgsFile: productArgsFile,
 		productEnvFile:  productEnvFile,
+		allTestArgsFile: allTestArgsFile,
 		probeFile:       probeFile,
 	}
 }
@@ -155,6 +165,133 @@ func fixtureEnvironment(t *testing.T, data string) map[string]string {
 		delete(environment, shellOwned)
 	}
 	return environment
+}
+
+func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
+	t.Parallel()
+
+	acceptanceFlags := map[string]string{"-tags": "acceptance_a"}
+	bdstoreFlags := map[string]string{
+		"-tags": "integration",
+		"-run":  "^(TestBdStoreConformance|TestBdStoreMailWispInsert)$",
+	}
+	tests := []struct {
+		name         string
+		target       string
+		envName      string
+		provider     string
+		exitCode     int
+		wantFlags    map[string]string
+		wantPackages []string
+	}{
+		{name: "acceptance sqlite", target: "test-acceptance", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", provider: "sqlite", exitCode: 23, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
+		{name: "acceptance file", target: "test-acceptance", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", provider: "file", exitCode: 37, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
+		{name: "acceptance default", target: "test-acceptance", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", exitCode: 23, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
+		{name: "integration sqlite", target: "test-integration-bdstore", envName: "GC_BEADS", provider: "sqlite", exitCode: 37, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
+		{name: "integration file", target: "test-integration-bdstore", envName: "GC_BEADS", provider: "file", exitCode: 23, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
+		{name: "integration default", target: "test-integration-bdstore", envName: "GC_BEADS", exitCode: 37, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fixture := newGoTestShardFixtureWithExit(t, tt.exitCode)
+			cmd := exec.Command("make", "--no-print-directory", "--silent", tt.target)
+			cmd.Dir = fixture.repoRoot
+			cmd.Env = []string{
+				"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + fixture.homeDir,
+				"SHELL=/bin/sh",
+				"LANG=C.UTF-8",
+				"TMPDIR=" + fixture.tmpDir,
+				"GC_TEST_NO_SLICE=1",
+				"SYS_USR_CGO_FALLBACK=0",
+				"GOFLAGS=-run=^$",
+				"GOENV=/host/goenv",
+				"GOWORK=/host/go.work",
+				"GC_CITY=host-city",
+				"GC_HOME=/host/gc",
+				"GC_DOLT_PORT=13306",
+				"BEADS_DOLT_SERVER_PORT=13307",
+			}
+			if tt.provider != "" {
+				cmd.Env = append(cmd.Env, tt.envName+"="+tt.provider)
+			}
+
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), fmt.Sprintf("Error %d", tt.exitCode)) {
+				t.Fatalf("make %s did not preserve fake go exit %d: %v\n%s", tt.target, tt.exitCode, err, output)
+			}
+			captured := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
+			if got := captured[tt.envName]; got != tt.provider {
+				t.Fatalf("make %s passed %s=%q to go, want %q", tt.target, tt.envName, got, tt.provider)
+			}
+			for _, name := range []string{"GC_CITY", "GC_HOME", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
+				if value, ok := captured[name]; ok {
+					t.Errorf("make %s leaked host %s=%q to go", tt.target, name, value)
+				}
+			}
+			for name, want := range map[string]string{"GOFLAGS": "", "GOENV": "off", "GOWORK": "off"} {
+				if got := captured[name]; got != want {
+					t.Errorf("make %s passed %s=%q, want deterministic %q", tt.target, name, got, want)
+				}
+			}
+			wantFastUnit := ""
+			if tt.target == "test-integration-bdstore" {
+				wantFastUnit = "0"
+			}
+			if got := captured["GC_FAST_UNIT"]; got != wantFastUnit {
+				t.Errorf("make %s passed GC_FAST_UNIT=%q, want %q", tt.target, got, wantFastUnit)
+			}
+
+			productArgs := readFixtureFile(t, fixture.productArgsFile)
+			if allArgs := readFixtureFile(t, fixture.allTestArgsFile); allArgs != productArgs {
+				t.Fatalf("make %s ran unapproved go test discovery/decoy calls:\n%s", tt.target, allArgs)
+			}
+			assertGoTestInvocation(t, productArgs, tt.wantFlags, tt.wantPackages)
+		})
+	}
+}
+
+func assertGoTestInvocation(t *testing.T, raw string, wantFlags map[string]string, wantPackages []string) {
+	t.Helper()
+
+	args := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(args) == 0 || args[0] != "test" {
+		t.Fatalf("go arguments = %v, want one go test invocation", args)
+	}
+	gotFlags := make(map[string]string, len(wantFlags))
+	var gotPackages []string
+	for i := 1; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") {
+			gotPackages = append(gotPackages, args[i])
+			continue
+		}
+
+		flag, value, joined := strings.Cut(args[i], "=")
+		if flag != "-tags" && flag != "-timeout" && flag != "-run" {
+			t.Fatalf("go arguments contain unsupported flag %q: %v", flag, args)
+		}
+		if _, duplicate := gotFlags[flag]; duplicate {
+			t.Fatalf("go arguments repeat %q: %v", flag, args)
+		}
+		if !joined {
+			i++
+			if i == len(args) {
+				t.Fatalf("go argument %q has no value: %v", flag, args)
+			}
+			value = args[i]
+		}
+		gotFlags[flag] = value
+	}
+	if timeout := gotFlags["-timeout"]; timeout == "" {
+		t.Fatalf("go invocation has no explicit timeout: %v", args)
+	}
+	delete(gotFlags, "-timeout")
+	if !maps.Equal(gotFlags, wantFlags) || !slices.Equal(gotPackages, wantPackages) {
+		t.Fatalf("go invocation flags/packages = %v / %v, want %v / %v", gotFlags, gotPackages, wantFlags, wantPackages)
+	}
 }
 
 func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {

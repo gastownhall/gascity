@@ -68,16 +68,16 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	stores := s.state.BeadStores()
@@ -87,7 +87,10 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	for _, rigName := range rigNames {
 		store := stores[rigName]
 		pa.attempt()
-		list, err := store.List(beads.ListQuery{Type: "convoy"})
+		// Explicit sort: with SortDefault the CachingStore returns
+		// map-iteration order, and keyset paging needs one deterministic
+		// total order (#3208 — the same fix the bead list carries).
+		list, err := store.List(beads.ListQuery{Type: "convoy", Sort: beads.SortCreatedDesc})
 		if err != nil {
 			pa.record("rig "+rigName, err)
 			continue
@@ -102,27 +105,18 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	if convoys == nil {
 		convoys = []beads.Bead{}
 	}
+	// The cross-rig concatenation is not globally ordered; impose the one
+	// (created_at DESC, id DESC) total order keyset pages cut against.
+	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
+	sortKeysetDesc(convoys, beadKey)
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	if !pp.IsPaging {
-		total := len(convoys)
-		if pp.Limit < len(convoys) {
-			convoys = convoys[:pp.Limit]
-		}
-		return &ListOutput[beads.Bead]{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body: ListBody[beads.Bead]{
-				Items:         convoys,
-				Total:         total,
-				Partial:       pa.partial(),
-				PartialErrors: pa.messages(),
-			},
-		}, nil
-	}
-
-	page, total, nextCursor := paginate(convoys, pp)
+	// A truncated response always carries next_cursor — cursor-less requests
+	// previously truncated silently, making the remainder unfetchable (the
+	// #3208 defect class the bead list already fixed).
+	page, total, hasMore := resolveKeysetPage(convoys, beadKey, seek, limit)
+	nextCursor := mintKeysetNextCursor(page, beadKey, hasMore)
 	if page == nil {
 		page = []beads.Bead{}
 	}

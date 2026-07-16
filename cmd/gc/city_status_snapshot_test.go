@@ -495,7 +495,10 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 		Session:   config.SessionConfig{Provider: "fake"},
 		Agents:    []config.Agent{{Name: "reviewer", Session: "acp", MaxActiveSessions: intPtr(1)}},
 	}
-	sp := newStatusSessionProviderForCity(cfg, t.TempDir())
+	sp, err := newStatusSessionProviderForCity(cfg, t.TempDir())
+	if err != nil {
+		t.Fatalf("newStatusSessionProviderForCity: %v", err)
+	}
 	if err := acpSP.Start(context.Background(), "custom-reviewer", runtime.Config{Command: "echo"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

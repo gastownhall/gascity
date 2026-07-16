@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 
 const eventRotateWaitTimeout = 30 * time.Second
 
-// humaHandleEventList is the Huma-typed handler for GET /v0/events.
+// humaHandleEventList is the Huma-typed handler for
+// GET /v0/city/{cityName}/events (the supervisor /v0/events list is a
+// separate handler on SupervisorMux).
 func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput) (*ListOutput[WireEvent], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -40,9 +43,6 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		filter.Since = time.Now().Add(-d)
 	}
 
-	// Resolve the effective limit first so we can decide between the
-	// bounded tail path (fast) and the full-scan pagination path (slow
-	// but needed when the caller walks offsets with cursors).
 	limit := 100
 	if input.Limit > 0 {
 		limit = input.Limit
@@ -51,91 +51,149 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		limit = maxPaginationLimit
 	}
 
+	// One order, both paths: seq DESC (newest first). The cursor is a v1
+	// sq-kind keyset token carrying the seq of the last row served; the next
+	// page is the events strictly below that boundary. The old contract had a
+	// window flip — no cursor returned the newest-N while any cursor walked
+	// oldest-first from the head — which made walking history coherently
+	// impossible. Anything other than a valid sq token is a typed 400.
+	beforeSeq, err := parseEventBeforeSeq(input.Cursor)
+	if err != nil {
+		return nil, err
+	}
+
 	index := s.latestIndex()
 
-	// Fast path: no cursor → most clients just want the N newest events.
-	// Use ListTail when the provider supports it so we don't parse the
-	// entire events.jsonl (which is O(file size), ~4s on 100 MB) just to
-	// throw away all but the tail. Same pattern as the supervisor
-	// handler's optimizedTail branch.
-	if input.Cursor == "" {
-		if tp, ok := ep.(events.TailProvider); ok {
-			evts, err := tp.ListTail(filter, limit)
-			if err != nil {
-				return nil, apierr.Internal.Msg(err.Error())
-			}
-			wires := toWireEvents(evts)
-			// Total is best-effort here: when the caller narrowed with
-			// Type/Actor/Since we cannot cheaply compute the full match
-			// count, so report the returned slice length. When the
-			// filter is empty, LatestSeq is authoritative since the log
-			// is append-only and gap-free.
-			total := len(wires)
-			if filterIsEmpty(filter) {
-				if seq, seqErr := ep.LatestSeq(); seqErr == nil {
-					total = int(seq)
-				}
-			}
-			return &ListOutput[WireEvent]{
-				Index: index,
-				Body:  ListBody[WireEvent]{Items: wires, Total: total},
-			}, nil
-		}
-	}
-
-	// Cursor pagination (or provider without TailProvider): we still
-	// need the full materialized list to honor offset-based cursors.
-	// Cap the scan at (offset+limit) matching events so this path is
-	// bounded by caller pagination depth rather than file size.
-	scanLimit := limit
-	if input.Cursor != "" {
-		scanLimit = decodeCursor(input.Cursor) + limit
-	}
-	filter.Limit = scanLimit
-
-	evts, err := ep.List(filter)
+	// Fetch limit+1 matching events at (first page) or strictly below (cursor
+	// page) the boundary, ascending; the extra row is the has-more signal.
+	scanFilter := filter
+	scanFilter.BeforeSeq = beforeSeq
+	evts, scanned, err := fetchEventPageAscending(ep, scanFilter, limit)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	wires := toWireEvents(evts)
 
-	if input.Cursor != "" {
-		pp := pageParams{
-			Offset: decodeCursor(input.Cursor),
-			Limit:  limit,
-		}
-		page, total, nextCursor := paginate(wires, pp)
-		if page == nil {
-			page = []WireEvent{}
-		}
-		return &ListOutput[WireEvent]{
-			Index: index,
-			Body:  ListBody[WireEvent]{Items: page, Total: total, NextCursor: nextCursor},
-		}, nil
+	// evts is ascending; the overfetched row (the oldest) signals more below.
+	hasMore := false
+	if len(evts) > limit {
+		hasMore = true
+		evts = evts[len(evts)-limit:]
 	}
 
-	// Capture the full match count BEFORE truncating so clients can tell
-	// how many items match vs. fit the page.
-	total := len(wires)
-	if limit < len(wires) {
-		wires = wires[:limit]
-	}
-	return &ListOutput[WireEvent]{
-		Index: index,
-		Body:  ListBody[WireEvent]{Items: wires, Total: total},
-	}, nil
-}
-
-func toWireEvents(evts []events.Event) []WireEvent {
+	// Reverse into seq DESC while projecting to the wire shape.
 	wires := make([]WireEvent, 0, len(evts))
-	for _, e := range evts {
-		w, ok := toWireEvent(e)
+	for i := len(evts) - 1; i >= 0; i-- {
+		w, ok := toWireEvent(evts[i])
 		if !ok {
 			continue
 		}
 		wires = append(wires, w)
 	}
-	return wires
+
+	// Total: authoritative for unfiltered reads (the log is append-only and
+	// gap-free, so LatestSeq counts every event and stays constant across a
+	// walk). Filtered reads report a best-effort count — the matching rows
+	// this request's scan could see.
+	total := scanned
+	if filterIsEmpty(filter) {
+		if seq, seqErr := ep.LatestSeq(); seqErr == nil {
+			// LatestSeq is a uint64 counter; bound it before the int narrowing so
+			// a value past the platform int range can't wrap to a negative or
+			// truncated total (CodeQL go/incorrect-integer-conversion).
+			if seq > uint64(math.MaxInt) {
+				total = math.MaxInt
+			} else {
+				total = int(seq)
+			}
+		}
+	}
+
+	// Mint the boundary from the page's oldest fetched EVENT, not the last
+	// wire row: toWireEvent drops corrupt-payload rows (logged above), and a
+	// page whose whole window is corrupt would otherwise return no cursor and
+	// silently strand the rest of the walk. Anchoring on evts guarantees
+	// exactly `limit` seqs of progress per page regardless of projection
+	// failures — corrupt rows are skipped, never re-fetched, never wedge.
+	var nextCursor string
+	if hasMore {
+		nextCursor = encodeKeysetCursor(keysetCursor{
+			Kind: cursorKindSeq,
+			Seq:  evts[0].Seq,
+		})
+	}
+	return &ListOutput[WireEvent]{
+		Index: index,
+		Body:  ListBody[WireEvent]{Items: wires, Total: total, NextCursor: nextCursor},
+	}, nil
+}
+
+// parseEventBeforeSeq decodes the pagination cursor into a keyset seq boundary.
+// An empty cursor is the first page (boundary 0 = "no boundary"). Anything that
+// is not a valid sq-kind token with a non-zero seq rejects with a typed 400:
+// legacy offset tokens, wrong-kind (cb) tokens, and a crafted s:0. Seq 0 is
+// never minted (seqs start at 1) and 0 means "first page" here, so echoing an
+// s:0 token back would serve a cursor-following client the first page forever.
+func parseEventBeforeSeq(cursor string) (uint64, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	c, err := decodeKeysetCursor(cursor)
+	if err != nil || c.Kind != cursorKindSeq || c.Seq == 0 {
+		return 0, apierr.InvalidCursor.Msg("cursor is not a valid pagination token; re-fetch the first page")
+	}
+	return c.Seq, nil
+}
+
+// fetchEventPageAscending fetches up to limit+1 matching events at or below the
+// filter's BeforeSeq boundary in ascending seq order; the extra row is the
+// has-more signal. It returns the fetched events and scanned — the best-effort
+// count of matching rows the read could see, used as the filtered Total.
+//
+// ListTail is the fast path: a backward scan of the ACTIVE events.jsonl only,
+// never the .gz archives, so its result is trusted ONLY when it yields a full
+// limit+1 rows. The active file holds the newest events, so a full tail page
+// there IS the newest page below the boundary. Anything short cannot
+// distinguish "log exhausted" from "active file exhausted, older matches in
+// archives/rotation" and MUST fall through to the full scan — otherwise a
+// rotation (or a selective filter) strands the older history behind an unminted
+// cursor. The scan uses the in-flight-aware read when the provider offers one
+// (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
+// is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
+// the one battle-tested sequential reader instead of a bespoke reverse reader.
+func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
+	fetch := limit + 1
+	if tp, ok := ep.(events.TailProvider); ok {
+		tail, err := tp.ListTail(filter, fetch)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(tail) == fetch {
+			return tail, limit, nil
+		}
+	}
+	all, err := listWithInFlight(ep, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	scanned := len(all)
+	if len(all) > fetch {
+		all = all[len(all)-fetch:]
+	}
+	return all, scanned, nil
+}
+
+// listWithInFlight returns all events matching filter, folding in events still
+// stranded in an in-flight rotation file when the provider is an
+// [events.InFlightProvider]. Plain List reads archives + the active file, so
+// during a rotation's compression window it misses the just-rotated .rotating-*
+// segment; the in-flight-aware read closes that gap so a descending keyset walk
+// cannot skip a whole seq range. Providers with no in-flight window fall back to
+// List unchanged.
+func listWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event, error) {
+	if ip, ok := ep.(events.InFlightProvider); ok {
+		return ip.ListInFlight(filter)
+	}
+	return ep.List(filter)
 }
 
 func filterIsEmpty(f events.Filter) bool {

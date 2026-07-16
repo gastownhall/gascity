@@ -22,6 +22,7 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 	}
 	invocation := string(captured)
 	for _, testName := range []string{
+		"TestCapstoneIntegrationRealMinter",
 		"TestControllerDiscoversAddedCronOrderWithoutRestart",
 		"TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",
 		"TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof",
@@ -65,6 +66,7 @@ func newIntegrationShardFixture(t *testing.T, extraTaggedTests []string) integra
 	capturePath := filepath.Join(tmp, "go-test.capture")
 	taggedTests := append([]string{
 		"TestOrdinaryUnit",
+		"TestCapstoneIntegrationRealMinter",
 		"TestControllerDiscoversAddedCronOrderWithoutRestart",
 		"TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",
 		"TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof",

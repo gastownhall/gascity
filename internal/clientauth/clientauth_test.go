@@ -169,3 +169,62 @@ func TestRunCredentialCommand_NonZeroExit(t *testing.T) {
 		t.Fatal("non-zero exit must error")
 	}
 }
+
+// TestCredentialSource_BoundsHelperContext proves a non-interactive credential
+// command runs under a bounded, cancellable context so a hung helper cannot block
+// the caller (and every remote request behind the mint lock) forever. The stub
+// runner records whether it got a deadline and blocks until cancellation; with the
+// helper timeout shrunk, Token must return the canceled-helper error promptly
+// rather than hang. Regression for the context.Background() unbounded-exec finding.
+func TestCredentialSource_BoundsHelperContext(t *testing.T) {
+	s, err := NewCredentialSource("cred-helper", "https://box:9443", "mc", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.helperTimeout <= 0 {
+		t.Fatalf("non-interactive source must bound the helper exec, got timeout %v", s.helperTimeout)
+	}
+	s.helperTimeout = 20 * time.Millisecond
+
+	var sawDeadline bool
+	s.runner = func(ctx context.Context, _ string, _ ExecInfo) (ExecResult, error) {
+		_, sawDeadline = ctx.Deadline()
+		<-ctx.Done() // simulate a hung credential command
+		return ExecResult{}, ctx.Err()
+	}
+
+	done := make(chan struct{})
+	var tokErr error
+	go func() {
+		_, tokErr = s.Token()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Token did not return: the credential helper exec is unbounded")
+	}
+	if !sawDeadline {
+		t.Error("credential helper ran without a context deadline")
+	}
+	if tokErr == nil {
+		t.Error("Token = nil error, want the canceled-helper error")
+	}
+}
+
+// TestCredentialSource_InteractiveBoundedGenerously documents that an interactive
+// credential command is still bounded (nothing runs under an unbounded context),
+// but with a far more generous deadline than the machine path so a human
+// completing a login is not killed mid-flow.
+func TestCredentialSource_InteractiveBoundedGenerously(t *testing.T) {
+	s, err := NewCredentialSource("cred-helper", "https://box:9443", "mc", true /*interactive*/)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.helperTimeout != interactiveCredentialHelperTimeout {
+		t.Fatalf("interactive helper timeout = %v, want %v", s.helperTimeout, interactiveCredentialHelperTimeout)
+	}
+	if interactiveCredentialHelperTimeout <= credentialHelperTimeout {
+		t.Fatalf("interactive timeout %v must be more generous than the machine timeout %v", interactiveCredentialHelperTimeout, credentialHelperTimeout)
+	}
+}

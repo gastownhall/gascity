@@ -106,19 +106,20 @@ type cachedCityServer struct {
 // dashboard is attached — the embedded SPA at "/" and the host-side dashboard
 // plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
-	resolver       CityResolver
-	initializer    cityInitializer
-	readOnly       bool
-	version        string
-	buildID        string
-	startedAt      time.Time
-	allowedOrigins []string
-	allowedHosts   []string
-	allowAnyHost   bool
-	writeAuth      *citywriteauth.Verifier
-	readAuth       *citywriteauth.Verifier
-	dashboardBase  func() string
-	server         *http.Server
+	resolver        CityResolver
+	initializer     cityInitializer
+	readOnly        bool
+	version         string
+	buildID         string
+	startedAt       time.Time
+	allowedOrigins  []string
+	allowedHosts    []string
+	allowAnyHost    bool
+	writeAuth       *citywriteauth.Verifier
+	readAuth        *citywriteauth.Verifier
+	dashboardBase   func() string
+	runCensusSource RunCensusSource
+	server          *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -301,6 +302,13 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 	return sm
 }
 
+// WithRunCensusSource supplies the incremental projection used by the typed
+// row-free run census endpoint. It must be called before Serve.
+func (sm *SupervisorMux) WithRunCensusSource(source RunCensusSource) *SupervisorMux {
+	sm.runCensusSource = source
+	return sm
+}
+
 // WithDashboardBase records where the embedded dashboard is served so
 // per-city handlers can mint dashboard deep links (e.g. the sling response's
 // dashboard_url). The provider returns the browser-reachable base URL of THIS
@@ -466,6 +474,7 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	// Serve, and per-city servers are built lazily per request, so every
 	// cached server observes the final provider.
 	srv.dashboardBase = sm.dashboardBase
+	srv.runCensusSource = sm.runCensusSource
 
 	sm.cacheMu.Lock()
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}

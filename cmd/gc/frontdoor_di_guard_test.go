@@ -323,9 +323,10 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // doWaitInspectFallback — derive sessStore := cliSessionStore(store, cfg, cityPath)
 // and route the SESSION/wait bead access (wait-bead CRUD, session-bead lookups,
 // wait_hold clears, cap-diagnostic stamps) through it, while dependency-bead reads
-// (loadWaitDependencyBead / depsWaitReadyDetailedForCity) deliberately stay on the
-// plain WORK store (dep beads are work class, federated across rig scopes) and the
-// wait-nudge shadow lookups ride a NudgesStore over the same work store (nudges class,
+// (loadWaitDependencyBead, injected into doSessionWait's waitDependencyReader)
+// deliberately stay on the plain WORK store (dep beads are work class, federated
+// across rig scopes), and wait-nudge shadow lookups ride a NudgesStore over the same
+// work store (nudges class,
 // its own E1.2 routing). The positive cliSessionStore( tripwire protects the routed
 // arm; as a non-front-door router (most session reads go through store args) this
 // guard is a regression canary for the file, not a completeness proof — the

@@ -59,6 +59,7 @@ gc [flags]
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
+| [gc metrics](#gc-metrics) | Inspect or control Gas City command usage metrics |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
@@ -2126,7 +2127,7 @@ gc init --template gascity --default-provider claude \
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
@@ -2500,6 +2501,62 @@ gc mcp list [flags]
 | `--agent` | string |  | show the projected MCP config for this agent |
 | `--json` | bool |  | Output one JSONL result record |
 | `--session` | string |  | show the projected MCP config for this session |
+
+## gc metrics
+
+Inspect or control Gas City command usage metrics
+
+```
+gc metrics
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc metrics example](#gc-metrics-example) | Print the fixed state-independent command-usage request example |
+| [gc metrics off](#gc-metrics-off) | Disable command usage metrics and delete local queued data |
+| [gc metrics on](#gc-metrics-on) | Read and accept the command-usage disclosure on a verified TTY |
+| [gc metrics status](#gc-metrics-status) | Show redacted local command-usage metrics status |
+
+## gc metrics example
+
+Print the fixed state-independent command-usage request example
+
+```
+gc metrics example [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | write only the exact example JSON |
+
+## gc metrics off
+
+Disable command usage metrics and delete local queued data
+
+```
+gc metrics off
+```
+
+## gc metrics on
+
+Read and accept the command-usage disclosure on a verified TTY
+
+```
+gc metrics on
+```
+
+## gc metrics status
+
+Show redacted local command-usage metrics status
+
+```
+gc metrics status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | write the redacted status as JSON |
+| `--show-installation-id` | bool |  | print the stable linkable installation pseudonym with a warning |
 
 ## gc nudge
 

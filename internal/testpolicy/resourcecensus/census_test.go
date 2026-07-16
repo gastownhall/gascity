@@ -3,6 +3,7 @@ package resourcecensus
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"io/fs"
@@ -305,6 +306,210 @@ func TestSiblingShadow() {
 	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "TestNetListenUnixgram", true, false)
 	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "helper", false, false)
 	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenUnixgram, "TestTaggedNetListenUnixgram", true, true)
+}
+
+func TestScanCountsSyscallListenByImportIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/syscall"
+	calls "syscall"
+	"testing"
+)
+
+type localSyscall struct{}
+func (localSyscall) Listen(int, int) error { return nil }
+
+func TestSyscallListen(t *testing.T) {
+	_ = ((calls.Listen))(1, 1)
+	t.Run("nested", func(t *testing.T) {
+		_ = (((calls)).Listen)(2, 1)
+	})
+
+	local := localSyscall{}
+	_ = local.Listen(3, 1)
+	_ = foreign.Listen(4, 1)
+	_, _ = calls.Socket(calls.AF_UNIX, calls.SOCK_STREAM, 0)
+	_ = calls.Bind(5, nil)
+	_ = "calls.Listen(6, 1)"
+	// calls.Listen(7, 1)
+}
+
+func helper() {
+	_ = calls.Listen(8, 1)
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	calls "syscall"
+	"testing"
+)
+func TestTaggedSyscallListen(t *testing.T) {
+	_ = calls.Listen(9, 1)
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localSyscall struct{}
+func (localSyscall) Listen(int, int) error { return nil }
+var calls localSyscall
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_ = calls.Listen(10, 1)
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceSyscallListen, 4, 2)
+	assertCount(t, got, ScopeUntagged, ResourceSyscallListen, 3, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceSyscallListen, "TestSyscallListen", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceSyscallListen, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceSyscallListen, "TestTaggedSyscallListen", true, true)
+}
+
+func TestScanCountsNetListenConfigByReceiverIdentityAndRunnableOwnership(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+
+type localListenConfig struct{}
+func (localListenConfig) Listen(any, string, string) (any, error) { return nil, nil }
+func newListenConfig() sockets.ListenConfig { return sockets.ListenConfig{} }
+func newListenConfigPointer() *sockets.ListenConfig { return &sockets.ListenConfig{} }
+type listenConfigAlias = sockets.ListenConfig
+
+func TestNetListenConfig(t *testing.T) {
+	value := sockets.ListenConfig{}
+	_, _ = ((value.Listen))(nil, "tcp", "127.0.0.1:0")
+	pointer := &sockets.ListenConfig{}
+	_, _ = pointer.Listen(nil, "tcp", "127.0.0.1:0")
+	var typed sockets.ListenConfig
+	_, _ = typed.Listen(nil, "tcp", "127.0.0.1:0")
+	var typedPointer *sockets.ListenConfig
+	_, _ = typedPointer.Listen(nil, "tcp", "127.0.0.1:0")
+	alias := value
+	_, _ = alias.Listen(nil, "tcp", "127.0.0.1:0")
+	factory := newListenConfig()
+	_, _ = factory.Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = newListenConfigPointer().Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = new(sockets.ListenConfig).Listen(nil, "tcp", "127.0.0.1:0")
+	holder := struct{ Config sockets.ListenConfig }{}
+	_, _ = holder.Config.Listen(nil, "tcp", "127.0.0.1:0")
+	configs := []sockets.ListenConfig{{}}
+	_, _ = configs[0].Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = (&listenConfigAlias{}).Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = (&sockets.ListenConfig{}).Listen(nil, "tcp", "127.0.0.1:0")
+
+	local := localListenConfig{}
+	_, _ = local.Listen(nil, "tcp", "local shadow")
+	foreignConfig := foreign.ListenConfig{}
+	_, _ = foreignConfig.Listen(nil, "tcp", "foreign package")
+	_, _ = value.ListenPacket(nil, "udp", "127.0.0.1:0")
+	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
+	_ = "value.Listen(nil, \"tcp\", \"string literal\")"
+	// value.Listen(nil, "tcp", "comment")
+}
+
+func helper(config sockets.ListenConfig) {
+	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+}
+`)},
+		"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedNetListenConfig(t *testing.T) {
+	config := sockets.ListenConfig{}
+	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+}
+`)},
+		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
+type localListenConfig struct{}
+func (localListenConfig) Listen(any, string, string) (any, error) { return nil, nil }
+var config localListenConfig
+`)},
+		"shadow/resources_test.go": &fstest.MapFile{Data: []byte(`package shadow
+func TestSiblingShadow() {
+	_, _ = config.Listen(nil, "tcp", "cross-file shadow")
+}
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeAll, ResourceNetListenConfig, 14, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListenConfig, 13, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenConfig, "TestNetListenConfig", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenConfig, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenConfig, "TestTaggedNetListenConfig", true, true)
+}
+
+func TestResolveBindingsRetainsOnlyNetListenReceiverTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source string
+		want   int
+	}{
+		{
+			name: "net Listen receiver only",
+			source: `package sample
+import sockets "net"
+func exercise() {
+	config := sockets.ListenConfig{}
+	_ = 1 + 2
+	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+}
+`,
+			want: 1,
+		},
+		{
+			name: "no net import",
+			source: `package sample
+type localConfig struct{}
+func (localConfig) Listen(any, string, string) (any, error) { return nil, nil }
+func exercise() {
+	config := localConfig{}
+	_ = 1 + 2
+	_, _ = config.Listen(nil, "tcp", "local")
+}
+`,
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, "sample/resources_test.go", tt.source, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatalf("ParseFile: %v", err)
+			}
+			bindings := resolveBindings(fileSet, file, newEmptyPackageImporter(), "resourcecensus.local/test")
+			if got := len(bindings.expressionTypes); got != tt.want {
+				t.Fatalf("retained expression types = %d, want %d", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestScanCountsCmdGCProcessGlobalsByLexicalOwnership(t *testing.T) {
@@ -924,6 +1129,15 @@ import . "net/http/httptest"
 func TestResource() { _ = NewServer(nil) }
 `,
 		},
+		{
+			name:       "syscall",
+			path:       "sample/dot_syscall_test.go",
+			importPath: "syscall",
+			source: `package sample
+import . "syscall"
+func TestResource() { _ = Listen(1, 1) }
+`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -946,6 +1160,7 @@ import (
 	_ "net/http/httptest"
 	_ "os"
 	_ "os/exec"
+	_ "syscall"
 	_ "testing"
 	_ "time"
 )
@@ -1375,6 +1590,20 @@ func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
 	}
 }
 
+func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListenConfig)
+		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
+			t.Fatalf("net.ListenConfig.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("net.ListenConfig.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
 func TestBootstrapPolicyOwnsNetListenUnixgramDebt(t *testing.T) {
 	t.Parallel()
 
@@ -1385,6 +1614,20 @@ func TestBootstrapPolicyOwnsNetListenUnixgramDebt(t *testing.T) {
 		}
 		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
 			t.Fatalf("net.ListenUnixgram owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+}
+
+func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
+	t.Parallel()
+
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceSyscallListen)
+		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
+			t.Fatalf("syscall.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("syscall.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }

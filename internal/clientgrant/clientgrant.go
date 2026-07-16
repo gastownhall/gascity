@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Version identifies the grant exec contract. It is echoed to the grant command
@@ -34,6 +35,13 @@ const Version = "gascity.dev/city-write-grant/v1"
 // GrantInfoEnv is the environment variable carrying the JSON request binding to
 // the grant command.
 const GrantInfoEnv = "GC_GRANT_INFO"
+
+// grantHelperTimeout bounds one grant-command exec. A grant is minted BEFORE the
+// mutating HTTP request is created, so without a bound a hung signer blocks that
+// request forever — the remote REST timeout only governs the request itself, not
+// the exec that precedes it. A grant command is a fast per-request signer (a
+// re-validate + ed25519 sign, no human in the loop), so the bound is tight.
+const grantHelperTimeout = 30 * time.Second
 
 // GrantInfo is the JSON handed to the grant command via GC_GRANT_INFO. It
 // carries the request binding as separate fields so the command can re-validate
@@ -68,6 +76,10 @@ type runFunc func(ctx context.Context, command string, info GrantInfo) (token st
 type GrantSource struct {
 	command string
 	runner  runFunc
+
+	// helperTimeout bounds one grant-command exec so a hung signer cannot block a
+	// mutating request forever (always > 0; see NewGrantSource).
+	helperTimeout time.Duration
 }
 
 // NewGrantSource builds a source for command. The command is a per-request
@@ -78,7 +90,7 @@ func NewGrantSource(command string) (*GrantSource, error) {
 	if command == "" {
 		return nil, errors.New("clientgrant: grant command is empty")
 	}
-	return &GrantSource{command: command, runner: runGrantCommand}, nil
+	return &GrantSource{command: command, runner: runGrantCommand, helperTimeout: grantHelperTimeout}, nil
 }
 
 // Mint runs the grant command for one request binding and returns its token. It
@@ -88,7 +100,11 @@ func NewGrantSource(command string) (*GrantSource, error) {
 // X-GC-City-Write header on the exact request the binding describes.
 func (s *GrantSource) Mint(info GrantInfo) (string, error) {
 	info.Version = Version
-	token, err := s.runner(context.Background(), s.command, info)
+	// Bound the exec so a hung signer is canceled instead of blocking the
+	// mutating request indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), s.helperTimeout)
+	defer cancel()
+	token, err := s.runner(ctx, s.command, info)
 	if err != nil {
 		return "", err
 	}

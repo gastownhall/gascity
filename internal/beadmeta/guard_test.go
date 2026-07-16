@@ -39,9 +39,19 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
-	// Cobra command annotations (CLI doc-gen plumbing, not bead metadata).
-	"gc.docgen.skip":     "cobra annotation: skip CLI doc generation",
-	"gc.json.schema_dir": "cobra annotation: JSON schema output dir",
+	// Cobra command-tree annotations (not bead metadata).
+	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
+	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",
+	"gc.productmetrics.census":      "testhook cobra annotation: omit a synthetic command from the production census",
+	"gc.productmetrics.class":       "cobra annotation: closed product-metrics command classification",
+	"gc.productmetrics.conditional": "cobra annotation: product-metrics conditional policy",
+	"gc.productmetrics.exclusion":   "cobra annotation: product-metrics exclusion reason",
+	"gc.productmetrics.id":          "cobra annotation: stable product-metrics command ID",
+	"gc.productmetrics.mode":        "cobra annotation: product-metrics command handling mode",
+	"gc.productmetrics.notice":      "cobra annotation: product-metrics notice policy",
+	"gc.productmetrics.owner":       "cobra annotation: product-metrics command owner",
+	"gc.productmetrics.recording":   "cobra annotation: product-metrics recording policy",
+	"gc.productmetrics.resolver":    "cobra annotation: product-metrics dynamic resolver",
 
 	// Generated shell-completion filenames, not metadata keys.
 	"gc.bash": "shell completion filename (cmd/gc/cmd_shell.go)",

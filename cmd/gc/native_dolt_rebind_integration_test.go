@@ -24,10 +24,14 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 	}
 
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "provider rebind bead", "-t", "task"))
-	providerStore, err := openStoreAtForCity(rigPath, cityPath)
+	providerResult, err := openStoreResultAtForCity(rigPath, cityPath)
 	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
+		t.Fatalf("openStoreResultAtForCity(rig): %v", err)
 	}
+	if got, want := providerResult.Diagnostic.Store, beads.BeadsStoreNameNativeDoltStore; got != want {
+		t.Fatalf("provider store = %q, want %q; diagnostic: %+v", got, want, providerResult.Diagnostic)
+	}
+	providerStore := providerResult.Store
 	if got, err := providerStore.Get(rawID); err != nil {
 		t.Fatalf("providerStore.Get(rawID) before rebind: %v", err)
 	} else if got.ID != rawID {
@@ -52,9 +56,20 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 	occupyManagedDoltPort(t, before.Port)
 
 	t.Setenv("GC_DOLT_PORT", "9999")
-	if got, err := providerStore.Get(rawID); err != nil {
-		t.Fatalf("providerStore.Get(rawID) after rebind: %v", err)
-	} else if got.ID != rawID {
+	deadline = time.Now().Add(30 * time.Second)
+	var got beads.Bead
+	for {
+		var err error
+		got, err = providerStore.Get(rawID)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("providerStore.Get(rawID) after rebind: %v", err)
+		}
+		<-time.After(250 * time.Millisecond)
+	}
+	if got.ID != rawID {
 		t.Fatalf("providerStore.Get(rawID) after rebind ID = %q, want %q", got.ID, rawID)
 	}
 

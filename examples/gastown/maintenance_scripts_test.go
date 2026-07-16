@@ -5068,6 +5068,78 @@ exit 0
 	}
 }
 
+// TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery covers the
+// regression reported in #4161: dolt sql embeds the full failing query in
+// its stderr ("error on line 1 for query <query>: <error>"), so once the
+// query text alone exceeds sanitize_output's window the trailing error
+// message is silently dropped. TestReaperFailureAnomalyPreservesDoltErrorTail
+// above only exercises a short (~90 char) stderr and cannot catch this.
+func TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'error on line 1 for query ' >&2
+    i=0
+    while [ "$i" -lt 4200 ]; do
+      printf 'x' >&2
+      i=$((i + 1))
+    done
+    printf ': WITH RECURSIVE iteration limit exceeded\n' >&2
+    exit 42
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "purging closed wisps failed for beads") {
+		t.Fatalf("reaper did not escalate failed purge:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "WITH RECURSIVE iteration limit exceeded") {
+		t.Fatalf("reaper escalation lost Dolt error tail for a long query:\n%s", gcLogText)
+	}
+}
+
 func TestReaperCommitReportsOnlySuccessfulPurgeRows(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

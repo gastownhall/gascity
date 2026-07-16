@@ -22,13 +22,21 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func mainExitCode(args []string, stdout, stderr io.Writer) int {
+	if handled, code := privateProductMetricsEntrypoint(args); handled {
+		return code
+	}
+	return run(args, stdout, stderr)
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal
@@ -122,9 +130,44 @@ var cityFlag string
 // Empty means "discover from cwd or omit."
 var rigFlag string
 
+type cliTelemetryShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+var initializeCLITelemetry = func(ctx context.Context, serviceName, serviceVersion string) (cliTelemetryShutdowner, error) {
+	provider, err := telemetry.Init(ctx, serviceName, serviceVersion)
+	if provider == nil {
+		return nil, err
+	}
+	return provider, err
+}
+
+var setCLIProcessOTELAttrs = telemetry.SetProcessOTELAttrs
+
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	if args == nil {
+		args = []string{}
+	}
+	lifecycle := openProductMetricsInvocationLifecycle(args)
+	defer lifecycle.Close()
+	return runWithRootCommandOptionsAndLifecycle(args, stdout, stderr, rootCommandOptionsForArgs(args), lifecycle)
+}
+
+// runWithRootCommandOptions preserves an explicit eager/lazy construction
+// seam for package tests while production always derives options from its
+// injected args. It must never fill options from ambient os.Args.
+func runWithRootCommandOptions(args []string, stdout, stderr io.Writer, options rootCommandOptions) int {
+	if args == nil {
+		args = []string{}
+	}
+	lifecycle := openProductMetricsInvocationLifecycle(args)
+	defer lifecycle.Close()
+	return runWithRootCommandOptionsAndLifecycle(args, stdout, stderr, options, lifecycle)
+}
+
+func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle) int {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
@@ -136,7 +179,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}()
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
-	provider, err := telemetry.Init(context.Background(), "gascity", version)
+	provider, err := initializeCLITelemetry(context.Background(), "gascity", version)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: telemetry init: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -146,16 +189,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 			defer cancel()
 			_ = provider.Shutdown(ctx)
 		}()
-		telemetry.SetProcessOTELAttrs()
+		setCLIProcessOTELAttrs()
 	}
-
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
 	var observedStdout *countingWriter
-	root := newRootCmd(execStdout, stderr)
-	if args == nil {
-		args = []string{}
+	options.invocationArgs = append([]string(nil), args...)
+	root := newRootCmdWithOptions(execStdout, stderr, options)
+	root.SetArgs(args)
+	root.SetOut(execStdout)
+	root.SetErr(stderr)
+	if options.discoverPackCommands {
+		materializePackCommandTreeForArgs(root, args, execStdout, stderr)
 	}
+	lifecycleBinding := bindProductMetricsInvocationLifecycle(root, args, lifecycle)
+	classification := lifecycleBinding.classification
+	lifecycle.prepareNotice(classification, stderr)
 	bufferJSONExecution := shouldBufferJSONExecution(root, args)
 	reportJSONFailure := shouldReportJSONExecutionError(root, args)
 	if bufferJSONExecution {
@@ -164,27 +213,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		observedStdout = &countingWriter{target: stdout}
 		execStdout.target = observedStdout
 	}
-	root.SetArgs(args)
-	root.SetOut(execStdout)
-	root.SetErr(stderr)
-	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
-		return code
+	if earlyAction, ok := prepareJSONEarlyAction(root, args); ok {
+		earlyOutcome := resolveProductMetricsEarlyOutcome(earlyAction, classification)
+		lifecycle.attemptEarlyOutcome(earlyOutcome)
+		if handled, code := executeProductMetricsEarlyOutcome(earlyOutcome, earlyAction, stdout, stderr); handled {
+			return code
+		}
 	}
-	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
-		return code
-	}
-	if err := root.Execute(); err != nil {
-		code := commandExitCode(err)
+	executedCommand, executeErr := root.ExecuteC()
+	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
+	if executeErr != nil {
+		code := commandExitCode(executeErr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
-				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(executeErr), code)
 			}
 		} else if reportJSONFailure && observedStdout.BytesWritten() == 0 {
-			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(executeErr), code)
 		}
 		return code
 	}
@@ -209,6 +258,15 @@ func commandFailureMessage(err error) string {
 
 // newRootCmd creates the root cobra command with all subcommands.
 func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
+	return newRootCmdWithOptions(stdout, stderr, rootCommandOptions{
+		discoverPackCommands:      true,
+		eagerPackCommandDiscovery: true,
+	})
+}
+
+// newRootCmdWithOptions constructs the built-in command tree and optionally
+// performs city/pack discovery selected from injected invocation arguments.
+func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "gc",
 		Short:         "Gas City CLI — orchestration-builder for multi-agent workflows",
@@ -216,13 +274,21 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		SilenceUsage:  true,
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if packCommandFlagsHaveEmptyExplicitScope(cmd) {
+				attemptProductMetricsForCommand(cmd)
+				fmt.Fprintln(stderr, "gc: --city and --rig require non-empty values") //nolint:errcheck // best-effort stderr
+				printCommandUsage(stderr, cmd)
+				return errExit
+			}
 			if len(args) == 0 {
 				return cmd.Help()
 			}
 			// Lazy fallback: if eager discovery missed a pack command
 			// (e.g. config changed after binary started), try one more time.
-			if tryPackCommandFallback(args, stdout, stderr) {
-				return nil
+			packAction := resolvePackCommandFallback(args, stdout, stderr)
+			packOutcome := executeProductMetricsPackAction(cmd, packAction)
+			if packAction.selected {
+				return packOutcome.err()
 			}
 			fmt.Fprintf(stderr, "gc: unknown command %q\n\n", args[0]) //nolint:errcheck // best-effort stderr
 			printCommandUsage(stderr, cmd)
@@ -286,6 +352,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newSkillCmd(stdout, stderr),
 		newMcpCmd(stdout, stderr),
 		newInternalCmd(stdout, stderr),
+		newMetricsCmd(stdout, stderr),
 		newPerfCmd(stdout, stderr),
 		newVersionCmd(stdout, stderr),
 		newDashboardCmd(stdout, stderr),
@@ -316,8 +383,19 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
 
+	// Cobra materializes its public help and completion commands lazily. Force
+	// them while pack discovery is still disabled so the finite built-in
+	// product-metrics census sees the same tree on every machine. Set the
+	// writers first: Cobra captures them in the generated handlers.
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	materializeProductMetricsCobraDefaults(root)
+	applyProductionProductMetricsCommandCensus(root)
+
 	// Best-effort: discover pack CLI commands if we're inside a city.
-	registerPackCommands(root, stdout, stderr)
+	if options.discoverPackCommands && options.eagerPackCommandDiscovery {
+		registerPackCommands(root, options.invocationArgs, stdout, stderr)
+	}
 
 	installArgUsageErrors(root, stderr)
 	installFlagGroupUsageErrors(root, stderr)
@@ -326,7 +404,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
-	if cmd.Args != nil {
+	if cmd.Args != nil && cmd.Annotations[cobraForcedDefaultAnnotation] != "true" {
 		argsValidator := cmd.Args
 		cmd.Args = func(cmd *cobra.Command, args []string) error {
 			if err := argsValidator(cmd, args); err != nil {
@@ -368,6 +446,7 @@ func installFlagGroupUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 }
 
 func printCommandUsageError(stderr io.Writer, cmd *cobra.Command, err error) {
+	attemptProductMetricsForCommand(cmd)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: %v\n\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -534,6 +613,13 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 	if target, ok, derr := resolveStickyDefaultTarget(); derr != nil {
 		return resolvedContext{}, derr
 	} else if ok {
+		// Honor GC_NO_API on the sticky-default tier too: the explicit flag/env
+		// tiers guard it inside resolveRemoteSelection, and the escape hatch
+		// ("never route through the API") must apply consistently rather than be
+		// silently ignored for a sticky-default remote target.
+		if gerr := guardNoAPI(readRemoteSelection()); gerr != nil {
+			return resolvedContext{}, gerr
+		}
 		return resolvedContext{Remote: target}, nil
 	}
 	return resolvedContext{}, err
@@ -1251,6 +1337,16 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false)
+}
+
+// openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
+// conditional-writes mode supplied by the caller instead of re-resolved from
+// the on-disk config. Controller-owned reopens use it to carry the
+// boot-latched mode: re-resolving from disk on a reload would flip the city
+// store's write discipline mid-process while rig stores keep the boot mode —
+// exactly the mixed-writer state the process latch exists to prevent.
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1265,16 +1361,22 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
-		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
+	mode := resolvedConditionalWritesMode(cfg)
+	if haveMode {
+		mode = modeOverride
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:        scopeRoot,
-		CityPath:         runtimeCityPath,
-		Provider:         provider,
-		PreflightChecker: newBeadsPreflightChecker(runtimeCityPath, provider),
-		Logger:           slog.Default(),
+		ScopeRoot:         scopeRoot,
+		CityPath:          runtimeCityPath,
+		Provider:          provider,
+		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
+		Logger:            slog.Default(),
+		ConditionalWrites: mode,
+		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
+			flags, resolved := resolvedConditionalWritesFlags(cfg)
+			return lazyConditionalWritesDegradeEmitter(
+				runtimeCityPath, conditionalWritesStoreID(scopeRoot, runtimeCityPath), flags, resolved)
+		}(),
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},

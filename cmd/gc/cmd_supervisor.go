@@ -1365,16 +1365,29 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// Gate city reads on a signed read grant when configured. Fail closed at boot
+	// if read-auth is required but no key is set, so the supervisor cannot
+	// silently serve reads unguarded.
+	if err := api.InstallReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
 	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
 	// the standalone controller seam) so an operator sees the read surface needs a
-	// network front. grantGated is resolved the same way InstallWriteAuth did.
+	// network front. grantGated and readAuthInstalled are resolved the same way
+	// InstallWriteAuth/InstallReadAuth did; a read-auth verifier suppresses the
+	// warning because the read plane is then authenticated.
 	if nonLocal && supCfg.Supervisor.AllowMutations {
 		grantGated := false
 		if v, verr := api.ResolveWriteAuthVerifier(supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); verr == nil && v != nil {
 			grantGated = true
 		}
-		warnUnauthenticatedReadPlane(stderr, bind, grantGated)
+		readAuthInstalled := false
+		if v, verr := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); verr == nil && v != nil {
+			readAuthInstalled = true
+		}
+		warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
 	}
 
 	// Host the embedded dashboard SPA + host-side /api plane on the same
@@ -1385,10 +1398,14 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: dashboard: %v\n", dashErr) //nolint:errcheck
 		return 1
 	}
-	if dashboardPlane != nil {
-		dashboardPlane.Start(ctx)
-		defer dashboardPlane.Stop()
+	dashboardMounted := dashboardPlane != nil
+	if dashboardPlane == nil {
+		// The typed run census is available even when the embedded dashboard is
+		// disabled. Keep its incremental plane unmounted in that posture.
+		dashboardPlane = newRunCensusPlane(apiMux, registry)
 	}
+	dashboardPlane.Start(ctx)
+	defer dashboardPlane.Stop()
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1428,13 +1445,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.Shutdown(shutCtx) //nolint:errcheck
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
-	if dashboardPlane != nil {
-		dashTag := ""
-		if readOnly {
-			dashTag = "  [read-only]"
-		}
-		fmt.Fprintf(stdout, "Dashboard:  %s/%s\n", dashboardLoopbackBaseURL(bind, port), dashTag) //nolint:errcheck
-	}
+	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
@@ -1983,7 +1994,7 @@ func reconcileCities(
 			providerName := effectiveProviderName(cfg.Session.Provider)
 			ctx := sessionProviderContextForCity(cfg, path, providerName)
 			snapshot := loadProviderSessionSnapshot(ctx)
-			resolvedSP, err := newSessionProviderFromContextWithError(ctx, snapshot)
+			resolvedSP, err := newSessionProviderFromContext(ctx, snapshot)
 			if err != nil {
 				return err
 			}

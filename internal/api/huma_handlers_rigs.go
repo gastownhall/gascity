@@ -30,6 +30,22 @@ const (
 	rigVisibilityPoll    = 50 * time.Millisecond
 )
 
+// rigProvisionTimeout is the SERVER-OWNED ceiling on one async git_url
+// provision. The detached goroutine runs the clone + provision under a context
+// bounded by this deadline (git.Clone honors it via exec.CommandContext), so a
+// stalled/black-hole git server terminalizes the request through the normal
+// rollback + request.failed path instead of leaking the goroutine and wedging
+// the rig name / request_id until process restart. It is deliberately shorter
+// than the client's rigCreateWaitTimeout (30m) so the server bounds the work,
+// not the client. rigTeardownTimeout bounds the rollback teardown under a FRESH
+// context, because the provisioning context may already be canceled (its
+// deadline is what triggered the rollback). Both are vars so tests can shrink
+// them to exercise terminalization deterministically.
+var (
+	rigProvisionTimeout = 20 * time.Minute
+	rigTeardownTimeout  = 2 * time.Minute
+)
+
 // humaHandleRigList is the Huma-typed handler for GET /v0/rigs.
 func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*ListOutput[rigResponse], error) {
 	bp := input.toBlockingParams()
@@ -86,18 +102,15 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 // humaHandleRigCreate is the Huma-typed handler for POST /v0/rigs. It branches
 // on git_url:
 //
-//   - git_url absent: today's synchronous config-append create → 201. Byte-
-//     identical to the pre-C4b path (path required, mapped via mutationError).
-//     Wrapped in withIdempotency so the S2 Idempotency-Key header contract holds
-//     for the sync path: a retried create replays the first response instead of
-//     re-running CreateRig.
+//   - git_url absent: synchronous config-append create → 201. Path required,
+//     mapped via mutationError. It is wired through withIdempotency so a repeat
+//     with the same Idempotency-Key header replays the cached 201 instead of
+//     re-creating — the create-endpoint idempotency invariant the guard enforces.
 //   - git_url present: async clone+provision. Runs the G13 request_id state
 //     machine under the per-rig-name lock, spawns a detached provisioning
 //     goroutine, and returns 202 (accepted) / 200 (idempotent replay of a
-//     succeeded create) / 409 (request_id or rig_name conflict). Idempotency on
-//     this path is owned by the request_id admission machine (which also tracks
-//     in-flight provisioning and re-clone), so the Idempotency-Key header is not
-//     additionally applied here.
+//     succeeded create) / 409 (request_id or rig_name conflict). Async
+//     idempotency is keyed on the body request_id, not the header.
 func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput) (*RigCreateOutput, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
@@ -106,10 +119,11 @@ func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput)
 
 	body := input.Body
 	if strings.TrimSpace(body.GitURL) == "" {
-		// The cached value is the whole typed output; the sync response carries
-		// no live-state-derived fields, so an Idempotency-Key replay is
-		// byte-identical to the first 201.
-		return withIdempotency(s.idem, "/v0/rigs", input.IdempotencyKey, body,
+		// Sync create: idempotent via the Idempotency-Key header. Cache the whole
+		// 201 union body and replay it verbatim on a same-key repeat, mirroring
+		// the other create endpoints (the create-endpoint idempotency guard
+		// requires the header). An empty key is a passthrough (create runs once).
+		return withIdempotency(s.idem, "/v0/rigs", input.IdempotencyKey, input.Body,
 			func() (*RigCreateOutput, error) {
 				return s.rigCreateSync(sm, body)
 			})
@@ -310,6 +324,13 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 	}
 
 	go func() {
+		// Bound the whole provision under a server-owned deadline so a stalled or
+		// black-hole git server terminalizes through the rollback + request.failed
+		// path instead of leaking this goroutine and wedging the rig name /
+		// request_id until process restart. git.Clone honors provCtx via
+		// exec.CommandContext; the client's own 30m wait does not bound the server.
+		provCtx, cancelProv := context.WithTimeout(context.Background(), rigProvisionTimeout)
+		defer cancelProv()
 		terminalized := false
 		defer s.recoverAsRequestFailed(reqID, RequestOperationRigCreate) // runs LAST (LIFO)
 		defer func() {                                                   // runs FIRST: panic backstop
@@ -324,7 +345,7 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 		// not re-clone over it; fail the request (the record's manifest keys are
 		// still set, so the boot sweep or the next retry completes teardown).
 		if !recloneManifest.IsEmpty() {
-			if tErr := sm.TeardownPartialRig(context.Background(), recloneManifest); tErr != nil {
+			if tErr := sm.TeardownPartialRig(provCtx, recloneManifest); tErr != nil {
 				log.Printf("api: rig create %s: reclone pre-drop: %v", reqID, tErr)
 				s.rigIdem.remove(city, entry)
 				terminalized = true
@@ -333,7 +354,7 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 			}
 		}
 
-		provisioned, err := sm.ProvisionRigFromGit(context.Background(), rigCfg, gitURL, onStep, onManifest)
+		provisioned, err := sm.ProvisionRigFromGit(provCtx, rigCfg, gitURL, onStep, onManifest)
 		if err != nil {
 			s.rollbackFailedProvision(sm, store, city, entry, manifest, err)
 			terminalized = true
@@ -368,8 +389,14 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 // carries the classified error_code.
 func (s *Server) rollbackFailedProvision(sm StateMutator, store beads.Store, city string, entry *liveProvision, manifest RigProvisionManifest, cause error) {
 	reqID := entry.requestID
+	// Teardown runs under a FRESH bounded context: the provisioning context may
+	// already be canceled (a provision-timeout is exactly what routes here), and
+	// the cleanup still needs its own deadline to drop the partial dir/DB rather
+	// than inheriting a dead context or blocking forever.
+	ctx, cancel := context.WithTimeout(context.Background(), rigTeardownTimeout)
+	defer cancel()
 	teardownOK := true
-	if tErr := sm.TeardownPartialRig(context.Background(), manifest); tErr != nil {
+	if tErr := sm.TeardownPartialRig(ctx, manifest); tErr != nil {
 		teardownOK = false
 		log.Printf("api: rig create %s: rollback teardown: %v", reqID, tErr)
 	}

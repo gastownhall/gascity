@@ -117,7 +117,7 @@ not in the current live `dolt` label snapshot:
   - `cmd/gc/beads_provider_lifecycle_test.go`: `TestCurrentDoltPortIgnoresReachablePortFileWithoutManagedState`
   - `cmd/gc/beads_provider_lifecycle_test.go`: `TestNormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles`
   - `cmd/gc/beads_provider_lifecycle_test.go`: `TestNormalizeCanonicalBdScopeFilesMaterializesMissingMetadata`
-  - `cmd/gc/cmd_rig_test.go`: `TestDoRigAdd_DoesNotWriteConfigWhenCanonicalBdNormalizationFails`
+  - `internal/rig/rollback_provision_test.go`: `TestProvisionRollsBackWhenNormalizeScopesFails`
 - Why this branch closes it:
   managed mode now has one canonical runtime publication path,
   compatibility port files are mirrors only, and canonical `.beads/` files
@@ -195,14 +195,13 @@ not in the current live `dolt` label snapshot:
 
 - Historical failure:
   bootstrap and adoption could leave partially normalized canonical files,
-  wrong `dolt_database` identity, or misleading success output on deferred
-  init paths.
+  wrong `dolt_database` identity, or incomplete state on deferred init paths.
 - Regression tests:
   - `cmd/gc/beads_provider_lifecycle_test.go`: `TestNormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles`
   - `cmd/gc/beads_provider_lifecycle_test.go`: `TestNormalizeCanonicalBdScopeFilesMaterializesMissingMetadata`
-  - `cmd/gc/beads_provider_lifecycle_test.go`: `TestGcBeadsBdInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity`
-  - `cmd/gc/cmd_rig_test.go`: `TestDoRigAdd_DoesNotWriteConfigWhenCanonicalBdNormalizationFails`
-  - `cmd/gc/cmd_rig_test.go`: `TestDoRigAdd_SkipDoltReportsDeferredInit`
+  - `cmd/gc/beads_provider_lifecycle_test.go`: `TestEnforceCanonicalScopeMetadataForInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity`
+  - `internal/rig/rollback_provision_test.go`: `TestProvisionRollsBackWhenNormalizeScopesFails`
+  - `cmd/gc/lifecycle_coordination_test.go`: `TestLifecycleCoordination_InitDirIfReady_BdDeferred`
   - `cmd/gc/lifecycle_coordination_test.go`: `TestSeedDeferredManagedBeadsUsesCompatCityExternalBeforeStartup`
   - `cmd/gc/lifecycle_coordination_test.go`: `TestSeedDeferredManagedBeadsUsesCompatExplicitRigEndpointBeforeStartup`
 - Why this branch closes it:
@@ -233,16 +232,25 @@ not in the current live `dolt` label snapshot:
   `exec:gc-beads-bd` implemented lifecycle operations but not the exec store
   protocol, so session and mail paths saw empty or invalid bead responses.
 - Regression tests:
-  - `cmd/gc/cmd_session_test.go`: `TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions`
   - `cmd/gc/cmd_mail_test.go`: `TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox`
-  - `cmd/gc/cmd_bd_test.go`: `TestManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore`
-  - `cmd/gc/cmd_bd_test.go`: `TestInheritedExternalExecBdRigStoreConsistentAcrossRawBdAndProviderStore`
+  - `cmd/gc/cmd_bd_store_bridge_test.go`:
+    `TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority`,
+    `TestBdStoreBridgeGetCmdReturnsBead`,
+    `TestBdStoreBridgeListCommandForwardsFilters`,
+    `TestBdStoreBridgeUpdateCommandPassesType`, and
+    `TestBdStoreBridgeDepListCmdReturnsJSON`
+  - `internal/beads/exec/exec_test.go`: `TestExecStoreConformance`
+  - `internal/beads/factory_test.go`: `TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore`
   - `cmd/gc/store_target_exec_test.go`: `TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv`
 - Why this branch closes it:
   `cmd/gc/gc-beads-bd` now implements the exec store protocol by bridging
   CRUD/list/get/update/dep operations through pinned `bd` commands, and the
   exec store opener projects the correct scoped Dolt env for
-  `exec:gc-beads-bd`.
+  `exec:gc-beads-bd`. Focused command-bridge tests own pinned `bd` translation,
+  ExecStore conformance owns the store protocol, and factory/scope tests own
+  production selection and env projection. The managed mail test retains the
+  city-scoped session/mail composition proof; fast file-backed tests own
+  session-list presentation.
 
 ### `fixes: #696` `GC_BEADS=exec:gc-beads-bd` silently no-ops bead data operations in managed sessions
 
@@ -250,9 +258,15 @@ not in the current live `dolt` label snapshot:
   managed-session flows could appear successful while all bead lookups were
   effectively no-ops under `exec:gc-beads-bd`.
 - Regression tests:
-  - `cmd/gc/cmd_session_test.go`: `TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions`
   - `cmd/gc/cmd_mail_test.go`: `TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox`
-  - `cmd/gc/cmd_bd_test.go`: `TestManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore`
+  - `cmd/gc/cmd_bd_store_bridge_test.go`:
+    `TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority`,
+    `TestBdStoreBridgeGetCmdReturnsBead`,
+    `TestBdStoreBridgeListCommandForwardsFilters`,
+    `TestBdStoreBridgeUpdateCommandPassesType`, and
+    `TestBdStoreBridgeDepListCmdReturnsJSON`
+  - `internal/beads/exec/exec_test.go`: `TestExecStoreConformance`
+  - `internal/beads/factory_test.go`: `TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore`
 - Why this branch closes it:
   the same store-bridge implementation that fixes `#684` now gives managed
   session and mail flows a real bead store instead of an exec provider that
@@ -372,15 +386,22 @@ not in the current live `dolt` label snapshot:
   make `exec:gc-beads-bd` support actual bead CRUD instead of lifecycle-only
   operations.
 - Regression tests:
-  - `cmd/gc/cmd_session_test.go`: `TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions`
   - `cmd/gc/cmd_mail_test.go`: `TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox`
-  - `cmd/gc/cmd_bd_test.go`: `TestManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore`
-  - `cmd/gc/cmd_bd_test.go`: `TestInheritedExternalExecBdRigStoreConsistentAcrossRawBdAndProviderStore`
+  - `cmd/gc/cmd_bd_store_bridge_test.go`:
+    `TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority`,
+    `TestBdStoreBridgeGetCmdReturnsBead`,
+    `TestBdStoreBridgeListCommandForwardsFilters`,
+    `TestBdStoreBridgeUpdateCommandPassesType`, and
+    `TestBdStoreBridgeDepListCmdReturnsJSON`
+  - `internal/beads/exec/exec_test.go`: `TestExecStoreConformance`
+  - `internal/beads/factory_test.go`: `TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore`
   - `cmd/gc/store_target_exec_test.go`: `TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv`
 - Why this branch supersedes it:
   the current branch contains the full exec-store bridge, not just a narrow
-  patch for one caller. Session, mail, raw `bd`, and provider-store paths all
-  exercise the same bridge.
+  patch for one caller. Command-bridge tests own pinned `bd` translation,
+  ExecStore conformance owns the store protocol, factory/scope tests own
+  production selection and env projection, and session/mail tests retain the
+  consumer-level composition proof.
 
 ### `supersedes: #686` route rig Dolt env to `scale_check` regardless of city provider
 
@@ -403,9 +424,15 @@ not in the current live `dolt` label snapshot:
   avoid crashing session data operations when `GC_BEADS` pointed at the
   lifecycle-only `gc-beads-bd` wrapper.
 - Regression tests:
-  - `cmd/gc/cmd_session_test.go`: `TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions`
   - `cmd/gc/cmd_mail_test.go`: `TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox`
-  - `cmd/gc/cmd_bd_test.go`: `TestManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore`
+  - `cmd/gc/cmd_bd_store_bridge_test.go`:
+    `TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority`,
+    `TestBdStoreBridgeGetCmdReturnsBead`,
+    `TestBdStoreBridgeListCommandForwardsFilters`,
+    `TestBdStoreBridgeUpdateCommandPassesType`, and
+    `TestBdStoreBridgeDepListCmdReturnsJSON`
+  - `internal/beads/exec/exec_test.go`: `TestExecStoreConformance`
+  - `internal/beads/factory_test.go`: `TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore`
 - Why this branch supersedes it:
   this branch removes the lifecycle-only cliff entirely by making
   `exec:gc-beads-bd` a valid data/store provider. Session data paths now work
@@ -439,7 +466,17 @@ than many one-off patches:
 These focused suites back the entries above:
 
 ```bash
-go test ./cmd/gc -run 'TestGcBeadsBd(StartIsIdempotentWhenAlreadyRunning|StartRestartsServerHoldingDeletedDataInodes|EnsureReadyDoesNotRestartAfterTransientTCPProbeFailure)|Test(CurrentDoltPortIgnoresReachablePortFileWithoutManagedState|CurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile|CurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped|NormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles|NormalizeCanonicalBdScopeFilesMaterializesMissingMetadata|GcBeadsBdInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity)|Test(DoRigAdd_DoesNotWriteConfigWhenCanonicalBdNormalizationFails|DoRigAdd_SkipDoltReportsDeferredInit)|Test(ManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore|ManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore|InheritedExternalBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore|ManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore|InheritedExternalExecBdRigStoreConsistentAcrossRawBdAndProviderStore|GcBdUsesProjectionNotAmbientEnv|GcBdWarnsOnExternalOverrideDrift)|Test(CmdSessionList_ManagedExecLifecycleProviderReadsSessions|CmdMailInbox_ManagedExecLifecycleProviderReadsInbox)|Test(OpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv)|Test(BuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent|BuildDesiredState_PoolCheckUsesExplicitRigPassword|BuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride)|Test(ResolveTemplateUsesCityManagedDoltPort)' -count=1 -timeout 1200s
+command -v bd
+command -v dolt
+command -v jq
 
-go test ./internal/doctor ./internal/beads/contract ./internal/beads/exec ./internal/runtime/k8s -run 'Test(DoltServerCheck_ManagedCityUsesRuntimeState|DoltServerCheck_ManagedCityReportsStartHint|DoltServerCheck_ExternalCityUsesCanonicalTarget|RigDoltServerCheck_ExplicitRigUsesCanonicalTarget|RigDoltServerCheck_InheritedRigDriftIsError|ResolveDoltConnectionTarget|RunSanitizesAmbientLegacyAndStoreTargetEnv|BuildPodEnvProjectsManagedDoltEndpoint|BuildPodEnvMirrorsBeadsEndpointFromProjectedGCDoltVars|BuildPodEnvRejectsHostOnlyProjectedTarget|BuildPodEnvUsesProviderManagedAlias)' -count=1 -timeout 1200s
+GC_FAST_UNIT=0 go test ./cmd/gc \
+  -run 'TestGcBeadsBd(StartIsIdempotentWhenAlreadyRunning|StartRestartsServerHoldingDeletedDataInodes|EnsureReadyDoesNotRestartAfterTransientTCPProbeFailure)|Test(CurrentDoltPortIgnoresReachablePortFileWithoutManagedState|CurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile|CurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped|NormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles|NormalizeCanonicalBdScopeFilesMaterializesMissingMetadata|EnforceCanonicalScopeMetadataForInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity)|TestLifecycleCoordination_InitDirIfReady_BdDeferred|Test(ManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore|GcBdUsesProjectionNotAmbientEnv|GcBdWarnsOnExternalOverrideDrift)|TestBdStoreBridge(CreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority|GetCmdReturnsBead|ListCommandForwardsFilters|UpdateCommandPassesType|DepListCmdReturnsJSON)|TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox|Test(OpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv)|Test(BuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent|BuildDesiredState_PoolCheckUsesExplicitRigPassword|BuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride)|Test(ResolveTemplateUsesCityManagedDoltPort)' \
+  -count=1 \
+  -timeout 1200s
+
+go test ./internal/doctor ./internal/beads ./internal/beads/contract ./internal/beads/exec ./internal/rig ./internal/runtime/k8s \
+  -run 'Test(DoltServerCheck_ManagedCityUsesRuntimeState|DoltServerCheck_ManagedCityReportsStartHint|DoltServerCheck_ExternalCityUsesCanonicalTarget|RigDoltServerCheck_ExplicitRigUsesCanonicalTarget|RigDoltServerCheck_InheritedRigDriftIsError|ResolveDoltConnectionTarget|OpenStoreAtForCityExecBdContractFallbackUsesExecStore|ExecStoreConformance|RunSanitizesAmbientLegacyAndStoreTargetEnv|ProvisionRollsBackWhenNormalizeScopesFails|BuildPodEnvProjectsManagedDoltEndpoint|BuildPodEnvMirrorsBeadsEndpointFromProjectedGCDoltVars|BuildPodEnvRejectsHostOnlyProjectedTarget|BuildPodEnvUsesProviderManagedAlias)' \
+  -count=1 \
+  -timeout 1200s
 ```

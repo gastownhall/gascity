@@ -787,9 +787,16 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		Running: hqRunning,
 		Beads:   rigBeadsStatus(fs, cityPath),
 	})
+	// Build the session provider once and share it across rigs:
+	// constructing it per rig reopened the session store and re-forked
+	// tmux probes, making --json scale O(rigs) in subprocesses (~7x
+	// slower than the text path, which skips running-status detection).
 	var sp runtime.Provider
 	if jsonOutput && len(cfg.Rigs) > 0 {
-		sp = rigListSessionProvider()
+		sp, err = rigListSessionProvider()
+		if err != nil {
+			return writeJSONError(stdout, stderr, "session_provider_failed", fmt.Sprintf("gc rig list: %v", err), 1)
+		}
 	}
 	for i := range cfg.Rigs {
 		running := false

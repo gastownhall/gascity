@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -185,18 +186,58 @@ type RigCreateBody struct {
 func rigCreateDigest(body RigCreateBody) (string, error) {
 	body.RequestID = ""
 	// Normalize the provisioning fields to their trimmed form BEFORE hashing:
-	// the clone/branch/path all TrimSpace their inputs, so a retry that differs
-	// only by surrounding whitespace on git_url/path/name must digest identically
-	// and not surface as a spurious 409 body-mismatch.
+	// name/path/prefix/default_branch/git_url are all TrimSpace'd downstream, so a
+	// retry that differs only by surrounding whitespace on any of them must digest
+	// identically and not surface as a spurious 409 body-mismatch.
 	body.Name = strings.TrimSpace(body.Name)
 	body.Path = strings.TrimSpace(body.Path)
-	body.GitURL = strings.TrimSpace(body.GitURL)
+	body.Prefix = strings.TrimSpace(body.Prefix)
+	body.DefaultBranch = strings.TrimSpace(body.DefaultBranch)
+	// Digest the LOGICAL repository, not the credential: strip any embedded
+	// userinfo from git_url before hashing. The CLI's documented same-request_id
+	// retry recipe redacts userinfo (gitcred.RedactUserinfo → "***@host"), and a
+	// rotated token changes it, so hashing the raw credentialed URL would turn the
+	// advertised clean replay into a spurious request_id conflict. Canonicalizing
+	// to the userinfo-free form makes the original credential-bearing URL, the
+	// redacted retry, and a refreshed-token retry all digest identically (the
+	// credential rides argv/askpass, not the idempotency identity).
+	body.GitURL = stripGitURLUserinfo(strings.TrimSpace(body.GitURL))
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return "", fmt.Errorf("digesting rig-create body: %w", err)
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// stripGitURLUserinfo removes any embedded "user:password@" userinfo from a git
+// URL so the idempotency digest binds a request_id to the logical repository
+// rather than the credential. It only rewrites a real scheme://…@host URL: a
+// parseable URL with a credential is re-emitted without it; an unparseable
+// credential URL has its "scheme://…@" authority hand-stripped so the digest
+// still canonicalizes; and a non-URL form (or a credential-free URL) is returned
+// unchanged so its bytes stay stable across retries.
+func stripGitURLUserinfo(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return raw
+	}
+	if u, err := url.Parse(raw); err == nil {
+		if u.User == nil {
+			return raw
+		}
+		u.User = nil
+		return u.String()
+	}
+	sep := strings.Index(raw, "://")
+	rest := raw[sep+3:]
+	tail := ""
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+		rest, tail = rest[:slash], rest[slash:]
+	}
+	if at := strings.LastIndexByte(rest, '@'); at >= 0 {
+		rest = rest[at+1:]
+	}
+	return raw[:sep+3] + rest + tail
 }
 
 // idemKey identifies one logical request: (city, request_id). G13 §0.
@@ -406,13 +447,8 @@ func healDuplicateIdemRecords(store beads.Store, city, requestID string, matches
 // exists in config: after `gc rig remove` / DeleteRig the config entry is gone
 // but the succeeded idem record lingers, so cross-checking rigInConfig lets the
 // name be re-added instead of being wedged forever. rigInConfig may be nil (in
-// which case a succeeded record blocks, the pre-fix behavior). excludeBeadID,
-// when non-empty, drops the caller's OWN record from the scan: a re-clone
-// re-checks the name axis before re-registering, and its own in_flight (row 7)
-// or rolled_back (row 6) record would otherwise be seen here — the in_flight one
-// self-reporting a false conflict. Record IDs are unique, so excluding one can
-// never mask a different actor's record.
-func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig func(name string) bool, excludeBeadID string) (bool, error) {
+// which case a succeeded record blocks, the pre-fix behavior).
+func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig func(name string) bool) (bool, error) {
 	matches, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			metaIdemKind:    idemKindRigCreate,
@@ -425,9 +461,6 @@ func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig fun
 		return false, fmt.Errorf("idem rig-name scan %s/%s: %w", city, rigName, err)
 	}
 	for i := range matches {
-		if excludeBeadID != "" && matches[i].ID == excludeBeadID {
-			continue
-		}
 		switch matches[i].Metadata[metaIdemState] {
 		case idemStateInFlight:
 			return true, nil
@@ -438,42 +471,6 @@ func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig fun
 		}
 	}
 	return false, nil
-}
-
-// nameAxisConflict runs the G13 §4.4 name-collision axis (live byName index →
-// config → durable rig-name scan) and returns a *rigNameConflictError when the
-// name is held by a live provision or a live config rig, or nil when the name is
-// free. Both the fresh-admission path and every re-clone admission consult it so
-// the two cannot drift: a re-clone re-executes one request_id's prior attempt
-// and would otherwise re-register byName and pre-drop the PRIOR manifest without
-// ever re-checking the name, letting it overwrite — and RemoveAll — a same-name
-// rig that a different actor created after the prior attempt rolled back. On the
-// re-clone path excludeBeadID is the re-cloning record's own id so its in_flight
-// record does not self-conflict; the fresh path passes "".
-func nameAxisConflict(
-	idx *rigIdemIndex,
-	store beads.Store,
-	rigInConfig func(name string) bool,
-	city, rigName, excludeBeadID string,
-) (*rigNameConflictError, error) {
-	if live, ok := idx.lookupByName(city, rigName); ok {
-		return &rigNameConflictError{
-			Rig:               rigName,
-			InFlightRequestID: live.requestID,
-			InFlightCursor:    live.eventCursor,
-		}, nil
-	}
-	if rigInConfig != nil && rigInConfig(rigName) {
-		return &rigNameConflictError{Rig: rigName}, nil
-	}
-	hit, err := durableRigNameScan(store, city, rigName, rigInConfig, excludeBeadID)
-	if err != nil {
-		return nil, err
-	}
-	if hit {
-		return &rigNameConflictError{Rig: rigName}, nil
-	}
-	return nil, nil
 }
 
 // markIdemSucceeded transitions a record to succeeded and merges the result
@@ -636,119 +633,143 @@ func admitRigCreate(
 		return rigAdmitResult{}, err
 	}
 
-	// (1) request_id axis — live index first, durable store on miss.
-	if body.RequestID != "" {
-		if live, ok := idx.lookup(city, body.RequestID); ok {
-			if live.digest != digest {
-				return rigAdmitResult{}, &requestIDConflictError{RequestID: body.RequestID} // row 2
-			}
-			return rigAdmitResult{ // row 1: in-flight replay, no spawn
-				outcome:     rigAdmitInflightReplay,
-				requestID:   body.RequestID,
-				eventCursor: live.eventCursor,
-			}, nil
-		}
-		rec, err := lookupIdemRecord(store, city, body.RequestID)
-		if err != nil {
-			return rigAdmitResult{}, err
-		}
-		if rec != nil {
-			if rec.Metadata[metaIdemDigest] != digest {
-				return rigAdmitResult{}, &requestIDConflictError{RequestID: body.RequestID} // row 4
-			}
-			// reclone re-executes a prior attempt: it captures the PRIOR manifest
-			// (created_dir/dolt_db) BEFORE admitFreshLocked resets the record to
-			// in_flight (the reset keeps those keys so a crash mid-reclone still
-			// leaves the debris findable by the boot sweep), then the goroutine
-			// pre-drops that debris before cloning (C4c §3, G13 §6 drop-then-mark).
-			reclone := func() (rigAdmitResult, error) {
-				// Re-check the name axis BEFORE re-registering byName and pre-dropping
-				// the prior manifest. Between this request_id's prior attempt and this
-				// retry, a different actor (another request_id, or a no-id add) may have
-				// created a live rig under the same name — a rolled_back record does not
-				// block a fresh same-name add. Without this check the re-clone would
-				// overwrite byName and RemoveAll that actor's live working tree.
-				// excludeBeadID = rec.ID so this request's own record does not
-				// self-conflict (row 7's in_flight record would otherwise block).
-				if conflict, cErr := nameAxisConflict(idx, store, rigInConfig, city, body.Name, rec.ID); cErr != nil {
-					return rigAdmitResult{}, cErr
-				} else if conflict != nil {
-					return rigAdmitResult{}, conflict
-				}
-				oldManifest := manifestFromRecord(rec)
-				res, rErr := admitFreshLocked(idx, store, cursor, city, body, digest, rec.ID)
-				if rErr != nil {
-					return res, rErr
-				}
-				res.recloneManifest = oldManifest
-				return res, nil
-			}
-			switch rec.Metadata[metaIdemState] {
-			case idemStateSucceeded:
-				// row 5: a succeeded record replays 200-exists — but ONLY while its
-				// rig still exists. If the rig was deleted (gc rig remove /
-				// DeleteRig) the config entry is gone while the succeeded record
-				// lingers; serving a 200 for a rig that no longer exists is stale,
-				// so re-execute (re-clone) the record instead.
-				if rigInConfig == nil || rigInConfig(body.Name) {
-					return rigAdmitResult{
-						outcome:     rigAdmitExisting,
-						requestID:   body.RequestID,
-						eventCursor: rec.Metadata[metaIdemEventCursor],
-						record:      rec,
-					}, nil
-				}
-				return reclone()
-			case idemStateInFlight:
-				// row 7: an orphan in_flight record — the live index missed, so no
-				// goroutine is running. Before re-cloning (which would tear down the
-				// rig via the re-clone pre-drop), probe completeness: a
-				// markIdemSucceeded that failed AFTER a successful provision leaves
-				// the record in_flight while the rig is COMPLETE. Forward-reconcile
-				// such a record to succeeded and serve 200 rather than destroying a
-				// live rig — the same probe the boot sweep uses.
-				if rigComplete != nil {
-					if complete, prefix, branch := rigComplete(body.Name); complete {
-						if mErr := markIdemSucceeded(store, rec.ID, body.Name, prefix, branch); mErr != nil {
-							return rigAdmitResult{}, mErr
-						}
-						rec.Metadata[metaIdemState] = idemStateSucceeded
-						rec.Metadata[metaIdemResultRig] = body.Name
-						rec.Metadata[metaIdemResultPrefix] = prefix
-						rec.Metadata[metaIdemResultBranch] = branch
-						return rigAdmitResult{
-							outcome:     rigAdmitExisting,
-							requestID:   body.RequestID,
-							eventCursor: rec.Metadata[metaIdemEventCursor],
-							record:      rec,
-						}, nil
-					}
-				}
-				return reclone()
-			case idemStateRolledBack:
-				// row 6: rolled_back is the re-executable terminal → re-clone.
-				return reclone()
-			default:
-				return rigAdmitResult{}, fmt.Errorf(
-					"idem record %s for (%s, %s) has unknown state %q",
-					rec.ID, city, body.RequestID, rec.Metadata[metaIdemState])
-			}
-		}
+	// (1) request_id axis — live index first, durable store on miss. It settles
+	// the request outright (in-flight replay, request_id conflict, 200-exists, or
+	// re-clone) unless there is no usable prior record for the id, in which case
+	// handled is false and we fall through to the name axis.
+	if res, handled, err := admitByRequestID(idx, store, cursor, rigInConfig, rigComplete, city, body, digest); handled {
+		return res, err
 	}
 
 	// (2) name-collision axis (G13 §4.4): live byName → config → durable scan.
-	// Shared with every re-clone admission via nameAxisConflict so the two paths
-	// cannot drift. No record to exclude on the fresh path (rec == nil here).
-	conflict, err := nameAxisConflict(idx, store, rigInConfig, city, body.Name, "")
+	if live, ok := idx.lookupByName(city, body.Name); ok {
+		return rigAdmitResult{}, &rigNameConflictError{ // row 8
+			Rig:               body.Name,
+			InFlightRequestID: live.requestID,
+			InFlightCursor:    live.eventCursor,
+		}
+	}
+	if rigInConfig != nil && rigInConfig(body.Name) {
+		return rigAdmitResult{}, &rigNameConflictError{Rig: body.Name} // row 8
+	}
+	hit, err := durableRigNameScan(store, city, body.Name, rigInConfig)
 	if err != nil {
 		return rigAdmitResult{}, err
 	}
-	if conflict != nil {
-		return rigAdmitResult{}, conflict // row 8
+	if hit {
+		return rigAdmitResult{}, &rigNameConflictError{Rig: body.Name} // row 8 backstop
 	}
 
 	// (3) admit new (rows 3, 9).
-	return admitFreshLocked(idx, store, cursor, city, body, digest, "")
+	return admitFreshLocked(idx, store, cursor, rigInConfig, city, body, digest, "")
+}
+
+// admitByRequestID resolves the G13 §4 request_id axis (rows 1-7): the live
+// index first, then the durable store on a miss. handled is true when the
+// request_id axis alone settles the request — an in-flight replay (row 1), a
+// request_id conflict (rows 2/4), a 200-exists replay (row 5), an orphan
+// forward-reconcile (row 7), or a re-clone (rows 5-fallthrough/6/7). handled is
+// false only when there is no usable prior record for the id (no request_id at
+// all, or a request_id the store has never seen), so admitRigCreate falls
+// through to the name axis and a fresh admission. It is the extracted first half
+// of admitRigCreate; the caller still holds both G13 §7 locks.
+func admitByRequestID(
+	idx *rigIdemIndex,
+	store beads.Store,
+	cursor func() (string, error),
+	rigInConfig func(name string) bool,
+	rigComplete func(name string) (complete bool, prefix, defaultBranch string),
+	city string,
+	body RigCreateBody,
+	digest string,
+) (rigAdmitResult, bool, error) {
+	if body.RequestID == "" {
+		return rigAdmitResult{}, false, nil
+	}
+	if live, ok := idx.lookup(city, body.RequestID); ok {
+		if live.digest != digest {
+			return rigAdmitResult{}, true, &requestIDConflictError{RequestID: body.RequestID} // row 2
+		}
+		return rigAdmitResult{ // row 1: in-flight replay, no spawn
+			outcome:     rigAdmitInflightReplay,
+			requestID:   body.RequestID,
+			eventCursor: live.eventCursor,
+		}, true, nil
+	}
+	rec, err := lookupIdemRecord(store, city, body.RequestID)
+	if err != nil {
+		return rigAdmitResult{}, true, err
+	}
+	if rec == nil {
+		return rigAdmitResult{}, false, nil
+	}
+	if rec.Metadata[metaIdemDigest] != digest {
+		return rigAdmitResult{}, true, &requestIDConflictError{RequestID: body.RequestID} // row 4
+	}
+	// reclone re-executes a prior attempt: it captures the PRIOR manifest
+	// (created_dir/dolt_db) BEFORE admitFreshLocked resets the record to
+	// in_flight (the reset keeps those keys so a crash mid-reclone still
+	// leaves the debris findable by the boot sweep), then the goroutine
+	// pre-drops that debris before cloning (C4c §3, G13 §6 drop-then-mark).
+	reclone := func() (rigAdmitResult, bool, error) {
+		oldManifest := manifestFromRecord(rec)
+		res, rErr := admitFreshLocked(idx, store, cursor, rigInConfig, city, body, digest, rec.ID)
+		if rErr != nil {
+			return res, true, rErr
+		}
+		res.recloneManifest = oldManifest
+		return res, true, nil
+	}
+	switch rec.Metadata[metaIdemState] {
+	case idemStateSucceeded:
+		// row 5: a succeeded record replays 200-exists — but ONLY while its
+		// rig still exists. If the rig was deleted (gc rig remove /
+		// DeleteRig) the config entry is gone while the succeeded record
+		// lingers; serving a 200 for a rig that no longer exists is stale,
+		// so re-execute (re-clone) the record instead.
+		if rigInConfig == nil || rigInConfig(body.Name) {
+			return rigAdmitResult{
+				outcome:     rigAdmitExisting,
+				requestID:   body.RequestID,
+				eventCursor: rec.Metadata[metaIdemEventCursor],
+				record:      rec,
+			}, true, nil
+		}
+		return reclone()
+	case idemStateInFlight:
+		// row 7: an orphan in_flight record — the live index missed, so no
+		// goroutine is running. Before re-cloning (which would tear down the
+		// rig via the re-clone pre-drop), probe completeness: a
+		// markIdemSucceeded that failed AFTER a successful provision leaves
+		// the record in_flight while the rig is COMPLETE. Forward-reconcile
+		// such a record to succeeded and serve 200 rather than destroying a
+		// live rig — the same probe the boot sweep uses.
+		if rigComplete != nil {
+			if complete, prefix, branch := rigComplete(body.Name); complete {
+				if mErr := markIdemSucceeded(store, rec.ID, body.Name, prefix, branch); mErr != nil {
+					return rigAdmitResult{}, true, mErr
+				}
+				rec.Metadata[metaIdemState] = idemStateSucceeded
+				rec.Metadata[metaIdemResultRig] = body.Name
+				rec.Metadata[metaIdemResultPrefix] = prefix
+				rec.Metadata[metaIdemResultBranch] = branch
+				return rigAdmitResult{
+					outcome:     rigAdmitExisting,
+					requestID:   body.RequestID,
+					eventCursor: rec.Metadata[metaIdemEventCursor],
+					record:      rec,
+				}, true, nil
+			}
+		}
+		return reclone()
+	case idemStateRolledBack:
+		// row 6: rolled_back is the re-executable terminal → re-clone.
+		return reclone()
+	default:
+		return rigAdmitResult{}, true, fmt.Errorf(
+			"idem record %s for (%s, %s) has unknown state %q",
+			rec.ID, city, body.RequestID, rec.Metadata[metaIdemState])
+	}
 }
 
 // admitFreshLocked captures the event cursor, reserves or resets the durable
@@ -759,14 +780,50 @@ func admitRigCreate(
 // the record being re-cloned. An absent client request_id mints a synthetic
 // correlation id (newRequestID) and creates NO durable record — name
 // protection via byName never depends on the dedup opt-in (G13 §1/§3.5).
+//
+// It also enforces register's precondition (§register: "neither key occupied")
+// on the name axis. admitRigCreate consults the name axis only on the
+// no-prior-record fall-through, so a re-clone (existingBeadID != "") reaches here
+// WITHOUT that check. Two guards below cover the same-name-owned-by-another-request
+// space on the re-clone path:
+//
+//   - the LIVE-index guard catches a DIFFERENT live same-name provision (a
+//     rolled_back request's retry would otherwise overwrite byName and tear down
+//     the rival's in-flight working tree via the re-clone pre-drop; G13 §4.4).
+//   - the CONFIG guard catches a name a DIFFERENT request has already COMMITTED.
+//     Once that rival succeeds it removes its live byName entry, so the live guard
+//     no longer sees it, but the rig persists in config; without this gate the
+//     re-clone pre-drop's os.RemoveAll would destroy the committed rig's working
+//     tree and .beads store. A rolled_back / incomplete-in_flight record never
+//     holds its OWN name in config (a failed provision's config write is rolled
+//     back atomically with mutateAndPoke, and the delete-then-re-add-own-rig path
+//     reaches here only with rigInConfig already false), so this never rejects a
+//     legitimate self-recovery.
+//
+// A brand-new admission (existingBeadID == "") already passed the name axis
+// (including rigInConfig) under the same lock, so both guards are no-ops for it;
+// the config guard is therefore scoped to the re-clone path. rigInConfig may be
+// nil (a read-only projection), in which case the config guard is skipped.
 func admitFreshLocked(
 	idx *rigIdemIndex,
 	store beads.Store,
 	cursor func() (string, error),
+	rigInConfig func(name string) bool,
 	city string,
 	body RigCreateBody,
 	digest, existingBeadID string,
 ) (rigAdmitResult, error) {
+	if live, ok := idx.lookupByName(city, body.Name); ok && live.requestID != body.RequestID {
+		return rigAdmitResult{}, &rigNameConflictError{ // row 8 (re-clone vs live same-name)
+			Rig:               body.Name,
+			InFlightRequestID: live.requestID,
+			InFlightCursor:    live.eventCursor,
+		}
+	}
+	if existingBeadID != "" && rigInConfig != nil && rigInConfig(body.Name) {
+		return rigAdmitResult{}, &rigNameConflictError{Rig: body.Name} // row 8 (re-clone vs committed same-name)
+	}
+
 	cur, err := cursor()
 	if err != nil {
 		return rigAdmitResult{}, err

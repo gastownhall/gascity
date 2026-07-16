@@ -47,68 +47,108 @@ func configureJSONSchemaFlag(root *cobra.Command) {
 }
 
 func handleJSONSchemaRequest(root *cobra.Command, args []string, stdout io.Writer) (bool, int) {
-	request, ok := parseJSONSchemaRequest(args)
+	action, ok := prepareJSONSchemaRequest(root, args)
 	if !ok {
 		return false, 0
+	}
+	return action.execute(stdout, io.Discard)
+}
+
+func prepareJSONSchemaRequest(root *cobra.Command, args []string) (jsonPreparedEarlyAction, bool) {
+	request, ok := parseJSONSchemaRequest(args)
+	if !ok {
+		return jsonPreparedEarlyAction{}, false
 	}
 
 	cmd, _, err := root.Find(request.commandArgs)
 	if err != nil || cmd == nil {
-		return true, writeJSONSchemaUnavailable(stdout, "json_schema_command_not_found",
-			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
+		return preparedJSONFailure(
+			jsonPreparedEarlySchema,
+			"json_schema_command_not_found",
+			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")),
+		), true
 	}
 	if cmd == root && len(request.commandArgs) > 0 {
-		return true, writeJSONSchemaUnavailable(stdout, "json_schema_command_not_found",
-			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
+		return preparedJSONFailure(
+			jsonPreparedEarlySchema,
+			"json_schema_command_not_found",
+			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")),
+		), true
 	}
 
 	commandPath := commandPathWords(cmd)
 	if request.role == "" || request.role == jsonSchemaManifestRole {
-		if err := writeJSONSchemaManifest(stdout, cmd, commandPath); err != nil {
-			return true, 1
-		}
-		return true, 0
+		manifest := resolveJSONSchemaManifest(cmd, commandPath)
+		return jsonPreparedEarlyAction{
+			kind:     jsonPreparedEarlySchema,
+			handled:  true,
+			exitCode: 0,
+			emit: func(stdout, _ io.Writer) int {
+				if err := writeCLIJSONLine(stdout, manifest); err != nil {
+					return 1
+				}
+				return 0
+			},
+		}, true
 	}
 
 	schema, err := schemaForRole(cmd, commandPath, request.role)
 	if err != nil {
-		return true, writeJSONSchemaUnavailable(stdout, "json_schema_unavailable", err.Error())
+		return preparedJSONFailure(jsonPreparedEarlySchema, "json_schema_unavailable", err.Error()), true
 	}
-	if err := writeRawJSONLine(stdout, schema); err != nil {
-		return true, 1
-	}
-	return true, 0
+	schema = append(json.RawMessage(nil), schema...)
+	return jsonPreparedEarlyAction{
+		kind:     jsonPreparedEarlySchema,
+		handled:  true,
+		exitCode: 0,
+		emit: func(stdout, _ io.Writer) int {
+			if err := writeRawJSONLine(stdout, schema); err != nil {
+				return 1
+			}
+			return 0
+		},
+	}, true
 }
 
 func handleJSONContractRequest(root *cobra.Command, args []string, stdout, stderr io.Writer) (bool, int) {
-	request, ok := resolveJSONRequest(root, args)
+	action, ok := prepareJSONContractRequest(root, args)
 	if !ok {
 		return false, 0
 	}
+	return action.execute(stdout, stderr)
+}
 
-	cmd := request.cmd
-	if request.findErr != nil || cmd == nil {
-		return true, writeJSONSchemaUnavailable(stdout, "json_command_not_found",
-			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
+func prepareJSONContractRequest(root *cobra.Command, args []string) (jsonPreparedEarlyAction, bool) {
+	request, disposition := resolveJSONContractDisposition(root, args)
+	switch disposition {
+	case jsonContractNotRequested, jsonContractPassthrough:
+		return jsonPreparedEarlyAction{}, false
+	case jsonContractPassthroughWithWarning:
+		commandPath := commandPathWords(request.cmd)
+		message := fmt.Sprintf("gc: warning: command %q does not declare JSON support; allowing --json pass-through during schema rollout (set GC_JSON_CONTRACT_STRICT=1 to enforce)\n", strings.Join(commandPath, " "))
+		return jsonPreparedEarlyAction{
+			kind:     jsonPreparedEarlyContractWarning,
+			exitCode: 0,
+			emit: func(_ io.Writer, stderr io.Writer) int {
+				_, _ = io.WriteString(stderr, message)
+				return 0
+			},
+		}, true
+	case jsonContractCommandNotFound:
+		return preparedJSONFailure(
+			jsonPreparedEarlyContractFailure,
+			"json_command_not_found",
+			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")),
+		), true
+	case jsonContractUnsupported:
+		commandPath := commandPathWords(request.cmd)
+		return preparedJSONFailure(
+			jsonPreparedEarlyContractFailure,
+			"json_unsupported",
+			fmt.Sprintf("command %q does not declare JSON support", strings.Join(commandPath, " ")),
+		), true
 	}
-	if cmd == root && len(request.commandArgs) > 0 {
-		return true, writeJSONSchemaUnavailable(stdout, "json_command_not_found",
-			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
-	}
-
-	commandPath := commandPathWords(cmd)
-	if isBDCommandPath(commandPath) {
-		return false, 0
-	}
-	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
-		if allowMissingLocalJSONSchemaPassthrough(cmd, err) {
-			fmt.Fprintf(stderr, "gc: warning: command %q does not declare JSON support; allowing --json pass-through during schema rollout (set GC_JSON_CONTRACT_STRICT=1 to enforce)\n", strings.Join(commandPath, " ")) //nolint:errcheck
-			return false, 0
-		}
-		return true, writeJSONSchemaUnavailable(stdout, "json_unsupported",
-			fmt.Sprintf("command %q does not declare JSON support", strings.Join(commandPath, " ")))
-	}
-	return false, 0
+	return jsonPreparedEarlyAction{}, false
 }
 
 func shouldBufferJSONExecution(root *cobra.Command, args []string) bool {
@@ -159,6 +199,83 @@ type jsonRequest struct {
 	findErr     error
 }
 
+type jsonContractDisposition uint8
+
+const (
+	jsonContractNotRequested jsonContractDisposition = iota
+	jsonContractPassthrough
+	jsonContractPassthroughWithWarning
+	jsonContractCommandNotFound
+	jsonContractUnsupported
+)
+
+type jsonPreparedEarlyKind uint8
+
+const (
+	jsonPreparedEarlyNone jsonPreparedEarlyKind = iota
+	jsonPreparedEarlySchema
+	jsonPreparedEarlyContractWarning
+	jsonPreparedEarlyContractFailure
+)
+
+// jsonPreparedEarlyAction is stack-local output scaffolding. It may hold
+// command-derived display data in its emitter, but is executed immediately and
+// never crosses into product-metrics lifecycle state; only its closed metadata
+// is projected there.
+type jsonPreparedEarlyAction struct {
+	kind     jsonPreparedEarlyKind
+	handled  bool
+	exitCode int
+	emit     func(io.Writer, io.Writer) int
+}
+
+func (action jsonPreparedEarlyAction) execute(stdout, stderr io.Writer) (bool, int) {
+	if action.emit == nil {
+		return action.handled, action.exitCode
+	}
+	return action.handled, action.emit(stdout, stderr)
+}
+
+func prepareJSONEarlyAction(root *cobra.Command, args []string) (jsonPreparedEarlyAction, bool) {
+	if action, ok := prepareJSONSchemaRequest(root, args); ok {
+		return action, true
+	}
+	return prepareJSONContractRequest(root, args)
+}
+
+func preparedJSONFailure(kind jsonPreparedEarlyKind, code, message string) jsonPreparedEarlyAction {
+	return jsonPreparedEarlyAction{
+		kind:     kind,
+		handled:  true,
+		exitCode: 1,
+		emit: func(stdout, _ io.Writer) int {
+			return writeJSONSchemaUnavailable(stdout, code, message)
+		},
+	}
+}
+
+func resolveJSONContractDisposition(root *cobra.Command, args []string) (jsonRequest, jsonContractDisposition) {
+	request, ok := resolveJSONRequest(root, args)
+	if !ok {
+		return jsonRequest{}, jsonContractNotRequested
+	}
+	cmd := request.cmd
+	if request.findErr != nil || cmd == nil || (cmd == root && len(request.commandArgs) > 0) {
+		return request, jsonContractCommandNotFound
+	}
+	commandPath := commandPathWords(cmd)
+	if isBDCommandPath(commandPath) {
+		return request, jsonContractPassthrough
+	}
+	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
+		if allowMissingLocalJSONSchemaPassthrough(cmd, err) {
+			return request, jsonContractPassthroughWithWarning
+		}
+		return request, jsonContractUnsupported
+	}
+	return request, jsonContractPassthrough
+}
+
 func resolveJSONRequest(root *cobra.Command, args []string) (jsonRequest, bool) {
 	filteredArgs, jsonRequested := filterJSONFlag(args)
 	if !jsonRequested {
@@ -200,6 +317,10 @@ func filterJSONFlag(args []string) ([]string, bool) {
 	return filtered, jsonRequested
 }
 
+func isJSONControlArg(arg string) bool {
+	return arg == "--json" || strings.HasPrefix(arg, "--json=")
+}
+
 func fallbackCommandArgs(args []string) []string {
 	var words []string
 	for i := 0; i < len(args); i++ {
@@ -232,11 +353,7 @@ func parseJSONSchemaRequest(args []string) (jsonSchemaRequest, bool) {
 		}
 		switch {
 		case arg == "--json-schema":
-			request.role = jsonSchemaManifestRole
-			if i+1 < len(args) && isJSONSchemaRole(args[i+1]) {
-				request.role = args[i+1]
-				i++
-			}
+			request.role, i = consumeJSONSchemaRole(args, i)
 		case strings.HasPrefix(arg, "--json-schema="):
 			request.role = strings.TrimPrefix(arg, "--json-schema=")
 			if request.role == "" {
@@ -254,6 +371,14 @@ func parseJSONSchemaRequest(args []string) (jsonSchemaRequest, bool) {
 		return jsonSchemaRequest{}, false
 	}
 	return request, true
+}
+
+func consumeJSONSchemaRole(args []string, index int) (string, int) {
+	role := jsonSchemaManifestRole
+	if index+1 < len(args) && isJSONSchemaRole(args[index+1]) {
+		return args[index+1], index + 1
+	}
+	return role, index
 }
 
 func isJSONSchemaRole(value string) bool {
@@ -301,7 +426,7 @@ func strictPackJSONSchemaContract() bool {
 	}
 }
 
-func writeJSONSchemaManifest(stdout io.Writer, cmd *cobra.Command, commandPath []string) error {
+func resolveJSONSchemaManifest(cmd *cobra.Command, commandPath []string) jsonSchemaManifest {
 	schemas := map[string]json.RawMessage{}
 	resultSchema, resultErr := readCommandSchema(cmd, commandPath, jsonSchemaResultRole)
 	if resultErr == nil {
@@ -311,12 +436,12 @@ func writeJSONSchemaManifest(stdout io.Writer, cmd *cobra.Command, commandPath [
 		}
 	}
 
-	return writeCLIJSONLine(stdout, jsonSchemaManifest{
+	return jsonSchemaManifest{
 		SchemaVersion: "1",
 		Command:       commandPath,
 		JSONSupported: resultErr == nil,
 		Schemas:       schemas,
-	})
+	}
 }
 
 func schemaForRole(cmd *cobra.Command, commandPath []string, role string) (json.RawMessage, error) {

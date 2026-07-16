@@ -36,20 +36,8 @@ func cmdRigAddRemote(c *api.Client, target *remoteTarget, args []string,
 
 	// Refusals — fail fast, before any wire call, in an order that reports the
 	// most specific mismatch first.
-	if len(args) > 0 {
-		return fail("unsupported_remote", "gc rig add: a remote city cannot see a client filesystem path; use --git-url for a server-side clone")
-	}
-	if strings.TrimSpace(gitURL) == "" {
-		return fail("invalid_arguments", "gc rig add: a remote rig add requires --git-url (the server clones it)")
-	}
-	if adopt {
-		return fail("unsupported_remote", "gc rig add: --adopt reads the client's .beads/ directory and is not supported for a remote city")
-	}
-	if len(includes) > 0 {
-		return fail("unsupported_remote", "gc rig add: --include is not supported for a remote city yet")
-	}
-	if startSuspended {
-		return fail("unsupported_remote", "gc rig add: --start-suspended is not supported for a remote city yet")
+	if code, message, refused := rigAddRemoteRefusal(args, gitURL, adopt, includes, startSuspended); refused {
+		return fail(code, message)
 	}
 
 	name := strings.TrimSpace(nameFlag)
@@ -96,7 +84,34 @@ func cmdRigAddRemote(c *api.Client, target *remoteTarget, args []string,
 	if err != nil {
 		return renderRemoteRigAddError(err, target, gitURL, name, prefixFlag, defaultBranchFlag, jsonOutput, stdout, stderr)
 	}
+	return renderRemoteRigAddSuccess(res, name, jsonOutput, stdout, stderr)
+}
 
+// rigAddRemoteRefusal reports the first unsupported-for-remote mode in the
+// invocation (a client-filesystem positional path, a missing --git-url, or a
+// flag that needs local client state), returning its error code and message.
+// refused is false when every mode is remote-safe. The scan order reports the
+// most specific mismatch first.
+func rigAddRemoteRefusal(args []string, gitURL string, adopt bool, includes []string, startSuspended bool) (code, message string, refused bool) {
+	switch {
+	case len(args) > 0:
+		return "unsupported_remote", "gc rig add: a remote city cannot see a client filesystem path; use --git-url for a server-side clone", true
+	case strings.TrimSpace(gitURL) == "":
+		return "invalid_arguments", "gc rig add: a remote rig add requires --git-url (the server clones it)", true
+	case adopt:
+		return "unsupported_remote", "gc rig add: --adopt reads the client's .beads/ directory and is not supported for a remote city", true
+	case len(includes) > 0:
+		return "unsupported_remote", "gc rig add: --include is not supported for a remote city yet", true
+	case startSuspended:
+		return "unsupported_remote", "gc rig add: --start-suspended is not supported for a remote city yet", true
+	}
+	return "", "", false
+}
+
+// renderRemoteRigAddSuccess renders the terminal success of a remote rig add: a
+// single JSONL object on stdout in --json mode, or a human "provisioned/exists"
+// line. name is the fallback rig label when the server echoes none.
+func renderRemoteRigAddSuccess(res api.RigCreateResult, name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	rigName := res.Rig
 	if rigName == "" {
 		rigName = name

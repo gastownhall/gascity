@@ -173,6 +173,23 @@ func allMailProvidersFailedError(partialErrs []string, storeSlow bool) error {
 	return apierr.ServiceUnavailable.Msg(detail)
 }
 
+// mailKeysetBody assembles a mail list page: one deterministic
+// (created_at DESC, id DESC) total order (within-provider store order is
+// nondeterministic), the contiguous page suffix strictly after the keyset
+// boundary, and a continuation cursor whenever the response is truncated —
+// cursor-less requests previously truncated silently, making the remainder
+// unfetchable (the #3208 defect class the bead list already fixed).
+func mailKeysetBody(msgs []mail.Message, seek *keysetKey, limit int, partial bool, partialErrs []string) MailListBody {
+	msgKey := func(m mail.Message) keysetKey { return keysetKey{CreatedAt: m.CreatedAt, ID: m.ID} }
+	sortKeysetDesc(msgs, msgKey)
+	page, total, hasMore := resolveKeysetPage(msgs, msgKey, seek, limit)
+	next := mintKeysetNextCursor(page, msgKey, hasMore)
+	if page == nil {
+		page = []mail.Message{}
+	}
+	return MailListBody{Items: page, Total: total, NextCursor: next, Partial: partial, PartialErrors: partialErrs}
+}
+
 // humaHandleMailList is the Huma-typed handler for GET /v0/mail.
 func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (*MailListOutput, error) {
 	bp := input.toBlockingParams()
@@ -185,16 +202,16 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
@@ -224,25 +241,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				msgs = []mail.Message{}
 			}
 			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: msgs, Total: total},
-				}, nil
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
 			return &MailListOutput{
 				Index:     index,
 				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor},
+				Body:      mailKeysetBody(msgs, seek, limit, false, nil),
 			}, nil
 		}
 
@@ -267,26 +269,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
 		}
-		partial := len(partialErrs) > 0
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
 		return &MailListOutput{
 			Index:     index,
 			CacheAgeS: cacheAge,
-			Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
+			Body:      mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
 		}, nil
 
 	case "all":
@@ -309,25 +295,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				msgs = []mail.Message{}
 			}
 			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: msgs, Total: total},
-				}, nil
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
 			return &MailListOutput{
 				Index:     index,
 				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor},
+				Body:      mailKeysetBody(msgs, seek, limit, false, nil),
 			}, nil
 		}
 
@@ -352,26 +323,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
 		}
-		partial := len(partialErrs) > 0
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
 		return &MailListOutput{
 			Index:     index,
 			CacheAgeS: cacheAge,
-			Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
+			Body:      mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
 		}, nil
 
 	default:

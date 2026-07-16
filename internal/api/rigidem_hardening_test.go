@@ -189,83 +189,6 @@ func TestRigIdemDeletedRigSucceededReclones(t *testing.T) {
 	}
 }
 
-// TestRigIdemRecloneRefusesForeignSameName proves the reviewed blocker fix: a
-// re-clone re-checks the name axis before re-registering byName and pre-dropping
-// the prior manifest. After this request_id's attempt rolled back, a DIFFERENT
-// actor may have taken the same rig name; the re-clone must return a rig_name
-// conflict instead of overwriting byName and tearing down that actor's live
-// working tree. The final sub-case is the negative control: a genuinely-free
-// name still re-clones (excludeBeadID keeps the request's own record from
-// self-blocking).
-func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
-	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-A-000001"}
-	digest, _ := rigCreateDigest(body)
-
-	t.Run("foreign live byName blocks reclone", func(t *testing.T) {
-		store := beads.NewMemStore()
-		idx := newRigIdemIndex()
-		if _, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
-			t.Fatal(err)
-		}
-		// A second actor is mid-provision under the same name.
-		foreign := &liveProvision{requestID: "req-B-000002", rigName: "web", eventCursor: "7", done: make(chan struct{})}
-		idx.register("c1", foreign)
-
-		res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", body)
-		var conflict *rigNameConflictError
-		if !errors.As(err, &conflict) {
-			t.Fatalf("err = %v (outcome %d), want *rigNameConflictError", err, res.outcome)
-		}
-		if conflict.InFlightRequestID != "req-B-000002" {
-			t.Fatalf("conflict.InFlightRequestID = %q, want req-B-000002", conflict.InFlightRequestID)
-		}
-		if res.entry != nil {
-			t.Fatalf("res.entry = %+v, want nil (no fresh registration on conflict)", res.entry)
-		}
-		if !res.recloneManifest.IsEmpty() {
-			t.Fatalf("res.recloneManifest = %+v, want empty (no teardown of the foreign rig)", res.recloneManifest)
-		}
-		// The foreign live entry must be untouched by the refused admission.
-		if live, ok := idx.lookupByName("c1", "web"); !ok || live != foreign {
-			t.Fatalf("foreign byName entry disturbed: ok=%v live=%+v", ok, live)
-		}
-	})
-
-	t.Run("foreign live in config blocks reclone", func(t *testing.T) {
-		store := beads.NewMemStore()
-		idx := newRigIdemIndex()
-		if _, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
-			t.Fatal(err)
-		}
-		inConfig := func(string) bool { return true }
-		res, err := admitRigCreate(idx, store, fixedCursor("9"), inConfig, nil, "c1", body)
-		var conflict *rigNameConflictError
-		if !errors.As(err, &conflict) {
-			t.Fatalf("err = %v (outcome %d), want *rigNameConflictError", err, res.outcome)
-		}
-		if res.entry != nil {
-			t.Fatalf("res.entry = %+v, want nil", res.entry)
-		}
-	})
-
-	t.Run("own free name still reclones", func(t *testing.T) {
-		store := beads.NewMemStore()
-		idx := newRigIdemIndex()
-		id, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack)
-		if err != nil {
-			t.Fatal(err)
-		}
-		free := func(string) bool { return false }
-		res, err := admitRigCreate(idx, store, fixedCursor("9"), free, nil, "c1", body)
-		if err != nil {
-			t.Fatalf("admit: %v", err)
-		}
-		if res.outcome != rigAdmitReclone || res.entry == nil || res.entry.beadID != id {
-			t.Fatalf("free-name outcome = %d entry=%+v, want rigAdmitReclone reusing %s", res.outcome, res.entry, id)
-		}
-	})
-}
-
 // TestDurableRigNameScanIgnoresDeletedSucceeded proves the name-axis backstop
 // stops blocking a name whose only durable record is succeeded-but-deleted.
 func TestDurableRigNameScanIgnoresDeletedSucceeded(t *testing.T) {
@@ -274,17 +197,17 @@ func TestDurableRigNameScanIgnoresDeletedSucceeded(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Present in config ⇒ blocks.
-	hit, err := durableRigNameScan(store, "c1", "web", func(string) bool { return true }, "")
+	hit, err := durableRigNameScan(store, "c1", "web", func(string) bool { return true })
 	if err != nil || !hit {
 		t.Fatalf("scan (present) = (%v,%v), want (true,nil)", hit, err)
 	}
 	// Absent from config ⇒ name is free.
-	hit, err = durableRigNameScan(store, "c1", "web", func(string) bool { return false }, "")
+	hit, err = durableRigNameScan(store, "c1", "web", func(string) bool { return false })
 	if err != nil || hit {
 		t.Fatalf("scan (deleted) = (%v,%v), want (false,nil)", hit, err)
 	}
 	// nil predicate preserves the pre-fix blocking behavior.
-	hit, err = durableRigNameScan(store, "c1", "web", nil, "")
+	hit, err = durableRigNameScan(store, "c1", "web", nil)
 	if err != nil || !hit {
 		t.Fatalf("scan (nil predicate) = (%v,%v), want (true,nil)", hit, err)
 	}
@@ -444,4 +367,80 @@ func TestRigCreateAsyncSameRequestIDDifferentNameSerialized(t *testing.T) {
 	if _, err := lookupIdemRecord(state.cityBeadStore, city, req); err != nil {
 		t.Fatalf("post-race lookupIdemRecord = %v, want nil (unpoisoned)", err)
 	}
+}
+
+// TestRigIdemRecloneRefusesForeignSameName proves the reviewed blocker fix: a
+// re-clone re-checks the name axis before re-registering byName and pre-dropping
+// the prior manifest. After this request_id's attempt rolled back, a DIFFERENT
+// actor may have taken the same rig name; the re-clone must return a rig_name
+// conflict instead of overwriting byName and tearing down that actor's live
+// working tree. The final sub-case is the negative control: a genuinely-free
+// name still re-clones (the request's own record must not self-block).
+func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
+	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-A-000001"}
+	digest, _ := rigCreateDigest(body)
+
+	t.Run("foreign live byName blocks reclone", func(t *testing.T) {
+		store := beads.NewMemStore()
+		idx := newRigIdemIndex()
+		if _, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
+			t.Fatal(err)
+		}
+		// A second actor is mid-provision under the same name.
+		foreign := &liveProvision{requestID: "req-B-000002", rigName: "web", eventCursor: "7", done: make(chan struct{})}
+		idx.register("c1", foreign)
+
+		res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", body)
+		var conflict *rigNameConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("err = %v (outcome %d), want *rigNameConflictError", err, res.outcome)
+		}
+		if conflict.InFlightRequestID != "req-B-000002" {
+			t.Fatalf("conflict.InFlightRequestID = %q, want req-B-000002", conflict.InFlightRequestID)
+		}
+		if res.entry != nil {
+			t.Fatalf("res.entry = %+v, want nil (no fresh registration on conflict)", res.entry)
+		}
+		if !res.recloneManifest.IsEmpty() {
+			t.Fatalf("res.recloneManifest = %+v, want empty (no teardown of the foreign rig)", res.recloneManifest)
+		}
+		// The foreign live entry must be untouched by the refused admission.
+		if live, ok := idx.lookupByName("c1", "web"); !ok || live != foreign {
+			t.Fatalf("foreign byName entry disturbed: ok=%v live=%+v", ok, live)
+		}
+	})
+
+	t.Run("foreign live in config blocks reclone", func(t *testing.T) {
+		store := beads.NewMemStore()
+		idx := newRigIdemIndex()
+		if _, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
+			t.Fatal(err)
+		}
+		inConfig := func(string) bool { return true }
+		res, err := admitRigCreate(idx, store, fixedCursor("9"), inConfig, nil, "c1", body)
+		var conflict *rigNameConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("err = %v (outcome %d), want *rigNameConflictError", err, res.outcome)
+		}
+		if res.entry != nil {
+			t.Fatalf("res.entry = %+v, want nil", res.entry)
+		}
+	})
+
+	t.Run("own free name still reclones", func(t *testing.T) {
+		store := beads.NewMemStore()
+		idx := newRigIdemIndex()
+		id, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		free := func(string) bool { return false }
+		res, err := admitRigCreate(idx, store, fixedCursor("9"), free, nil, "c1", body)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if res.outcome != rigAdmitReclone || res.entry == nil || res.entry.beadID != id {
+			t.Fatalf("free-name outcome = %d entry=%+v, want rigAdmitReclone reusing %s", res.outcome, res.entry, id)
+		}
+	})
 }
