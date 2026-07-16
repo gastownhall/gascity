@@ -591,6 +591,24 @@ func TestJSONContractAllowsBdPassthrough(t *testing.T) {
 	}
 }
 
+func TestJSONContractAllowsBdShimPassthrough(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd(&stdout, &stderr)
+	t.Setenv("GC_JSON_CONTRACT_STRICT", "1")
+
+	args := []string{"bd-shim", "mol", "current", "gcg-1", "--json"}
+	handled, code := handleJSONContractRequest(root, args, &stdout, &stderr)
+	if handled || code != 0 {
+		t.Fatalf("bd-shim --json must pass through the contract: handled=%v code=%d stdout=%q stderr=%q", handled, code, stdout.String(), stderr.String())
+	}
+	if shouldBufferJSONExecution(root, args) {
+		t.Fatal("bd-shim --json should stream the shim-owned payload without buffering")
+	}
+	if shouldReportJSONExecutionError(root, args) {
+		t.Fatal("bd-shim should preserve the delegated bd exit and error contract")
+	}
+}
+
 func TestJSONContractAllowsHookClaimJSON(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	root := newRootCmd(&stdout, &stderr)

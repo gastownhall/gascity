@@ -130,6 +130,9 @@ func newBdShimCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short:              "Alias for `gc bd` (forwards to the bd wrapper)",
 		Hidden:             true,
 		DisableFlagParsing: true,
+		Annotations: map[string]string{
+			jsonRawPassthroughAnnotation: "true",
+		},
 		RunE: func(_ *cobra.Command, args []string) error {
 			return exitForCode(doBd(args, stdout, stderr))
 		},
