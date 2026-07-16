@@ -53,6 +53,12 @@ recovery stays with the exact provider-store owner instead of being repeated by
 each command consumer. Body review is not a reason to remove a retained
 boundary test.
 
+`TestDockerSessionProtocol` owns fast Docker CLI mapping, injected failures,
+and cleanup transitions through a strict `PATH`-injected executable. The
+real-Docker `scripts/test-docker-session` harness remains the composition owner
+until each retained container invariant has a replacement contract and the
+real proof is deliberately consolidated.
+
 The canonical identity is package directory plus package clause plus top-level
 `Test`, `Benchmark`, `Fuzz`, or `TestMain` name. Nested function literals and
 subtests retain that top-level lexical owner. Methods, wrong signatures, and
@@ -130,9 +136,10 @@ all-source audit while staying outside untagged and Small debt.
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 440 calls / 157 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 532 calls / 157 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 533 calls / 158 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner; only environment calls lexically inside TestMain leave Small debt | P0.4b | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
+| Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-80po0c.23.1 | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-80po0c.2.1 | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 285 calls / 43 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | environment: 4342 calls / 203 files (historical regex census: 4348 / 200) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
@@ -152,7 +159,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged net.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 404 calls / 110 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 405 calls / 111 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 
 | Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -78,6 +79,25 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	var cancellationAccepted atomic.Bool
+	// Give cooperative adapters a chance to roll back before cancellation
+	// becomes a forced kill. Platforms that do not support os.Interrupt (such
+	// as Windows) fall back to Kill.
+	cmd.Cancel = func() error {
+		err := cmd.Process.Signal(os.Interrupt)
+		if err == nil {
+			cancellationAccepted.Store(true)
+			return nil
+		}
+		if errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		err = cmd.Process.Kill()
+		if err == nil {
+			cancellationAccepted.Store(true)
+		}
+		return err
+	}
 	// WaitDelay ensures Go forcibly closes I/O pipes after the context
 	// expires, even if grandchild processes (e.g. sleep in a shell script)
 	// still hold them open.
@@ -93,6 +113,24 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 
 	err := cmd.Run()
 	if err != nil {
+		// An accepted cancellation action wins over the adapter's exit status.
+		// In particular, an INT trap may use protocol-reserved exit 2; treating
+		// that as an unsupported operation would turn cancellation into success.
+		// Signal can race with process completion: nil defines cancellation as
+		// the observed winner, while os.ErrProcessDone leaves this flag false and
+		// preserves the ordinary exit-2 result because completion was observed
+		// first. Neither result claims physical signal-delivery ordering.
+		if cancellationAccepted.Load() {
+			cancelErr := ctx.Err()
+			if cancelErr == nil {
+				cancelErr = context.Canceled
+			}
+			if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+				return "", fmt.Errorf("exec provider %s %s: %s: %w", p.script, strings.Join(args, " "), errMsg, cancelErr)
+			}
+			return "", fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), cancelErr)
+		}
+
 		// Check for exit code 2 → unknown operation → success.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
