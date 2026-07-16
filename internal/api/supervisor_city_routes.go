@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -32,6 +34,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Status + Health.
 	cityGet(sm, "/status", (*Server).humaHandleStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/health", (*Server).humaHandleHealth, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/usage", (*Server).humaHandleUsage, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// City detail.
 	cityGet(sm, "", (*Server).humaHandleCityGet, errorStatuses(http.StatusNotFound))
@@ -117,13 +120,48 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Rigs.
 	cityGet(sm, "/rigs", (*Server).humaHandleRigList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/rig/{name}", (*Server).humaHandleRigGet, errorStatuses(http.StatusNotFound))
+	// create-rig returns one of three success statuses (201 sync create, 202
+	// async clone accepted, 200 idempotent replay) over one union body. Huma
+	// only auto-schematizes op.DefaultStatus (201), so the 200/202 responses are
+	// declared manually here — cityRegister takes op by value with no
+	// op-modifier closure (city_scope.go), so they must exist before the call.
+	// All three reference the same RigCreateResponseBody registry schema, so
+	// genclient/dashboard get one type discriminated by status.
+	rigBodyRef := sm.humaAPI.OpenAPI().Components.Schemas.Schema(
+		reflect.TypeOf(RigCreateResponseBody{}), true, "RigCreateResponseBody")
+	// Huma's defineErrors only synthesizes the default application/problem+json
+	// error response when op.Responses has at most one entry (huma.go: the
+	// `len(op.Responses) <= 1` guard). Declaring the 200/202 union bodies manually
+	// trips that guard, so the default error response would be dropped and the
+	// generated CreateRigResponse would lose ApplicationproblemJSONDefault —
+	// degrading every 400/409 (including the structured 409 that carries the
+	// re-attach request_id + event_cursor) to a detail-less "API returned NNN".
+	// Restore it here so it references the same apierr.ErrorModel schema this fork
+	// registers under the "ErrorModel" name for every other cityPost op (using
+	// huma.ErrorModel here would double-register that name and panic at startup).
+	errModelRef := sm.humaAPI.OpenAPI().Components.Schemas.Schema(
+		reflect.TypeOf(apierr.ErrorModel{}), true, "ErrorModel")
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-rig",
 		Method:        http.MethodPost,
 		Path:          "/rigs",
 		Summary:       "Create a rig",
-		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented},
+		Description:   "Create a rig. Without git_url, appends the rig to city.toml synchronously (201). With git_url, clones and provisions asynchronously: returns 202 with an event_cursor — watch the city event stream for request.result.rig.create, rig.provision.progress, or request.failed carrying the request_id — or 200 for an idempotent replay of a succeeded create.",
+		DefaultStatus: http.StatusCreated, // 201 — Huma auto-schematizes the union body here
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Rig already exists — idempotent request_id replay of a succeeded async create.",
+				Content:     map[string]*huma.MediaType{"application/json": {Schema: rigBodyRef}},
+			},
+			"202": {
+				Description: "Provisioning accepted; watch the city event stream from event_cursor for request.result.rig.create, rig.provision.progress, or request.failed with this request_id.",
+				Content:     map[string]*huma.MediaType{"application/json": {Schema: rigBodyRef}},
+			},
+			"default": {
+				Description: "Error",
+				Content:     map[string]*huma.MediaType{"application/problem+json": {Schema: errModelRef}},
+			},
+		},
 	}, (*Server).humaHandleRigCreate)
 	cityPatch(sm, "/rig/{name}", (*Server).humaHandleRigUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
@@ -200,7 +238,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/mail/{id}/reply",
 		Summary:       "Reply to a mail message",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleMailReply)
 	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
@@ -231,7 +270,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/events",
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleEventEmit)
 	cityRegister(sm, huma.Operation{
 		OperationID: "rotate-events",
@@ -275,8 +315,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Canonical Run resource — the ONE typed run projection, sourced from the
 	// city event log.
 	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
+	cityGet(sm, "/runs/census", (*Server).humaHandleRunsCensus, errorStatuses(http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
@@ -425,7 +469,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/extmsg/adapters",
 		Summary:       "Register an external messaging adapter",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgAdapterRegister)
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 }

@@ -282,3 +282,108 @@ func TestEventListWalkCrossesArchiveBoundary(t *testing.T) {
 		}
 	}
 }
+
+// rotationBlindProvider models the production FileRecorder during a rotation's
+// asynchronous compression window. Three seq bands live on disk at once:
+// ListTail scans only the ACTIVE file (Seq >= activeFloor); plain List reads
+// canonical .gz archives + active but CANNOT see the in-flight .rotating-*
+// segment [rotatingLow, activeFloor) (that is exactly what ReadFiltered
+// misses); ListInFlight folds that segment back in (ReadFilteredWithInFlight).
+// A descending keyset walk that fell through to List would serve rows above the
+// segment, then jump below it, silently skipping the whole band — the fast path
+// can't see it either — so the handler must use the in-flight-aware read.
+type rotationBlindProvider struct {
+	*events.Fake
+	activeFloor uint64 // Seq >= activeFloor lives in the active file
+	rotatingLow uint64 // [rotatingLow, activeFloor) lives ONLY in the in-flight file
+}
+
+// List models ReadFiltered: canonical archives + active, MISSING the in-flight
+// rotating segment.
+func (p *rotationBlindProvider) List(filter events.Filter) ([]events.Event, error) {
+	all, err := p.Fake.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	var visible []events.Event
+	for _, e := range all {
+		if e.Seq >= p.rotatingLow && e.Seq < p.activeFloor {
+			continue // stranded in the .rotating-* file ReadFiltered can't read
+		}
+		visible = append(visible, e)
+	}
+	return visible, nil
+}
+
+// ListInFlight models ReadFilteredWithInFlight: the complete history including
+// the in-flight rotating segment.
+func (p *rotationBlindProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	return p.Fake.List(filter)
+}
+
+// ListTail models the active-file-only backward scan.
+func (p *rotationBlindProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	all, err := p.Fake.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	var active []events.Event
+	for _, e := range all {
+		if e.Seq >= p.activeFloor {
+			active = append(active, e)
+		}
+	}
+	if limit > 0 && len(active) > limit {
+		active = active[len(active)-limit:]
+	}
+	return active, nil
+}
+
+// TestEventListWalkCrossesInFlightRotation pins the in-flight rotation gap that
+// the archive-boundary test misses: during a rotation's compression window the
+// just-rotated segment lives ONLY in the .rotating-* file, which neither the
+// active-file tail fast path nor the plain archive-aware scan can see. A keyset
+// walk that fell through to the plain scan would jump straight from the active
+// band to the archived band, silently skipping the in-flight segment. The
+// handler must route the fallback through the in-flight-aware read so the walk
+// covers every seq exactly once.
+func TestEventListWalkCrossesInFlightRotation(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	// seqs 1..15: 1..6 archived (.gz), 7..12 in-flight (.rotating-*), 13..15 active.
+	state.eventProv = &rotationBlindProvider{Fake: fake, activeFloor: 13, rotatingLow: 7}
+	h := newTestCityHandler(t, state)
+	for i := 0; i < 15; i++ {
+		fake.Record(events.Event{Type: "e.t", Actor: "a"})
+	}
+
+	seen := map[uint64]int{}
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 5 {
+			t.Fatal("walk did not terminate")
+		}
+		url := cityURL(state, "/events?limit=10")
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+		rec := getList(t, h, url)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("page %d: status %d body %s", pages, rec.Code, rec.Body.String())
+		}
+		items, _, next := decodeEventList(t, rec)
+		for _, e := range items {
+			seen[e.Seq]++
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+
+	for seq := uint64(1); seq <= 15; seq++ {
+		if seen[seq] != 1 {
+			t.Errorf("seq %d seen %d times, want exactly 1 (in-flight rotation band 7..12 must not be skipped)", seq, seen[seq])
+		}
+	}
+}

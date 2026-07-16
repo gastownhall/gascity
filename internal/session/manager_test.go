@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,67 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
+
+type manualStaleKeyDetectionWaiter struct {
+	entered     chan string
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func newManualStaleKeyDetectionWaiter(t *testing.T) *manualStaleKeyDetectionWaiter {
+	t.Helper()
+	w := &manualStaleKeyDetectionWaiter{
+		entered: make(chan string, 1),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(w.allow)
+	return w
+}
+
+func (w *manualStaleKeyDetectionWaiter) wait(ctx context.Context, name string) error {
+	select {
+	case w.entered <- name:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-w.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (w *manualStaleKeyDetectionWaiter) allow() {
+	w.releaseOnce.Do(func() { close(w.release) })
+}
+
+func awaitStaleKeyWaiterEntry(t *testing.T, waiter *manualStaleKeyDetectionWaiter, want string) {
+	t.Helper()
+	select {
+	case got := <-waiter.entered:
+		if got != want {
+			t.Fatalf("stale-key waiter entered for %q, want %q", got, want)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("timed out waiting for stale-key waiter entry for %q", want)
+	}
+}
+
+func awaitSessionOperation(t *testing.T, result <-chan error, description string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("timed out waiting for %s", description)
+		return nil
+	}
+}
 
 type startOverrideProvider struct {
 	*runtime.Fake
@@ -4517,7 +4578,7 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 	base := runtime.NewFake()
 
 	sp := &failOnceStartProvider{Fake: base}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
 		ResumeFlag:    "--resume",
@@ -4565,7 +4626,7 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 	base := runtime.NewFake()
 
 	sp := &dieAndFailProvider{Fake: base}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
 		ResumeFlag:    "--resume",
@@ -4597,6 +4658,121 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 	b, _ = store.Get(info.ID)
 	if b.Metadata["session_key"] != "" {
 		t.Errorf("session_key should be cleared even on retry failure, got %q", b.Metadata["session_key"])
+	}
+}
+
+func TestEnsureRunning_StaleKeyDetectionWaitHonorsContextCancellation(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	waiter := newManualStaleKeyDetectionWaiter(t)
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(waiter.wait))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "worker",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+		Resume: ProviderResume{
+			ResumeFlag:    "--resume",
+			SessionIDFlag: "--session-id",
+		},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- mgr.Send(ctx, info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"})
+	}()
+	awaitStaleKeyWaiterEntry(t, waiter, info.SessionName)
+	cancel()
+	if err := awaitSessionOperation(t, result, "canceled resume"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send error = %v, want context.Canceled", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("runtime should remain started for the next reconciliation pass")
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got := State(b.Metadata["state"]); got != StateSuspended {
+		t.Fatalf("state after canceled stability wait = %q, want %q", got, StateSuspended)
+	}
+}
+
+func TestManagersUseIndependentStaleKeyDetectionWaiters(t *testing.T) {
+	type resumable struct {
+		mgr    *Manager
+		sp     *runtime.Fake
+		info   Info
+		waiter *manualStaleKeyDetectionWaiter
+	}
+	store := beads.NewMemStore()
+	newResumable := func(label string) resumable {
+		t.Helper()
+		sp := runtime.NewFake()
+		waiter := newManualStaleKeyDetectionWaiter(t)
+		mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(waiter.wait))
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{
+			Template: label,
+			Command:  "claude",
+			WorkDir:  "/tmp",
+			Provider: "claude",
+			Resume: ProviderResume{
+				ResumeFlag:    "--resume",
+				SessionIDFlag: "--session-id",
+			},
+			ExtraMeta: map[string]string{"session_origin": "manual"},
+		})
+		if err != nil {
+			t.Fatalf("CreateSession(%s): %v", label, err)
+		}
+		if err := mgr.Suspend(info.ID); err != nil {
+			t.Fatalf("Suspend(%s): %v", label, err)
+		}
+		return resumable{mgr: mgr, sp: sp, info: info, waiter: waiter}
+	}
+
+	first := newResumable("first")
+	second := newResumable("second")
+	resume := func(r resumable) <-chan error {
+		result := make(chan error, 1)
+		go func() {
+			result <- r.mgr.Send(context.Background(), r.info.ID, "hello", "claude --resume "+r.info.SessionKey, runtime.Config{WorkDir: "/tmp"})
+		}()
+		return result
+	}
+	firstResult := resume(first)
+	secondResult := resume(second)
+	awaitStaleKeyWaiterEntry(t, first.waiter, first.info.SessionName)
+	awaitStaleKeyWaiterEntry(t, second.waiter, second.info.SessionName)
+
+	first.waiter.allow()
+	if err := awaitSessionOperation(t, firstResult, "first independently released resume"); err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second resume completed when only first waiter was released: %v", err)
+	default:
+	}
+	if !first.sp.IsRunning(first.info.SessionName) {
+		t.Fatal("first runtime should be running after its waiter release")
+	}
+
+	second.waiter.allow()
+	if err := awaitSessionOperation(t, secondResult, "second independently released resume"); err != nil {
+		t.Fatalf("second Send: %v", err)
+	}
+	if !second.sp.IsRunning(second.info.SessionName) {
+		t.Fatal("second runtime should be running after its waiter release")
 	}
 }
 

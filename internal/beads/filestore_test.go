@@ -93,6 +93,235 @@ func TestFileStore(t *testing.T) {
 	beadstest.RunMetadataTests(t, factory)
 }
 
+func TestFileStoreConditionalWriterConformance(t *testing.T) {
+	open := func(st *testing.T) beads.Store {
+		path := filepath.Join(st.TempDir(), "beads.json")
+		s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+		if err != nil {
+			st.Fatal(err)
+		}
+		return s
+	}
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "FileStore", open,
+		beadstest.ConditionalWriterOptions{
+			SuppliesCurrent: true,
+			OpenDisabled: func(st *testing.T) beads.Store {
+				s := open(st)
+				s.(*beads.FileStore).DisableConditionalWrites = true
+				return s
+			},
+		},
+	)
+}
+
+// TestFileStoreRevisionSurvivesReopen proves the ConditionalWriter revision
+// round-trips through disk — it is json:"-" on Bead, so it only survives via the
+// out-of-band Revisions map. reloadFromDisk runs before every write, so a
+// dropped revision here would reset to 0 mid-session in cross-process mode. Two
+// beads (one bumped, one left at revision 1) catch per-bead persistence bugs a
+// single-bead test cannot: a reload that resets bead N>0 to 0, or a persist that
+// drops untouched rev-1 beads.
+func TestFileStoreRevisionSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bumped, err := s1.Create(beads.Bead{Title: "bumped"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := s1.SetMetadata(bumped.ID, "k", fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	untouched, err := s1.Create(beads.Bead{Title: "untouched"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBumped, err := s1.Get(bumped.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeUntouched, err := s1.Get(untouched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeUntouched.Revision != 1 {
+		t.Fatalf("freshly created bead revision = %d, want 1", beforeUntouched.Revision)
+	}
+	if beforeBumped.Revision <= beforeUntouched.Revision {
+		t.Fatalf("bumped revision %d did not advance past a fresh bead %d", beforeBumped.Revision, beforeUntouched.Revision)
+	}
+
+	// Reopen from disk in a fresh handle (a second process).
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterBumped, err := s2.Get(bumped.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterUntouched, err := s2.Get(untouched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterBumped.Revision != beforeBumped.Revision {
+		t.Fatalf("bumped revision did not survive reopen: %d -> %d", beforeBumped.Revision, afterBumped.Revision)
+	}
+	if afterUntouched.Revision != 1 {
+		t.Fatalf("untouched (rev 1) bead did not survive reopen: got %d, want 1", afterUntouched.Revision)
+	}
+
+	w, ok := beads.ConditionalWriterFor(s2)
+	if !ok {
+		t.Fatal("reopened FileStore lost ConditionalWriter")
+	}
+	// A CAS at the surviving revision succeeds and moves it; a second CAS at the
+	// same (now stale) revision must fail — proving the persisted revision is a
+	// live OCC token across the reopen, not a reset-to-zero.
+	title := "v-fresh"
+	if err := w.UpdateIfMatch(bumped.ID, afterBumped.Revision, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("UpdateIfMatch at surviving revision: %v", err)
+	}
+	staleTitle := "v-stale"
+	if err := w.UpdateIfMatch(bumped.ID, afterBumped.Revision, beads.UpdateOpts{Title: &staleTitle}); !beads.IsPreconditionFailed(err) {
+		t.Fatalf("UpdateIfMatch at now-stale revision: got %v, want PreconditionFailed", err)
+	}
+}
+
+// TestFileStoreConditionalWriteCrossHandle is the load-bearing test for
+// FileStore's reason to exist: two handles on one file (two processes). It kills
+// mutations that delete the reloadFromDisk or the save from the conditional
+// verbs — invisible to any single-handle test because in-memory state already
+// equals disk.
+func TestFileStoreConditionalWriteCrossHandle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := s1.Create(beads.Bead{Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// s2 reads the bead, caching its revision in memory.
+	cached, err := s2.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// s1 mutates through to disk, advancing the revision past s2's cached view.
+	if err := s1.SetMetadata(b.ID, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	s1Cur, err := s1.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1Cur.Revision <= cached.Revision {
+		t.Fatalf("s1 write did not advance revision: %d -> %d", cached.Revision, s1Cur.Revision)
+	}
+
+	w2, ok := beads.ConditionalWriterFor(s2)
+	if !ok {
+		t.Fatal("s2 lost ConditionalWriter")
+	}
+
+	// s2 CASes at its STALE cached revision. It must reload under the flock, see
+	// s1's newer revision, and reject — otherwise it clobbers s1's write. A
+	// missing reloadFromDisk makes s2's stale revision match and succeed.
+	clobber := "clobber"
+	err = w2.UpdateIfMatch(b.ID, cached.Revision, beads.UpdateOpts{Title: &clobber})
+	var pfe *beads.PreconditionFailedError
+	if !errors.As(err, &pfe) {
+		t.Fatalf("cross-handle stale CAS: got %v, want *PreconditionFailedError", err)
+	}
+	if pfe.Current != s1Cur.Revision {
+		t.Fatalf("PreconditionFailedError.Current = %d, want %d (s1's committed revision)", pfe.Current, s1Cur.Revision)
+	}
+
+	// s2 CASes at the CURRENT revision — must succeed and persist to disk.
+	winTitle := "s2-win"
+	if err := w2.UpdateIfMatch(b.ID, s1Cur.Revision, beads.UpdateOpts{Title: &winTitle}); err != nil {
+		t.Fatalf("cross-handle current CAS: %v", err)
+	}
+
+	// A third fresh handle reads straight from disk — this is the durability
+	// assertion that a missing save cannot fake.
+	s3, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s3Got, err := s3.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s3Got.Title != winTitle {
+		t.Fatalf("durability: fresh handle title = %q, want %q (s2's CAS was not saved)", s3Got.Title, winTitle)
+	}
+	if s3Got.Revision <= s1Cur.Revision {
+		t.Fatalf("s2's CAS did not advance the persisted revision: %d -> %d", s1Cur.Revision, s3Got.Revision)
+	}
+}
+
+// TestFileStoreConditionalWriteLegacyFileNoRevisions pins the downgrade-safe
+// continuity contract: an UNSEALED store file with beads (a pre-revisions
+// legacy file, or a file an older binary rewrote — dropping the revisions map
+// and the seal) re-seeds every revision at a deterministic floor far above
+// any token a prior writer could have issued, so tokens are never reused. A
+// CAS at the observed (re-seeded) revision works normally.
+func TestFileStoreConditionalWriteLegacyFileNoRevisions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	legacy := `{"seq":1,"beads":[{"id":"gc-1","title":"legacy","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision < 1<<40 {
+		t.Fatalf("unsealed-file revision = %d, want the continuity floor re-seed (>= 2^40): fresh-from-zero tokens could reuse previously issued ones", got.Revision)
+	}
+	w, ok := beads.ConditionalWriterFor(s)
+	if !ok {
+		t.Fatal("FileStore lost ConditionalWriter")
+	}
+	// Any previously issued small counter token must fail against the seed.
+	title := "v2"
+	if err := w.UpdateIfMatch("gc-1", 5, beads.UpdateOpts{Title: &title}); !beads.IsPreconditionFailed(err) {
+		t.Fatalf("legacy stale CAS: got %v, want PreconditionFailed", err)
+	}
+	// A CAS at the observed re-seeded revision succeeds and bumps.
+	if err := w.UpdateIfMatch("gc-1", got.Revision, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("legacy CAS at re-seeded revision: %v", err)
+	}
+	// The bump now persists to a fresh handle.
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, err := s2.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Revision == 0 {
+		t.Fatalf("bumped revision did not persist for a migrated legacy bead: got %d", got2.Revision)
+	}
+}
+
 func TestFileStorePersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "beads.json")
 
@@ -1604,5 +1833,88 @@ func TestFileStoreConcurrentInstances_DuplicateIDs(t *testing.T) {
 	// after the first write and assign gc-2. Without the flock, both get gc-1.
 	if b1.ID == b2.ID {
 		t.Errorf("two concurrent FileStore instances produced the same bead ID %q; cross-process flock is missing", b1.ID)
+	}
+}
+
+// TestFileStoreRevisionContinuityAcrossDowngradeRewrite simulates the mixed-
+// version hazard the review flagged: a revisions-aware binary issues tokens,
+// an OLDER binary then fully rewrites the file (dropping the revisions map
+// and the seal), and the new binary reloads. Revisions must come back ABOVE
+// every previously issued token — never reused — and a stale pre-rewrite
+// token must precondition-fail.
+func TestFileStoreRevisionContinuityAcrossDowngradeRewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.Create(beads.Bead{Title: "target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "mutated"
+	for range 3 {
+		got, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(created.ID, beads.UpdateOpts{Title: &title}); err != nil {
+			t.Fatal(err)
+		}
+		_ = got
+	}
+	preToken, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the N-1 binary's full rewrite: same beads, no revisions map,
+	// no seal.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	delete(onDisk, "revisions")
+	delete(onDisk, "revisions_sealed")
+	rewritten, err := json.Marshal(onDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, rewritten, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Revision <= preToken.Revision {
+		t.Fatalf("post-rewrite revision %d <= previously issued %d: token reuse — the monotonic-never-reused contract is broken",
+			reloaded.Revision, preToken.Revision)
+	}
+	w, _ := beads.ConditionalWriterFor(s2)
+	if err := w.UpdateIfMatch(created.ID, preToken.Revision, beads.UpdateOpts{Title: &title}); !beads.IsPreconditionFailed(err) {
+		t.Fatalf("stale pre-rewrite token: got %v, want PreconditionFailed", err)
+	}
+	// And determinism: a second reload of the same unsealed bytes seeds the
+	// same value (no revision churn on the reload-before-write path).
+	s3, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := s3.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Revision != reloaded.Revision {
+		t.Fatalf("re-seed not deterministic: %d then %d", reloaded.Revision, again.Revision)
 	}
 }

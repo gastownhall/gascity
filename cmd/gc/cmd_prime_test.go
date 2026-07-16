@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -429,7 +430,9 @@ prompt_template = "prompts/worker.md"
 		managedHook      string
 		envHookSource    string
 		envHookEvent     string
+		liveSession      bool
 		wantPromptInHook bool
+		wantBeacon       bool
 	}{
 		{
 			name:             "startup hook delivered",
@@ -437,7 +440,9 @@ prompt_template = "prompts/worker.md"
 			managedHook:      "1",
 			envHookSource:    "startup",
 			envHookEvent:     "SessionStart",
+			liveSession:      true,
 			wantPromptInHook: false,
+			wantBeacon:       true,
 		},
 		{
 			name:             "resume hook delivered",
@@ -445,21 +450,26 @@ prompt_template = "prompts/worker.md"
 			managedHook:      "1",
 			envHookSource:    "resume",
 			envHookEvent:     "SessionStart",
+			liveSession:      true,
 			wantPromptInHook: false,
+			wantBeacon:       true,
 		},
-		{name: "manual command with inherited marker", delivered: "1", wantPromptInHook: true},
+		{name: "manual command with inherited marker", delivered: "1", wantPromptInHook: true, wantBeacon: true},
 		{
-			name:             "unmanaged session start keeps prompt",
+			name:             "unmanaged session start gates prompt",
 			delivered:        "1",
 			envHookEvent:     "SessionStart",
-			wantPromptInHook: true,
+			wantPromptInHook: false,
+			wantBeacon:       false,
 		},
 		{
 			name:             "startup hook not delivered",
 			managedHook:      "1",
 			envHookSource:    "startup",
 			envHookEvent:     "SessionStart",
+			liveSession:      true,
 			wantPromptInHook: true,
+			wantBeacon:       true,
 		},
 		{
 			name:             "non startup event keeps prompt",
@@ -467,6 +477,7 @@ prompt_template = "prompts/worker.md"
 			envHookSource:    "startup",
 			envHookEvent:     "UserPromptSubmit",
 			wantPromptInHook: true,
+			wantBeacon:       true,
 		},
 		{
 			name:             "session start ignores source value",
@@ -474,10 +485,13 @@ prompt_template = "prompts/worker.md"
 			managedHook:      "1",
 			envHookSource:    "manual",
 			envHookEvent:     "SessionStart",
+			liveSession:      true,
 			wantPromptInHook: false,
+			wantBeacon:       true,
 		},
-		{name: "unset source not delivered", wantPromptInHook: true},
+		{name: "unset source not delivered", wantPromptInHook: true, wantBeacon: true},
 	} {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			withPrimeHookStdin(t)
 			t.Setenv("GC_CITY", cityDir)
@@ -485,7 +499,12 @@ prompt_template = "prompts/worker.md"
 			t.Setenv("GC_ALIAS", "worker")
 			t.Setenv("GC_TEMPLATE", "worker")
 			t.Setenv("GC_SESSION_NAME", "gastown--worker")
-			t.Setenv("GC_SESSION_ID", "sess-777")
+			if tc.liveSession {
+				sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+				t.Setenv("GC_SESSION_ID", sessionID)
+			} else {
+				t.Setenv("GC_SESSION_ID", "")
+			}
 			t.Setenv(managedSessionHookEnv, tc.managedHook)
 			t.Setenv("GC_HOOK_SOURCE", tc.envHookSource)
 			t.Setenv("GC_HOOK_EVENT_NAME", tc.envHookEvent)
@@ -500,8 +519,8 @@ prompt_template = "prompts/worker.md"
 			if got := strings.Contains(out, promptContent); got != tc.wantPromptInHook {
 				t.Fatalf("stdout = %q, prompt present = %v, want %v", out, got, tc.wantPromptInHook)
 			}
-			if !strings.Contains(out, "[gastown] worker") {
-				t.Fatalf("stdout = %q, want hook beacon", out)
+			if got := strings.Contains(out, "[gastown] worker"); got != tc.wantBeacon {
+				t.Fatalf("stdout = %q, beacon present = %v, want %v", out, got, tc.wantBeacon)
 			}
 		})
 	}
@@ -536,7 +555,8 @@ prompt_template = "prompts/worker.md"
 	t.Setenv("GC_ALIAS", "worker")
 	t.Setenv("GC_TEMPLATE", "worker")
 	t.Setenv("GC_SESSION_NAME", "gastown--worker")
-	t.Setenv("GC_SESSION_ID", "sess-777")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
 	t.Setenv(managedSessionHookEnv, "1")
 	t.Setenv("GC_HOOK_SOURCE", "startup")
 	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
@@ -566,12 +586,128 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
-func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
+// mustCreateInProgressStore creates a bead in a beads.Store and transitions it
+// to in_progress. It mirrors the MemStore helper in wisp_step_inject_test.go
+// but works against the concrete city store opened on disk.
+func mustCreateInProgressStore(t *testing.T, store beads.Store, b beads.Bead) beads.Bead {
+	t.Helper()
+	created, err := store.Create(b)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(created.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+	created.Status = status
+	return created
+}
+
+// TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder is the
+// managed-SessionStart regression: when the startup prompt is suppressed
+// (GC_STARTUP_PROMPT_DELIVERED=1 + managed hook + SessionStart), the rendered
+// startup prompt must be absent from the single hook payload, but the agent's
+// active formula step <system-reminder> must still be injected. The step
+// reminder is hook-only context, not the startup prompt, so it survives
+// suppression — this is the SessionStart leg of the hook-inject feature.
+func TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder(t *testing.T) {
+	for _, hookFormat := range []string{"codex", hookOutputFormatGemini} {
+		t.Run(hookFormat, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+
+			cityDir := t.TempDir()
+			promptDir := filepath.Join(cityDir, "prompts")
+			if err := os.MkdirAll(promptDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(promptDir): %v", err)
+			}
+			const promptContent = "launch-only startup prompt\n"
+			if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+				t.Fatalf("WriteFile(prompt): %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+				t.Fatalf("WriteFile(city.toml): %v", err)
+			}
+
+			// Seed an in-progress molecule with an in-progress step child assigned
+			// to the agent so wispStepInjectionContent resolves an active step.
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt: %v", err)
+			}
+			mol := mustCreateInProgressStore(t, store, beads.Bead{
+				Title:    "Formula: mol-worker",
+				Type:     "molecule",
+				Assignee: "worker",
+			})
+			step := mustCreateInProgressStore(t, store, beads.Bead{
+				Title:       "Step 1: implement the widget",
+				Description: "Write the widget code",
+				Type:        "step",
+				Assignee:    "worker",
+				ParentID:    mol.ID,
+			})
+
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_SESSION_NAME", "gastown--worker")
+			sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+			t.Setenv("GC_SESSION_ID", sessionID)
+			t.Setenv(managedSessionHookEnv, "1")
+			t.Setenv("GC_HOOK_SOURCE", "startup")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			t.Setenv(startupPromptDeliveredEnv, "1")
+			withPrimeHookStdin(t)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookFormat, false)
+			if code != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+
+			var got struct {
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			context := got.HookSpecificOutput.AdditionalContext
+			// The suppressed startup prompt must be absent...
+			if strings.Contains(context, promptContent) {
+				t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+			}
+			// ...but the active step reminder must survive suppression.
+			for _, want := range []string{"<system-reminder>", step.Title, step.ID, "Write the widget code"} {
+				if !strings.Contains(context, want) {
+					t.Fatalf("additionalContext = %q, want step reminder substring %q", context, want)
+				}
+			}
+			if !strings.Contains(context, "[gastown] worker") {
+				t.Fatalf("additionalContext = %q, want hook beacon", context)
+			}
+		})
+	}
+}
+
+func TestDoPrimeWithHookFormat_GatesDefaultFallbackWithoutManagedSession(t *testing.T) {
 	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "")
 	t.Setenv("GC_SESSION_NAME", "")
 	t.Setenv("GC_TEMPLATE", "")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
@@ -579,20 +715,27 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
 	}
 
-	var payload struct {
-		HookSpecificOutput struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
+	if out := stdout.String(); out != "" {
+		t.Fatalf("stdout = %q, want no hook output for unmanaged SessionStart hook", out)
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("stdout is not hook JSON: %v\n%s", err, stdout.String())
+}
+
+func TestDoPrimeExplicitInvocationStillFormatsDefaultFallback(t *testing.T) {
+	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_TEMPLATE", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, false, "", false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if got, want := payload.HookSpecificOutput.HookEventName, "SessionStart"; got != want {
-		t.Fatalf("hookEventName = %q, want %q", got, want)
-	}
-	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "# Gas City Agent") {
-		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
+
+	out := stdout.String()
+	if !strings.Contains(out, "# Gas City Agent") {
+		t.Fatalf("stdout = %q, want default prime prompt", out)
 	}
 	for _, want := range []string{
 		"You are an agent in a Gas City workspace. Claim available work and execute it.",
@@ -602,19 +745,8 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 		"Read the claimed bead and execute the work described in its title",
 		"Check for more work. Repeat until the queue is empty.",
 	} {
-		if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, want) {
-			t.Fatalf("additionalContext missing %q:\n%s", want, payload.HookSpecificOutput.AdditionalContext)
-		}
-	}
-	for _, stale := range []string{
-		"managed runtime session",
-		"If $GC_SESSION_NAME is empty",
-		"bd update <id> --claim",
-		"gc runtime drain-ack",
-		"bd ready",
-	} {
-		if strings.Contains(payload.HookSpecificOutput.AdditionalContext, stale) {
-			t.Fatalf("additionalContext contains stale fallback protocol %q:\n%s", stale, payload.HookSpecificOutput.AdditionalContext)
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
 		}
 	}
 }
@@ -651,7 +783,8 @@ prompt_template = "prompts/worker.md"
 	t.Setenv("GC_ALIAS", "worker")
 	t.Setenv("GC_TEMPLATE", "worker")
 	t.Setenv("GC_SESSION_NAME", "gastown--worker")
-	t.Setenv("GC_SESSION_ID", "sess-777")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
 	t.Setenv(managedSessionHookEnv, "1")
 	t.Setenv("GC_HOOK_SOURCE", "startup")
 	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
@@ -758,6 +891,10 @@ prompt_template = %q
 			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
 				t.Fatalf("WriteFile(city.toml): %v", err)
 			}
+			sessionName := "session-" + strings.ReplaceAll(tt.beaconAgent, "/", "-")
+			sessionID := createPrimeHookSession(t, cityDir, sessionName, tt.beaconAgent)
+			t.Setenv("GC_SESSION_ID", sessionID)
+			t.Setenv("GC_SESSION_NAME", sessionName)
 			t.Chdir(agentWorkDir)
 
 			var stdout, stderr bytes.Buffer
@@ -806,4 +943,34 @@ func withPrimeHookStdin(t *testing.T) {
 		primeStdin = oldPrimeStdin
 		_ = reader.Close()
 	})
+}
+
+func createPrimeHookSession(t *testing.T, cityDir, sessionName, template string) string {
+	t.Helper()
+
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%s): %v", cityDir, err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"agent_name":   template,
+			"session_name": sessionName,
+			"state":        "active",
+			"template":     template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session %s): %v", sessionName, err)
+	}
+	if strings.TrimSpace(created.ID) == "" {
+		t.Fatalf("Create(session %s) returned empty ID", sessionName)
+	}
+	return created.ID
 }

@@ -1144,20 +1144,6 @@ func (e *Editor) DeleteAgent(name string) error {
 	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
-// CreateRig adds a new rig to the config. Returns an error if a rig with
-// the same name already exists.
-func (e *Editor) CreateRig(r config.Rig) error {
-	return e.Edit(func(cfg *config.City) error {
-		for _, existing := range cfg.Rigs {
-			if existing.Name == r.Name {
-				return fmt.Errorf("%w: rig %q", ErrAlreadyExists, r.Name)
-			}
-		}
-		cfg.Rigs = append(cfg.Rigs, r)
-		return nil
-	})
-}
-
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -108,6 +109,21 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	allOrders = append(allOrders, cityOrders...)
 	allOrders = append(allOrders, promotedCityOrders...)
 	allOrders = append(allOrders, rigOrders...)
+	// Stamp the city-default cron timezone onto orders that don't author
+	// their own tz, so trigger evaluation sees one explicit location without
+	// widening the CheckTrigger signature. A bad [workspace] timezone fails
+	// the whole scan loudly — a silent fallback would move every inheriting
+	// order's schedule onto a different wall clock.
+	if tz := cfg.Workspace.Timezone; tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			return nil, fmt.Errorf("[workspace] timezone %q: %w", tz, err)
+		}
+		for i := range allOrders {
+			if allOrders[i].TZ == "" {
+				allOrders[i].TZ = tz
+			}
+		}
+	}
 	if len(cfg.Orders.Overrides) > 0 {
 		if err := orders.ApplyOverrides(allOrders, overridesFromConfig(cfg.Orders.Overrides)); err != nil {
 			if opts.OnOverrideError == nil {

@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -307,15 +308,83 @@ func SortBeads(items []Bead, order SortOrder) {
 // which store path served it (#3208).
 func sortBeadsReadyOrder(items []Bead) {
 	sort.Slice(items, func(i, j int) bool {
-		pi, pj := readySortPriority(items[i]), readySortPriority(items[j])
-		if pi != pj {
-			return pi < pj
-		}
-		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
-			return items[i].CreatedAt.Before(items[j].CreatedAt)
-		}
-		return items[i].ID < items[j].ID
+		return beadReadyLess(items[i], items[j])
 	})
+}
+
+// sortBeadsReadyOrderContext is the cancellation-aware form used by
+// deadline-sensitive cache projections. A local merge sort keeps cancellation
+// checks inside both comparison and copy work instead of abandoning an
+// uninterruptible sort goroutine when ctx expires.
+func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
+	if ctx == nil || ctx.Done() == nil {
+		sortBeadsReadyOrder(items)
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(items) < 2 {
+		return nil
+	}
+
+	scratch := make([]Bead, len(items))
+	var mergeSort func(int, int) error
+	mergeSort = func(lo, hi int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if hi-lo < 2 {
+			return nil
+		}
+		mid := lo + (hi-lo)/2
+		if err := mergeSort(lo, mid); err != nil {
+			return err
+		}
+		if err := mergeSort(mid, hi); err != nil {
+			return err
+		}
+
+		i, j := lo, mid
+		for k := lo; k < hi; k++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			switch {
+			case i == mid:
+				scratch[k] = items[j]
+				j++
+			case j == hi:
+				scratch[k] = items[i]
+				i++
+			case beadReadyLess(items[j], items[i]):
+				scratch[k] = items[j]
+				j++
+			default:
+				scratch[k] = items[i]
+				i++
+			}
+		}
+		for k := lo; k < hi; k++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			items[k] = scratch[k]
+		}
+		return nil
+	}
+	return mergeSort(0, len(items))
+}
+
+func beadReadyLess(a, b Bead) bool {
+	pa, pb := readySortPriority(a), readySortPriority(b)
+	if pa != pb {
+		return pa < pb
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func readySortPriority(b Bead) int {

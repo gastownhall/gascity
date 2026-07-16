@@ -269,7 +269,7 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 	// write (visibility timeout 503/504) releases the reservation, so a
 	// same-key retry re-runs the create and surfaces the conflict — identical
 	// to an unkeyed retry today.
-	qualifiedName, err := withIdempotency(s, "/v0/agents", input.IdempotencyKey, input.Body,
+	qualifiedName, err := withIdempotency(s.idem, "/v0/agents", input.IdempotencyKey, input.Body,
 		func() (string, error) {
 			sm, ok := s.state.(StateMutator)
 			if !ok {

@@ -812,7 +812,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// beaconTime is captured once so the beacon timestamp remains stable
 	// across reconcile ticks. Without this, FormatBeacon(time.Now()) would

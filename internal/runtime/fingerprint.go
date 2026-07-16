@@ -40,7 +40,13 @@ type BreakdownCopyEntry struct {
 // v4: .gc/settings.json is no longer probed in CopyFiles; its fingerprint
 // contribution is path-based only. Content changes to the managed runtime
 // settings file no longer trigger stale-session cascades. (ga-zfm)
-const FingerprintVersion = "v4"
+//
+// v5: operational/host-tooling scripts (city-*.sh, update-*.sh) are excluded
+// from the .gc/scripts probed CopyFiles content hash. Editing such a script no
+// longer flips every agent's fingerprint into a fleet-wide config-drift drain.
+// The bump rebaselines existing v4 hashes silently instead of draining the
+// fleet once on rollout. (#3840)
+const FingerprintVersion = "v5"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate

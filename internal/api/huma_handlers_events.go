@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -56,58 +57,20 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	// window flip — no cursor returned the newest-N while any cursor walked
 	// oldest-first from the head — which made walking history coherently
 	// impossible. Anything other than a valid sq token is a typed 400.
-	var beforeSeq uint64
-	if input.Cursor != "" {
-		c, err := decodeKeysetCursor(input.Cursor)
-		// Seq 0 is never minted (seqs start at 1) and beforeSeq==0 means
-		// "first page" below — accepting a crafted s:0 token would serve a
-		// cursor-following client the first page again, forever.
-		if err != nil || c.Kind != cursorKindSeq || c.Seq == 0 {
-			return nil, apierr.InvalidCursor.Msg("cursor is not a valid pagination token; re-fetch the first page")
-		}
-		beforeSeq = c.Seq
+	beforeSeq, err := parseEventBeforeSeq(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	index := s.latestIndex()
 
 	// Fetch limit+1 matching events at (first page) or strictly below (cursor
 	// page) the boundary, ascending; the extra row is the has-more signal.
-	// ListTail is the fast path — a backward scan of the ACTIVE events.jsonl
-	// only, never the .gz archives — so its result is trusted ONLY when it
-	// yields a full limit+1 rows: the active file holds the newest events, so
-	// a full tail page there IS the newest page below the boundary. Anything
-	// short of that cannot distinguish "log exhausted" from "active file
-	// exhausted, older matches in archives" and MUST fall through to the
-	// archive-aware ep.List scan — otherwise a rotation (or a selective
-	// filter) strands the whole archived history behind an unminted cursor.
-	// The scan is a full filtered read of archives + active file — the
-	// deliberate price of an exact seq boundary on a rotating log; the
-	// BeforeSeq predicate keeps rotation/archive handling inside the one
-	// battle-tested sequential reader instead of a bespoke reverse reader.
 	scanFilter := filter
 	scanFilter.BeforeSeq = beforeSeq
-	fetch := limit + 1
-	var evts []events.Event
-	var scanned int // matching rows this request could see (best-effort Total for filtered reads)
-	if tp, ok := ep.(events.TailProvider); ok {
-		tail, err := tp.ListTail(scanFilter, fetch)
-		if err != nil {
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		if len(tail) == fetch {
-			evts, scanned = tail, limit
-		}
-	}
-	if evts == nil {
-		all, err := ep.List(scanFilter)
-		if err != nil {
-			return nil, apierr.Internal.Msg(err.Error())
-		}
-		scanned = len(all)
-		if len(all) > fetch {
-			all = all[len(all)-fetch:]
-		}
-		evts = all
+	evts, scanned, err := fetchEventPageAscending(ep, scanFilter, limit)
+	if err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	// evts is ascending; the overfetched row (the oldest) signals more below.
@@ -134,7 +97,14 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	total := scanned
 	if filterIsEmpty(filter) {
 		if seq, seqErr := ep.LatestSeq(); seqErr == nil {
-			total = int(seq)
+			// LatestSeq is a uint64 counter; bound it before the int narrowing so
+			// a value past the platform int range can't wrap to a negative or
+			// truncated total (CodeQL go/incorrect-integer-conversion).
+			if seq > uint64(math.MaxInt) {
+				total = math.MaxInt
+			} else {
+				total = int(seq)
+			}
 		}
 	}
 
@@ -155,6 +125,75 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		Index: index,
 		Body:  ListBody[WireEvent]{Items: wires, Total: total, NextCursor: nextCursor},
 	}, nil
+}
+
+// parseEventBeforeSeq decodes the pagination cursor into a keyset seq boundary.
+// An empty cursor is the first page (boundary 0 = "no boundary"). Anything that
+// is not a valid sq-kind token with a non-zero seq rejects with a typed 400:
+// legacy offset tokens, wrong-kind (cb) tokens, and a crafted s:0. Seq 0 is
+// never minted (seqs start at 1) and 0 means "first page" here, so echoing an
+// s:0 token back would serve a cursor-following client the first page forever.
+func parseEventBeforeSeq(cursor string) (uint64, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	c, err := decodeKeysetCursor(cursor)
+	if err != nil || c.Kind != cursorKindSeq || c.Seq == 0 {
+		return 0, apierr.InvalidCursor.Msg("cursor is not a valid pagination token; re-fetch the first page")
+	}
+	return c.Seq, nil
+}
+
+// fetchEventPageAscending fetches up to limit+1 matching events at or below the
+// filter's BeforeSeq boundary in ascending seq order; the extra row is the
+// has-more signal. It returns the fetched events and scanned — the best-effort
+// count of matching rows the read could see, used as the filtered Total.
+//
+// ListTail is the fast path: a backward scan of the ACTIVE events.jsonl only,
+// never the .gz archives, so its result is trusted ONLY when it yields a full
+// limit+1 rows. The active file holds the newest events, so a full tail page
+// there IS the newest page below the boundary. Anything short cannot
+// distinguish "log exhausted" from "active file exhausted, older matches in
+// archives/rotation" and MUST fall through to the full scan — otherwise a
+// rotation (or a selective filter) strands the older history behind an unminted
+// cursor. The scan uses the in-flight-aware read when the provider offers one
+// (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
+// is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
+// the one battle-tested sequential reader instead of a bespoke reverse reader.
+func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
+	fetch := limit + 1
+	if tp, ok := ep.(events.TailProvider); ok {
+		tail, err := tp.ListTail(filter, fetch)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(tail) == fetch {
+			return tail, limit, nil
+		}
+	}
+	all, err := listWithInFlight(ep, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	scanned := len(all)
+	if len(all) > fetch {
+		all = all[len(all)-fetch:]
+	}
+	return all, scanned, nil
+}
+
+// listWithInFlight returns all events matching filter, folding in events still
+// stranded in an in-flight rotation file when the provider is an
+// [events.InFlightProvider]. Plain List reads archives + the active file, so
+// during a rotation's compression window it misses the just-rotated .rotating-*
+// segment; the in-flight-aware read closes that gap so a descending keyset walk
+// cannot skip a whole seq range. Providers with no in-flight window fall back to
+// List unchanged.
+func listWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event, error) {
+	if ip, ok := ep.(events.InFlightProvider); ok {
+		return ip.ListInFlight(filter)
+	}
+	return ep.List(filter)
 }
 
 func filterIsEmpty(f events.Filter) bool {
@@ -178,20 +217,30 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 // Body validation (Type and Actor required) is enforced by struct tags
 // on EventEmitInput.
 func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
-	ep := s.state.EventProvider()
-	if ep == nil {
-		return nil, apierr.ServiceUnavailable.Msg("events not enabled")
+	// Idempotency: append at most once per Idempotency-Key — the log is
+	// append-only, so a timed-out retry would otherwise double-emit (and
+	// double any projection built over the log). The cached value is just the
+	// status constant; the whole point is skipping the duplicate Record.
+	status, err := withIdempotency(s.idem, "/v0/events", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			ep := s.state.EventProvider()
+			if ep == nil {
+				return "", apierr.ServiceUnavailable.Msg("events not enabled")
+			}
+			ep.Record(events.Event{
+				Type:    input.Body.Type,
+				Actor:   input.Body.Actor,
+				Subject: input.Body.Subject,
+				Message: input.Body.Message,
+			})
+			return "recorded", nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
-	ep.Record(events.Event{
-		Type:    input.Body.Type,
-		Actor:   input.Body.Actor,
-		Subject: input.Body.Subject,
-		Message: input.Body.Message,
-	})
-
 	resp := &EventEmitOutput{}
-	resp.Body.Status = "recorded"
+	resp.Body.Status = status
 	return resp, nil
 }
 
@@ -289,12 +338,17 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 	ep := s.state.EventProvider()
 	afterSeq := input.resolveAfterSeq()
 	if strings.TrimSpace(input.LastEventID) == "" && strings.TrimSpace(input.AfterSeq) == "" {
+		// Head-start (no resume cursor): stream from now. Fail closed on a
+		// LatestSeq error rather than fall through to afterSeq=0, which Watch now
+		// treats as "replay the entire retained history" (across archives) — a
+		// head-start client must not get a full-history flood. The client can
+		// reconnect.
 		seq, err := ep.LatestSeq()
 		if err != nil {
-			log.Printf("api: events-stream: latest seq failed: %v", err)
-		} else {
-			afterSeq = seq
+			log.Printf("api: events-stream: latest seq failed, refusing head-start replay: %v", err)
+			return
 		}
+		afterSeq = seq
 	}
 	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {

@@ -115,7 +115,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 		{
 			profileID:             "mimocode/tmux-cli",
 			family:                "mimocode",
-			wantCommand:           "mimo --never-ask-questions",
+			wantCommand:           "mimo --never-ask",
 			wantPromptMode:        "flag",
 			wantPromptFlag:        "--prompt",
 			wantReadyDelayMs:      8000,
@@ -235,7 +235,7 @@ func resolveMimoCodeDefaultTransportTemplate(t *testing.T, session string) Templ
 
 // TestResolveTemplateMimoCodeDefaultTransportStaysOnCLI pins the out-of-box
 // launch for `provider = "mimocode"` with no session override. The headless
-// gate suppression flag (--never-ask-questions) is a TUI-surface flag that
+// gate suppression flag (--never-ask) is a TUI-surface flag that
 // the `mimo acp` subcommand does not take, and live conformance coverage for
 // mimocode exists only on the CLI transport, so the default launch must be
 // the CLI command, not `mimo acp`.
@@ -244,8 +244,8 @@ func TestResolveTemplateMimoCodeDefaultTransportStaysOnCLI(t *testing.T) {
 	if tp.IsACP {
 		t.Fatal("IsACP = true for default mimocode session, want CLI transport")
 	}
-	if tp.Command != "mimo --never-ask-questions" {
-		t.Fatalf("Command = %q, want %q", tp.Command, "mimo --never-ask-questions")
+	if tp.Command != "mimo --never-ask" {
+		t.Fatalf("Command = %q, want %q", tp.Command, "mimo --never-ask")
 	}
 }
 

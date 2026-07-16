@@ -19,7 +19,8 @@ export type RunNodeStatus =
   | 'completed'
   | 'failed'
   | 'blocked'
-  | 'skipped';
+  | 'skipped'
+  | 'canceled';
 
 export type RunConstructKind =
   | 'run-root'

@@ -481,7 +481,11 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 	for i := range input.beads {
 		issues = append(issues, fromRunSnapshotBead(input.beads[i]))
 	}
-	phase := mapRunPhase(issues)
+	// The run id feeds mapRunPhase's terminal-fail lookup, but the detail view
+	// carries run failure through node statuses in the DAG rather than a
+	// run-header label: only phase.phase is projected below, so the honest
+	// "failed" label stays a summary/lane-level signal (RunLane.PhaseLabel).
+	phase := mapRunPhase(input.runID, issues)
 	formulaName, hasFormulaName := "", false
 	if formula.Kind == "known" {
 		formulaName, hasFormulaName = formula.Name, true
@@ -637,7 +641,7 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 // duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
 // newly-added status must be explicitly classified here (or the test fails).
 var (
-	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped"}
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped", "canceled"}
 	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
 )
 

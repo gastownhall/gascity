@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -32,11 +34,35 @@ const (
 	ResourceSubprocess Resource = "subprocess"
 	// ResourceFixedSleep counts direct time.Sleep calls.
 	ResourceFixedSleep Resource = "fixed_sleep"
+	// ResourceEnvironment counts recognized process-environment mutations.
+	ResourceEnvironment Resource = "environment"
+	// ResourceCWD counts recognized process working-directory mutations.
+	ResourceCWD Resource = "cwd"
+	// ResourceSlowProcessGate counts the cmd/gc slow-process helper and calls.
+	ResourceSlowProcessGate Resource = "slow_process_gate"
+	// ResourceHTTPTestServer counts loopback servers opened by net/http/httptest.
+	ResourceHTTPTestServer Resource = "http_test_server"
+	// ResourceNetListen counts direct listeners opened by net.Listen.
+	ResourceNetListen Resource = "net_listen"
+	// ResourceNetListenUnixgram counts direct Unix datagram listeners opened by net.ListenUnixgram.
+	ResourceNetListenUnixgram Resource = "net_listen_unixgram"
+	// ResourceNetListenConfig counts direct listeners opened through net.ListenConfig.Listen.
+	ResourceNetListenConfig Resource = "net_listen_config"
+	// ResourceSyscallListen counts direct calls that put sockets into listening state through syscall.Listen.
+	ResourceSyscallListen Resource = "syscall_listen"
 )
 
 var knownResources = map[Resource]struct{}{
-	ResourceSubprocess: {},
-	ResourceFixedSleep: {},
+	ResourceSubprocess:        {},
+	ResourceFixedSleep:        {},
+	ResourceEnvironment:       {},
+	ResourceCWD:               {},
+	ResourceSlowProcessGate:   {},
+	ResourceHTTPTestServer:    {},
+	ResourceNetListen:         {},
+	ResourceNetListenConfig:   {},
+	ResourceNetListenUnixgram: {},
+	ResourceSyscallListen:     {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -47,6 +73,8 @@ const (
 	ScopeAll Scope = "all"
 	// ScopeUntagged excludes explicitly and implicitly constrained files.
 	ScopeUntagged Scope = "untagged"
+	// ScopeCmdGCUntagged selects untagged test files beneath cmd/gc.
+	ScopeCmdGCUntagged Scope = "cmd/gc+untagged"
 )
 
 type baselineKey struct {
@@ -56,9 +84,12 @@ type baselineKey struct {
 
 // Ledger is the checked source-level test-resource inventory.
 type Ledger struct {
-	Version       int        `toml:"version"`
-	AuditBaseline []Baseline `toml:"audit_baseline"`
-	Debt          []Baseline `toml:"debt"`
+	Version              int                    `toml:"version"`
+	AuditBaseline        []Baseline             `toml:"audit_baseline"`
+	Debt                 []Baseline             `toml:"debt"`
+	Medium               []MediumOwner          `toml:"medium"`
+	ReviewedHermeticBody []ReviewedHermeticBody `toml:"reviewed_hermetic_body"`
+	SmallDebt            []Baseline             `toml:"small_debt"`
 }
 
 // Baseline pins one source-census signal and its migration ownership.
@@ -77,13 +108,13 @@ type Baseline struct {
 }
 
 var bootstrapPolicy = Ledger{
-	Version: 1,
+	Version: 2,
 	AuditBaseline: []Baseline{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   490,
-			BaselineFiles:   135,
+			BaselineCalls:   528,
+			BaselineFiles:   154,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -95,8 +126,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   443,
-			BaselineFiles:   156,
+			BaselineCalls:   441,
+			BaselineFiles:   158,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -110,8 +141,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   374,
-			BaselineFiles:   97,
+			BaselineCalls:   401,
+			BaselineFiles:   108,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -123,7 +154,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   291,
+			BaselineCalls:   287,
 			BaselineFiles:   113,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -133,19 +164,326 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "W1-W5",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceEnvironment,
+			BaselineCalls:   4332,
+			BaselineFiles:   200,
+			ReportedCalls:   3960,
+			ReportedFiles:   184,
+			OwnerBead:       "ga-80po0c.2.3",
+			Invariant:       "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "cmd/gc callers restore or eliminate every recognized process-environment mutation",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceCWD,
+			BaselineCalls:   284,
+			BaselineFiles:   43,
+			ReportedCalls:   98,
+			ReportedFiles:   13,
+			OwnerBead:       "ga-80po0c.2.3",
+			Invariant:       "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "cmd/gc callers restore or eliminate every recognized cwd mutation",
+			MigrationTarget: "D5/D6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceSlowProcessGate,
+			BaselineCalls:   74,
+			BaselineFiles:   25,
+			ReportedCalls:   78,
+			ReportedFiles:   27,
+			OwnerBead:       "ga-80po0c.2.3",
+			Invariant:       "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "the helper definition and every marked caller retain an explicit process-suite migration owner",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceHTTPTestServer,
+			BaselineCalls:   300,
+			BaselineFiles:   66,
+			ReportedCalls:   255,
+			ReportedFiles:   56,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its loopback server and removes duplicate server-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListen,
+			BaselineCalls:   92,
+			BaselineFiles:   34,
+			ReportedCalls:   92,
+			ReportedFiles:   34,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenConfig,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its configured listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenUnixgram,
+			BaselineCalls:   3,
+			BaselineFiles:   2,
+			ReportedCalls:   3,
+			ReportedFiles:   2,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSyscallListen,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+	},
+	Medium: []MediumOwner{
+		{
+			PackageDir:      "internal/api",
+			PackageName:     "api",
+			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "internal/api tracked-source error URN guard is a checked Medium owner",
+			ResourceOwner:   "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestMain",
+			Resources:       []Resource{ResourceEnvironment},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner",
+			ResourceOwner:   "only environment calls lexically inside TestMain leave Small debt",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "Make/provider and suite-contract proof is a checked Medium owner",
+			ResourceOwner:   "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
+			MigrationTarget: "P0.1",
+			Expires:         "2026-10-01",
+		},
+	},
+	ReviewedHermeticBody: []ReviewedHermeticBody{
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
+			Owner:         "TestDoSessionWait_RegistersReadyWaitForRigDependency",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
+			Owner:         "TestDoSessionWake_PokesManagedControllerAfterStateChange",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
+			Owner:         "TestPrepareWaitWakeState_ResolvesRigDependencyBeads",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
+		{
+			PackageDir:    "cmd/gc",
+			PackageName:   "main",
+			Owner:         "TestDoMailInbox_RendersMessagesFromReader",
+			EffectiveSize: "medium",
+			MediumReason:  "package TestMain mutates process state",
+		},
+	},
+	SmallDebt: []Baseline{
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSubprocess,
+			BaselineCalls:   399,
+			BaselineFiles:   107,
+			ReportedCalls:   394,
+			ReportedFiles:   105,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners remove or replace each process call site",
+			MigrationTarget: "D1/D2/D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceFixedSleep,
+			BaselineCalls:   287,
+			BaselineFiles:   113,
+			ReportedCalls:   287,
+			ReportedFiles:   113,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners replace elapsed wall time with lifecycle signals",
+			MigrationTarget: "W1-W5",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceEnvironment,
+			BaselineCalls:   4326,
+			BaselineFiles:   200,
+			ReportedCalls:   4339,
+			ReportedFiles:   199,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners restore or eliminate every process-environment mutation",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceCWD,
+			BaselineCalls:   284,
+			BaselineFiles:   43,
+			ReportedCalls:   284,
+			ReportedFiles:   43,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners restore or eliminate every cwd mutation",
+			MigrationTarget: "D5/D6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeCmdGCUntagged,
+			Resource:        ResourceSlowProcessGate,
+			BaselineCalls:   74,
+			BaselineFiles:   25,
+			ReportedCalls:   75,
+			ReportedFiles:   25,
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each non-Medium marked caller retains an explicit process-suite migration owner",
+			MigrationTarget: "D5/D6/E6",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceHTTPTestServer,
+			BaselineCalls:   300,
+			BaselineFiles:   66,
+			ReportedCalls:   300,
+			ReportedFiles:   66,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListen,
+			BaselineCalls:   92,
+			BaselineFiles:   34,
+			ReportedCalls:   92,
+			ReportedFiles:   34,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenConfig,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListenUnixgram,
+			BaselineCalls:   3,
+			BaselineFiles:   2,
+			ReportedCalls:   3,
+			ReportedFiles:   2,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSyscallListen,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
+			ReportedCalls:   1,
+			ReportedFiles:   1,
+			OwnerBead:       "ga-80po0c.2.2",
+			Invariant:       "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
 	},
 }
 
 // Occurrence is one syntax-owned resource use.
 type Occurrence struct {
-	Path     string
-	Tagged   bool
-	Resource Resource
+	Path        string
+	PackageDir  string
+	PackageName string
+	Owner       string
+	Runnable    bool
+	Tagged      bool
+	Resource    Resource
 }
 
 // Census is a deterministic collection of resource occurrences.
 type Census struct {
-	Occurrences []Occurrence
+	Occurrences    []Occurrence
+	Runnables      []RunnableOwner
+	hermeticSource *hermeticSourceIndex
 }
 
 // Count is the call-site and unique-file count for a scope/resource pair.
@@ -175,17 +513,20 @@ func scopeContains(scope Scope, occurrence Occurrence) bool {
 		return true
 	case ScopeUntagged:
 		return !occurrence.Tagged
+	case ScopeCmdGCUntagged:
+		return !occurrence.Tagged && strings.HasPrefix(occurrence.Path, "cmd/gc/")
 	default:
 		return false
 	}
 }
 
-// ScanRepository scans the repository's tracked Go test files.
+// ScanRepository scans the repository's tracked Go test files. Tracked sibling
+// Go source supplies package-level declaration context but is never counted.
 func ScanRepository(root string) (Census, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*_test.go")
+	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
-		return Census{}, fmt.Errorf("listing tracked Go tests: %w", err)
+		return Census{}, fmt.Errorf("listing tracked Go source: %w", err)
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -194,19 +535,20 @@ func ScanRepository(root string) (Census, error) {
 			files = append(files, filepath.ToSlash(name))
 		}
 	}
-	return scanFiles(os.DirFS(root), files)
+	return scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
 }
 
-// ScanFS scans every *_test.go file in sourceFS. It is intended for hermetic
-// policy fixtures; repository checks use ScanRepository so untracked files do
-// not perturb the checked baseline.
+// ScanFS scans every *_test.go file in sourceFS. Sibling Go source supplies
+// package-level declaration context but is never counted. ScanFS is intended
+// for hermetic policy fixtures; repository checks use ScanRepository so
+// untracked files do not perturb the checked baseline.
 func ScanFS(sourceFS fs.FS) (Census, error) {
 	var files []string
 	err := fs.WalkDir(sourceFS, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !entry.IsDir() && strings.HasSuffix(name, "_test.go") {
+		if !entry.IsDir() && strings.HasSuffix(name, ".go") {
 			files = append(files, filepath.ToSlash(name))
 		}
 		return nil
@@ -214,16 +556,44 @@ func ScanFS(sourceFS fs.FS) (Census, error) {
 	if err != nil {
 		return Census{}, fmt.Errorf("walking test source: %w", err)
 	}
-	return scanFiles(sourceFS, files)
+	return scanFiles(sourceFS, files, nil)
+}
+
+func reviewedHermeticPackages(rows []ReviewedHermeticBody) map[packageKey]struct{} {
+	packages := make(map[packageKey]struct{}, len(rows))
+	for _, row := range rows {
+		packages[packageKey{directory: row.PackageDir, packageName: row.PackageName}] = struct{}{}
+	}
+	return packages
 }
 
 type parsedFile struct {
-	name   string
-	tagged bool
+	name        string
+	directory   string
+	packageName string
+	tagged      bool
+	file        *ast.File
+	calls       []resourceCall
+	bindings    bindingInfo
 }
 
 type bindingInfo struct {
-	uses map[*ast.Ident]types.Object
+	defs                       map[*ast.Ident]types.Object
+	uses                       map[*ast.Ident]types.Object
+	expressionTypes            map[ast.Expr]types.TypeAndValue
+	packageDeclarations        map[string]struct{}
+	unresolvedImportQualifiers map[string]struct{}
+}
+
+type packageKey struct {
+	directory   string
+	packageName string
+}
+
+type resourceCall struct {
+	call     *ast.CallExpr
+	owner    string
+	runnable bool
 }
 
 type emptyPackageImporter struct {
@@ -239,6 +609,14 @@ func (importer *emptyPackageImporter) Import(importPath string) (*types.Package,
 		return imported, nil
 	}
 	imported := types.NewPackage(importPath, path.Base(importPath))
+	if importPath == "net" {
+		// Seed only the receiver type the census needs so go/types can carry
+		// ListenConfig identity through pointers and aliases without loading
+		// host toolchain export data.
+		name := types.NewTypeName(token.NoPos, imported, "ListenConfig", nil)
+		types.NewNamed(name, types.NewStruct(nil, nil), nil)
+		imported.Scope().Insert(name)
+	}
 	imported.MarkComplete()
 	importer.packages[importPath] = imported
 	return imported, nil
@@ -269,19 +647,44 @@ var knownGOARCH = map[string]struct{}{
 	"wasm": {},
 }
 
-func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
+func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]struct{}) (Census, error) {
 	sort.Strings(names)
-	census := Census{}
+	fileSet := token.NewFileSet()
 	importer := newEmptyPackageImporter()
-	for index, name := range names {
+	var sources []parsedFile
+	var hermeticSources []parsedFile
+	var runnables []RunnableOwner
+	packageDeclarations := make(map[packageKey]map[string]struct{})
+	for _, name := range names {
 		data, err := fs.ReadFile(sourceFS, name)
 		if err != nil {
 			return Census{}, fmt.Errorf("reading %s: %w", name, err)
 		}
-		fileSet := token.NewFileSet()
 		file, err := parser.ParseFile(fileSet, name, data, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			return Census{}, fmt.Errorf("parsing %s: %w", name, err)
+		}
+		normalized := filepath.ToSlash(name)
+		key := packageKey{directory: path.Dir(normalized), packageName: file.Name.Name}
+		declarations := packageDeclarations[key]
+		if declarations == nil {
+			declarations = make(map[string]struct{})
+			packageDeclarations[key] = declarations
+		}
+		recordPackageDeclarations(file, declarations)
+		source := parsedFile{
+			name:        normalized,
+			directory:   key.directory,
+			packageName: key.packageName,
+			file:        file,
+		}
+		_, retainHermeticSource := hermeticPackages[key]
+		retainHermeticSource = hermeticPackages == nil || retainHermeticSource
+		if !strings.HasSuffix(name, "_test.go") {
+			if retainHermeticSource {
+				hermeticSources = append(hermeticSources, source)
+			}
+			continue
 		}
 		tagged, err := parsedBuildConstraint(data)
 		if err != nil {
@@ -290,30 +693,88 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		if err := validateImports(file); err != nil {
 			return Census{}, fmt.Errorf("scanning imports in %s: %w", name, err)
 		}
-		source := parsedFile{
-			name:   filepath.ToSlash(name),
-			tagged: tagged || hasImplicitPlatformConstraint(name),
-		}
+		runnables = append(runnables, runnableOwners(file, key.directory, key.packageName)...)
 		candidates := resourceCandidateCalls(file)
-		if len(candidates) == 0 {
+		source.tagged = tagged || hasImplicitPlatformConstraint(name)
+		source.calls = candidates
+		if retainHermeticSource {
+			hermeticSources = append(hermeticSources, source)
+		}
+		scanned := len(candidates) > 0 || hasSlowHelperDeclarationCandidate(file)
+		if !scanned {
 			continue
 		}
-		bindings := resolveBindings(fileSet, file, importer, fmt.Sprintf("resourcecensus.local/file%d", index))
-		for _, call := range candidates {
-			matched, err := isImportedCall(call, bindings, "os/exec", "Command", "CommandContext")
-			if err != nil {
-				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", name, err)
-			}
-			if matched {
-				census.add(source, ResourceSubprocess)
+		sources = append(sources, source)
+	}
+
+	for index := range sources {
+		source := &sources[index]
+		bindings := resolveBindings(fileSet, source.file, importer, fmt.Sprintf("resourcecensus.local/file%d", index))
+		bindings.packageDeclarations = packageDeclarations[source.groupKey()]
+		bindings.unresolvedImportQualifiers = unresolvedDefaultImportQualifiers(source.file)
+		source.bindings = bindings
+	}
+
+	slowHelpers := make(map[packageKey]types.Object)
+	for _, source := range sources {
+		for _, declaration := range source.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok {
 				continue
 			}
-			matched, err = isImportedCall(call, bindings, "time", "Sleep")
+			matched, err := isSlowHelperDeclaration(function, source.bindings)
 			if err != nil {
-				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", name, err)
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: %w", source.name, err)
+			}
+			if !matched {
+				continue
+			}
+			key := source.groupKey()
+			if _, exists := slowHelpers[key]; exists {
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: package %s has multiple canonical declarations", source.name, source.packageName)
+			}
+			object := source.bindings.defs[function.Name]
+			if object == nil {
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: declaration has no lexical binding", source.name)
+			}
+			slowHelpers[key] = object
+		}
+	}
+
+	census := Census{
+		Runnables: uniqueSortedRunnables(runnables),
+		hermeticSource: &hermeticSourceIndex{
+			fileSet:             fileSet,
+			files:               hermeticSources,
+			packageDeclarations: packageDeclarations,
+		},
+	}
+	for _, source := range sources {
+		testingObjects, err := testingParameterObjects(source.file, source.bindings)
+		if err != nil {
+			return Census{}, fmt.Errorf("scanning testing parameters in %s: %w", source.name, err)
+		}
+		for _, declaration := range source.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			matched, err := isSlowHelperDeclaration(function, source.bindings)
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning slow-process helper in %s: %w", source.name, err)
 			}
 			if matched {
-				census.add(source, ResourceFixedSleep)
+				census.add(source, function.Name.Name, false, ResourceSlowProcessGate)
+			}
+		}
+
+		for _, candidate := range source.calls {
+			resources, err := matchedResourcesForCall(candidate.call, source.bindings, testingObjects, slowHelpers[source.groupKey()])
+			if err != nil {
+				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
+			}
+			for _, resource := range resources {
+				census.add(source, candidate.owner, candidate.runnable, resource)
 			}
 		}
 	}
@@ -323,16 +784,27 @@ func scanFiles(sourceFS fs.FS, names []string) (Census, error) {
 		if left.Path != right.Path {
 			return left.Path < right.Path
 		}
+		if left.Owner != right.Owner {
+			return left.Owner < right.Owner
+		}
 		return left.Resource < right.Resource
 	})
 	return census, nil
 }
 
-func (c *Census) add(source parsedFile, resource Resource) {
+func (p parsedFile) groupKey() packageKey {
+	return packageKey{directory: p.directory, packageName: p.packageName}
+}
+
+func (c *Census) add(source parsedFile, owner string, runnable bool, resource Resource) {
 	c.Occurrences = append(c.Occurrences, Occurrence{
-		Path:     source.name,
-		Tagged:   source.tagged,
-		Resource: resource,
+		Path:        source.name,
+		PackageDir:  source.directory,
+		PackageName: source.packageName,
+		Owner:       owner,
+		Runnable:    runnable,
+		Tagged:      source.tagged,
+		Resource:    resource,
 	})
 }
 
@@ -450,7 +922,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "os/exec" || importPath == "time" {
+			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -458,36 +930,467 @@ func validateImports(file *ast.File) error {
 	return nil
 }
 
-func resourceCandidateCalls(file *ast.File) []*ast.CallExpr {
-	var calls []*ast.CallExpr
-	ast.Inspect(file, func(node ast.Node) bool {
+func resourceCandidateCalls(file *ast.File) []resourceCall {
+	aliases := testingImportAliases(file)
+	var calls []resourceCall
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok {
+			calls = appendResourceCandidateCalls(calls, function.Body, function.Name.Name, isRunnableOwner(function, aliases))
+			continue
+		}
+		calls = appendResourceCandidateCalls(calls, declaration, "", false)
+	}
+	return calls
+}
+
+func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner string, runnable bool) []resourceCall {
+	ast.Inspect(node, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		switch selector.Sel.Name {
-		case "Command", "CommandContext", "Sleep":
-			calls = append(calls, call)
+		switch function := unparen(call.Fun).(type) {
+		case *ast.SelectorExpr:
+			switch function.Sel.Name {
+			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenUnixgram", "NewServer", "NewTLSServer", "NewUnstartedServer":
+				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
+			}
+		case *ast.Ident:
+			if function.Name == "skipSlowCmdGCTest" {
+				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
+			}
 		}
 		return true
 	})
 	return calls
 }
 
+func runnableOwners(file *ast.File, packageDir, packageName string) []RunnableOwner {
+	aliases := testingImportAliases(file)
+	var owners []RunnableOwner
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || !isRunnableOwner(function, aliases) {
+			continue
+		}
+		owners = append(owners, RunnableOwner{PackageDir: packageDir, PackageName: packageName, Owner: function.Name.Name})
+	}
+	return owners
+}
+
+func testingImportAliases(file *ast.File) map[string]struct{} {
+	aliases := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || importPath != "testing" {
+			continue
+		}
+		if spec.Name == nil {
+			aliases["testing"] = struct{}{}
+			continue
+		}
+		if spec.Name.Name != "." && spec.Name.Name != "_" {
+			aliases[spec.Name.Name] = struct{}{}
+		}
+	}
+	return aliases
+}
+
+func isRunnableOwner(function *ast.FuncDecl, testingAliases map[string]struct{}) bool {
+	if function.Recv != nil || function.Type.TypeParams != nil || function.Type.Params == nil || functionParameterCount(function.Type.Params) != 1 || functionParameterCount(function.Type.Results) != 0 {
+		return false
+	}
+	wantType := ""
+	switch {
+	case function.Name.Name == "TestMain":
+		wantType = "M"
+	case goTestName(function.Name.Name, "Test"):
+		wantType = "T"
+	case goTestName(function.Name.Name, "Benchmark"):
+		wantType = "B"
+	case goTestName(function.Name.Name, "Fuzz"):
+		wantType = "F"
+	default:
+		return false
+	}
+	field := function.Type.Params.List[0]
+	pointer, ok := unparen(field.Type).(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := unparen(pointer.X).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != wantType {
+		return false
+	}
+	qualifier, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, ok = testingAliases[qualifier.Name]
+	return ok
+}
+
+func goTestName(name, prefix string) bool {
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	if len(name) == len(prefix) {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(name[len(prefix):])
+	return !unicode.IsLower(next)
+}
+
+func uniqueSortedRunnables(runnables []RunnableOwner) []RunnableOwner {
+	sort.Slice(runnables, func(i, j int) bool {
+		left, right := runnables[i], runnables[j]
+		if left.PackageDir != right.PackageDir {
+			return left.PackageDir < right.PackageDir
+		}
+		if left.PackageName != right.PackageName {
+			return left.PackageName < right.PackageName
+		}
+		return left.Owner < right.Owner
+	})
+	result := runnables[:0]
+	for _, runnable := range runnables {
+		if len(result) == 0 || result[len(result)-1] != runnable {
+			result = append(result, runnable)
+		}
+	}
+	return result
+}
+
 func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Importer, packagePath string) bindingInfo {
-	info := bindingInfo{uses: make(map[*ast.Ident]types.Object)}
+	info := bindingInfo{
+		defs:            make(map[*ast.Ident]types.Object),
+		uses:            make(map[*ast.Ident]types.Object),
+		expressionTypes: make(map[ast.Expr]types.TypeAndValue),
+	}
+	receivers := netListenReceiverExpressions(file)
+	var checkedExpressionTypes map[ast.Expr]types.TypeAndValue
+	if len(receivers) > 0 {
+		checkedExpressionTypes = make(map[ast.Expr]types.TypeAndValue)
+	}
 	config := types.Config{
 		Importer:                 importer,
 		DisableUnusedImportCheck: true,
 		IgnoreFuncBodies:         false,
 		Error:                    func(error) {},
 	}
-	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{Uses: info.uses})
+	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{
+		Defs:  info.defs,
+		Uses:  info.uses,
+		Types: checkedExpressionTypes,
+	})
+	for _, receiver := range receivers {
+		if typeAndValue, ok := checkedExpressionTypes[receiver]; ok {
+			info.expressionTypes[receiver] = typeAndValue
+		}
+	}
 	return info
+}
+
+func netListenReceiverExpressions(file *ast.File) []ast.Expr {
+	hasNetImport := false
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err == nil && importPath == "net" && (spec.Name == nil || spec.Name.Name != "_") {
+			hasNetImport = true
+			break
+		}
+	}
+	if !hasNetImport {
+		return nil
+	}
+
+	var receivers []ast.Expr
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "Listen" {
+			receivers = append(receivers, unparen(selector.X))
+		}
+		return true
+	})
+	return receivers
+}
+
+func recordPackageDeclarations(file *ast.File, declarations map[string]struct{}) {
+	for _, declaration := range file.Decls {
+		switch declaration := declaration.(type) {
+		case *ast.FuncDecl:
+			if declaration.Recv == nil {
+				declarations[declaration.Name.Name] = struct{}{}
+			}
+		case *ast.GenDecl:
+			for _, spec := range declaration.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					declarations[spec.Name.Name] = struct{}{}
+				case *ast.ValueSpec:
+					for _, name := range spec.Names {
+						declarations[name.Name] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+}
+
+// unresolvedDefaultImportQualifiers returns common versioned-import package
+// names that the hermetic path.Base importer cannot derive.
+func unresolvedDefaultImportQualifiers(file *ast.File) map[string]struct{} {
+	qualifiers := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		if spec.Name != nil {
+			continue
+		}
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		base := path.Base(importPath)
+		if isVersionSegment(base) {
+			qualifier := path.Base(path.Dir(importPath))
+			if token.IsIdentifier(qualifier) {
+				qualifiers[qualifier] = struct{}{}
+			}
+			continue
+		}
+		if index := strings.LastIndex(base, ".v"); index > 0 && isVersionSegment(base[index+1:]) {
+			qualifier := base[:index]
+			if token.IsIdentifier(qualifier) {
+				qualifiers[qualifier] = struct{}{}
+			}
+		}
+	}
+	return qualifiers
+}
+
+func isVersionSegment(value string) bool {
+	if len(value) < 2 || value[0] != 'v' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func hasSlowHelperDeclarationCandidate(file *ast.File) bool {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "skipSlowCmdGCTest" {
+			return true
+		}
+	}
+	return false
+}
+
+func testingParameterObjects(file *ast.File, bindings bindingInfo) (map[types.Object]bool, error) {
+	objects := make(map[types.Object]bool)
+	var inspectErr error
+	ast.Inspect(file, func(node ast.Node) bool {
+		if inspectErr != nil {
+			return false
+		}
+		var function *ast.FuncType
+		switch node := node.(type) {
+		case *ast.FuncDecl:
+			function = node.Type
+		case *ast.FuncLit:
+			function = node.Type
+		default:
+			return true
+		}
+		if function.Params == nil {
+			return true
+		}
+		for _, field := range function.Params.List {
+			matched, err := isTestingParameterType(field.Type, bindings)
+			if err != nil {
+				inspectErr = err
+				return false
+			}
+			if !matched {
+				continue
+			}
+			for _, name := range field.Names {
+				object := bindings.defs[name]
+				if object == nil {
+					inspectErr = fmt.Errorf("testing parameter %q has no lexical binding", name.Name)
+					return false
+				}
+				objects[object] = true
+			}
+		}
+		return true
+	})
+	return objects, inspectErr
+}
+
+func isNetListenConfigType(expression ast.Expr, bindings bindingInfo) (bool, error) {
+	if expression == nil {
+		return false, nil
+	}
+	expression = unparen(expression)
+	if pointer, ok := expression.(*ast.StarExpr); ok {
+		expression = pointer.X
+	}
+	return isImportedType(expression, bindings, "net", "ListenConfig")
+}
+
+func isNetListenConfigValue(expression ast.Expr, bindings bindingInfo) (bool, error) {
+	expression = unparen(expression)
+	if address, ok := expression.(*ast.UnaryExpr); ok && address.Op == token.AND {
+		expression = unparen(address.X)
+	}
+	composite, ok := expression.(*ast.CompositeLit)
+	if !ok {
+		return false, nil
+	}
+	return isNetListenConfigType(composite.Type, bindings)
+}
+
+func isNetListenConfigCall(call *ast.CallExpr, bindings bindingInfo) (bool, error) {
+	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Listen" {
+		return false, nil
+	}
+	receiver := unparen(selector.X)
+	if typeAndValue, ok := bindings.expressionTypes[receiver]; ok && typeAndValue.Type != nil {
+		return isNetListenConfigObjectType(typeAndValue.Type), nil
+	}
+	direct, err := isNetListenConfigValue(receiver, bindings)
+	if err != nil || direct {
+		return direct, err
+	}
+	identifier, ok := receiver.(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	object := bindings.uses[identifier]
+	if object == nil {
+		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+			return false, nil
+		}
+		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+			return false, nil
+		}
+		return false, fmt.Errorf("net.ListenConfig receiver %q has no lexical binding", identifier.Name)
+	}
+	return isNetListenConfigObjectType(object.Type()), nil
+}
+
+func isNetListenConfigObjectType(objectType types.Type) bool {
+	objectType = types.Unalias(objectType)
+	if pointer, ok := objectType.(*types.Pointer); ok {
+		objectType = types.Unalias(pointer.Elem())
+	}
+	named, ok := objectType.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Name() == "ListenConfig" && named.Obj().Pkg().Path() == "net"
+}
+
+func isTestingParameterType(expression ast.Expr, bindings bindingInfo) (bool, error) {
+	expression = unparen(expression)
+	if pointer, ok := expression.(*ast.StarExpr); ok {
+		return isImportedType(pointer.X, bindings, "testing", "T")
+	}
+	return isImportedType(expression, bindings, "testing", "TB")
+}
+
+func isImportedType(expression ast.Expr, bindings bindingInfo, importPath, typeName string) (bool, error) {
+	selector, ok := unparen(expression).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != typeName {
+		return false, nil
+	}
+	identifier, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	return isImportedQualifier(identifier, bindings, importPath)
+}
+
+func isTestingCall(call *ast.CallExpr, bindings bindingInfo, testingObjects map[types.Object]bool, method string) (bool, error) {
+	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != method {
+		return false, nil
+	}
+	identifier, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	object := bindings.uses[identifier]
+	if object == nil {
+		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+			return false, nil
+		}
+		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+			return false, nil
+		}
+		return false, fmt.Errorf("testing resource receiver %q has no lexical binding", identifier.Name)
+	}
+	return testingObjects[object], nil
+}
+
+func isSlowHelperDeclaration(function *ast.FuncDecl, bindings bindingInfo) (bool, error) {
+	if function.Recv != nil || function.Name.Name != "skipSlowCmdGCTest" || function.Type.Params == nil {
+		return false, nil
+	}
+	if functionParameterCount(function.Type.Results) != 0 || functionParameterCount(function.Type.Params) != 2 || len(function.Type.Params.List) != 2 {
+		return false, nil
+	}
+	firstType := unparen(function.Type.Params.List[0].Type)
+	pointer, ok := firstType.(*ast.StarExpr)
+	if !ok {
+		return false, nil
+	}
+	first, err := isImportedType(pointer.X, bindings, "testing", "T")
+	if err != nil || !first {
+		return false, err
+	}
+	second, ok := unparen(function.Type.Params.List[1].Type).(*ast.Ident)
+	if !ok || bindings.uses[second] != types.Universe.Lookup("string") {
+		return false, nil
+	}
+	return true, nil
+}
+
+func functionParameterCount(fields *ast.FieldList) int {
+	if fields == nil {
+		return 0
+	}
+	count := 0
+	for _, field := range fields.List {
+		if len(field.Names) == 0 {
+			count++
+		} else {
+			count += len(field.Names)
+		}
+	}
+	return count
+}
+
+func isSlowHelperCall(call *ast.CallExpr, bindings bindingInfo, ownership types.Object) bool {
+	if ownership == nil || len(call.Args) != 2 {
+		return false
+	}
+	identifier, ok := unparen(call.Fun).(*ast.Ident)
+	if !ok || identifier.Name != "skipSlowCmdGCTest" {
+		return false
+	}
+	object := bindings.uses[identifier]
+	return object == nil || object == ownership
 }
 
 func isImportedCall(call *ast.CallExpr, bindings bindingInfo, importPath string, names ...string) (bool, error) {
@@ -509,8 +1412,18 @@ func isImportedCall(call *ast.CallExpr, bindings bindingInfo, importPath string,
 	if !matchedName {
 		return false, nil
 	}
+	return isImportedQualifier(identifier, bindings, importPath)
+}
+
+func isImportedQualifier(identifier *ast.Ident, bindings bindingInfo, importPath string) (bool, error) {
 	binding, ok := bindings.uses[identifier]
 	if !ok || binding == nil {
+		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+			return false, nil
+		}
+		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+			return false, nil
+		}
 		return false, fmt.Errorf("resource candidate qualifier %q has no lexical binding", identifier.Name)
 	}
 	packageName, ok := binding.(*types.PkgName)
@@ -571,6 +1484,12 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 		sort.Strings(problems)
 		return errors.New(strings.Join(problems, "\n"))
 	}
+	if err := validateMediumOwners(ledger.Medium, census, now); err != nil {
+		return err
+	}
+	if err := validateReviewedHermeticBodies(ledger.ReviewedHermeticBody, census); err != nil {
+		return err
+	}
 
 	var problems []string
 	for _, baseline := range ledger.AuditBaseline {
@@ -581,6 +1500,9 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 		prefix := fmt.Sprintf("debt baseline scope=%s resource=%s", debt.Scope, debt.Resource)
 		problems = append(problems, validateBaseline(prefix, debt, census)...)
 	}
+	for _, debt := range ledger.SmallDebt {
+		problems = append(problems, validateSmallBaseline(debt, census, ledger.Medium)...)
+	}
 	if len(problems) == 0 {
 		return nil
 	}
@@ -590,14 +1512,17 @@ func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time) 
 
 func validateManifestAgainstPolicy(policy, ledger Ledger, now time.Time) []string {
 	var problems []string
-	if policy.Version != 1 {
-		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 1", policy.Version))
+	if policy.Version != 2 {
+		problems = append(problems, fmt.Sprintf("bootstrap policy version = %d, want 2", policy.Version))
 	}
 	if ledger.Version != policy.Version {
 		problems = append(problems, fmt.Sprintf("ledger version = %d, bootstrap policy requires %d", ledger.Version, policy.Version))
 	}
 	problems = append(problems, validateRowsAgainstPolicy("audit", policy.AuditBaseline, ledger.AuditBaseline, now)...)
 	problems = append(problems, validateRowsAgainstPolicy("debt", policy.Debt, ledger.Debt, now)...)
+	problems = append(problems, validateMediumRowsAgainstPolicy(policy.Medium, ledger.Medium, now)...)
+	problems = append(problems, validateReviewedHermeticRowsAgainstPolicy(policy.ReviewedHermeticBody, ledger.ReviewedHermeticBody)...)
+	problems = append(problems, validateRowsAgainstPolicy("small debt", policy.SmallDebt, ledger.SmallDebt, now)...)
 	return problems
 }
 
@@ -704,26 +1629,30 @@ func validateBaseline(prefix string, row Baseline, census Census) []string {
 }
 
 func knownScope(scope Scope) bool {
-	return scope == ScopeAll || scope == ScopeUntagged
+	return scope == ScopeAll || scope == ScopeUntagged || scope == ScopeCmdGCUntagged
 }
 
 func validateOwnership(prefix string, row Baseline, now time.Time) []string {
+	return validateOwnershipFields(prefix, row.OwnerBead, row.Invariant, row.ResourceOwner, row.MigrationTarget, row.Expires, now)
+}
+
+func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string, now time.Time) []string {
 	var problems []string
 	for name, value := range map[string]string{
-		"owner_bead":       row.OwnerBead,
-		"invariant":        row.Invariant,
-		"resource_owner":   row.ResourceOwner,
-		"migration_target": row.MigrationTarget,
+		"owner_bead":       owner,
+		"invariant":        invariant,
+		"resource_owner":   resourceOwner,
+		"migration_target": migration,
 	} {
 		if strings.TrimSpace(value) == "" {
 			problems = append(problems, fmt.Sprintf("%s: %s is required", prefix, name))
 		}
 	}
-	expiry, err := time.Parse("2006-01-02", row.Expires)
+	expiry, err := time.Parse("2006-01-02", expiryText)
 	if err != nil {
-		problems = append(problems, fmt.Sprintf("%s: expiry %q must use YYYY-MM-DD", prefix, row.Expires))
+		problems = append(problems, fmt.Sprintf("%s: expiry %q must use YYYY-MM-DD", prefix, expiryText))
 	} else if expiry.Before(day(now)) {
-		problems = append(problems, fmt.Sprintf("%s: expired %s", prefix, row.Expires))
+		problems = append(problems, fmt.Sprintf("%s: expired %s", prefix, expiryText))
 	}
 	return problems
 }
@@ -759,6 +1688,22 @@ func RenderMarkdown(ledger Ledger) string {
 		}
 	}
 	appendRows("Audit baseline", ledger.AuditBaseline)
+	for _, medium := range ledger.Medium {
+		resources := make([]string, 0, len(medium.Resources))
+		for _, resource := range medium.Resources {
+			resources = append(resources, string(resource))
+		}
+		rows = append(rows, row{
+			kind:      "Medium owner",
+			scope:     fmt.Sprintf("`%s` package `%s`", medium.PackageDir, medium.PackageName),
+			baseline:  medium.Owner + ": " + strings.Join(resources, ", "),
+			owner:     medium.OwnerBead,
+			invariant: medium.Invariant + "; " + medium.ResourceOwner,
+			migration: medium.MigrationTarget,
+			expiry:    medium.Expires,
+		})
+	}
+	appendRows("Small debt ratchet", ledger.SmallDebt)
 	appendRows("Source debt ratchet", ledger.Debt)
 	sort.Slice(rows, func(i, j int) bool {
 		left := rows[i].kind + "\x00" + rows[i].scope + "\x00" + rows[i].baseline
@@ -774,6 +1719,24 @@ func RenderMarkdown(ledger Ledger) string {
 		fmt.Fprintf(&output, "| %s | %s | %s | %s | %s | %s | %s |\n",
 			row.kind, row.scope, row.baseline, row.owner, row.invariant, row.migration, row.expiry)
 	}
+	if len(ledger.ReviewedHermeticBody) > 0 {
+		reviewed := append([]ReviewedHermeticBody(nil), ledger.ReviewedHermeticBody...)
+		sort.Slice(reviewed, func(i, j int) bool {
+			left := reviewed[i].PackageDir + "\x00" + reviewed[i].PackageName + "\x00" + reviewed[i].Owner
+			right := reviewed[j].PackageDir + "\x00" + reviewed[j].PackageName + "\x00" + reviewed[j].Owner
+			return left < right
+		})
+		output.WriteString("\n| Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |\n")
+		output.WriteString("| --- | --- | --- | --- |\n")
+		for _, body := range reviewed {
+			retained := "—"
+			if owner, exists := retainedRealOwnerFor(reviewedHermeticBodyKey(body)); exists {
+				retained = fmt.Sprintf("`%s` package `%s` — %s", owner.packageDir, owner.packageName, owner.owner)
+			}
+			fmt.Fprintf(&output, "| `%s` package `%s` — %s | %s | %s | %s |\n",
+				body.PackageDir, body.PackageName, body.Owner, body.EffectiveSize, body.MediumReason, retained)
+		}
+	}
 	output.WriteString(markdownEnd)
 	return output.String()
 }
@@ -784,6 +1747,8 @@ func renderedSourceScope(scope Scope) string {
 		return "all tracked test source"
 	case ScopeUntagged:
 		return "all untagged test source"
+	case ScopeCmdGCUntagged:
+		return "`cmd/gc` untagged test source"
 	default:
 		return string(scope)
 	}

@@ -548,6 +548,15 @@ export type CityUnregisterSucceededPayload = {
     request_id: string;
 };
 
+export type ConditionalWritesDegradedPayload = {
+    bd_version?: string;
+    mode: string;
+    origin: string;
+    reason: string;
+    store_id: string;
+    store_kind: string;
+};
+
 export type ConfigAgentResponse = {
     dir?: string;
     is_pool?: boolean;
@@ -835,7 +844,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2560,7 +2569,7 @@ export type RequestFailedPayload = {
     /**
      * Which operation failed.
      */
-    operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit';
+    operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit' | 'rig.create';
     /**
      * Correlation ID from the 202 response.
      */
@@ -2590,34 +2599,77 @@ export type RigActionBody = {
     status: string;
 };
 
-export type RigCreateInputBody = {
+export type RigCreateBody = {
     /**
      * Mainline branch (e.g. main, master). Auto-detected when omitted.
      */
     default_branch?: string;
     /**
+     * Git URL to clone (triggers async provisioning).
+     */
+    git_url?: string;
+    /**
      * Rig name.
      */
     name: string;
     /**
-     * Filesystem path.
+     * Filesystem path (server-derived for git_url clones).
      */
-    path: string;
+    path?: string;
     /**
      * Session name prefix.
      */
     prefix?: string;
+    /**
+     * Client-supplied idempotency key; reuse across retries.
+     */
+    request_id?: string;
 };
 
-export type RigCreatedOutputBody = {
+export type RigCreateResponseBody = {
     /**
-     * Created rig name.
+     * Resolved mainline branch (created/exists).
+     */
+    default_branch?: string;
+    /**
+     * City event-stream cursor captured before accept (202 only); pass as after_seq to the events stream to receive request.result.rig.create / rig.provision.progress / request.failed without replaying unrelated backlog.
+     */
+    event_cursor?: string;
+    /**
+     * Resolved session-name prefix (created/exists).
+     */
+    prefix?: string;
+    /**
+     * Correlation ID; echo of the request's request_id, or a server-minted id on 202.
+     */
+    request_id?: string;
+    /**
+     * Rig name (created/exists).
+     */
+    rig?: string;
+    /**
+     * created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).
+     */
+    status: 'created' | 'accepted' | 'exists';
+};
+
+export type RigCreateSucceededPayload = {
+    /**
+     * Resolved mainline branch.
+     */
+    default_branch: string;
+    /**
+     * Resolved session-name prefix.
+     */
+    prefix: string;
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+    /**
+     * Rig name that was provisioned.
      */
     rig: string;
-    /**
-     * Operation result.
-     */
-    status: string;
 };
 
 export type RigPatch = {
@@ -2653,6 +2705,29 @@ export type RigPatchSetInputBody = {
      * Override suspended state.
      */
     suspended?: boolean;
+};
+
+export type RigProvisionProgressPayload = {
+    /**
+     * Human-readable step detail.
+     */
+    detail?: string;
+    /**
+     * Correlation ID from the 202 response (empty on sync 201 provisions).
+     */
+    request_id?: string;
+    /**
+     * Rig name being provisioned.
+     */
+    rig: string;
+    /**
+     * Provisioning step that completed (clone, beads-init, packs, config, routes, …).
+     */
+    step: string;
+    /**
+     * True when the step reports a warn-and-continue condition.
+     */
+    warn?: boolean;
 };
 
 export type RigResponse = {
@@ -2731,6 +2806,21 @@ export type Run = {
     updated_at?: string;
 };
 
+export type RunCancelOutputBody = {
+    /**
+     * Count of the run's beads closed by the cancel.
+     */
+    closed: number;
+    /**
+     * The canceled run.
+     */
+    run_id: string;
+    /**
+     * Run status after the cancel wind-down.
+     */
+    status: RunStatus;
+};
+
 export type RunLastError = {
     /**
      * Machine-readable outcome code (e.g. fail, skipped, canceled).
@@ -2773,6 +2863,41 @@ export type RunScope = {
  */
 export type RunStatus = 'pending' | 'active' | 'waiting' | 'canceling' | 'completed' | 'failed' | 'canceled' | 'skipped';
 
+export type RunStatusCounts = {
+    /**
+     * Runs with work in progress.
+     */
+    active: number;
+    /**
+     * Runs terminated by cancellation.
+     */
+    canceled: number;
+    /**
+     * Runs winding down after cancellation.
+     */
+    canceling: number;
+    /**
+     * Runs completed successfully.
+     */
+    completed: number;
+    /**
+     * Runs completed with failure.
+     */
+    failed: number;
+    /**
+     * Runs created but not yet started.
+     */
+    pending: number;
+    /**
+     * Runs completed as a no-op or skip.
+     */
+    skipped: number;
+    /**
+     * Runs waiting on a dependency or gate.
+     */
+    waiting: number;
+};
+
 export type RunStep = {
     /**
      * Current assignee, when set.
@@ -2799,7 +2924,7 @@ export type RunStep = {
 /**
  * Closed lifecycle state of a run step.
  */
-export type RunStepStatus = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped';
+export type RunStepStatus = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled';
 
 export type RunStepsOutputBody = {
     /**
@@ -2810,6 +2935,21 @@ export type RunStepsOutputBody = {
      * Steps of the run.
      */
     steps: Array<RunStep> | null;
+};
+
+export type RunsCensusOutputBody = {
+    /**
+     * True when the incremental projection is incomplete.
+     */
+    partial?: boolean;
+    /**
+     * Sanitized reasons the census may be incomplete.
+     */
+    partial_errors?: Array<string> | null;
+    /**
+     * Every projected run by canonical lifecycle state.
+     */
+    status_counts: RunStatusCounts;
 };
 
 export type RunsListOutputBody = {
@@ -2825,6 +2965,10 @@ export type RunsListOutputBody = {
      * Runs in the city, newest activity first.
      */
     runs: Array<Run> | null;
+    /**
+     * All projected runs by canonical lifecycle state; not truncated by the row limit.
+     */
+    status_counts: RunStatusCounts;
 };
 
 export type ScopeGroup = {
@@ -3399,6 +3543,10 @@ export type StatusBody = {
      */
     beads_version?: string;
     /**
+     * Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface.
+     */
+    conditional_writes?: StatusConditionalWrites;
+    /**
      * Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
      */
     dolt_version?: string;
@@ -3468,6 +3616,56 @@ export type StatusBody = {
     work: StatusWorkCounts;
 };
 
+export type StatusConditionalWriteStoreVerdict = {
+    /**
+     * What the write path uses today: false only on a definitive incapable verdict.
+     */
+    capable: boolean;
+    /**
+     * Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).
+     */
+    kind: string;
+    /**
+     * Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+     */
+    latch: 'incapable' | 'unlatched';
+    /**
+     * Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+     */
+    probe: 'capable' | 'incapable' | 'unprobed';
+    /**
+     * Incapable cause, verbatim from the probe or latch.
+     */
+    reason?: string;
+    /**
+     * Store scope: city, or rig/<name>.
+     */
+    store_id: string;
+};
+
+export type StatusConditionalWrites = {
+    /**
+     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+     */
+    effective: 'off' | 'active' | 'degraded' | 'fail_closed' | 'pending_restart';
+    /**
+     * Boot-latched beads.conditional_writes mode.
+     */
+    mode: 'off' | 'auto' | 'require';
+    /**
+     * Retained rollout notices (env overrides, drift, invalid spellings).
+     */
+    notices?: Array<StatusRolloutNotice> | null;
+    /**
+     * Where the latched mode came from.
+     */
+    origin: 'builtin' | 'config' | 'env';
+    /**
+     * Per-store verdicts, one row per controller-owned store.
+     */
+    stores?: Array<StatusConditionalWriteStoreVerdict> | null;
+};
+
 export type StatusMailCounts = {
     /**
      * Total number of messages.
@@ -3518,6 +3716,33 @@ export type StatusRigDetail = {
      * Whether the rig is suspended (either explicitly or because all its agents are suspended).
      */
     suspended: boolean;
+};
+
+export type StatusRolloutNotice = {
+    /**
+     * Raw config spelling; empty when unset.
+     */
+    config_value?: string;
+    /**
+     * Raw env spelling as found.
+     */
+    env_value?: string;
+    /**
+     * Environment variable involved, when env-related.
+     */
+    env_var?: string;
+    /**
+     * Rollout gate key the notice is about.
+     */
+    flag_key: string;
+    /**
+     * Notice kind (env_overrides_config, pending_restart, invalid_value, ...).
+     */
+    kind: string;
+    /**
+     * Human-readable line carrying the gate and the outcome.
+     */
+    message: string;
 };
 
 export type StatusSessionCountsDetail = {
@@ -3730,6 +3955,10 @@ export type SupervisorRequestPayload = {
      */
     remote_addr_class: 'loopback' | 'private' | 'public' | 'unknown';
     /**
+     * The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line.
+     */
+    request_id?: string;
+    /**
      * HTTP response status code. Start-phase records use 0 before the final response status is known.
      */
     status: number;
@@ -3823,6 +4052,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
     type: 'bead.worktree.reaped';
 } & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
+    type: 'beads.conditional_writes.degraded';
+} & TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -3903,12 +4134,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultCityCreate) | ({
     type: 'request.result.city.unregister';
 } & TypedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.rig.create';
+} & TypedEventStreamEnvelopeRequestResultRigCreate) | ({
     type: 'request.result.session.create';
 } & TypedEventStreamEnvelopeRequestResultSessionCreate) | ({
     type: 'request.result.session.message';
 } & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'rig.provision.progress';
+} & TypedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -4091,6 +4326,23 @@ export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
     subject?: string;
     ts: string;
     type: 'bead.worktree.reaped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope beads.conditional_writes.degraded
+ */
+export type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
+    actor: string;
+    message?: string;
+    payload: ConditionalWritesDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'beads.conditional_writes.degraded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4792,6 +5044,23 @@ export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
 };
 
 /**
+ * TypedEventStreamEnvelope request.result.rig.create
+ */
+export type TypedEventStreamEnvelopeRequestResultRigCreate = {
+    actor: string;
+    message?: string;
+    payload: RigCreateSucceededPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.result.rig.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope request.result.session.create
  */
 export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
@@ -4839,6 +5108,23 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope rig.provision.progress
+ */
+export type TypedEventStreamEnvelopeRigProvisionProgress = {
+    actor: string;
+    message?: string;
+    payload: RigProvisionProgressPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.provision.progress';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5255,6 +5541,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
     type: 'bead.worktree.reaped';
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
+    type: 'beads.conditional_writes.degraded';
+} & TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -5335,12 +5623,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultCityCreate) | ({
     type: 'request.result.city.unregister';
 } & TypedTaggedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.rig.create';
+} & TypedTaggedEventStreamEnvelopeRequestResultRigCreate) | ({
     type: 'request.result.session.create';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionCreate) | ({
     type: 'request.result.session.message';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'rig.provision.progress';
+} & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -5531,6 +5823,24 @@ export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
     subject?: string;
     ts: string;
     type: 'bead.worktree.reaped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope beads.conditional_writes.degraded
+ */
+export type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: ConditionalWritesDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'beads.conditional_writes.degraded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6273,6 +6583,24 @@ export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope request.result.rig.create
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultRigCreate = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RigCreateSucceededPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.result.rig.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope request.result.session.create
  */
 export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
@@ -6323,6 +6651,24 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope rig.provision.progress
+ */
+export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RigProvisionProgressPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.provision.progress';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6745,6 +7091,127 @@ export type UnboundEventPayload = {
     session_id: string;
 };
 
+export type UsageBody = {
+    /**
+     * True when this city is configured to record local usage estimates.
+     */
+    available: boolean;
+    /**
+     * RFC3339 timestamp of the oldest fact included in this bounded read.
+     */
+    observed_from?: string;
+    /**
+     * True when the bounded reader skipped history or malformed records.
+     */
+    partial?: boolean;
+    /**
+     * Path-sanitized reasons the aggregate may be incomplete.
+     */
+    partial_reasons?: Array<string> | null;
+    /**
+     * Usage in the trailing recent window.
+     */
+    recent: UsageTotals;
+    /**
+     * Recent model usage per session, largest token volume first.
+     */
+    recent_by_session?: Array<UsageSessionRecent> | null;
+    /**
+     * Length of the recent window in seconds.
+     */
+    recent_window_secs: number;
+    /**
+     * True when new facts are currently being written to the local estimate log.
+     */
+    recording: boolean;
+    /**
+     * Source of this usage reading.
+     */
+    source: 'local_estimate' | 'unavailable';
+    /**
+     * Usage since local midnight on the supervisor host.
+     */
+    today: UsageTotals;
+    /**
+     * RFC3339 time at which the aggregate was built.
+     */
+    updated_at: string;
+};
+
+export type UsageSessionRecent = {
+    /**
+     * Prompt-cache creation tokens in the window.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens in the window.
+     */
+    cache_read_tokens: number;
+    /**
+     * List-price estimate for the window.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens in the window.
+     */
+    input_tokens: number;
+    /**
+     * Completion tokens in the window.
+     */
+    output_tokens: number;
+    /**
+     * Session (worker) name the facts were attributed to.
+     */
+    session: string;
+    /**
+     * Session bead id, when attributed.
+     */
+    session_id?: string;
+    /**
+     * Facts in this window whose price is unknown.
+     */
+    unpriced: number;
+};
+
+export type UsageTotals = {
+    /**
+     * Prompt-cache creation tokens.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens.
+     */
+    cache_read_tokens: number;
+    /**
+     * Compute (wall-clock) facts in the window.
+     */
+    compute_facts: number;
+    /**
+     * List-price estimate; decision-support only, never an authoritative charge.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens.
+     */
+    input_tokens: number;
+    /**
+     * Model facts (LLM invocations) in the window.
+     */
+    invocations: number;
+    /**
+     * Completion tokens.
+     */
+    output_tokens: number;
+    /**
+     * Facts with unknown pricing; their cost is not included in the estimate.
+     */
+    unpriced: number;
+    /**
+     * Compute wall-clock seconds.
+     */
+    wall_seconds: number;
+};
+
 export type WaitListBody = {
     /**
      * True when the lookup hit the per-scope cap and the list is partial.
@@ -7137,6 +7604,10 @@ export type PostV0CityData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path?: never;
     query?: never;
@@ -7145,9 +7616,29 @@ export type PostV0CityData = {
 
 export type PostV0CityErrors = {
     /**
-     * Error
+     * Unauthorized
      */
-    default: ErrorModel;
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
 };
 
 export type PostV0CityError = PostV0CityErrors[keyof PostV0CityErrors];
@@ -9543,6 +10034,10 @@ export type EmitEventData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -9567,6 +10062,10 @@ export type EmitEventErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -9829,6 +10328,10 @@ export type RegisterExtmsgAdapterData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -9853,6 +10356,10 @@ export type RegisterExtmsgAdapterErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -11725,6 +12232,10 @@ export type ReplyMailData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -11758,6 +12269,10 @@ export type ReplyMailErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -14031,7 +14546,7 @@ export type GetV0CityByCityNameRigsResponses = {
 export type GetV0CityByCityNameRigsResponse = GetV0CityByCityNameRigsResponses[keyof GetV0CityByCityNameRigsResponses];
 
 export type CreateRigData = {
-    body: RigCreateInputBody;
+    body: RigCreateBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -14054,46 +14569,26 @@ export type CreateRigData = {
 
 export type CreateRigErrors = {
     /**
-     * Bad Request
+     * Error
      */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
+    default: ErrorModel;
 };
 
 export type CreateRigError = CreateRigErrors[keyof CreateRigErrors];
 
 export type CreateRigResponses = {
     /**
+     * Rig already exists — idempotent request_id replay of a succeeded async create.
+     */
+    200: RigCreateResponseBody;
+    /**
      * Created
      */
-    201: RigCreatedOutputBody;
+    201: RigCreateResponseBody;
+    /**
+     * Provisioning accepted; watch the city event stream from event_cursor for request.result.rig.create, rig.provision.progress, or request.failed with this request_id.
+     */
+    202: RigCreateResponseBody;
 };
 
 export type CreateRigResponse = CreateRigResponses[keyof CreateRigResponses];
@@ -14141,6 +14636,44 @@ export type GetV0CityByCityNameRunsResponses = {
 
 export type GetV0CityByCityNameRunsResponse = GetV0CityByCityNameRunsResponses[keyof GetV0CityByCityNameRunsResponses];
 
+export type GetV0CityByCityNameRunsCensusData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/census';
+};
+
+export type GetV0CityByCityNameRunsCensusErrors = {
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsCensusError = GetV0CityByCityNameRunsCensusErrors[keyof GetV0CityByCityNameRunsCensusErrors];
+
+export type GetV0CityByCityNameRunsCensusResponses = {
+    /**
+     * OK
+     */
+    200: RunsCensusOutputBody;
+};
+
+export type GetV0CityByCityNameRunsCensusResponse = GetV0CityByCityNameRunsCensusResponses[keyof GetV0CityByCityNameRunsCensusResponses];
+
 export type GetV0CityByCityNameRunsByRunIdData = {
     body?: never;
     path: {
@@ -14186,6 +14719,62 @@ export type GetV0CityByCityNameRunsByRunIdResponses = {
 };
 
 export type GetV0CityByCityNameRunsByRunIdResponse = GetV0CityByCityNameRunsByRunIdResponses[keyof GetV0CityByCityNameRunsByRunIdResponses];
+
+export type PostV0CityByCityNameRunsByRunIdCancelData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Run identifier.
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/{run_id}/cancel';
+};
+
+export type PostV0CityByCityNameRunsByRunIdCancelErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameRunsByRunIdCancelError = PostV0CityByCityNameRunsByRunIdCancelErrors[keyof PostV0CityByCityNameRunsByRunIdCancelErrors];
+
+export type PostV0CityByCityNameRunsByRunIdCancelResponses = {
+    /**
+     * Accepted
+     */
+    202: RunCancelOutputBody;
+};
+
+export type PostV0CityByCityNameRunsByRunIdCancelResponse = PostV0CityByCityNameRunsByRunIdCancelResponses[keyof PostV0CityByCityNameRunsByRunIdCancelResponses];
 
 export type GetV0CityByCityNameRunsByRunIdStepsData = {
     body?: never;
@@ -15766,6 +16355,53 @@ export type PostV0CityByCityNameUnregisterResponses = {
 };
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];
+
+export type GetV0CityByCityNameUsageData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Omit the per-session breakdown and return city-level totals only.
+         */
+        aggregate_only?: boolean;
+    };
+    url: '/v0/city/{cityName}/usage';
+};
+
+export type GetV0CityByCityNameUsageErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameUsageError = GetV0CityByCityNameUsageErrors[keyof GetV0CityByCityNameUsageErrors];
+
+export type GetV0CityByCityNameUsageResponses = {
+    /**
+     * OK
+     */
+    200: UsageBody;
+};
+
+export type GetV0CityByCityNameUsageResponse = GetV0CityByCityNameUsageResponses[keyof GetV0CityByCityNameUsageResponses];
 
 export type GetV0CityByCityNameWaitByIdData = {
     body?: never;

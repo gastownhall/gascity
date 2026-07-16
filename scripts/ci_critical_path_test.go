@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,20 +17,24 @@ type ciCriticalPathWorkflow struct {
 }
 
 type ciCriticalPathJob struct {
-	Name     string                    `yaml:"name"`
-	If       string                    `yaml:"if"`
-	Needs    ciCriticalPathNeeds       `yaml:"needs"`
-	Steps    []ciCriticalPathStep      `yaml:"steps"`
-	Strategy ciCriticalPathJobStrategy `yaml:"strategy"`
+	Name            string                    `yaml:"name"`
+	If              string                    `yaml:"if"`
+	RunsOn          string                    `yaml:"runs-on"`
+	Needs           ciCriticalPathNeeds       `yaml:"needs"`
+	Steps           []ciCriticalPathStep      `yaml:"steps"`
+	Strategy        ciCriticalPathJobStrategy `yaml:"strategy"`
+	ContinueOnError bool                      `yaml:"continue-on-error"`
 }
 
 type ciCriticalPathJobStrategy struct {
-	Matrix ciCriticalPathJobMatrix `yaml:"matrix"`
+	FailFast *bool                   `yaml:"fail-fast"`
+	Matrix   ciCriticalPathJobMatrix `yaml:"matrix"`
 }
 
 type ciCriticalPathJobMatrix struct {
 	Include []ciCriticalPathMatrixEntry `yaml:"include"`
 	Shard   []int                       `yaml:"shard"`
+	Keys    []string                    `yaml:"-"`
 }
 
 type ciCriticalPathMatrixEntry struct {
@@ -40,10 +45,190 @@ type ciCriticalPathMatrixEntry struct {
 type ciCriticalPathNeeds []string
 
 type ciCriticalPathStep struct {
-	Name string            `yaml:"name"`
-	Run  string            `yaml:"run"`
-	Uses string            `yaml:"uses"`
-	With map[string]string `yaml:"with"`
+	Name            string            `yaml:"name"`
+	If              string            `yaml:"if"`
+	Run             string            `yaml:"run"`
+	Uses            string            `yaml:"uses"`
+	ContinueOnError bool              `yaml:"continue-on-error"`
+	Env             map[string]string `yaml:"env"`
+	With            map[string]string `yaml:"with"`
+}
+
+const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
+
+const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
+
+func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job, ok := wf.Jobs["cmd-gc-process"]
+	if !ok {
+		t.Fatal("CI workflow has no cmd-gc-process job")
+	}
+
+	wantShards := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	if !slices.Equal(job.Strategy.Matrix.Shard, wantShards) {
+		t.Fatalf("cmd-gc-process shards = %v, want %v", job.Strategy.Matrix.Shard, wantShards)
+	}
+	if !slices.Equal(job.Strategy.Matrix.Keys, []string{"shard"}) {
+		t.Fatalf("cmd-gc-process matrix keys = %v, want only shard", job.Strategy.Matrix.Keys)
+	}
+	if job.ContinueOnError {
+		t.Fatal("cmd-gc-process job must surface failures")
+	}
+	if job.RunsOn != cmdGCProcessRunner {
+		t.Errorf("cmd-gc-process runs-on = %q, want recorded runner %q", job.RunsOn, cmdGCProcessRunner)
+	}
+	if job.Strategy.FailFast == nil || *job.Strategy.FailFast {
+		t.Fatal("cmd-gc-process strategy must explicitly disable fail-fast so all shard timings complete")
+	}
+
+	var runIndices, uploadIndices []int
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if strings.Contains(step.Run, "test-cmd-gc-process-shard") {
+			runIndices = append(runIndices, i)
+		}
+		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+			uploadIndices = append(uploadIndices, i)
+		}
+	}
+	if len(runIndices) != 1 {
+		t.Fatalf("cmd-gc-process process-shard step indices = %v, want exactly one", runIndices)
+	}
+	if len(uploadIndices) != 1 {
+		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly one", uploadIndices)
+	}
+	runIndex, uploadIndex := runIndices[0], uploadIndices[0]
+	if uploadIndex <= runIndex {
+		t.Fatalf("cmd-gc-process timing upload step %d must follow process-shard step %d", uploadIndex, runIndex)
+	}
+	runStep := &job.Steps[runIndex]
+	uploadStep := &job.Steps[uploadIndex]
+	if runStep.Name != "Run cmd/gc process shard" {
+		t.Errorf("cmd-gc-process execution step name = %q", runStep.Name)
+	}
+	if runStep.If != "" {
+		t.Errorf("cmd-gc-process execution condition = %q, want unconditional product execution", runStep.If)
+	}
+	if runStep.ContinueOnError {
+		t.Error("cmd-gc-process execution step must surface product failures")
+	}
+	if uploadStep.Name != "Upload cmd/gc process timing" {
+		t.Errorf("cmd-gc-process timing upload step name = %q", uploadStep.Name)
+	}
+
+	wantEnv := map[string]string{
+		"GO_TEST_TIMING_FILE":    "${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json",
+		"GO_TEST_TIMING_NAME":    "cmd-gc-process-${{ matrix.shard }}-of-12",
+		"GO_TEST_TIMING_VARIANT": "linux-default",
+		"GO_TEST_RUNNER_LABEL":   cmdGCProcessRunner,
+		"EXTRA_TEST_ENV":         cmdGCProcessExtraTestEnv,
+	}
+	if len(runStep.Env) != len(wantEnv) {
+		t.Errorf("cmd-gc-process timing env = %v, want exactly %v", runStep.Env, wantEnv)
+	}
+	for name, want := range wantEnv {
+		if got := runStep.Env[name]; got != want {
+			t.Errorf("cmd-gc-process %s = %q, want %q", name, got, want)
+		}
+	}
+
+	wantRun := `make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"`
+	if got := strings.TrimSpace(runStep.Run); got != wantRun {
+		t.Errorf("cmd-gc-process run command:\n%s\nwant:\n%s", got, wantRun)
+	}
+	if strings.Contains(runStep.Run, "CPU_COUNT") {
+		t.Error("cmd-gc-process must let the timing collector discover CPU count instead of configuring it")
+	}
+
+	const pinnedUploadArtifactV4 = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+	if uploadStep.Uses != pinnedUploadArtifactV4 {
+		t.Errorf("cmd-gc-process timing upload action = %q, want pinned v4 %q", uploadStep.Uses, pinnedUploadArtifactV4)
+	}
+	if uploadStep.If != "${{ always() }}" {
+		t.Errorf("cmd-gc-process timing upload condition = %q, want always()", uploadStep.If)
+	}
+	if uploadStep.ContinueOnError {
+		t.Error("cmd-gc-process timing upload must surface publication failures")
+	}
+	wantUpload := map[string]string{
+		"name":              "timing-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}",
+		"path":              "${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json",
+		"if-no-files-found": "warn",
+		"retention-days":    "7",
+	}
+	if len(uploadStep.With) != len(wantUpload) {
+		t.Errorf("cmd-gc-process timing upload settings = %v, want exactly %v", uploadStep.With, wantUpload)
+	}
+	for name, want := range wantUpload {
+		if got := uploadStep.With[name]; got != want {
+			t.Errorf("cmd-gc-process timing upload %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
+	fixture := newGoTestShardFixture(t)
+	timingDir := filepath.Join(fixture.tmpDir, "timing artifacts")
+	if err := os.Mkdir(timingDir, 0o755); err != nil {
+		t.Fatalf("create timing directory: %v", err)
+	}
+	timingFile := filepath.Join(timingDir, "cmd gc process.json")
+
+	cmd := makeCommand(
+		"test-cmd-gc-process-shard",
+		"CMD_GC_PROCESS_SHARD=1",
+		"CMD_GC_PROCESS_TOTAL=2",
+		"EXTRA_TEST_ENV="+cmdGCProcessExtraTestEnv,
+	)
+	cmd.Dir = fixture.repoRoot
+	cmd.Env = []string{
+		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + fixture.homeDir,
+		"SHELL=/bin/sh",
+		"LANG=C.UTF-8",
+		"TMPDIR=" + fixture.tmpDir,
+		"GC_TEST_NO_SLICE=1",
+		"SYS_USR_CGO_FALLBACK=0",
+		"GO_TEST_TIMING_FILE=" + timingFile,
+		"GO_TEST_TIMING_NAME=cmd-gc-process-1-of-2",
+		"GO_TEST_TIMING_VARIANT=linux default",
+		"GO_TEST_RUNNER_LABEL=blacksmith 32 vcpu",
+		"GO_TEST_RUNNER_CPU_COUNT=99",
+		"GITHUB_SHA=abc123",
+		"GITHUB_WORKFLOW=CI workflow with spaces",
+		"GITHUB_RUN_ID=77",
+		"GITHUB_RUN_ATTEMPT=2",
+		"GITHUB_JOB=cmd gc process",
+		"RUNNER_NAME=runner name with spaces",
+		"RUNNER_OS=Linux",
+		"RUNNER_ARCH=X64",
+	}
+	status, output := runShardCommand(t, cmd)
+	if status == 0 || !strings.Contains(string(output), "Error 23") {
+		t.Fatalf("make status = %d, want product failure 23 to remain authoritative\n%s", status, output)
+	}
+
+	data, err := os.ReadFile(timingFile)
+	if err != nil {
+		t.Fatalf("read timing artifact after Make isolation: %v\n%s", err, output)
+	}
+	var artifact observableTimingArtifact
+	if err := json.Unmarshal(data, &artifact); err != nil {
+		t.Fatalf("decode timing artifact after Make isolation: %v\n%s", err, data)
+	}
+	if artifact.ShardID != "cmd-gc-process-1-of-2" || artifact.Variant != "linux default" {
+		t.Fatalf("timing identity after Make isolation = shard %q variant %q", artifact.ShardID, artifact.Variant)
+	}
+	if artifact.CommitSHA != "abc123" || artifact.Workflow != "CI workflow with spaces" || artifact.RunID != "77" || artifact.RunAttempt != "2" || artifact.Job != "cmd gc process" {
+		t.Fatalf("timing run metadata after Make isolation = %+v", artifact)
+	}
+	wantRunner := observableTimingRunner{
+		Label: "blacksmith 32 vcpu", Name: "runner name with spaces", OS: "Linux", Arch: "X64", CPUCount: 16,
+	}
+	if artifact.Runner != wantRunner {
+		t.Fatalf("timing runner after Make isolation = %+v, want %+v", artifact.Runner, wantRunner)
+	}
 }
 
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
@@ -365,6 +550,19 @@ func (n *ciCriticalPathNeeds) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+func (m *ciCriticalPathJobMatrix) UnmarshalYAML(node *yaml.Node) error {
+	type plainMatrix ciCriticalPathJobMatrix
+	var decoded plainMatrix
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*m = ciCriticalPathJobMatrix(decoded)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		m.Keys = append(m.Keys, node.Content[i].Value)
+	}
+	return nil
+}
+
 func TestForkVerifyRunsOnlyInForks(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "fork-verify.yml")
 	job, ok := wf.Jobs["verify"]
@@ -417,6 +615,98 @@ func TestPackGateAddsOnlyParallelPackCoverage(t *testing.T) {
 	}
 	if !smokesLiveRegistry {
 		t.Error("pack-gate must retain the live registry/materialization smoke test")
+	}
+}
+
+func TestGoReleaserOutputCannotDirtyReleaseBuilds(t *testing.T) {
+	gitignorePath := filepath.Join(repoRoot(t), ".gitignore")
+	body, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", gitignorePath, err)
+	}
+
+	var ignoresRootDist bool
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == "/dist/" {
+			ignoresRootDist = true
+			break
+		}
+	}
+	if !ignoresRootDist {
+		t.Fatal("root .gitignore must contain anchored /dist/ so GoReleaser metadata cannot set vcs.modified=true")
+	}
+}
+
+func TestReleasePipelinesVerifyExactBinaryMetadata(t *testing.T) {
+	tests := []struct {
+		name               string
+		workflow           string
+		job                string
+		wantCommitResolver string
+		wantVersionArg     string
+	}{
+		{
+			name:               "release",
+			workflow:           "release.yml",
+			job:                "release",
+			wantCommitResolver: `git rev-parse "${GITHUB_REF_NAME}^{commit}"`,
+			wantVersionArg:     `"${GITHUB_REF_NAME#v}"`,
+		},
+		{
+			name:               "rc gate snapshot",
+			workflow:           "rc-gate.yml",
+			job:                "ubuntu_goreleaser_snapshot",
+			wantCommitResolver: "git rev-parse HEAD",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := readCriticalPathWorkflow(t, tt.workflow)
+			job, ok := wf.Jobs[tt.job]
+			if !ok {
+				t.Fatalf("workflow %s has no %s job", tt.workflow, tt.job)
+			}
+
+			goreleaserIndex := -1
+			ignoreCheckIndex := -1
+			metadataCheckIndex := -1
+			var metadataCheck ciCriticalPathStep
+			for i, step := range job.Steps {
+				if strings.HasPrefix(step.Uses, "goreleaser/goreleaser-action@") {
+					goreleaserIndex = i
+				}
+				if strings.Contains(step.Run, "make check-release-dist-ignore") {
+					ignoreCheckIndex = i
+				}
+				if step.Name == "Verify release binary metadata" {
+					metadataCheckIndex = i
+					metadataCheck = step
+				}
+			}
+
+			if goreleaserIndex < 0 {
+				t.Fatal("GoReleaser step not found")
+			}
+			if ignoreCheckIndex < 0 || ignoreCheckIndex >= goreleaserIndex {
+				t.Fatalf("release-output ignore check index = %d, want before GoReleaser index %d", ignoreCheckIndex, goreleaserIndex)
+			}
+			if metadataCheckIndex <= goreleaserIndex {
+				t.Fatalf("binary metadata check index = %d, want after GoReleaser index %d", metadataCheckIndex, goreleaserIndex)
+			}
+			if metadataCheck.ContinueOnError {
+				t.Fatal("binary metadata verification must block release progression")
+			}
+			if !strings.Contains(metadataCheck.Run, "scripts/verify-release-binary-metadata.sh") {
+				t.Fatal("binary metadata verification must use the shared checker")
+			}
+			if !strings.Contains(metadataCheck.Run, tt.wantCommitResolver) {
+				t.Errorf("binary metadata verification does not resolve the expected commit with %q", tt.wantCommitResolver)
+			}
+			if tt.wantVersionArg != "" && !strings.Contains(metadataCheck.Run, tt.wantVersionArg) {
+				t.Errorf("binary metadata verification does not require release version %s", tt.wantVersionArg)
+			}
+		})
 	}
 }
 

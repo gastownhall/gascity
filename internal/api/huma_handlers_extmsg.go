@@ -89,7 +89,10 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 				return nil, apierr.Internal.Msg(handleErr.Error())
 			}
 		}
-		go s.extmsgNotifyInboundMembers(s.backgroundCtx(), *input.Body.Message)
+		message := *input.Body.Message
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyInboundMembers(ctx, message)
+		})
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
 			out.Body = *result
@@ -167,7 +170,10 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 			notifyConversation = result.Receipt.Conversation
 		}
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
-		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID, "")
+		text, sessionID := input.Body.Text, input.Body.SessionID
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyMembers(ctx, notifyConversation, sourceDisplay, "agent", text, sessionID, "")
+		})
 	}
 	out := &ExtMsgOutboundOutput{}
 	if result != nil {
@@ -530,24 +536,36 @@ func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapter
 
 // humaHandleExtMsgAdapterRegister is the Huma-typed handler for POST /v0/extmsg/adapters.
 func (s *Server) humaHandleExtMsgAdapterRegister(_ context.Context, input *ExtMsgAdapterRegisterInput) (*ExtMsgAdapterRegisterOutput, error) {
-	reg, err := s.humaExtmsgAdapterRegistry()
+	// Idempotency: register at most once per Idempotency-Key. Register itself
+	// is an add-or-replace upsert; the win is suppressing a duplicate
+	// ExtMsgAdapterAdded event on retry. The cached value is the resolved
+	// adapter name — the other body fields are echoes of the input, which the
+	// body hash pins to be identical on replay.
+	name, err := withIdempotency(s.idem, "/v0/extmsg/adapters", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			reg, regErr := s.humaExtmsgAdapterRegistry()
+			if regErr != nil {
+				return "", regErr
+			}
+
+			resolved := input.Body.Name
+			if resolved == "" {
+				resolved = input.Body.Provider + "/" + input.Body.AccountID
+			}
+
+			adapter := extmsg.NewHTTPAdapter(resolved, input.Body.CallbackURL, input.Body.Capabilities)
+			key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
+			reg.Register(key, adapter)
+
+			s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, resolved, extmsg.AdapterEventPayload{
+				Provider:  input.Body.Provider,
+				AccountID: input.Body.AccountID,
+			})
+			return resolved, nil
+		})
 	if err != nil {
 		return nil, err
 	}
-
-	name := input.Body.Name
-	if name == "" {
-		name = input.Body.Provider + "/" + input.Body.AccountID
-	}
-
-	adapter := extmsg.NewHTTPAdapter(name, input.Body.CallbackURL, input.Body.Capabilities)
-	key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
-	reg.Register(key, adapter)
-
-	s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, name, extmsg.AdapterEventPayload{
-		Provider:  input.Body.Provider,
-		AccountID: input.Body.AccountID,
-	})
 	out := &ExtMsgAdapterRegisterOutput{}
 	out.Body.Status = "registered"
 	out.Body.Provider = input.Body.Provider

@@ -2,6 +2,38 @@ package main
 
 import "testing"
 
+func TestIsOperationalScript(t *testing.T) {
+	cases := []struct {
+		rel  string
+		want bool
+	}{
+		{"city-start.sh", true},
+		{"city-stop.sh", true},
+		{"update-gascity.sh", true},
+		{"update-external-tools.sh", true},
+		// Non-operational / agent-relevant scripts stay content-hashed.
+		{"gc-human-notify.sh", false},
+		{"hq-noms-recovery.sh", false},
+		{"embedder-eval.py", false},
+		{"gc-beads-bd.sh", false},
+		// Prefix must be followed by a hyphen + a name + .sh; bare stems and
+		// non-.sh extensions are not operational.
+		{"city.sh", false},
+		{"update.sh", false},
+		{"city-start.py", false},
+		{"update-gascity.txt", false},
+		{"a.sh", false},
+		// Match is on the basename, not a substring of the path.
+		{"sub/update-gascity.sh", true},
+		{"my-update-tool.sh", false},
+	}
+	for _, c := range cases {
+		if got := isOperationalScript(c.rel); got != c.want {
+			t.Errorf("isOperationalScript(%q) = %v, want %v", c.rel, got, c.want)
+		}
+	}
+}
+
 func TestT3BridgeStartupEnvelopeModel_PrefersResolvedEnvModel(t *testing.T) {
 	tp := TemplateParams{
 		Env: map[string]string{

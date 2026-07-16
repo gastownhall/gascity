@@ -258,7 +258,7 @@ func loadSessionsForCompletion() []session.Info {
 		if err != nil {
 			return
 		}
-		sp, err := newSessionProviderFromContextWithError(providerCtx, sessionBeads)
+		sp, err := newSessionProviderFromContext(providerCtx, sessionBeads)
 		if err != nil {
 			return
 		}

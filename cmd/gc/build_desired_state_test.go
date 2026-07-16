@@ -4141,6 +4141,88 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 	}
 }
 
+func TestRealizePoolDesiredSessionsLiveRetryPreservesLauncherWorkDir(t *testing.T) {
+	tests := []struct {
+		name          string
+		currentBeadID string
+	}{
+		{name: "worker marker still names prior attempt", currentBeadID: "fi-old"},
+		{name: "worker marker already names retry attempt", currentBeadID: "fi-new"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			launcherWorkDir := filepath.Join(t.TempDir(), "fi-old-write-review-report")
+			reusable, err := store.Create(beads.Bead{
+				Title:  "worker live retry",
+				Type:   sessionBeadType,
+				Status: "open",
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"template":                              "worker",
+					"agent_name":                            "worker-1",
+					"alias":                                 "worker-1",
+					"session_name":                          "worker-live-retry",
+					"state":                                 string(sessionpkg.StateAwake),
+					"pool_slot":                             "1",
+					poolManagedMetadataKey:                  boolMetadata(true),
+					sessionpkg.CurrentBeadIDKey:             tt.currentBeadID,
+					beadmeta.TriggerBeadIDMetadataKey:       "fi-old",
+					beadmeta.WorkDirMetadataKey:             launcherWorkDir,
+					beadmeta.LegacyWorkDirMetadataKey:       launcherWorkDir,
+					beadmeta.TriggerBeadStoreRefMetadataKey: "rig:fixture",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			snapshot := &sessionBeadSnapshot{}
+			snapshot.addInfo(sessiontest.SeedBead(t, reusable))
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = snapshot
+
+			retry := workBead("fi-new", "worker", reusable.ID, "in_progress", 1)
+			states := ComputePoolDesiredStates(cfg, []beads.Bead{retry}, snapshot.OpenInfos(), nil)
+			if len(states) != 1 || len(states[0].Requests) != 1 {
+				t.Fatalf("retry desired state = %#v, want one request", states)
+			}
+			request := states[0].Requests[0]
+			if request.Tier != "resume" || request.SessionBeadID != reusable.ID || request.WorkBeadID != retry.ID {
+				t.Fatalf("retry request = %#v, want concrete resume of %s for %s", request, reusable.ID, retry.ID)
+			}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], states[0], map[string]TemplateParams{}, &stderr)
+
+			stored, err := store.Get(reusable.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != retry.ID {
+				t.Fatalf("trigger bead metadata = %q, want %q", got, retry.ID)
+			}
+			if got := stored.Metadata[beadmeta.WorkDirMetadataKey]; got != launcherWorkDir {
+				t.Fatalf("gc.work_dir = %q, want live launcher path %q", got, launcherWorkDir)
+			}
+			if got := stored.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != launcherWorkDir {
+				t.Fatalf("work_dir = %q, want live launcher path %q", got, launcherWorkDir)
+			}
+		})
+	}
+}
+
 func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *testing.T) {
 	maxWakes := 1
 	store := beads.NewMemStore()

@@ -19,6 +19,20 @@ func TestMemStore(t *testing.T) {
 	beadstest.RunMetadataTests(t, factory)
 }
 
+func TestMemStoreConditionalWriterConformance(t *testing.T) {
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "MemStore",
+		func(_ *testing.T) beads.Store { return beads.NewMemStore() },
+		beadstest.ConditionalWriterOptions{
+			SuppliesCurrent: true,
+			OpenDisabled: func(_ *testing.T) beads.Store {
+				s := beads.NewMemStore()
+				s.DisableConditionalWrites = true
+				return s
+			},
+		},
+	)
+}
+
 func TestMemStoreSetMetadata(t *testing.T) {
 	s := beads.NewMemStore()
 	b, err := s.Create(beads.Bead{Title: "test"})

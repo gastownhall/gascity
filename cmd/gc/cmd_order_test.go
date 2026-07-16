@@ -3072,6 +3072,52 @@ prefix = "ct"
 	}
 }
 
+// TestOrderRunExecSuccessRedactsProjectedGitHubToken proves that when a manual
+// `gc order run` exec order succeeds after echoing the controller's projected
+// GitHub token, the token is redacted from the combined output printed to
+// stdout. The exec env projects GH_TOKEN/GITHUB_TOKEN into the child (see
+// projectGitHubTokenExecEnv), so the success path must scrub them just like the
+// failure path does — a passing order that prints the token would otherwise
+// leak it verbatim.
+func TestOrderRunExecSuccessRedactsProjectedGitHubToken(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	// Echo the projected token to the child's combined output, then succeed so
+	// the success (stdout) branch runs.
+	a := orders.Order{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN"`,
+	}
+
+	var stdout, stderr bytes.Buffer
+	result := doOrderRunExecResult(a, cityDir, cfg, nil, &stdout, &stderr)
+	if result.code != 0 {
+		t.Fatalf("doOrderRunExecResult = %d, want exec success; stdout=%q stderr=%q", result.code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), secret) {
+		t.Fatalf("stdout leaked projected GitHub token: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[redacted]") {
+		t.Fatalf("stdout = %q, want redaction marker for the echoed token", stdout.String())
+	}
+}
+
 // --- gc order history ---
 
 func TestOrderHistory(t *testing.T) {

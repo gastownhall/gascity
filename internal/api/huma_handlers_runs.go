@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // runResourcePath is the canonical Run resource URL for one run — the value a
@@ -48,6 +49,15 @@ const (
 type runFoldResult struct {
 	beads        []beads.Bead
 	decodeMisses int
+}
+
+const runCensusPartialReason = "run projection is incomplete"
+
+// RunCensusSource serves canonical counts from an incremental per-city
+// projector. The bool is false when the requested city is unknown to the
+// source.
+type RunCensusSource interface {
+	RunCensus(context.Context, string) (runproj.CanonicalRunCensus, bool)
 }
 
 // runFold reads the city event log, folds it into the latest bead snapshot per
@@ -98,20 +108,24 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	if err != nil {
 		return nil, runProjectionUnavailable(err)
 	}
-	summary := runproj.BuildRunSummary(fold.beads)
+	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(fold.beads)
 	byID := beadsByID(fold.beads)
+	startedByRun := countStartedMembersByRun(fold.beads, censusLanes)
 
 	limit := normalizeRunsListLimit(input.Limit)
 	lanes := allRunLanes(summary)
+	rowCount := min(limit, len(lanes))
+	projected := make([]Run, 0, rowCount)
+	for i := range rowCount {
+		lane := lanes[i]
+		projected = append(projected, laneToRun(lane, byID, startedByRun[lane.ID]))
+	}
 
 	out := &RunsListOutput{}
-	out.Body.Runs = make([]Run, 0, len(lanes))
-	for i := range lanes {
-		if len(out.Body.Runs) >= limit {
-			break
-		}
-		out.Body.Runs = append(out.Body.Runs, laneToRun(lanes[i], byID, fold.beads))
-	}
+	out.Body.StatusCounts = runStatusCountsFromProjection(
+		runproj.CountCanonicalRunStatuses(fold.beads, censusLanes),
+	)
+	out.Body.Runs = projected
 
 	// Do not silently hide incompleteness: the projection caps the historical
 	// lane list, the caller-supplied limit can drop runs, and a corrupt event
@@ -129,6 +143,36 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 	return out, nil
 }
 
+func (s *Server) humaHandleRunsCensus(ctx context.Context, input *RunsCensusInput) (*RunsCensusOutput, error) {
+	if s.runCensusSource == nil {
+		return nil, apierr.ServiceUnavailable.Msg("run census is unavailable")
+	}
+	census, ok := s.runCensusSource.RunCensus(ctx, input.CityName)
+	if !ok {
+		return nil, apierr.ServiceUnavailable.Msg("run census is unavailable")
+	}
+	if !census.Ready {
+		return nil, apierr.ServiceUnavailable.Msg("run census is warming")
+	}
+	out := &RunsCensusOutput{}
+	out.Body.StatusCounts = runStatusCountsFromProjection(census.StatusCounts)
+	out.Body.Partial = census.Partial
+	if census.Partial {
+		// The source may carry local diagnostics. The public typed endpoint exposes
+		// only this closed, operator-safe reason so paths and error prose never leak.
+		out.Body.PartialErrors = []string{runCensusPartialReason}
+	}
+	return out, nil
+}
+
+func runStatusCountsFromProjection(counts runproj.CanonicalRunStatusCounts) RunStatusCounts {
+	return RunStatusCounts{
+		Pending: counts.Pending, Active: counts.Active, Waiting: counts.Waiting,
+		Canceling: counts.Canceling, Completed: counts.Completed, Failed: counts.Failed,
+		Canceled: counts.Canceled, Skipped: counts.Skipped,
+	}
+}
+
 // humaHandleRunGet is the Huma-typed handler for
 // GET /v0/city/{cityName}/runs/{run_id}. It resolves the single run off the fold
 // via BuildRunLane, so a completed run beyond the list's historical cap is still
@@ -142,7 +186,7 @@ func (s *Server) humaHandleRunGet(_ context.Context, input *RunGetInput) (*RunGe
 	if !ok {
 		return nil, apierr.RunNotFound.Msgf("run not found: %s", input.RunID)
 	}
-	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), fold.beads)}, nil
+	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), countStartedMembers(fold.beads, lane.ID))}, nil
 }
 
 // humaHandleRunSteps is the Huma-typed handler for
@@ -177,16 +221,139 @@ func (s *Server) humaHandleRunSteps(_ context.Context, input *RunStepsInput) (*R
 	return out, nil
 }
 
+// runCanceledCloseReason is the close_reason stamped on beads wound down by a run
+// cancel, distinguishing an operator cancel from a skip-directive teardown.
+const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+
+// humaHandleRunCancel is the Huma-typed handler for
+// POST /v0/city/{cityName}/runs/{run_id}/cancel. It stamps cancel intent on the
+// run root and synchronously winds the run down — closing the root and its open
+// beads with a canceled outcome so the dispatcher finds no more ready work and
+// the run starves. Registered with a 202 default status: in-flight sessions
+// finish their current step before idling, so the wind-down is accepted, not
+// instantaneous.
+func (s *Server) humaHandleRunCancel(_ context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
+	runID := strings.TrimSpace(input.RunID)
+	res, err := s.cancelRun(runID)
+	if err != nil {
+		// A store read/write failed mid-cancel: do NOT report a cancellation we
+		// could not substantiate. 503 is retryable; the run keeps running.
+		return nil, apierr.ServiceUnavailable.Msgf("run cancel failed: %v", err)
+	}
+	if !res.found {
+		return nil, apierr.RunNotFound.Msgf("run not found: %s", runID)
+	}
+	if res.terminal {
+		return nil, apierr.ConflictWrongState.Msgf("run %s is already terminal; nothing to cancel", runID)
+	}
+	out := &RunCancelOutput{}
+	out.Body.RunID = runID
+	out.Body.Status = res.status
+	out.Body.Closed = res.closed
+	return out, nil
+}
+
+// cancelRunResult is the outcome of a cancelRun wind-down.
+type cancelRunResult struct {
+	found    bool      // a workflow run root with this id exists
+	terminal bool      // every matching root was already terminal (nothing to cancel)
+	closed   int       // beads newly closed by the cancel
+	status   RunStatus // resulting run status
+}
+
+// cancelRun winds down the run rooted at runID across every workflow store,
+// closing each open root and its still-OPEN member beads with a canceled
+// outcome. It reuses the workflow teardown close ordering (descendants before
+// the root, blockers before blocked) so a strict store accepts the batch. The
+// cancel-intent marker is stamped root-only, together with the root's own close:
+// on an atomic store the two commit as one transaction, so a failed close
+// persists neither and never strands an open, half-marked root; on a non-atomic
+// store the marker is durably recorded so the returned 5xx's retry completes the
+// wind-down. Already-terminal runs (and already-closed members) are left
+// untouched — closing a completed member would rewrite its recorded outcome. Any
+// store read/write failure is returned so the caller reports a 5xx rather than a
+// phantom success.
+func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
+	var res cancelRunResult
+	for _, info := range s.workflowStores() {
+		if info.store == nil {
+			continue
+		}
+		roots, err := findWorkflowRoots(info.store, runID)
+		if err != nil {
+			return res, err
+		}
+		for _, root := range roots {
+			res.found = true
+			if isClosedStatus(root.Status) {
+				continue // already terminal — nothing to wind down
+			}
+			n, err := sourceworkflow.CloseWorkflowSubtreeAs(
+				info.store,
+				root.ID,
+				beadmeta.OutcomeCanceled,
+				runCanceledCloseReason,
+				map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+			)
+			if err != nil {
+				return res, err
+			}
+			res.closed += n
+			res.status = RunStatusCanceled
+		}
+	}
+	if res.found && res.status == "" {
+		res.terminal = true
+	}
+	return res, nil
+}
+
+// findWorkflowRoots returns the graph-workflow roots in store that match runID
+// (Get by id + List by kind=workflow/workflow_id). Root membership uses
+// sourceworkflow.IsWorkflowRoot (gc.kind=workflow OR gc.formula_contract=graph.v2)
+// so a graph.v2-only root — one the Run resource lists but that lacks the
+// gc.kind=workflow marker — is still cancellable, not a false 404. A non-NotFound
+// store error is returned so the caller reports a 5xx.
+func findWorkflowRoots(store beads.Store, runID string) ([]beads.Bead, error) {
+	var roots []beads.Bead
+	seen := map[string]bool{}
+	add := func(root beads.Bead) {
+		if !sourceworkflow.IsWorkflowRoot(root) || !matchesWorkflowID(root, runID) {
+			return
+		}
+		if seen[root.ID] {
+			return
+		}
+		seen[root.ID] = true
+		roots = append(roots, root)
+	}
+	if root, err := store.Get(runID); err == nil {
+		add(root)
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, err
+	}
+	list, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: runID,
+		},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range list {
+		add(r)
+	}
+	return roots, nil
+}
+
 // laneToRun maps a projection lane to the canonical Run DTO, reading the run root
 // bead (when present) for start time, target, and terminal outcome. The started
 // member count (used only to split pending from active) is computed just for
 // non-terminal runs.
-func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, beadList []beads.Bead) Run {
+func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, started int) Run {
 	root, rootFound := byID[lane.ID]
-	started := 0
-	if !rootFound || !isClosedStatus(root.Status) {
-		started = countStartedMembers(beadList, lane.ID)
-	}
 	run := Run{
 		RunID:  lane.ID,
 		Title:  lane.Title,
@@ -218,24 +385,11 @@ func laneToRun(lane runproj.RunLane, byID map[string]beads.Bead, beadList []bead
 // indefinitely. Extending run lifecycle (cancellation) grows this function;
 // nothing else interprets run status.
 func deriveRunStatus(lane runproj.RunLane, root beads.Bead, rootFound bool, startedCount int) RunStatus {
-	if rootFound && isClosedStatus(root.Status) {
-		switch strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey]) {
-		case beadmeta.OutcomeFail:
-			return RunStatusFailed
-		case beadmeta.OutcomeSkipped:
-			return RunStatusSkipped
-		}
-		return RunStatusCompleted
+	var rootPtr *beads.Bead
+	if rootFound {
+		rootPtr = &root
 	}
-	switch lane.Phase {
-	case "blocked":
-		return RunStatusWaiting
-	default: // active/in-flight
-		if startedCount == 0 {
-			return RunStatusPending
-		}
-		return RunStatusActive
-	}
+	return RunStatus(runproj.CanonicalRunStatusForLane(lane, rootPtr, startedCount))
 }
 
 // deriveRunStepStatus maps one run-step (child bead) onto the closed
@@ -248,6 +402,8 @@ func deriveRunStepStatus(b beads.Bead) RunStepStatus {
 			return RunStepStatusFailed
 		case beadmeta.OutcomeSkipped:
 			return RunStepStatusSkipped
+		case beadmeta.OutcomeCanceled:
+			return RunStepStatusCanceled
 		}
 		return RunStepStatusCompleted
 	case "in_progress":
@@ -327,6 +483,50 @@ func countStartedMembers(beadList []beads.Bead, rootID string) int {
 		}
 	}
 	return n
+}
+
+// countStartedMembersByRun indexes started membership for every projected run
+// in one pass. A bead may match more than one nested dotted root; candidates
+// are de-duplicated per bead to mirror runMemberBeads exactly without an
+// O(runs*beads) scan on the polled list endpoint.
+func countStartedMembersByRun(beadList []beads.Bead, lanes []runproj.RunLane) map[string]int {
+	roots := make(map[string]struct{}, len(lanes))
+	counts := make(map[string]int, len(lanes))
+	for _, lane := range lanes {
+		roots[lane.ID] = struct{}{}
+		counts[lane.ID] = 0
+	}
+	for _, bead := range beadList {
+		if !runStepStarted(bead.Status) {
+			continue
+		}
+		candidates := make(map[string]struct{}, 4)
+		for _, rootID := range []string{
+			bead.ParentID,
+			bead.Metadata[beadmeta.RootBeadIDMetadataKey],
+			strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]),
+		} {
+			if _, ok := roots[rootID]; ok {
+				candidates[rootID] = struct{}{}
+			}
+		}
+		for offset, char := range bead.ID {
+			if char != '.' {
+				continue
+			}
+			if rootID := bead.ID[:offset]; rootID != "" {
+				if _, ok := roots[rootID]; ok {
+					candidates[rootID] = struct{}{}
+				}
+			}
+		}
+		for rootID := range candidates {
+			if bead.ID != rootID {
+				counts[rootID]++
+			}
+		}
+	}
+	return counts
 }
 
 func runStepStarted(status string) bool {

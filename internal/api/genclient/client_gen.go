@@ -103,6 +103,7 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
 	CityUnregister RequestFailedPayloadOperation = "city.unregister"
+	RigCreate      RequestFailedPayloadOperation = "rig.create"
 	SessionCreate  RequestFailedPayloadOperation = "session.create"
 	SessionMessage RequestFailedPayloadOperation = "session.message"
 	SessionSubmit  RequestFailedPayloadOperation = "session.submit"
@@ -115,11 +116,34 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 		return true
 	case CityUnregister:
 		return true
+	case RigCreate:
+		return true
 	case SessionCreate:
 		return true
 	case SessionMessage:
 		return true
 	case SessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RigCreateResponseBodyStatus.
+const (
+	Accepted RigCreateResponseBodyStatus = "accepted"
+	Created  RigCreateResponseBodyStatus = "created"
+	Exists   RigCreateResponseBodyStatus = "exists"
+)
+
+// Valid indicates whether the value is a known member of the RigCreateResponseBodyStatus enum.
+func (e RigCreateResponseBodyStatus) Valid() bool {
+	switch e {
+	case Accepted:
+		return true
+	case Created:
+		return true
+	case Exists:
 		return true
 	default:
 		return false
@@ -184,6 +208,7 @@ func (e RunStatus) Valid() bool {
 const (
 	RunStepStatusActive    RunStepStatus = "active"
 	RunStepStatusBlocked   RunStepStatus = "blocked"
+	RunStepStatusCanceled  RunStepStatus = "canceled"
 	RunStepStatusCompleted RunStepStatus = "completed"
 	RunStepStatusFailed    RunStepStatus = "failed"
 	RunStepStatusPending   RunStepStatus = "pending"
@@ -197,6 +222,8 @@ func (e RunStepStatus) Valid() bool {
 		return true
 	case RunStepStatusBlocked:
 		return true
+	case RunStepStatusCanceled:
+		return true
 	case RunStepStatusCompleted:
 		return true
 	case RunStepStatusFailed:
@@ -204,6 +231,114 @@ func (e RunStepStatus) Valid() bool {
 	case RunStepStatusPending:
 		return true
 	case RunStepStatusSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWriteStoreVerdictLatch.
+const (
+	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
+	StatusConditionalWriteStoreVerdictLatchUnlatched StatusConditionalWriteStoreVerdictLatch = "unlatched"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWriteStoreVerdictLatch enum.
+func (e StatusConditionalWriteStoreVerdictLatch) Valid() bool {
+	switch e {
+	case StatusConditionalWriteStoreVerdictLatchIncapable:
+		return true
+	case StatusConditionalWriteStoreVerdictLatchUnlatched:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWriteStoreVerdictProbe.
+const (
+	StatusConditionalWriteStoreVerdictProbeCapable   StatusConditionalWriteStoreVerdictProbe = "capable"
+	StatusConditionalWriteStoreVerdictProbeIncapable StatusConditionalWriteStoreVerdictProbe = "incapable"
+	StatusConditionalWriteStoreVerdictProbeUnprobed  StatusConditionalWriteStoreVerdictProbe = "unprobed"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWriteStoreVerdictProbe enum.
+func (e StatusConditionalWriteStoreVerdictProbe) Valid() bool {
+	switch e {
+	case StatusConditionalWriteStoreVerdictProbeCapable:
+		return true
+	case StatusConditionalWriteStoreVerdictProbeIncapable:
+		return true
+	case StatusConditionalWriteStoreVerdictProbeUnprobed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesEffective.
+const (
+	StatusConditionalWritesEffectiveActive         StatusConditionalWritesEffective = "active"
+	StatusConditionalWritesEffectiveDegraded       StatusConditionalWritesEffective = "degraded"
+	StatusConditionalWritesEffectiveFailClosed     StatusConditionalWritesEffective = "fail_closed"
+	StatusConditionalWritesEffectiveOff            StatusConditionalWritesEffective = "off"
+	StatusConditionalWritesEffectivePendingRestart StatusConditionalWritesEffective = "pending_restart"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesEffective enum.
+func (e StatusConditionalWritesEffective) Valid() bool {
+	switch e {
+	case StatusConditionalWritesEffectiveActive:
+		return true
+	case StatusConditionalWritesEffectiveDegraded:
+		return true
+	case StatusConditionalWritesEffectiveFailClosed:
+		return true
+	case StatusConditionalWritesEffectiveOff:
+		return true
+	case StatusConditionalWritesEffectivePendingRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesMode.
+const (
+	StatusConditionalWritesModeAuto    StatusConditionalWritesMode = "auto"
+	StatusConditionalWritesModeOff     StatusConditionalWritesMode = "off"
+	StatusConditionalWritesModeRequire StatusConditionalWritesMode = "require"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesMode enum.
+func (e StatusConditionalWritesMode) Valid() bool {
+	switch e {
+	case StatusConditionalWritesModeAuto:
+		return true
+	case StatusConditionalWritesModeOff:
+		return true
+	case StatusConditionalWritesModeRequire:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesOrigin.
+const (
+	Builtin StatusConditionalWritesOrigin = "builtin"
+	Config  StatusConditionalWritesOrigin = "config"
+	Env     StatusConditionalWritesOrigin = "env"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesOrigin enum.
+func (e StatusConditionalWritesOrigin) Valid() bool {
+	switch e {
+	case Builtin:
+		return true
+	case Config:
+		return true
+	case Env:
 		return true
 	default:
 		return false
@@ -363,6 +498,24 @@ func (e TranscriptProvenance) Valid() bool {
 	case Hydrated:
 		return true
 	case Live:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UsageBodySource.
+const (
+	LocalEstimate UsageBodySource = "local_estimate"
+	Unavailable   UsageBodySource = "unavailable"
+)
+
+// Valid indicates whether the value is a known member of the UsageBodySource enum.
+func (e UsageBodySource) Valid() bool {
+	switch e {
+	case LocalEstimate:
+		return true
+	case Unavailable:
 		return true
 	default:
 		return false
@@ -946,6 +1099,16 @@ type CityUnregisterSucceededPayload struct {
 
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
+}
+
+// ConditionalWritesDegradedPayload defines model for ConditionalWritesDegradedPayload.
+type ConditionalWritesDegradedPayload struct {
+	BdVersion *string `json:"bd_version,omitempty"`
+	Mode      string  `json:"mode"`
+	Origin    string  `json:"origin"`
+	Reason    string  `json:"reason"`
+	StoreId   string  `json:"store_id"`
+	StoreKind string  `json:"store_kind"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -2687,28 +2850,64 @@ type RigActionBody struct {
 	Status string `json:"status"`
 }
 
-// RigCreateInputBody defines model for RigCreateInputBody.
-type RigCreateInputBody struct {
+// RigCreateBody defines model for RigCreateBody.
+type RigCreateBody struct {
 	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
 	DefaultBranch *string `json:"default_branch,omitempty"`
+
+	// GitUrl Git URL to clone (triggers async provisioning).
+	GitUrl *string `json:"git_url,omitempty"`
 
 	// Name Rig name.
 	Name string `json:"name"`
 
-	// Path Filesystem path.
-	Path string `json:"path"`
+	// Path Filesystem path (server-derived for git_url clones).
+	Path *string `json:"path,omitempty"`
 
 	// Prefix Session name prefix.
 	Prefix *string `json:"prefix,omitempty"`
+
+	// RequestId Client-supplied idempotency key; reuse across retries.
+	RequestId *string `json:"request_id,omitempty"`
 }
 
-// RigCreatedOutputBody defines model for RigCreatedOutputBody.
-type RigCreatedOutputBody struct {
-	// Rig Created rig name.
-	Rig string `json:"rig"`
+// RigCreateResponseBody defines model for RigCreateResponseBody.
+type RigCreateResponseBody struct {
+	// DefaultBranch Resolved mainline branch (created/exists).
+	DefaultBranch *string `json:"default_branch,omitempty"`
 
-	// Status Operation result.
-	Status string `json:"status"`
+	// EventCursor City event-stream cursor captured before accept (202 only); pass as after_seq to the events stream to receive request.result.rig.create / rig.provision.progress / request.failed without replaying unrelated backlog.
+	EventCursor *string `json:"event_cursor,omitempty"`
+
+	// Prefix Resolved session-name prefix (created/exists).
+	Prefix *string `json:"prefix,omitempty"`
+
+	// RequestId Correlation ID; echo of the request's request_id, or a server-minted id on 202.
+	RequestId *string `json:"request_id,omitempty"`
+
+	// Rig Rig name (created/exists).
+	Rig *string `json:"rig,omitempty"`
+
+	// Status created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).
+	Status RigCreateResponseBodyStatus `json:"status"`
+}
+
+// RigCreateResponseBodyStatus created (201 sync), accepted (202 async provisioning), exists (200 idempotent replay).
+type RigCreateResponseBodyStatus string
+
+// RigCreateSucceededPayload defines model for RigCreateSucceededPayload.
+type RigCreateSucceededPayload struct {
+	// DefaultBranch Resolved mainline branch.
+	DefaultBranch string `json:"default_branch"`
+
+	// Prefix Resolved session-name prefix.
+	Prefix string `json:"prefix"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
+
+	// Rig Rig name that was provisioned.
+	Rig string `json:"rig"`
 }
 
 // RigPatch defines model for RigPatch.
@@ -2738,6 +2937,24 @@ type RigPatchSetInputBody struct {
 
 	// Suspended Override suspended state.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// RigProvisionProgressPayload defines model for RigProvisionProgressPayload.
+type RigProvisionProgressPayload struct {
+	// Detail Human-readable step detail.
+	Detail *string `json:"detail,omitempty"`
+
+	// RequestId Correlation ID from the 202 response (empty on sync 201 provisions).
+	RequestId *string `json:"request_id,omitempty"`
+
+	// Rig Rig name being provisioned.
+	Rig string `json:"rig"`
+
+	// Step Provisioning step that completed (clone, beads-init, packs, config, routes, …).
+	Step string `json:"step"`
+
+	// Warn True when the step reports a warn-and-continue condition.
+	Warn *bool `json:"warn,omitempty"`
 }
 
 // RigResponse defines model for RigResponse.
@@ -2801,6 +3018,18 @@ type Run struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// RunCancelOutputBody defines model for RunCancelOutputBody.
+type RunCancelOutputBody struct {
+	// Closed Count of the run's beads closed by the cancel.
+	Closed int64 `json:"closed"`
+
+	// RunId The canceled run.
+	RunId string `json:"run_id"`
+
+	// Status Closed lifecycle state of a run.
+	Status RunStatus `json:"status"`
+}
+
 // RunLastError defines model for RunLastError.
 type RunLastError struct {
 	// Code Machine-readable outcome code (e.g. fail, skipped, canceled).
@@ -2837,6 +3066,33 @@ type RunScope struct {
 // RunStatus Closed lifecycle state of a run.
 type RunStatus string
 
+// RunStatusCounts defines model for RunStatusCounts.
+type RunStatusCounts struct {
+	// Active Runs with work in progress.
+	Active int64 `json:"active"`
+
+	// Canceled Runs terminated by cancellation.
+	Canceled int64 `json:"canceled"`
+
+	// Canceling Runs winding down after cancellation.
+	Canceling int64 `json:"canceling"`
+
+	// Completed Runs completed successfully.
+	Completed int64 `json:"completed"`
+
+	// Failed Runs completed with failure.
+	Failed int64 `json:"failed"`
+
+	// Pending Runs created but not yet started.
+	Pending int64 `json:"pending"`
+
+	// Skipped Runs completed as a no-op or skip.
+	Skipped int64 `json:"skipped"`
+
+	// Waiting Runs waiting on a dependency or gate.
+	Waiting int64 `json:"waiting"`
+}
+
 // RunStep defines model for RunStep.
 type RunStep struct {
 	// Assignee Current assignee, when set.
@@ -2867,6 +3123,16 @@ type RunStepsOutputBody struct {
 	Steps *[]RunStep `json:"steps"`
 }
 
+// RunsCensusOutputBody defines model for RunsCensusOutputBody.
+type RunsCensusOutputBody struct {
+	// Partial True when the incremental projection is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Sanitized reasons the census may be incomplete.
+	PartialErrors *[]string       `json:"partial_errors,omitempty"`
+	StatusCounts  RunStatusCounts `json:"status_counts"`
+}
+
 // RunsListOutputBody defines model for RunsListOutputBody.
 type RunsListOutputBody struct {
 	// Partial True when some runs could not be fully projected.
@@ -2876,7 +3142,8 @@ type RunsListOutputBody struct {
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Runs Runs in the city, newest activity first.
-	Runs *[]Run `json:"runs"`
+	Runs         *[]Run          `json:"runs"`
+	StatusCounts RunStatusCounts `json:"status_counts"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -3346,7 +3613,8 @@ type StatusBody struct {
 	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
 
 	// BeadsVersion Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
-	BeadsVersion *string `json:"beads_version,omitempty"`
+	BeadsVersion      *string                  `json:"beads_version,omitempty"`
+	ConditionalWrites *StatusConditionalWrites `json:"conditional_writes,omitempty"`
 
 	// DoltVersion Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
 	DoltVersion *string          `json:"dolt_version,omitempty"`
@@ -3390,6 +3658,60 @@ type StatusBody struct {
 	Work    StatusWorkCounts `json:"work"`
 }
 
+// StatusConditionalWriteStoreVerdict defines model for StatusConditionalWriteStoreVerdict.
+type StatusConditionalWriteStoreVerdict struct {
+	// Capable What the write path uses today: false only on a definitive incapable verdict.
+	Capable bool `json:"capable"`
+
+	// Kind Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).
+	Kind string `json:"kind"`
+
+	// Latch Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+	Latch StatusConditionalWriteStoreVerdictLatch `json:"latch"`
+
+	// Probe Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+	Probe StatusConditionalWriteStoreVerdictProbe `json:"probe"`
+
+	// Reason Incapable cause, verbatim from the probe or latch.
+	Reason *string `json:"reason,omitempty"`
+
+	// StoreId Store scope: city, or rig/<name>.
+	StoreId string `json:"store_id"`
+}
+
+// StatusConditionalWriteStoreVerdictLatch Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+type StatusConditionalWriteStoreVerdictLatch string
+
+// StatusConditionalWriteStoreVerdictProbe Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+type StatusConditionalWriteStoreVerdictProbe string
+
+// StatusConditionalWrites defines model for StatusConditionalWrites.
+type StatusConditionalWrites struct {
+	// Effective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+	Effective StatusConditionalWritesEffective `json:"effective"`
+
+	// Mode Boot-latched beads.conditional_writes mode.
+	Mode StatusConditionalWritesMode `json:"mode"`
+
+	// Notices Retained rollout notices (env overrides, drift, invalid spellings).
+	Notices *[]StatusRolloutNotice `json:"notices,omitempty"`
+
+	// Origin Where the latched mode came from.
+	Origin StatusConditionalWritesOrigin `json:"origin"`
+
+	// Stores Per-store verdicts, one row per controller-owned store.
+	Stores *[]StatusConditionalWriteStoreVerdict `json:"stores,omitempty"`
+}
+
+// StatusConditionalWritesEffective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+type StatusConditionalWritesEffective string
+
+// StatusConditionalWritesMode Boot-latched beads.conditional_writes mode.
+type StatusConditionalWritesMode string
+
+// StatusConditionalWritesOrigin Where the latched mode came from.
+type StatusConditionalWritesOrigin string
+
 // StatusMailCounts defines model for StatusMailCounts.
 type StatusMailCounts struct {
 	// Total Total number of messages.
@@ -3430,6 +3752,27 @@ type StatusRigDetail struct {
 
 	// Suspended Whether the rig is suspended (either explicitly or because all its agents are suspended).
 	Suspended bool `json:"suspended"`
+}
+
+// StatusRolloutNotice defines model for StatusRolloutNotice.
+type StatusRolloutNotice struct {
+	// ConfigValue Raw config spelling; empty when unset.
+	ConfigValue *string `json:"config_value,omitempty"`
+
+	// EnvValue Raw env spelling as found.
+	EnvValue *string `json:"env_value,omitempty"`
+
+	// EnvVar Environment variable involved, when env-related.
+	EnvVar *string `json:"env_var,omitempty"`
+
+	// FlagKey Rollout gate key the notice is about.
+	FlagKey string `json:"flag_key"`
+
+	// Kind Notice kind (env_overrides_config, pending_restart, invalid_value, ...).
+	Kind string `json:"kind"`
+
+	// Message Human-readable line carrying the gate and the outcome.
+	Message string `json:"message"`
 }
 
 // StatusSessionCountsDetail defines model for StatusSessionCountsDetail.
@@ -3605,6 +3948,9 @@ type SupervisorRequestPayload struct {
 
 	// RemoteAddrClass Network class of the remote address, not the raw address.
 	RemoteAddrClass SupervisorRequestPayloadRemoteAddrClass `json:"remote_addr_class"`
+
+	// RequestId The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line.
+	RequestId *string `json:"request_id,omitempty"`
 
 	// Status HTTP response status code. Start-phase records use 0 before the final response status is known.
 	Status int64 `json:"status"`
@@ -3803,6 +4149,21 @@ type TypedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts        time.Time                 `json:"ts"`
 	Type      string                    `json:"type"`
 	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedEventStreamEnvelopeBeadsConditionalWritesDegraded.
+type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
+	Actor     string                           `json:"actor"`
+	Message   *string                          `json:"message,omitempty"`
+	Payload   ConditionalWritesDegradedPayload `json:"payload"`
+	RunId     *string                          `json:"run_id,omitempty"`
+	Seq       int64                            `json:"seq"`
+	SessionId *string                          `json:"session_id,omitempty"`
+	StepId    *string                          `json:"step_id,omitempty"`
+	Subject   *string                          `json:"subject,omitempty"`
+	Ts        time.Time                        `json:"ts"`
+	Type      string                           `json:"type"`
+	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCityCreated defines model for TypedEventStreamEnvelopeCityCreated.
@@ -4420,6 +4781,21 @@ type TypedEventStreamEnvelopeRequestResultCityUnregister struct {
 	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRequestResultRigCreate defines model for TypedEventStreamEnvelopeRequestResultRigCreate.
+type TypedEventStreamEnvelopeRequestResultRigCreate struct {
+	Actor     string                    `json:"actor"`
+	Message   *string                   `json:"message,omitempty"`
+	Payload   RigCreateSucceededPayload `json:"payload"`
+	RunId     *string                   `json:"run_id,omitempty"`
+	Seq       int64                     `json:"seq"`
+	SessionId *string                   `json:"session_id,omitempty"`
+	StepId    *string                   `json:"step_id,omitempty"`
+	Subject   *string                   `json:"subject,omitempty"`
+	Ts        time.Time                 `json:"ts"`
+	Type      string                    `json:"type"`
+	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedEventStreamEnvelopeRequestResultSessionCreate.
 type TypedEventStreamEnvelopeRequestResultSessionCreate struct {
 	Actor     string                        `json:"actor"`
@@ -4463,6 +4839,21 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Ts        time.Time                     `json:"ts"`
 	Type      string                        `json:"type"`
 	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRigProvisionProgress defines model for TypedEventStreamEnvelopeRigProvisionProgress.
+type TypedEventStreamEnvelopeRigProvisionProgress struct {
+	Actor     string                      `json:"actor"`
+	Message   *string                     `json:"message,omitempty"`
+	Payload   RigProvisionProgressPayload `json:"payload"`
+	RunId     *string                     `json:"run_id,omitempty"`
+	Seq       int64                       `json:"seq"`
+	SessionId *string                     `json:"session_id,omitempty"`
+	StepId    *string                     `json:"step_id,omitempty"`
+	Subject   *string                     `json:"subject,omitempty"`
+	Ts        time.Time                   `json:"ts"`
+	Type      string                      `json:"type"`
+	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
@@ -4941,6 +5332,22 @@ type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts        time.Time                 `json:"ts"`
 	Type      string                    `json:"type"`
 	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded.
+type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
+	Actor     string                           `json:"actor"`
+	City      string                           `json:"city"`
+	Message   *string                          `json:"message,omitempty"`
+	Payload   ConditionalWritesDegradedPayload `json:"payload"`
+	RunId     *string                          `json:"run_id,omitempty"`
+	Seq       int64                            `json:"seq"`
+	SessionId *string                          `json:"session_id,omitempty"`
+	StepId    *string                          `json:"step_id,omitempty"`
+	Subject   *string                          `json:"subject,omitempty"`
+	Ts        time.Time                        `json:"ts"`
+	Type      string                           `json:"type"`
+	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityCreated defines model for TypedTaggedEventStreamEnvelopeCityCreated.
@@ -5599,6 +6006,22 @@ type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister struct {
 	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeRequestResultRigCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultRigCreate.
+type TypedTaggedEventStreamEnvelopeRequestResultRigCreate struct {
+	Actor     string                    `json:"actor"`
+	City      string                    `json:"city"`
+	Message   *string                   `json:"message,omitempty"`
+	Payload   RigCreateSucceededPayload `json:"payload"`
+	RunId     *string                   `json:"run_id,omitempty"`
+	Seq       int64                     `json:"seq"`
+	SessionId *string                   `json:"session_id,omitempty"`
+	StepId    *string                   `json:"step_id,omitempty"`
+	Subject   *string                   `json:"subject,omitempty"`
+	Ts        time.Time                 `json:"ts"`
+	Type      string                    `json:"type"`
+	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionCreate.
 type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate struct {
 	Actor     string                        `json:"actor"`
@@ -5645,6 +6068,22 @@ type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Ts        time.Time                     `json:"ts"`
 	Type      string                        `json:"type"`
 	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRigProvisionProgress defines model for TypedTaggedEventStreamEnvelopeRigProvisionProgress.
+type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
+	Actor     string                      `json:"actor"`
+	City      string                      `json:"city"`
+	Message   *string                     `json:"message,omitempty"`
+	Payload   RigProvisionProgressPayload `json:"payload"`
+	RunId     *string                     `json:"run_id,omitempty"`
+	Seq       int64                       `json:"seq"`
+	SessionId *string                     `json:"session_id,omitempty"`
+	StepId    *string                     `json:"step_id,omitempty"`
+	Subject   *string                     `json:"subject,omitempty"`
+	Ts        time.Time                   `json:"ts"`
+	Type      string                      `json:"type"`
+	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
@@ -6021,6 +6460,98 @@ type UnboundEventPayload struct {
 	SessionId string `json:"session_id"`
 }
 
+// UsageBody defines model for UsageBody.
+type UsageBody struct {
+	// Available True when this city is configured to record local usage estimates.
+	Available bool `json:"available"`
+
+	// ObservedFrom RFC3339 timestamp of the oldest fact included in this bounded read.
+	ObservedFrom *string `json:"observed_from,omitempty"`
+
+	// Partial True when the bounded reader skipped history or malformed records.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialReasons Path-sanitized reasons the aggregate may be incomplete.
+	PartialReasons *[]string   `json:"partial_reasons,omitempty"`
+	Recent         UsageTotals `json:"recent"`
+
+	// RecentBySession Recent model usage per session, largest token volume first.
+	RecentBySession *[]UsageSessionRecent `json:"recent_by_session,omitempty"`
+
+	// RecentWindowSecs Length of the recent window in seconds.
+	RecentWindowSecs int64 `json:"recent_window_secs"`
+
+	// Recording True when new facts are currently being written to the local estimate log.
+	Recording bool `json:"recording"`
+
+	// Source Source of this usage reading.
+	Source UsageBodySource `json:"source"`
+	Today  UsageTotals     `json:"today"`
+
+	// UpdatedAt RFC3339 time at which the aggregate was built.
+	UpdatedAt string `json:"updated_at"`
+}
+
+// UsageBodySource Source of this usage reading.
+type UsageBodySource string
+
+// UsageSessionRecent defines model for UsageSessionRecent.
+type UsageSessionRecent struct {
+	// CacheCreationTokens Prompt-cache creation tokens in the window.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens in the window.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// CostUsdEstimate List-price estimate for the window.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens in the window.
+	InputTokens int64 `json:"input_tokens"`
+
+	// OutputTokens Completion tokens in the window.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Session Session (worker) name the facts were attributed to.
+	Session string `json:"session"`
+
+	// SessionId Session bead id, when attributed.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// Unpriced Facts in this window whose price is unknown.
+	Unpriced int64 `json:"unpriced"`
+}
+
+// UsageTotals defines model for UsageTotals.
+type UsageTotals struct {
+	// CacheCreationTokens Prompt-cache creation tokens.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// ComputeFacts Compute (wall-clock) facts in the window.
+	ComputeFacts int64 `json:"compute_facts"`
+
+	// CostUsdEstimate List-price estimate; decision-support only, never an authoritative charge.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens.
+	InputTokens int64 `json:"input_tokens"`
+
+	// Invocations Model facts (LLM invocations) in the window.
+	Invocations int64 `json:"invocations"`
+
+	// OutputTokens Completion tokens.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Unpriced Facts with unknown pricing; their cost is not included in the estimate.
+	Unpriced int64 `json:"unpriced"`
+
+	// WallSeconds Compute wall-clock seconds.
+	WallSeconds float64 `json:"wall_seconds"`
+}
+
 // WaitListBody defines model for WaitListBody.
 type WaitListBody struct {
 	// Capped True when the lookup hit the per-scope cap and the list is partial.
@@ -6307,6 +6838,9 @@ type WorkspaceResponse struct {
 type PostV0CityParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PatchV0CityByCityNameParams defines parameters for PatchV0CityByCityName.
@@ -6571,6 +7105,9 @@ type GetV0CityByCityNameEventsParams struct {
 type EmitEventParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // RotateEventsParams defines parameters for RotateEvents.
@@ -6601,6 +7138,9 @@ type DeleteV0CityByCityNameExtmsgAdaptersParams struct {
 type RegisterExtmsgAdapterParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameExtmsgBindParams defines parameters for PostV0CityByCityNameExtmsgBind.
@@ -6886,6 +7426,9 @@ type ReplyMailParams struct {
 
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // TriggerMaintenanceDoltGcParams defines parameters for TriggerMaintenanceDoltGc.
@@ -7101,6 +7644,12 @@ type GetV0CityByCityNameRunsParams struct {
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// PostV0CityByCityNameRunsByRunIdCancelParams defines parameters for PostV0CityByCityNameRunsByRunIdCancel.
+type PostV0CityByCityNameRunsByRunIdCancelParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameServiceByNameRestartParams defines parameters for PostV0CityByCityNameServiceByNameRestart.
 type PostV0CityByCityNameServiceByNameRestartParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -7252,6 +7801,12 @@ type GetV0CityByCityNameStatusParams struct {
 type PostV0CityByCityNameUnregisterParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+}
+
+// GetV0CityByCityNameUsageParams defines parameters for GetV0CityByCityNameUsage.
+type GetV0CityByCityNameUsageParams struct {
+	// AggregateOnly Omit the per-session breakdown and return city-level totals only.
+	AggregateOnly *bool `form:"aggregate_only,omitempty" json:"aggregate_only,omitempty"`
 }
 
 // GetV0CityByCityNameWaitsParams defines parameters for GetV0CityByCityNameWaits.
@@ -7432,7 +7987,7 @@ type CreateProviderJSONRequestBody = ProviderCreateInputBody
 type PatchV0CityByCityNameRigByNameJSONRequestBody = RigUpdateInputBody
 
 // CreateRigJSONRequestBody defines body for CreateRig for application/json ContentType.
-type CreateRigJSONRequestBody = RigCreateInputBody
+type CreateRigJSONRequestBody = RigCreateBody
 
 // PatchV0CityByCityNameSessionByIdJSONRequestBody defines body for PatchV0CityByCityNameSessionById for application/json ContentType.
 type PatchV0CityByCityNameSessionByIdJSONRequestBody = SessionPatchBody
@@ -7708,6 +8263,32 @@ func (t *EventPayload) FromCityUnregisterSucceededPayload(v CityUnregisterSuccee
 
 // MergeCityUnregisterSucceededPayload performs a merge with any union data inside the EventPayload, using the provided CityUnregisterSucceededPayload
 func (t *EventPayload) MergeCityUnregisterSucceededPayload(v CityUnregisterSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsConditionalWritesDegradedPayload returns the union data inside the EventPayload as a ConditionalWritesDegradedPayload
+func (t EventPayload) AsConditionalWritesDegradedPayload() (ConditionalWritesDegradedPayload, error) {
+	var body ConditionalWritesDegradedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromConditionalWritesDegradedPayload overwrites any union data inside the EventPayload as the provided ConditionalWritesDegradedPayload
+func (t *EventPayload) FromConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeConditionalWritesDegradedPayload performs a merge with any union data inside the EventPayload, using the provided ConditionalWritesDegradedPayload
+func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -7994,6 +8575,58 @@ func (t *EventPayload) FromRequestFailedPayload(v RequestFailedPayload) error {
 
 // MergeRequestFailedPayload performs a merge with any union data inside the EventPayload, using the provided RequestFailedPayload
 func (t *EventPayload) MergeRequestFailedPayload(v RequestFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRigCreateSucceededPayload returns the union data inside the EventPayload as a RigCreateSucceededPayload
+func (t EventPayload) AsRigCreateSucceededPayload() (RigCreateSucceededPayload, error) {
+	var body RigCreateSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRigCreateSucceededPayload overwrites any union data inside the EventPayload as the provided RigCreateSucceededPayload
+func (t *EventPayload) FromRigCreateSucceededPayload(v RigCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRigCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided RigCreateSucceededPayload
+func (t *EventPayload) MergeRigCreateSucceededPayload(v RigCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRigProvisionProgressPayload returns the union data inside the EventPayload as a RigProvisionProgressPayload
+func (t EventPayload) AsRigProvisionProgressPayload() (RigProvisionProgressPayload, error) {
+	var body RigProvisionProgressPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRigProvisionProgressPayload overwrites any union data inside the EventPayload as the provided RigProvisionProgressPayload
+func (t *EventPayload) FromRigProvisionProgressPayload(v RigProvisionProgressPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRigProvisionProgressPayload performs a merge with any union data inside the EventPayload, using the provided RigProvisionProgressPayload
+func (t *EventPayload) MergeRigProvisionProgressPayload(v RigProvisionProgressPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -8862,6 +9495,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadWorktreeReape
 // MergeTypedEventStreamEnvelopeBeadWorktreeReaped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadWorktreeReaped
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadWorktreeReaped(v TypedEventStreamEnvelopeBeadWorktreeReaped) error {
 	v.Type = "bead.worktree.reaped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
+	var body TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadsConditionalWritesDegraded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9992,6 +10653,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultCit
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRequestResultRigCreate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultRigCreate
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultRigCreate() (TypedEventStreamEnvelopeRequestResultRigCreate, error) {
+	var body TypedEventStreamEnvelopeRequestResultRigCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultRigCreate overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultRigCreate(v TypedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultRigCreate performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultRigCreate(v TypedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeRequestResultSessionCreate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultSessionCreate
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultSessionCreate() (TypedEventStreamEnvelopeRequestResultSessionCreate, error) {
 	var body TypedEventStreamEnvelopeRequestResultSessionCreate
@@ -10066,6 +10755,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultSess
 // MergeTypedEventStreamEnvelopeRequestResultSessionSubmit performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultSessionSubmit
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSessionSubmit(v TypedEventStreamEnvelopeRequestResultSessionSubmit) error {
 	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRigProvisionProgress returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRigProvisionProgress
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRigProvisionProgress() (TypedEventStreamEnvelopeRigProvisionProgress, error) {
+	var body TypedEventStreamEnvelopeRigProvisionProgress
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRigProvisionProgress overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRigProvisionProgress(v TypedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRigProvisionProgress performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProgress(v TypedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -10780,6 +11497,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.conditional_writes.degraded":
+		return t.AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
 		return t.AsTypedEventStreamEnvelopeCityCreated()
 	case "city.resumed":
@@ -10860,12 +11579,16 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultCityCreate()
 	case "request.result.city.unregister":
 		return t.AsTypedEventStreamEnvelopeRequestResultCityUnregister()
+	case "request.result.rig.create":
+		return t.AsTypedEventStreamEnvelopeRequestResultRigCreate()
 	case "request.result.session.create":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionCreate()
 	case "request.result.session.message":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "rig.provision.progress":
+		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -11141,6 +11864,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadW
 // MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadWorktreeReaped
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped(v TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) error {
 	v.Type = "bead.worktree.reaped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12271,6 +13022,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequ
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRequestResultRigCreate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultRigCreate() (TypedTaggedEventStreamEnvelopeRequestResultRigCreate, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultRigCreate overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultRigCreate(v TypedTaggedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultRigCreate performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultRigCreate
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultRigCreate(v TypedTaggedEventStreamEnvelopeRequestResultRigCreate) error {
+	v.Type = "request.result.rig.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate() (TypedTaggedEventStreamEnvelopeRequestResultSessionCreate, error) {
 	var body TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
@@ -12345,6 +13124,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeReque
 // MergeTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit(v TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) error {
 	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRigProvisionProgress returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRigProvisionProgress
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRigProvisionProgress() (TypedTaggedEventStreamEnvelopeRigProvisionProgress, error) {
+	var body TypedTaggedEventStreamEnvelopeRigProvisionProgress
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRigProvisionProgress overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRigProvisionProgress(v TypedTaggedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRigProvisionProgress performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRigProvisionProgress
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigProvisionProgress(v TypedTaggedEventStreamEnvelopeRigProvisionProgress) error {
+	v.Type = "rig.provision.progress"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13059,6 +13866,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.conditional_writes.degraded":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
 		return t.AsTypedTaggedEventStreamEnvelopeCityCreated()
 	case "city.resumed":
@@ -13139,12 +13948,16 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultCityCreate()
 	case "request.result.city.unregister":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultCityUnregister()
+	case "request.result.rig.create":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultRigCreate()
 	case "request.result.session.create":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate()
 	case "request.result.session.message":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "rig.provision.progress":
+		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -13727,8 +14540,14 @@ type ClientInterface interface {
 	// GetV0CityByCityNameRuns request
 	GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameRunsCensus request
+	GetV0CityByCityNameRunsCensus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameRunsByRunId request
 	GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameRunsByRunIdCancel request
+	PostV0CityByCityNameRunsByRunIdCancel(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameRunsByRunIdSteps request
 	GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13823,6 +14642,9 @@ type ClientInterface interface {
 
 	// PostV0CityByCityNameUnregister request
 	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameUsage request
+	GetV0CityByCityNameUsage(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameWaitById request
 	GetV0CityByCityNameWaitById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15781,8 +16603,32 @@ func (c *Client) GetV0CityByCityNameRuns(ctx context.Context, cityName string, p
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetV0CityByCityNameRunsCensus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsCensusRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameRunsByRunIdRequest(c.Server, cityName, runId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameRunsByRunIdCancel(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameRunsByRunIdCancelRequest(c.Server, cityName, runId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -16201,6 +17047,18 @@ func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameWaitById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameWaitByIdRequest(c.Server, cityName, id)
 	if err != nil {
@@ -16398,6 +17256,17 @@ func NewPostV0CityRequestWithBody(server string, params *PostV0CityParams, conte
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -19104,6 +19973,17 @@ func NewEmitEventRequestWithBody(server string, cityName string, params *EmitEve
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -19397,6 +20277,17 @@ func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, par
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -21796,6 +22687,17 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -24220,6 +25122,40 @@ func NewGetV0CityByCityNameRunsRequest(server string, cityName string, params *G
 	return req, nil
 }
 
+// NewGetV0CityByCityNameRunsCensusRequest generates requests for GetV0CityByCityNameRunsCensus
+func NewGetV0CityByCityNameRunsCensusRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/census", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameRunsByRunIdRequest generates requests for GetV0CityByCityNameRunsByRunId
 func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, runId string) (*http.Request, error) {
 	var err error
@@ -24256,6 +25192,60 @@ func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, ru
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameRunsByRunIdCancelRequest generates requests for PostV0CityByCityNameRunsByRunIdCancel
+func NewPostV0CityByCityNameRunsByRunIdCancelRequest(server string, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s/cancel", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -25883,6 +26873,62 @@ func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, pa
 	return req, nil
 }
 
+// NewGetV0CityByCityNameUsageRequest generates requests for GetV0CityByCityNameUsage
+func NewGetV0CityByCityNameUsageRequest(server string, cityName string, params *GetV0CityByCityNameUsageParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/usage", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.AggregateOnly != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "aggregate_only", *params.AggregateOnly, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameWaitByIdRequest generates requests for GetV0CityByCityNameWaitById
 func NewGetV0CityByCityNameWaitByIdRequest(server string, cityName string, id string) (*http.Request, error) {
 	var err error
@@ -26965,8 +28011,14 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameRunsWithResponse request
 	GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error)
 
+	// GetV0CityByCityNameRunsCensusWithResponse request
+	GetV0CityByCityNameRunsCensusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsCensusResponse, error)
+
 	// GetV0CityByCityNameRunsByRunIdWithResponse request
 	GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error)
+
+	// PostV0CityByCityNameRunsByRunIdCancelWithResponse request
+	PostV0CityByCityNameRunsByRunIdCancelWithResponse(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error)
 
 	// GetV0CityByCityNameRunsByRunIdStepsWithResponse request
 	GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error)
@@ -27062,6 +28114,9 @@ type ClientWithResponsesInterface interface {
 	// PostV0CityByCityNameUnregisterWithResponse request
 	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
 
+	// GetV0CityByCityNameUsageWithResponse request
+	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
+
 	// GetV0CityByCityNameWaitByIdWithResponse request
 	GetV0CityByCityNameWaitByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitByIdResponse, error)
 
@@ -27134,10 +28189,15 @@ func (r GetV0CitiesResponse) StatusCode() int {
 }
 
 type PostV0CityResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON202                       *AsyncAcceptedResponse
-	ApplicationproblemJSONDefault *ErrorModel
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *AsyncAcceptedResponse
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -28272,6 +29332,7 @@ type EmitEventResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -28404,6 +29465,7 @@ type RegisterExtmsgAdapterResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -29284,6 +30346,7 @@ type ReplyMailResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 }
@@ -30445,17 +31508,12 @@ func (r GetV0CityByCityNameRigsResponse) StatusCode() int {
 }
 
 type CreateRigResponse struct {
-	Body                      []byte
-	HTTPResponse              *http.Response
-	JSON201                   *RigCreatedOutputBody
-	ApplicationproblemJSON400 *ErrorModel
-	ApplicationproblemJSON401 *ErrorModel
-	ApplicationproblemJSON403 *ErrorModel
-	ApplicationproblemJSON404 *ErrorModel
-	ApplicationproblemJSON409 *ErrorModel
-	ApplicationproblemJSON422 *ErrorModel
-	ApplicationproblemJSON500 *ErrorModel
-	ApplicationproblemJSON501 *ErrorModel
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *RigCreateResponseBody
+	JSON201                       *RigCreateResponseBody
+	JSON202                       *RigCreateResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -30499,6 +31557,31 @@ func (r GetV0CityByCityNameRunsResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameRunsCensusResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RunsCensusOutputBody
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsCensusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsCensusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameRunsByRunIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -30519,6 +31602,33 @@ func (r GetV0CityByCityNameRunsByRunIdResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameRunsByRunIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameRunsByRunIdCancelResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *RunCancelOutputBody
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameRunsByRunIdCancelResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameRunsByRunIdCancelResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -31237,6 +32347,32 @@ func (r PostV0CityByCityNameUnregisterResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostV0CityByCityNameUnregisterResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameUsageResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *UsageBody
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameUsageResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameUsageResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -32854,6 +33990,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameRunsWithResponse(ctx context.Co
 	return ParseGetV0CityByCityNameRunsResponse(rsp)
 }
 
+// GetV0CityByCityNameRunsCensusWithResponse request returning *GetV0CityByCityNameRunsCensusResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsCensusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsCensusResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRunsCensus(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsCensusResponse(rsp)
+}
+
 // GetV0CityByCityNameRunsByRunIdWithResponse request returning *GetV0CityByCityNameRunsByRunIdResponse
 func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
 	rsp, err := c.GetV0CityByCityNameRunsByRunId(ctx, cityName, runId, reqEditors...)
@@ -32861,6 +34006,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx con
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameRunsByRunIdResponse(rsp)
+}
+
+// PostV0CityByCityNameRunsByRunIdCancelWithResponse request returning *PostV0CityByCityNameRunsByRunIdCancelResponse
+func (c *ClientWithResponses) PostV0CityByCityNameRunsByRunIdCancelWithResponse(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error) {
+	rsp, err := c.PostV0CityByCityNameRunsByRunIdCancel(ctx, cityName, runId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameRunsByRunIdCancelResponse(rsp)
 }
 
 // GetV0CityByCityNameRunsByRunIdStepsWithResponse request returning *GetV0CityByCityNameRunsByRunIdStepsResponse
@@ -33161,6 +34315,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx con
 	return ParsePostV0CityByCityNameUnregisterResponse(rsp)
 }
 
+// GetV0CityByCityNameUsageWithResponse request returning *GetV0CityByCityNameUsageResponse
+func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
+	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameUsageResponse(rsp)
+}
+
 // GetV0CityByCityNameWaitByIdWithResponse request returning *GetV0CityByCityNameWaitByIdResponse
 func (c *ClientWithResponses) GetV0CityByCityNameWaitByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitByIdResponse, error) {
 	rsp, err := c.GetV0CityByCityNameWaitById(ctx, cityName, id, reqEditors...)
@@ -33320,12 +34483,47 @@ func ParsePostV0CityResponse(rsp *http.Response) (*PostV0CityResponse, error) {
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.ApplicationproblemJSONDefault = &dest
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
 
 	}
 
@@ -35889,6 +37087,13 @@ func ParseEmitEventResponse(rsp *http.Response) (*EmitEventResponse, error) {
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -36172,6 +37377,13 @@ func ParseRegisterExtmsgAdapterResponse(rsp *http.Response) (*RegisterExtmsgAdap
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -38236,6 +39448,13 @@ func ParseReplyMailResponse(rsp *http.Response) (*ReplyMailResponse, error) {
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -40874,68 +42093,33 @@ func ParseCreateRigResponse(rsp *http.Response) (*CreateRigResponse, error) {
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RigCreateResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest RigCreatedOutputBody
+		var dest RigCreateResponseBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
-		var dest ErrorModel
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest RigCreateResponseBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.ApplicationproblemJSON400 = &dest
+		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.ApplicationproblemJSON401 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON403 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON404 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON409 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON422 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON500 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON501 = &dest
+		response.ApplicationproblemJSONDefault = &dest
 
 	}
 
@@ -40958,6 +42142,53 @@ func ParseGetV0CityByCityNameRunsResponse(rsp *http.Response) (*GetV0CityByCityN
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest RunsListOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsCensusResponse parses an HTTP response from a GetV0CityByCityNameRunsCensusWithResponse call
+func ParseGetV0CityByCityNameRunsCensusResponse(rsp *http.Response) (*GetV0CityByCityNameRunsCensusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsCensusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunsCensusOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -41016,6 +42247,67 @@ func ParseGetV0CityByCityNameRunsByRunIdResponse(rsp *http.Response) (*GetV0City
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameRunsByRunIdCancelResponse parses an HTTP response from a PostV0CityByCityNameRunsByRunIdCancelWithResponse call
+func ParsePostV0CityByCityNameRunsByRunIdCancelResponse(rsp *http.Response) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameRunsByRunIdCancelResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest RunCancelOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -42735,6 +44027,60 @@ func ParsePostV0CityByCityNameUnregisterResponse(rsp *http.Response) (*PostV0Cit
 			return nil, err
 		}
 		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameUsageResponse parses an HTTP response from a GetV0CityByCityNameUsageWithResponse call
+func ParseGetV0CityByCityNameUsageResponse(rsp *http.Response) (*GetV0CityByCityNameUsageResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameUsageResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UsageBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

@@ -616,5 +616,6 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	child.Stdout = logFile
 	child.Stderr = logFile
 	child.Env = os.Environ()
+	disableProductMetricsForChild(child)
 	return child.Start()
 }

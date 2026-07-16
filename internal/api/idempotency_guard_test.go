@@ -14,13 +14,17 @@ import (
 // Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
 // lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
-	"create-bead":     true,
-	"send-mail":       true,
-	"create-agent":    true,
-	"create-provider": true,
-	"create-rig":      true,
-	"create-convoy":   true,
-	"add-pack":        true,
+	"create-bead":             true,
+	"send-mail":               true,
+	"create-agent":            true,
+	"create-provider":         true,
+	"create-rig":              true,
+	"create-convoy":           true,
+	"add-pack":                true,
+	"reply-mail":              true,
+	"register-extmsg-adapter": true,
+	"emit-event":              true,
+	"post-v0-city":            true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -28,15 +32,10 @@ var requireIdempotency = map[string]bool{
 // TODO list, not an exemption: when a slice wires one of these, MOVE it to
 // requireIdempotency — the test enforces the move so the lists stay honest.
 var pendingIdempotency = map[string]bool{
-	"reply-mail":              true, // 201; mints a message (S3)
-	"register-extmsg-adapter": true, // 201 (S3)
-	"emit-event":              true, // 201; append-only, retry double-emits (S3)
-	"ensure-extmsg-group":     true, // 201; identity-idempotent already — moves to exempt in S3
-	"post-v0-city":            true, // 202; supervisor city create (S3)
-	"create-session":          true, // 202; raw+Huma split, deferred (S4)
-	"send-session-message":    true, // 202; deferred (S4)
-	"respond-session":         true, // 202; deferred (S4)
-	"submit-session":          true, // 202; deferred (S4)
+	"create-session":       true, // 202; raw+Huma split, deferred (S4)
+	"send-session-message": true, // 202; deferred (S4)
+	"respond-session":      true, // 202; deferred (S4)
+	"submit-session":       true, // 202; deferred (S4)
 }
 
 // exemptFromIdempotency lists POST operations that are NOT resource creates and
@@ -47,6 +46,13 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// ensure-extmsg-group is identity-idempotent by design: the ensure
+	// semantics (same group in → same group out) make a retry safe without a
+	// key, so wiring one would be dead weight (owner decision, 2026-07-11).
+	// Accepted trade-off: the ExtMsgGroupCreated event fires on every ensure,
+	// so a retry can double-emit it — tolerable for an ensure endpoint; move
+	// this opid to requireIdempotency if that ever matters.
+	"ensure-extmsg-group":                                      true,
 	"post-v0-city-by-city-name-agent-by-base-by-action":        true,
 	"post-v0-city-by-city-name-agent-by-dir-by-base-by-action": true,
 	"post-v0-city-by-city-name-bead-by-id-assign":              true,
@@ -71,6 +77,7 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-order-by-name-enable":           true,
 	"post-v0-city-by-city-name-order-by-name-run":              true,
 	"post-v0-city-by-city-name-rig-by-name-by-action":          true,
+	"post-v0-city-by-city-name-runs-by-run-id-cancel":          true,
 	"post-v0-city-by-city-name-service-by-name-restart":        true,
 	"post-v0-city-by-city-name-session-by-id-close":            true,
 	"post-v0-city-by-city-name-session-by-id-kill":             true,

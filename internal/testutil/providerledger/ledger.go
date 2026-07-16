@@ -13,7 +13,7 @@ import (
 
 const moduleImportPath = "github.com/gastownhall/gascity"
 
-// SymbolRef identifies a Go function by import path and declared name.
+// SymbolRef identifies a Go declaration by import path and declared name.
 type SymbolRef struct {
 	ImportPath string
 	Name       string
@@ -49,15 +49,23 @@ const (
 type Disposition string
 
 const (
+	// DispositionProved records an executable, source-checked contract proof.
+	DispositionProved Disposition = "proved"
 	// DispositionWaived records a temporary, owned contract gap.
 	DispositionWaived Disposition = "waived"
 	// DispositionNotApplicable records why a contract does not apply.
 	DispositionNotApplicable Disposition = "not_applicable"
 )
 
+var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
+
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
 	RuntimeBuiltinCatalog = "runtime.builtin"
+	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
+	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
+	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
+	runtimeContractWaiverOwner = "ga-80po0c.3"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -80,6 +88,16 @@ type SourceRef struct {
 	Reason   string
 }
 
+// ProofRef binds an exact runnable test to its contract runner. AllowedCalls
+// lists pure setup calls permitted inside the inline provider factory; provider
+// construction itself is always bound separately through ContractClaim.
+type ProofRef struct {
+	File         string
+	Test         string
+	Runner       SymbolRef
+	AllowedCalls []SymbolRef
+}
+
 // Waiver is a temporary, owned exception to an applicable contract.
 type Waiver struct {
 	Owner   string
@@ -92,16 +110,19 @@ type ContractClaim struct {
 	Constructor         SymbolRef
 	Contract            ContractID
 	Disposition         Disposition
+	Proof               *ProofRef
 	Waiver              *Waiver
 	NotApplicableReason string
 }
 
 // Entry connects one provider construction path to its required contracts.
 type Entry struct {
-	ID           string
-	Roles        []Role
-	Port         Port
-	Constructors []SymbolRef
+	ID             string
+	Roles          []Role
+	Port           Port
+	Constructors   []SymbolRef
+	DoubleType     *SymbolRef
+	DoubleBoundary string
 
 	// Production providers have exactly one catalog or source binding.
 	Catalog *CatalogRef
@@ -114,16 +135,18 @@ type Entry struct {
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
 	return []Entry{
-		builtin(
-			"fake", "exact:fake", []Role{RoleReusableDouble},
-			waivedRuntime(
+		reusableBuiltin(
+			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
+			provedRuntime(
 				repoSymbol("internal/runtime", "NewFake"),
-				"ga-80po0c.1.2",
-				"existing full conformance is not yet structurally bound to runtime.NewFake; exact proof binding is deferred to ga-80po0c.1.2",
+				"internal/runtime/fake_conformance_test.go",
+				"TestFakeConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
-		builtin(
-			"fail", "exact:fail", []Role{RoleReusableDouble},
+		reusableBuiltin(
+			"fail", "exact:fail", repoSymbol("internal/runtime", "Fake"),
 			notApplicableRuntime(
 				repoSymbol("internal/runtime", "NewFailFake"),
 				"intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable",
@@ -133,25 +156,25 @@ func Catalog() []Entry {
 			"subprocess", "exact:subprocess", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBacked"),
-				"ga-80po0c.1.2",
-				"NewSeamBacked exact production-constructor proof binding is deferred to ga-80po0c.1.2",
+				"NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition",
 			),
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
-				"ga-80po0c.1.2",
-				"NewSeamBackedWithDir exact production-constructor proof binding is deferred to ga-80po0c.1.2",
+				"internal/runtime/subprocess/seam_conformance_test.go",
+				"TestSubprocessSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/testutil", "ShortTempDir"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"full conformance covers the raw ACP provider, not the NewSeamBacked production composition",
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
-				"ga-80po0c.3",
 				"full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition",
 			),
 		),
@@ -159,7 +182,6 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
 			),
 		),
@@ -167,7 +189,6 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the actual K8s production composition has no full shared runtime contract",
 			),
 		),
@@ -175,7 +196,6 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"ga-80po0c.3",
 				"the existing full conformance run skips in short mode or when the herdr executable is absent",
 			),
 		),
@@ -183,7 +203,6 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				"ga-80po0c.3",
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
 			),
 		),
@@ -191,12 +210,10 @@ func Catalog() []Entry {
 			"exec", "prefix:exec:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"full conformance covers the raw exec provider, not the production seam-backed prefix composition",
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
 			),
 		),
@@ -204,7 +221,6 @@ func Catalog() []Entry {
 			"ssh", "prefix:ssh:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the production SSH composition has no full shared runtime contract",
 			),
 		),
@@ -212,7 +228,6 @@ func Catalog() []Entry {
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"ga-80po0c.3",
 				"the existing full conformance run skips when the tmux executable is absent",
 			),
 		),
@@ -227,7 +242,6 @@ func Catalog() []Entry {
 				Reason:   "conditional transport composition is outside the runtime registry",
 			},
 			Claims: []ContractClaim{waivedRuntime(autoConstructor,
-				"ga-80po0c.3",
 				"the production auto base/ACP composition has no full shared runtime contract",
 			)},
 		},
@@ -257,13 +271,34 @@ func builtin(id, key string, extraRoles []Role, claims ...ContractClaim) Entry {
 	}
 }
 
-func waivedRuntime(constructor SymbolRef, owner, reason string) ContractClaim {
+func reusableBuiltin(id, key string, doubleType SymbolRef, claims ...ContractClaim) Entry {
+	entry := builtin(id, key, []Role{RoleReusableDouble}, claims...)
+	entry.DoubleType = &doubleType
+	entry.DoubleBoundary = runtimeDoubleBoundaryPath
+	return entry
+}
+
+func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...SymbolRef) ContractClaim {
+	return ContractClaim{
+		Constructor: constructor,
+		Contract:    ContractRuntimeProvider,
+		Disposition: DispositionProved,
+		Proof: &ProofRef{
+			File:         file,
+			Test:         test,
+			Runner:       runtimeProviderRunner,
+			AllowedCalls: append([]SymbolRef(nil), allowedCalls...),
+		},
+	}
+}
+
+func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
-			Owner:   owner,
+			Owner:   runtimeContractWaiverOwner,
 			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
 			Reason:  reason,
 		},
@@ -323,6 +358,22 @@ func Validate(entries []Entry, now time.Time) error {
 		}
 		if len(roles) == 0 {
 			problems = append(problems, prefix+" requires at least one role")
+		}
+		switch {
+		case roles[RoleReusableDouble]:
+			if entry.DoubleType == nil {
+				problems = append(problems, prefix+" reusable_double role requires a double type")
+			} else if err := validateSymbolRef(*entry.DoubleType); err != nil {
+				problems = append(problems, fmt.Sprintf("%s double type: %v", prefix, err))
+			}
+			boundary := pathpkg.Clean(strings.TrimSpace(entry.DoubleBoundary))
+			if boundary == "." || strings.HasPrefix(boundary, "../") || strings.HasPrefix(boundary, "/") {
+				problems = append(problems, prefix+" reusable_double role requires a repository-relative double boundary")
+			}
+		case entry.DoubleType != nil:
+			problems = append(problems, prefix+" double type requires role reusable_double")
+		case strings.TrimSpace(entry.DoubleBoundary) != "":
+			problems = append(problems, prefix+" double boundary requires role reusable_double")
 		}
 		if (entry.Catalog != nil || entry.Source != nil) && !roles[RoleProductionProvider] {
 			problems = append(problems, prefix+" discovery binding requires role production_provider")
@@ -412,6 +463,9 @@ func hasRole(roles []Role, want Role) bool {
 func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 	var problems []string
 	payloads := 0
+	if claim.Proof != nil {
+		payloads++
+	}
 	if claim.Waiver != nil {
 		payloads++
 	}
@@ -419,10 +473,33 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 		payloads++
 	}
 	if payloads != 1 {
-		problems = append(problems, prefix+" requires exactly one of waiver or not-applicable reason")
+		problems = append(problems, prefix+" requires exactly one of proof, waiver, or not-applicable reason")
 	}
 
 	switch claim.Disposition {
+	case DispositionProved:
+		if claim.Proof == nil {
+			problems = append(problems, prefix+" proved claim requires a proof")
+		} else {
+			if strings.TrimSpace(claim.Proof.File) == "" || strings.TrimSpace(claim.Proof.Test) == "" {
+				problems = append(problems, prefix+" proof file and test are required")
+			}
+			if err := validateSymbolRef(claim.Proof.Runner); err != nil {
+				problems = append(problems, fmt.Sprintf("%s proof runner: %v", prefix, err))
+			} else if claim.Contract == ContractRuntimeProvider && claim.Proof.Runner != runtimeProviderRunner {
+				problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(runtimeProviderRunner)))
+			}
+			seenAllowed := make(map[SymbolRef]bool)
+			for _, allowed := range claim.Proof.AllowedCalls {
+				if err := validateSymbolRef(allowed); err != nil {
+					problems = append(problems, fmt.Sprintf("%s allowed proof call: %v", prefix, err))
+				}
+				if seenAllowed[allowed] {
+					problems = append(problems, fmt.Sprintf("%s repeats allowed proof call %s", prefix, renderSymbolRef(allowed)))
+				}
+				seenAllowed[allowed] = true
+			}
+		}
 	case DispositionWaived:
 		if claim.Waiver == nil {
 			problems = append(problems, prefix+" waived claim requires a waiver")
@@ -518,8 +595,8 @@ func RenderMarkdown(entries []Entry) string {
 	out.WriteString(MarkdownStart)
 	out.WriteString("\n")
 	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.\n\n")
-	out.WriteString("| Provider path | Roles | Port | Constructor | Discovery | Contract | Status |\n")
-	out.WriteString("|---|---|---|---|---|---|---|\n")
+	out.WriteString("| Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |\n")
+	out.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, entry := range entries {
 		claims := append([]ContractClaim(nil), entry.Claims...)
 		sort.Slice(claims, func(i, j int) bool {
@@ -529,9 +606,10 @@ func RenderMarkdown(entries []Entry) string {
 			return claims[i].Contract < claims[j].Contract
 		})
 		for _, claim := range claims {
-			fmt.Fprintf(&out, "| `%s` | %s | `%s` | `%s` | %s | `%s` | %s |\n",
+			fmt.Fprintf(&out, "| `%s` | %s | %s | `%s` | `%s` | %s | `%s` | %s |\n",
 				markdownCell(entry.ID),
 				markdownCell(renderRoles(entry.Roles)),
+				renderDoubleType(entry),
 				markdownCell(string(entry.Port)),
 				markdownCell(renderSymbolRef(claim.Constructor)),
 				markdownCell(renderDiscovery(entry)),
@@ -542,6 +620,13 @@ func RenderMarkdown(entries []Entry) string {
 	}
 	out.WriteString(MarkdownEnd)
 	return out.String()
+}
+
+func renderDoubleType(entry Entry) string {
+	if entry.DoubleType == nil {
+		return "—"
+	}
+	return "`" + markdownCell(renderSymbolRef(*entry.DoubleType)) + "`"
 }
 
 func symbolRefLess(left, right SymbolRef) bool {
@@ -561,17 +646,29 @@ func renderRoles(roles []Role) string {
 }
 
 func renderDiscovery(entry Entry) string {
+	var bindings []string
 	if entry.Catalog != nil {
-		return entry.Catalog.Name + "/" + entry.Catalog.Key
+		bindings = append(bindings, entry.Catalog.Name+"/"+entry.Catalog.Key)
 	}
 	if entry.Source != nil {
-		return fmt.Sprintf("source: %s#%s — %s", entry.Source.File, entry.Source.Function, entry.Source.Reason)
+		bindings = append(bindings, fmt.Sprintf("source: %s#%s — %s", entry.Source.File, entry.Source.Function, entry.Source.Reason))
 	}
-	return "invalid: no discovery binding"
+	if hasRole(entry.Roles, RoleReusableDouble) && strings.TrimSpace(entry.DoubleBoundary) != "" {
+		bindings = append(bindings, "reusable: "+entry.DoubleBoundary)
+	}
+	if len(bindings) == 0 {
+		return "invalid: no discovery binding"
+	}
+	return strings.Join(bindings, "; ")
 }
 
 func renderClaim(claim ContractClaim) string {
 	switch claim.Disposition {
+	case DispositionProved:
+		if claim.Proof == nil {
+			return "proved (invalid: no proof)"
+		}
+		return fmt.Sprintf("proved by %s#%s", claim.Proof.File, claim.Proof.Test)
 	case DispositionWaived:
 		if claim.Waiver == nil {
 			return "waived (invalid: no waiver)"

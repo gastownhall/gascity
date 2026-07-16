@@ -73,6 +73,7 @@ var nativeDoltOpenReadyStatuses = []beadslib.Status{
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
 	nativeDoltOpenEnvMu         sync.Mutex
+	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
 var nativeDoltOpenEnvKeys = []string{
@@ -200,6 +201,12 @@ type NativeDoltStore struct {
 	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
+
+	// condWritesStamp carries the factory-stamped conditional-writes mode.
+	// NativeDoltStore implements no ConditionalWriter yet, so the stamp's
+	// effect today is require→typed refusal / auto→loud degrade at the
+	// seam, never a silent legacy write under require.
+	condWritesStamp
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -229,6 +236,7 @@ var (
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
+	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -1121,6 +1129,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		for _, issue := range issues {
 			bead, err := beadFromNativeIssue(issue)
 			if err != nil {
+				if isNativeIssueMetadataParseError(err) {
+					continue
+				}
 				return err
 			}
 			beads = append(beads, bead)
@@ -1849,7 +1860,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	}
 	metadata, err := metadataMapFromNative(issue.Metadata)
 	if err != nil {
-		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", issue.ID, err)
+		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
 	b := Bead{
 		ID:          issue.ID,
@@ -1882,6 +1893,10 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		}
 	}
 	return b, nil
+}
+
+func isNativeIssueMetadataParseError(err error) bool {
+	return errors.Is(err, errNativeIssueMetadataParse)
 }
 
 func nativePriorityFromIssue(issue *beadslib.Issue) *int {

@@ -24,7 +24,11 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, sessFront 
 		return "", "", false, ""
 	}
 	if logCtx.sessionID != "" {
-		handle, err := workerHandleForSessionWithConfig(cityPath, sessFront.Store().Store, newSessionProvider(), cfg, logCtx.sessionID)
+		sp, err := newSessionProvider()
+		if err != nil {
+			return "", logCtx.provider, true, err.Error()
+		}
+		handle, err := workerHandleForSessionWithConfig(cityPath, sessFront.Store().Store, sp, cfg, logCtx.sessionID)
 		if err == nil {
 			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
 				return path, logCtx.provider, true, ""
