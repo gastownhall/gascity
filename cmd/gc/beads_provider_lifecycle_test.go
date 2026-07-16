@@ -3629,58 +3629,80 @@ exit 0
 	}
 }
 
-func TestInitBeadsForDirExecGcBeadsBdPreservesCityRuntimeEnv(t *testing.T) {
-	cityDir := t.TempDir()
-	writeMinimalCityToml(t, cityDir)
-	logFile := filepath.Join(t.TempDir(), "env.log")
-	script := filepath.Join(t.TempDir(), "gc-beads-bd")
-	content := fmt.Sprintf(`#!/bin/sh
-set -eu
-case "$1" in
-  init)
-    printf '%%s|%%s|%%s|%%s
-' "${GC_CITY_PATH:-}" "${GC_CITY_RUNTIME_DIR:-}" "${GC_PACK_STATE_DIR:-}" "${GC_DOLT_DATA_DIR:-}" > %q
-    exit 0
-    ;;
-  *)
-    exit 2
-    ;;
-esac
-`, logFile)
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
+func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   func(string) string
+		wantScript func(string) string
+	}{
+		{
+			name:       "logical bd uses the stable city wrapper",
+			provider:   func(string) string { return "bd" },
+			wantScript: gcBeadsBdScriptPath,
+		},
+		{
+			name: "explicit canonical wrapper keeps its configured path",
+			provider: func(cityDir string) string {
+				return "exec:" + filepath.Join(cityDir, "custom", "gc-beads-bd")
+			},
+			wantScript: func(cityDir string) string {
+				return filepath.Join(cityDir, "custom", "gc-beads-bd")
+			},
+		},
 	}
 
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
-	t.Setenv("GC_CITY_PATH", "/wrong-city")
-	t.Setenv("GC_CITY_RUNTIME_DIR", "/wrong-runtime")
-	t.Setenv("GC_PACK_STATE_DIR", "/wrong-pack")
-	t.Setenv("GC_DOLT_DATA_DIR", "/wrong-data")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cityConfig := fmt.Sprintf(`[workspace]
+name = "demo"
 
-	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
-		t.Fatalf("initBeadsForDir: %v", err)
-	}
+[beads]
+provider = %q
+`, tt.provider(cityDir))
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	data, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("read env log: %v", err)
-	}
-	parts := strings.Split(strings.TrimSpace(string(data)), "|")
-	if len(parts) != 4 {
-		t.Fatalf("captured env = %q, want 4 fields", strings.TrimSpace(string(data)))
-	}
-	if parts[0] != cityDir {
-		t.Fatalf("GC_CITY_PATH = %q, want %q", parts[0], cityDir)
-	}
-	if parts[1] != filepath.Join(cityDir, ".gc", "runtime") {
-		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", parts[1], filepath.Join(cityDir, ".gc", "runtime"))
-	}
-	if parts[2] != citylayout.PackStateDir(cityDir, "dolt") {
-		t.Fatalf("GC_PACK_STATE_DIR = %q, want %q", parts[2], citylayout.PackStateDir(cityDir, "dolt"))
-	}
-	if parts[3] != filepath.Join(cityDir, ".beads", "dolt") {
-		t.Fatalf("GC_DOLT_DATA_DIR = %q, want %q", parts[3], filepath.Join(cityDir, ".beads", "dolt"))
+			stopAfterCapture := errors.New("stop after capturing provider op")
+			var calls int
+			var gotScript string
+			var gotEnv, gotArgs []string
+			execute := func(script string, environ []string, args ...string) error {
+				calls++
+				gotScript = script
+				gotEnv = append([]string(nil), environ...)
+				gotArgs = append([]string(nil), args...)
+				return stopAfterCapture
+			}
+
+			err := initBeadsForDirWithExecutor(cityDir, cityDir, "gc", "hq", execute)
+			if !errors.Is(err, stopAfterCapture) {
+				t.Fatalf("initBeadsForDirWithExecutor error = %v, want %v", err, stopAfterCapture)
+			}
+			if calls != 1 {
+				t.Fatalf("provider calls = %d, want 1", calls)
+			}
+			if got, want := gotScript, tt.wantScript(cityDir); got != want {
+				t.Fatalf("script = %q, want %q", got, want)
+			}
+			if want := []string{"init", cityDir, "gc", "hq"}; !reflect.DeepEqual(gotArgs, want) {
+				t.Fatalf("args = %#v, want %#v", gotArgs, want)
+			}
+
+			env := runtimeEnvEntriesToMap(gotEnv)
+			for key, want := range map[string]string{
+				"GC_CITY_PATH":        cityDir,
+				"GC_CITY_RUNTIME_DIR": filepath.Join(cityDir, ".gc", "runtime"),
+				"GC_PACK_STATE_DIR":   citylayout.PackStateDir(cityDir, "dolt"),
+				"GC_DOLT_DATA_DIR":    filepath.Join(cityDir, ".beads", "dolt"),
+				"BEADS_DIR":           filepath.Join(cityDir, ".beads"),
+			} {
+				if got := env[key]; got != want {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -3918,132 +3940,6 @@ func TestInitBeadsForDir_bd_skip(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	if err := initBeadsForDir(dir, dir, "test", "test"); err != nil {
 		t.Fatalf("expected nil, got %v", err)
-	}
-}
-
-func TestInitBeadsForDirBdMaterializedScriptPreservesCityPath(t *testing.T) {
-	cityDir := t.TempDir()
-	writeMinimalCityToml(t, cityDir)
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityDir)
-
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fakeBd := filepath.Join(binDir, "bd")
-	fakeBdScript := `#!/bin/sh
-set -eu
-case "${1:-}" in
-  init)
-    mkdir -p "$PWD/.beads"
-    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"test-project"}\n' > "$PWD/.beads/metadata.json"
-    exit 0
-    ;;
-  config|migrate|list)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	configureTestDoltIdentityEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
-	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
-		t.Fatalf("initBeadsForDir: %v", err)
-	}
-}
-
-func TestInitBeadsForDirBdMaterializedScriptIgnoresAmbientCityRuntimeEnv(t *testing.T) {
-	cityDir := t.TempDir()
-	writeMinimalCityToml(t, cityDir)
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityDir)
-
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	captureFile := filepath.Join(t.TempDir(), "bd-init-env.txt")
-	fakeBd := filepath.Join(binDir, "bd")
-	fakeBdScript := fmt.Sprintf(`#!/bin/sh
-set -eu
-case "${1:-}" in
-  init)
-    mkdir -p "$PWD/.beads"
-    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"test-project"}\n' > "$PWD/.beads/metadata.json"
-    printf '%%s|%%s|%%s|%%s\n' \
-      "${GC_CITY_PATH:-}" \
-      "${GC_CITY_RUNTIME_DIR:-}" \
-      "${GC_PACK_STATE_DIR:-}" \
-      "${BEADS_DIR:-}" > %q
-    exit 0
-    ;;
-  config|migrate|list)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`, captureFile)
-	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	configureTestDoltIdentityEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
-	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-	t.Setenv("GC_CITY_PATH", "/wrong-city")
-	t.Setenv("GC_CITY_RUNTIME_DIR", "/wrong-runtime")
-	t.Setenv("GC_PACK_STATE_DIR", "/wrong-pack")
-	t.Setenv("BEADS_DIR", "/wrong/.beads")
-
-	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
-		t.Fatalf("initBeadsForDir: %v", err)
-	}
-
-	data, err := os.ReadFile(captureFile)
-	if err != nil {
-		t.Fatalf("read capture file: %v", err)
-	}
-	parts := strings.Split(strings.TrimSpace(string(data)), "|")
-	if len(parts) != 4 {
-		t.Fatalf("captured env = %q, want 4 fields", strings.TrimSpace(string(data)))
-	}
-	if parts[0] != cityDir {
-		t.Fatalf("GC_CITY_PATH = %q, want %q", parts[0], cityDir)
-	}
-	if parts[1] != filepath.Join(cityDir, ".gc", "runtime") {
-		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", parts[1], filepath.Join(cityDir, ".gc", "runtime"))
-	}
-	if parts[2] != citylayout.PackStateDir(cityDir, "dolt") {
-		t.Fatalf("GC_PACK_STATE_DIR = %q, want %q", parts[2], citylayout.PackStateDir(cityDir, "dolt"))
-	}
-	if parts[3] != filepath.Join(cityDir, ".beads") {
-		t.Fatalf("BEADS_DIR = %q, want %q", parts[3], filepath.Join(cityDir, ".beads"))
 	}
 }
 
