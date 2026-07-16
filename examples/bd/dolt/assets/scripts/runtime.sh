@@ -43,7 +43,7 @@ GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 # gc-beads-bd `is_remote` classification (gastownhall/gascity su-deol8).
 is_local_dolt_host() {
   case "$1" in
-    ""|0.0.0.0|127.*|localhost|::1|"[::1]") return 0 ;;
+    ""|127.0.0.1|0.0.0.0|localhost|::1|"[::1]") return 0 ;;
     *) return 1 ;;
   esac
 }

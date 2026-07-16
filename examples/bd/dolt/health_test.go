@@ -1288,6 +1288,74 @@ exit 1
 	}
 }
 
+// TestHealthScriptNonOneLoopbackHostIsExternal pins the host-classification
+// contract for a non-.1 loopback address (127.0.0.2): it must be treated as an
+// external endpoint (server.external=true), matching the sibling gc-beads-bd
+// `is_remote`/`restart`/`recover` scripts, which classify only 127.0.0.1 as the
+// local managed server. A future re-broadening of is_local_dolt_host back to the
+// whole 127.* block — which would split the health/status/logs commands from the
+// restart/recover contract — is caught here (su-deol8).
+func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	emptyDataDir := t.TempDir()
+
+	// Local managed precheck must fail so classification alone decides the path;
+	// the smart fake answers the external SELECT 1 / SHOW DATABASES probes.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.External {
+		t.Fatalf("server.external = false for 127.0.0.2; a non-.1 loopback host must classify as external to match the is_remote contract\n%s", out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for 127.0.0.2; the local-process signal must stay false for a non-local host\n%s", out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; the fake external endpoint answers SELECT 1\n%s", out)
+	}
+}
+
 // TestHealthScriptZombieScanExcludesRigLocalServers verifies that
 // Dolt processes on rig-configured ports are not flagged as zombies.
 // Regression guard for the bug where deacon patrol killed rig-local
