@@ -64,7 +64,7 @@ func Value() int { return alpha.Value() }
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for one changed Go file: %v\n%s", err, output)
 		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "--disable=govet", "./alpha", "./consumer")
+		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./consumer")
 		fixture.requireGoCalls(t, []string{"vet", "./alpha", "./consumer"})
 
 		fixture.resetCalls(t)
@@ -121,7 +121,6 @@ func TestValue(t *testing.T) { _ = alpha.Value() }
 			t.Errorf("lint-affected failed for reverse-dependent graph: %v\n%s", err, output)
 		}
 		fixture.requireSingleRunCallWithUnorderedTail(t,
-			"--disable=govet",
 			"./alpha",
 			"./consumer",
 			"./externaltest",
@@ -152,7 +151,7 @@ import _ "example.com/static-scope/missing"
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected did not fail closed for a broken package graph: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./..."})
+		fixture.requireCalls(t, []string{"run", "./..."})
 		fixture.requireGoCalls(t, []string{"vet", "./..."})
 	})
 
@@ -169,7 +168,7 @@ import _ "example.com/static-scope/missing"
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for a deleted Go file: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./alpha"})
+		fixture.requireCalls(t, []string{"run", "./alpha"})
 		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
 
 		fixture.resetCalls(t)
@@ -211,7 +210,7 @@ func Moved() int {
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for a cross-package rename: %v\n%s", err, output)
 		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "--disable=govet", "./newpkg", "./oldpkg")
+		fixture.requireSingleRunCallWithUnorderedTail(t, "./newpkg", "./oldpkg")
 		fixture.requireGoCalls(t, []string{"vet", "./newpkg", "./oldpkg"})
 
 		fixture.resetCalls(t)
@@ -247,7 +246,7 @@ func Moved() int {
 		if output, err := fixture.runMakeTargetWithRef("lint-affected", "refs/heads/missing-static-base"); err != nil {
 			t.Errorf("lint-affected did not fail closed for an invalid ref: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./..."})
+		fixture.requireCalls(t, []string{"run", "./..."})
 		fixture.requireGoCalls(t, []string{"vet", "./..."})
 
 		fixture.resetCalls(t)
@@ -290,7 +289,7 @@ func Printf(format string, args ...any) { fmt.Printf(format, args...) }
 				t.Errorf("affected vet output missing %q:\n%s", marker, output)
 			}
 		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "--disable=govet", "./alpha", "./consumer")
+		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./consumer")
 		fixture.requireGoCalls(t)
 	})
 
@@ -305,9 +304,75 @@ func Printf(format string, args ...any) { fmt.Printf(format, args...) }
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for an assembly-only diff: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./alpha"})
+		fixture.requireCalls(t, []string{"run", "./alpha"})
 		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
 	})
+
+	t.Run("native include fragment selects its package and reverse dependents", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value()\n",
+			"alpha/value.s":  "#include \"../shared/defs.inc\"\n\nTEXT ·Value(SB), $0-0\n\tRET\n",
+			"consumer/consumer.go": `package consumer
+
+import "example.com/static-scope/alpha"
+
+func Value() { alpha.Value() }
+`,
+			"unrelated/unrelated.go": "package unrelated\n",
+			"shared/defs.inc":        "#define VALUE 1\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "shared", "defs.inc"), "#define VALUE 2\n")
+
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
+			t.Errorf("lint-affected failed for a native include fragment: %v\n%s", err, output)
+		}
+		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./consumer")
+		fixture.requireGoCalls(t, []string{"vet", "./alpha", "./consumer"})
+	})
+
+	for _, testCase := range []struct {
+		name          string
+		sharedPackage bool
+		wantPackages  []string
+	}{
+		{
+			name:          "recognized shared native header beside a Go package",
+			sharedPackage: true,
+			wantPackages:  []string{"./alpha", "./consumer", "./shared"},
+		},
+		{
+			name:         "recognized package-less shared native header",
+			wantPackages: []string{"./alpha", "./consumer"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			files := map[string]string{
+				"alpha/alpha.go": "package alpha\n\nfunc Value()\n",
+				"alpha/value.s":  "#include \"../shared/defs.h\"\n\nTEXT ·Value(SB), $0-0\n\tRET\n",
+				"consumer/consumer.go": `package consumer
+
+import "example.com/static-scope/alpha"
+
+func Value() { alpha.Value() }
+`,
+				"shared/defs.h":          "#define VALUE 1\n",
+				"unrelated/unrelated.go": "package unrelated\n",
+			}
+			if testCase.sharedPackage {
+				files["shared/shared.go"] = "package shared\n"
+			}
+			fixture := newPRStaticScopeFixture(t, files)
+			writeTestFile(t, filepath.Join(fixture.repoRoot, "shared", "defs.h"), "#define VALUE 2\n")
+
+			fixture.resetCalls(t)
+			if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
+				t.Errorf("lint-affected failed for a recognized shared native header: %v\n%s", err, output)
+			}
+			fixture.requireSingleRunCallWithUnorderedTail(t, testCase.wantPackages...)
+			fixture.requireGoCalls(t, append([]string{"vet"}, testCase.wantPackages...))
+		})
+	}
 
 	t.Run("embedded file diff selects its package", func(t *testing.T) {
 		fixture := newPRStaticScopeFixture(t, map[string]string{
@@ -326,7 +391,7 @@ var Data string
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for an embedded-file diff: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./alpha"})
+		fixture.requireCalls(t, []string{"run", "./alpha"})
 		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
 	})
 
@@ -357,7 +422,7 @@ var data string
 			if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 				t.Errorf("lint-affected failed for a %s diff: %v\n%s", testPackage.name, err, output)
 			}
-			fixture.requireCalls(t, []string{"run", "--disable=govet", "./alpha"})
+			fixture.requireCalls(t, []string{"run", "./alpha"})
 			fixture.requireGoCalls(t, []string{"vet", "./alpha"})
 		})
 	}
@@ -386,7 +451,7 @@ var Data string
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for a multiply owned embedded file: %v\n%s", err, output)
 		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "--disable=govet", "./alpha", "./alpha/child")
+		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./alpha/child")
 		fixture.requireGoCalls(t, []string{"vet", "./alpha", "./alpha/child"})
 	})
 
@@ -409,7 +474,7 @@ var Data string
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected did not fail closed for a missing embedded file: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./..."})
+		fixture.requireCalls(t, []string{"run", "./..."})
 		fixture.requireGoCalls(t, []string{"vet", "./..."})
 	})
 
@@ -433,7 +498,39 @@ var Data embed.FS
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected did not fail closed for a deleted embed glob member: %v\n%s", err, output)
 		}
-		fixture.requireCalls(t, []string{"run", "--disable=govet", "./..."})
+		fixture.requireCalls(t, []string{"run", "./..."})
+		fixture.requireGoCalls(t, []string{"vet", "./..."})
+	})
+
+	t.Run("deleted recognized embedded glob member falls back before native shortcut", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": `package alpha
+
+import "embed"
+
+//go:embed data/*.h
+var Data embed.FS
+`,
+			"alpha/data/first.h":  "#define FIRST 1\n",
+			"alpha/data/second.h": "#define SECOND 2\n",
+			"consumer/consumer.go": `package consumer
+
+import "example.com/static-scope/alpha"
+
+var Data = alpha.Data
+`,
+			"native/native.go": "package native\n\nfunc Value()\n",
+			"native/value.s":   "TEXT ·Value(SB), $0-0\n\tRET\n",
+		})
+		if err := os.Remove(filepath.Join(fixture.repoRoot, "alpha", "data", "first.h")); err != nil {
+			t.Fatalf("delete recognized embedded glob member: %v", err)
+		}
+
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
+			t.Errorf("lint-affected did not fail closed before the native shortcut: %v\n%s", err, output)
+		}
+		fixture.requireCalls(t, []string{"run", "./..."})
 		fixture.requireGoCalls(t, []string{"vet", "./..."})
 	})
 
@@ -506,7 +603,7 @@ func TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge(t *t
 		"go.sum",
 		"go.work",
 		"go.work.sum",
-		".golangci.yml",
+		".golangci.",
 		"Makefile",
 		".github/workflows/",
 		".github/actions/",
@@ -535,10 +632,13 @@ func TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge(t *t
 		for _, protectedPath := range []string{
 			"go.mod",
 			"go.sum",
+			".golangci.json",
+			".golangci.toml",
+			".golangci.yaml",
+			".golangci.yml",
 			".github/actions/static-scope/action.yml",
 			".github/workflows/ci.yml",
 			".githooks/pre-commit",
-			".golangci.yml",
 			"Makefile",
 			"go.work",
 			"go.work.sum",

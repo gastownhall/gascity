@@ -40,6 +40,19 @@ GO_BUILD_INPUT_SUFFIXES = frozenset(
 
 EMBED_FILE_FIELDS = ("EmbedFiles", "TestEmbedFiles", "XTestEmbedFiles")
 
+NATIVE_SOURCE_FIELDS = (
+    "CgoFiles",
+    "CFiles",
+    "CXXFiles",
+    "MFiles",
+    "HFiles",
+    "FFiles",
+    "SFiles",
+    "SwigFiles",
+    "SwigCXXFiles",
+    "SysoFiles",
+)
+
 
 class SelectionError(Exception):
     """The changed scope could not be selected without losing coverage."""
@@ -186,6 +199,7 @@ def affected_package_args(
     import_by_dir: dict[str, str] = {}
     arg_by_import: dict[str, str] = {}
     embed_owners: dict[str, set[str]] = defaultdict(set)
+    native_imports: set[str] = set()
 
     for package in package_records:
         import_path = package.get("ImportPath")
@@ -217,25 +231,52 @@ def affected_package_args(
             for embedded in string_list(package, field):
                 embed_owners[embedded_repo_path(relative_dir, embedded)].add(import_path)
 
+        native_sources: list[str] = []
+        for field in NATIVE_SOURCE_FIELDS:
+            native_sources.extend(string_list(package, field))
+        ignored_native_sources = (
+            path
+            for path in string_list(package, "IgnoredOtherFiles")
+            if is_go_build_input(path)
+        )
+        if native_sources or any(ignored_native_sources):
+            native_imports.add(import_path)
+
     seeds: set[str] = set()
     for status, path in changed:
         owners = embed_owners.get(path, set())
         seeds.update(owners)
-        if is_go_build_input(path):
+        # Native compilers can consume inputs with arbitrary names and from
+        # shared directories. The Go package inventory does not expose that
+        # dependency graph, so every native package is the smallest safe scope
+        # for every changed path without duplicating compiler discovery.
+        seeds.update(native_imports)
+        build_input = is_go_build_input(path)
+        import_path = None
+        directory = ""
+        if build_input:
             directory = posixpath.dirname(path) or "."
             import_path = import_by_dir.get(directory)
-            if import_path is None:
-                raise SelectionError(
-                    f"changed Go build-input directory {directory!r} has no unique package"
-                )
-            seeds.add(import_path)
-        elif status == "D" and not owners and any(
-            path_is_beneath_package(path, package_dir)
-            for package_dir in import_by_dir
+        if (
+            status == "D"
+            and not owners
+            and (not build_input or import_path is None)
+            and any(
+                path_is_beneath_package(path, package_dir)
+                for package_dir in import_by_dir
+            )
         ):
             raise SelectionError(
                 f"deleted path {path!r} may be absent from the current embed inventory"
             )
+        if build_input:
+            if import_path is None:
+                if native_imports and not path.endswith(".go"):
+                    continue
+                raise SelectionError(
+                    f"changed Go build-input directory {directory!r} has no unique package"
+                )
+            seeds.add(import_path)
 
     if not seeds:
         return []
@@ -276,9 +317,7 @@ def run_static_checks(
     lint_flags: list[str],
     packages: list[str],
 ) -> int:
-    lint_result = run_tool(
-        [lint_tool, "run", "--disable=govet", *lint_flags, *packages]
-    )
+    lint_result = run_tool([lint_tool, "run", *lint_flags, *packages])
     if lint_result != 0:
         return lint_result
     return run_tool([go_tool, "vet", *packages])
@@ -306,7 +345,7 @@ def lint_affected(
     except SelectionError as error:
         return full_static_checks(lint_tool, go_tool, lint_flags, error)
     if not packages:
-        print("lint-affected: no changed Go build inputs or embedded files")
+        print("lint-affected: no changed Go build inputs, embedded files, or native consumers")
         return 0
     print(f"lint-affected: {' '.join(packages)}")
     return run_static_checks(lint_tool, go_tool, lint_flags, packages)

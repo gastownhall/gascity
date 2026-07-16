@@ -939,18 +939,25 @@ comes from the canonical package records and their production, internal-test,
 and external-test resolved embed inventories in one `go list -test -json ./...`
 graph. Multiple owners are retained. The reverse-dependency closure preserves
 analyzer-fact consumers that did not change textually, including test-only
-importers. An incomplete package graph, a deleted required embed input, or an
-otherwise-unclassified deletion beneath a package fails safe to full-repository
-lint instead of using a partial closure. Changed formatting receives only
+importers. An incomplete package graph, a deleted required embed input, or a
+deletion beneath a package with neither a current embed owner nor a current
+direct package owner fails safe to full-repository lint before native-input
+shortcuts. Changed formatting receives only
 exact existing regular, non-symlink `.go` paths, with NUL-safe handling for
 spaces and no empty formatter invocation. Keep `lint-changed` as the smaller
 local/pre-commit target; the PR workflow uses the distinct conservative
-`lint-affected` target. That target disables golangci's `govet` copy and runs
-the Go tool's exact vet over the same closure, preserving generated-file
-diagnostics without duplicate vet analysis.
+`lint-affected` target. That target runs configured golangci, including its
+`govet` copy, and the Go tool's exact vet over the same closure. The bounded
+duplicate preserves both diagnostic surfaces without repeating either across
+the whole repository. Any selection failure runs both configured lint and
+standalone vet over `./...`; fallback never disables a configured linter.
+Native include and linker inputs can have recognized or arbitrary names and may
+live outside the consuming package, so every changed path selects every package
+with native Go-tool sources plus its reverse dependents.
 
 Protected full-scope paths are the Go module/workspace files,
-`.golangci.yml`, `Makefile`, workflow/action definitions, hooks, vendored code,
+every root `.golangci.*` configuration, `Makefile`, workflow/action definitions,
+hooks, vendored code,
 `scripts/cipolicy/**`, `scripts/ci-static-scope`, and
 `scripts/ci-static-select`. Pushes to `main`, schedules, dispatches (including
 the current reusable RC caller), and any unrecognized event also stay full.
@@ -959,14 +966,17 @@ the current reusable RC caller), and any unrecognized event also stay full.
 `fmt-check-changed` only when the classifier emits `changed`. It uses
 `scope != 'changed'`, rather than equality with a second expected value, for
 full lint, full format, and standalone vet so a missing output cannot skip
-them. Golangci enables `govet` explicitly for full lint. Affected lint disables
-that copy and invokes standalone vet over the identical package arguments;
-every full-scope run retains standalone full-repository vet.
+them. Golangci enables `govet` explicitly in both scopes, and affected lint
+invokes standalone vet over the identical package arguments. Every selection
+fallback and full-scope run retains configured golangci plus standalone
+full-repository vet.
 
 **Verification:** Synthetic-repository contracts cover a valid PR merge,
 wrong/missing base, non-merge checkout, every non-PR/unknown event, protected
 paths, changed/deleted/moved Go files, assembly and other recognized Go-tool
-build inputs, production/internal-test/external-test embedded assets, multiple
+build inputs, arbitrary native include fragments, recognized shared headers,
+and a deleted recognized glob member before native fallback,
+production/internal-test/external-test embedded assets, multiple
 embed owners, a deleted required input and deleted glob member's full-scope
 fallback, unrelated non-build/non-embedded no-op diffs, filenames containing
 spaces, transitive and test-only reverse dependents, a generated

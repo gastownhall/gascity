@@ -296,7 +296,7 @@ Even a validated PR merge runs the full scope when its diff touches static
 analysis or build policy:
 
 - `go.mod`, `go.sum`, `go.work`, or `go.work.sum`
-- `.golangci.yml` or `Makefile`
+- any root `.golangci.*` configuration or `Makefile`
 - `.github/workflows/**`, `.github/actions/**`, or `.githooks/**`
 - `vendor/**` or `scripts/cipolicy/**`
 - `scripts/ci-static-scope` and `scripts/ci-static-select`
@@ -305,7 +305,7 @@ The two scopes own different commands:
 
 | Scope | Commands | Selection guarantee |
 | --- | --- | --- |
-| Changed PR | `make lint-affected`, `make fmt-check-changed` | Lint and vet every package owning a changed Go build input or embedded file, plus all transitive reverse dependents; format-check only changed regular `.go` files that still exist. |
+| Changed PR | `make lint-affected`, `make fmt-check-changed` | Lint and vet every package owning a changed Go build input or embedded file, every native package that could consume a changed path, and all transitive reverse dependents; format-check only changed regular `.go` files that still exist. |
 | Full/fail-safe | `make lint`, `make fmt-check`, `make vet` | Analyze and format-check the whole repository, then run standalone `go vet ./...`. |
 
 Affected-package discovery examines every changed path. It selects packages
@@ -316,32 +316,42 @@ owning package using `EmbedFiles`, `TestEmbedFiles`, and `XTestEmbedFiles` from
 the canonical records in one complete `go list -test -json ./...` graph.
 Additions, modifications, deletions, and both sides of cross-package moves are
 included. Git rename coalescing is disabled so a move cannot hide the old
-package. An unrelated non-build, non-embedded path remains a no-op.
+package. Native compiler include and linker inputs can have recognized or
+arbitrary names and may live outside their consuming package. Every changed
+path therefore selects every package with native Go-tool sources, plus their
+reverse dependents. This is the smallest sound scope available without trying
+to duplicate compiler-specific dependency discovery. An unrelated non-build,
+non-embedded path remains a no-op when the graph has no native package that
+could consume it.
 
 Reverse dependents are included because analyzers such as `govet` consume
 exported facts, including through test-only imports. If the package graph
 cannot be loaded completely, affected lint fails safe to `./...` instead of
 trusting a partial graph. This includes a deleted required embed input. A
 deleted glob member no longer appears in the current resolved embed inventory,
-so an otherwise-unclassified deletion beneath a package also fails safe to
-full scope. File selection is NUL-delimited. Formatting remains limited to
+so any deletion beneath a package that has neither a current embed owner nor a
+current direct package owner also fails safe to full scope. This guard runs
+before native shared-input shortcuts, including for recognized headers. File
+selection is NUL-delimited. Formatting remains limited to
 changed `.go` paths, excludes deletions and symlinks, accepts only existing
 regular files, and never invokes the formatter with an empty file list.
 
 `lint-affected` is the conservative PR target. It runs the configured
-golangci linters with golangci's `govet` copy disabled, then runs the Go tool's
-`vet` over the exact same affected package closure. That avoids duplicate vet
-analysis without losing standalone-vet diagnostics in generated files or
-unchanged reverse dependents. `lint-changed` remains the faster
-local/pre-commit target and intentionally checks only packages that contain
-changed Go files. Both accept `LINT_CHANGED_SCOPE` and `LINT_CHANGED_REF`; CI
-uses `tracked` and the event's exact PR base SHA.
+golangci linters, including golangci's `govet`, then runs the Go tool's `vet`
+over the exact same affected package closure. The bounded duplicate preserves
+both tools' distinct diagnostics without repeating either analysis across the
+whole repository. It also retains standalone-vet diagnostics in generated
+files and unchanged reverse dependents. If selection fails, the same pair runs
+over `./...`; fallback never disables configured linters. `lint-changed`
+remains the faster local/pre-commit target and intentionally checks only
+packages that contain changed Go files. Both accept `LINT_CHANGED_SCOPE` and
+`LINT_CHANGED_REF`; CI uses `tracked` and the event's exact PR base SHA.
 
-The golangci configuration still enables `govet` explicitly for full lint.
+The golangci configuration enables `govet` explicitly in both scopes.
 Golangci's `govet` execution is not assumed to be semantically equivalent to
-standalone `go vet ./...`: generated-file exclusions and analyzer/configuration
-drift can differ. Full-scope runs therefore retain standalone vet, while the
-changed lane directly invokes standalone vet on its conservative closure.
+standalone `go vet`: generated-file exclusions and analyzer/configuration drift
+can differ. Full-scope runs therefore retain standalone `go vet ./...`, while
+the changed lane invokes standalone vet on its conservative closure.
 
 `make test-ci-policy` runs independently of changed/full static selection and
 always executes the focused workflow-scope, golangci-`govet`, affected-target,

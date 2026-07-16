@@ -14,13 +14,13 @@ PROTECTED_FILES = frozenset(
         "go.sum",
         "go.work",
         "go.work.sum",
-        ".golangci.yml",
         "Makefile",
         "scripts/ci-static-scope",
         "scripts/ci-static-select",
     }
 )
 PROTECTED_PREFIXES = (
+    ".golangci.",
     ".github/workflows/",
     ".github/actions/",
     ".githooks/",
