@@ -346,6 +346,14 @@
             "off"
           ],
           "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
+        },
+        "scheduling_policy": {
+          "type": "string",
+          "enum": [
+            "priority_fifo",
+            "fifo"
+          ],
+          "description": "SchedulingPolicy sets the order in which this agent (or worker pool)\nadmits ready work. \"priority_fifo\" (default) takes the most urgent\npriority band first, oldest first within a band. \"fifo\" takes the oldest\nready bead first and ignores priority. Empty means \"priority_fifo\".\n\nThe policy governs ordering only. Which beads are eligible at all is\ndecided by the work query; a custom work_query narrows eligibility and\ndoes not set scheduling order. The one selected policy applies across\nevery admission path: work discovery, cross-store claims, continuation\nassignment, lost-claim retry, and nested-cap admission. Recovery of work\nthis agent already owns is always admitted ahead of new work under either\npolicy, and no running session is ever preempted."
         }
       },
       "additionalProperties": false,
@@ -668,6 +676,14 @@
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
+        "scheduling_policy": {
+          "type": "string",
+          "enum": [
+            "priority_fifo",
+            "fifo"
+          ],
+          "description": "SchedulingPolicy overrides the work-admission order (\"priority_fifo\" or\n\"fifo\") for this agent in this rig."
+        },
         "inject_fragments_append": {
           "items": {
             "type": "string"
@@ -920,6 +936,14 @@
             "off"
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
+        "scheduling_policy": {
+          "type": "string",
+          "enum": [
+            "priority_fifo",
+            "fifo"
+          ],
+          "description": "SchedulingPolicy overrides the work-admission order (\"priority_fifo\" or\n\"fifo\"). This is the operator-authoritative route for a shared pool whose\npack ships a different default."
         },
         "pre_start_append": {
           "items": {
@@ -3188,6 +3212,14 @@
         "max_active_sessions": {
           "type": "integer",
           "description": "MaxActiveSessions is the workspace-level cap on total concurrent sessions.\nNil means unlimited. Agents and rigs inherit this if they don't set their own."
+        },
+        "scheduling_policy": {
+          "type": "string",
+          "enum": [
+            "priority_fifo",
+            "fifo"
+          ],
+          "description": "SchedulingPolicy is the operator's work-admission order for capacity that\npools share. When several pools compete for one workspace, rig, or agent\ncap, their requests are ordered by this policy — a per-pool setting cannot\narbitrate between two pools, so the city's value decides. \"priority_fifo\"\n(default) or \"fifo\"; empty means \"priority_fifo\".\n\nA pool's own scheduling_policy still governs the order it admits its own\nwork (discovery, claims, continuations, retry). This value governs only\nwhich competing request wins scarce shared capacity, which is why a pack\ncannot set it."
         },
         "session_template": {
           "type": "string",

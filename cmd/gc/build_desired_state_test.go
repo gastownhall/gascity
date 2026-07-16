@@ -877,7 +877,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
-	}})
+	}}, nil)
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}
@@ -925,19 +925,16 @@ func TestMergeScaleCheckDemandPreservesPriorityAndCreationTime(t *testing.T) {
 	}
 }
 
-func TestSortScaleCheckDemandUsesPriorityBandFIFO(t *testing.T) {
+func TestScaleCheckDemandFromCandidatesUsesPriorityBandFIFO(t *testing.T) {
 	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
-	demand := scaleCheckDemand{
-		WorkBeadIDs: []string{"p1-old", "p0-new", "p0-old"},
-		Priorities:  map[string]int{"p1-old": 1, "p0-new": 0, "p0-old": 0},
-		CreatedAt: map[string]time.Time{
-			"p1-old": base.Add(-time.Hour),
-			"p0-new": base.Add(time.Hour),
-			"p0-old": base,
-		},
+	p0, p1 := 0, 1
+	rows := []scaleCheckCandidate{
+		{bead: beads.Bead{ID: "p1-old", Priority: &p1, CreatedAt: base.Add(-time.Hour)}, storeRef: "city"},
+		{bead: beads.Bead{ID: "p0-new", Priority: &p0, CreatedAt: base.Add(time.Hour)}, storeRef: "city"},
+		{bead: beads.Bead{ID: "p0-old", Priority: &p0, CreatedAt: base}, storeRef: "city"},
 	}
 
-	sortScaleCheckDemand(&demand)
+	demand := scaleCheckDemandFromCandidates(rows, beads.DefaultAdmissionPolicy)
 	want := []string{"p0-old", "p0-new", "p1-old"}
 	if !reflect.DeepEqual(demand.WorkBeadIDs, want) {
 		t.Fatalf("WorkBeadIDs = %v, want %v", demand.WorkBeadIDs, want)
@@ -4433,7 +4430,7 @@ func TestFairPoolSessionCreateSharesReservesFloorFirst(t *testing.T) {
 		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
 	}
 	for seed := uint64(0); seed < 5; seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
+		shares, _ := fairPoolSessionCreateShares(states, 1, beads.PolicyPriorityFIFO, seed)
 		if shares["zulu"] != 1 {
 			t.Errorf("seed=%d: floor pool zulu got %d budget, want 1 (floor reserved before elastic)", seed, shares["zulu"])
 		}
@@ -4444,7 +4441,7 @@ func TestFairPoolSessionCreateSharesReservesFloorFirst(t *testing.T) {
 
 	// Surplus budget beyond the reserved floor still flows to elastic demand,
 	// and a floor-only template is not topped up past its single request.
-	shares, spare := fairPoolSessionCreateShares(states, 3, 0)
+	shares, spare := fairPoolSessionCreateShares(states, 3, beads.PolicyPriorityFIFO, 0)
 	if shares["zulu"] != 1 {
 		t.Errorf("floor pool zulu got %d, want 1 (not topped up past its single request)", shares["zulu"])
 	}
@@ -4482,7 +4479,7 @@ func TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation(t *t
 	const budget = 8 // floors (8) >= budget: Phase 1 alone would consume it all.
 	wantReserve := budget / 4
 	for seed := uint64(0); seed < uint64(len(states)); seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, budget, seed)
+		shares, _ := fairPoolSessionCreateShares(states, budget, beads.PolicyPriorityFIFO, seed)
 		if got := shares["voxist-web/executor"]; got < wantReserve {
 			t.Fatalf("seed=%d: elastic pool starved by floor saturation (got %d), want >= %d (reserved elastic slice)", seed, got, wantReserve)
 		}
@@ -4503,7 +4500,7 @@ func TestFairPoolSessionCreateSharesRotatesFloorReservation(t *testing.T) {
 	}
 	reserved := map[string]bool{}
 	for seed := uint64(0); seed < 6; seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
+		shares, _ := fairPoolSessionCreateShares(states, 1, beads.PolicyPriorityFIFO, seed)
 		total := 0
 		for tmpl, n := range shares {
 			if n > 0 {

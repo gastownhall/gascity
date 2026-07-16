@@ -104,6 +104,7 @@ type agentFile struct {
 	ResumeCommand          string            `toml:"resume_command,omitempty"`
 	WakeMode               string            `toml:"wake_mode,omitempty"`
 	MouseMode              string            `toml:"mouse_mode,omitempty"`
+	SchedulingPolicy       string            `toml:"scheduling_policy,omitempty"`
 }
 
 type usageCounts struct {
@@ -959,6 +960,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		ResumeCommand:          agent.ResumeCommand,
 		WakeMode:               agent.WakeMode,
 		MouseMode:              agent.MouseMode,
+		SchedulingPolicy:       agent.SchedulingPolicy,
 	}
 }
 
@@ -1010,7 +1012,8 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		len(cfg.DependsOn) == 0 &&
 		cfg.ResumeCommand == "" &&
 		cfg.WakeMode == "" &&
-		cfg.MouseMode == ""
+		cfg.MouseMode == "" &&
+		cfg.SchedulingPolicy == ""
 }
 
 func dedupeStrings(values []string) []string {

@@ -285,6 +285,14 @@
             "off"
           ],
           "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
+        },
+        "scheduling_policy": {
+          "type": "string",
+          "enum": [
+            "priority_fifo",
+            "fifo"
+          ],
+          "description": "SchedulingPolicy sets the order in which this agent (or worker pool)\nadmits ready work. \"priority_fifo\" (default) takes the most urgent\npriority band first, oldest first within a band. \"fifo\" takes the oldest\nready bead first and ignores priority. Empty means \"priority_fifo\".\n\nThe policy governs ordering only. Which beads are eligible at all is\ndecided by the work query; a custom work_query narrows eligibility and\ndoes not set scheduling order. The one selected policy applies across\nevery admission path: work discovery, cross-store claims, continuation\nassignment, lost-claim retry, and nested-cap admission. Recovery of work\nthis agent already owns is always admitted ahead of new work under either\npolicy, and no running session is ever preempted."
         }
       },
       "additionalProperties": false,
@@ -578,6 +586,14 @@
             "off"
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
+        "scheduling_policy": {
+          "type": "string",
+          "enum": [
+            "priority_fifo",
+            "fifo"
+          ],
+          "description": "SchedulingPolicy overrides the work-admission order (\"priority_fifo\" or\n\"fifo\"). This is the operator-authoritative route for a shared pool whose\npack ships a different default."
         },
         "pre_start_append": {
           "items": {

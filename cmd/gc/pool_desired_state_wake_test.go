@@ -10,14 +10,14 @@ import (
 // closedPoolSessionBead creates a closed pool-managed session bead whose
 // template metadata matches the given qualified template name. Used to
 // construct "session bead closed but template still configured" scenarios.
-func closedPoolSessionBead(id, template string) beads.Bead {
+func closedPoolSessionBead() beads.Bead {
 	return beads.Bead{
-		ID:     id,
+		ID:     "sess-1",
 		Status: "closed",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"template":             template,
+			"template":             "rig/claude",
 			poolManagedMetadataKey: boolMetadata(true),
 		},
 	}
@@ -39,7 +39,7 @@ func TestComputePoolDesiredStates_WakeKnownIdentityForClosedSession(t *testing.T
 	work := []beads.Bead{
 		workBead("w1", "rig/claude", "rig/claude", "in_progress", 5),
 	}
-	closed := closedPoolSessionBead("sess-1", "rig/claude")
+	closed := closedPoolSessionBead()
 
 	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil)
 
@@ -90,7 +90,7 @@ func TestComputePoolDesiredStates_WakeKnownIdentityDedupsMultipleBeadsForSameSes
 		workBead("w1", "rig/claude", "rig/claude", "in_progress", 5),
 		workBead("w2", "rig/claude", "rig/claude", "open", 3),
 	}
-	closed := closedPoolSessionBead("sess-1", "rig/claude")
+	closed := closedPoolSessionBead()
 
 	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil)
 

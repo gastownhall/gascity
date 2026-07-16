@@ -856,6 +856,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		DependsOn:                    []string{"other-agent"},
 		WakeMode:                     "fresh",
 		MouseMode:                    "on",
+		SchedulingPolicy:             "fifo",
 		TmuxAlias:                    "worker--{{.CityName}}",
 		Implicit:                     true,
 		DrainTimeout:                 "10m",

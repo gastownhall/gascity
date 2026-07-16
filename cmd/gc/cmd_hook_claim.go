@@ -27,6 +27,10 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// Policy is the pool's work-admission policy. Every ordering and
+	// band decision in the claim path reads it, so one claim cannot order
+	// its candidates differently from the query that produced them.
+	Policy beads.AdmissionPolicy
 }
 
 type hookClaimOps struct {
@@ -145,7 +149,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
-	candidates = orderedHookCandidates(candidates)
+	candidates = orderedHookCandidates(candidates, opts.Policy)
 
 	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
@@ -155,6 +159,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 }
 
 func normalizeHookClaimOptions(opts *hookClaimOptions) {
+	opts.Policy = opts.Policy.Resolve()
 	opts.Assignee = strings.TrimSpace(opts.Assignee)
 	opts.IdentityCandidates = hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
 	opts.RouteTargets = hookClaimRouteTargets(opts.RouteTargets...)
@@ -209,11 +214,17 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
 			continue
 		}
-		candidatePriority := beads.PriorityValue(candidate.Priority)
-		if activePriority < 0 {
-			activePriority = candidatePriority
-		} else if candidatePriority != activePriority {
-			break
+		// The band latch is #4322's inversion guard: once this scan commits to a
+		// band, a candidate lost to another claimant must not fall through to a
+		// weaker band. Policies without bands (fifo) must not latch, or the scan
+		// would stop at the first band change and skip older eligible work.
+		if opts.Policy.HasPriorityBands() {
+			candidatePriority := beads.PriorityValue(candidate.Priority)
+			if activePriority < 0 {
+				activePriority = candidatePriority
+			} else if candidatePriority != activePriority {
+				break
+			}
 		}
 		if ctx.Err() != nil {
 			// The shared claim budget is spent (an earlier slow-failing claim
@@ -264,10 +275,11 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
 
-func orderedHookCandidates(candidates []beads.Bead) []beads.Bead {
+func orderedHookCandidates(candidates []beads.Bead, policy beads.AdmissionPolicy) []beads.Bead {
 	ordered := append([]beads.Bead(nil), candidates...)
+	less := beads.LessFunc(policy)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return beads.ReadyLess(ordered[i], ordered[j])
+		return less(ordered[i], ordered[j])
 	})
 	return ordered
 }
@@ -402,7 +414,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
-			beads.PriorityValue(sibling.Priority) != beads.PriorityValue(bead.Priority) ||
+			(opts.Policy.HasPriorityBands() && beads.PriorityValue(sibling.Priority) != beads.PriorityValue(bead.Priority)) ||
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}

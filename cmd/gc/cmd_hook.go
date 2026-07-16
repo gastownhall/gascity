@@ -448,6 +448,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:          queryEnv,
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
+			// Same agent that generated workQuery, so the claim path admits in the
+			// order the query asked for.
+			Policy: a.EffectiveSchedulingPolicy(),
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
@@ -492,7 +495,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	claimsErrored := false
 	var activePriority *int
 	for len(remaining) > 0 {
-		_, selected, _, err := bestClaimStoreWithWork(workQuery, remaining, primary, claimOpts, activePriority, run)
+		_, selected, selectedRank, err := bestClaimStoreWithWork(workQuery, remaining, primary, claimOpts, activePriority, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -501,6 +504,13 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
+		// Lock the band from the scan that just observed it, BEFORE revalidating.
+		// Revalidation re-queries the selected store; if another claimant takes
+		// the bead we picked inside that window, reselection must stay in the
+		// band we saw rather than falling through to weaker work and latching
+		// onto that instead. Latching only after selection made the fallthrough
+		// invisible: the band we observed was already gone by then.
+		activePriority = latchClaimBand(activePriority, selectedRank, claimOpts.Policy)
 		selectedOutput, selectedErr := run(workQuery, selected.dir, selected.env)
 		var claimOutput string
 		var claimStore hookStore
@@ -521,10 +531,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
 		}
-		if claimRank.tier == 2 && activePriority == nil {
-			priority := beads.PriorityValue(claimRank.bead.Priority)
-			activePriority = &priority
-		}
+		// Revalidation may have settled on a different row than the first scan
+		// (same band, different store). Latch that too when the first scan did
+		// not already fix the band.
+		activePriority = latchClaimBand(activePriority, claimRank, claimOpts.Policy)
 		storeOpts := claimOpts
 		storeOpts.Env = queryEnv
 		if len(claimStore.env) > 0 {
@@ -606,6 +616,24 @@ func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[strin
 
 // WorkQueryRunner runs a work query command and returns its stdout.
 // dir sets the command's working directory.
+// latchClaimBand fixes the priority band a federated claim loop is working in.
+//
+// Once a scan has observed a claimable bead at some band, a later scan in the
+// same loop must not admit a weaker band: losing a P0 race is a reason to retry
+// for P0 (or drain and re-hook), never a reason to quietly accept P1. The first
+// non-nil result therefore sticks for the rest of the loop.
+//
+// Only fresh claims (tier 2) are band-gated; recovery tiers are work this
+// session already owns and are never fenced out. Policies without priority
+// bands never latch — for them every ready bead stays in scope on every retry.
+func latchClaimBand(current *int, rank hookClaimCandidateRank, policy beads.AdmissionPolicy) *int {
+	if current != nil || !policy.HasPriorityBands() || rank.tier != 2 {
+		return current
+	}
+	priority := beads.PriorityValue(rank.bead.Priority)
+	return &priority
+}
+
 type WorkQueryRunner func(command, dir string) (string, error)
 
 // hookWorkQueryTimeout caps the work-query subprocess that `gc hook` and the

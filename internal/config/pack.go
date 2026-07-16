@@ -2772,6 +2772,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		ResumeCommand:           ov.ResumeCommand,
 		WakeMode:                ov.WakeMode,
 		MouseMode:               ov.MouseMode,
+		SchedulingPolicy:        ov.SchedulingPolicy,
 		PreStartAppend:          ov.PreStartAppend,
 		SessionSetupAppend:      ov.SessionSetupAppend,
 		SessionLiveAppend:       ov.SessionLiveAppend,

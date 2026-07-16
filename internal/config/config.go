@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -778,6 +779,9 @@ type AgentOverride struct {
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
 	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// SchedulingPolicy overrides the work-admission order ("priority_fifo" or
+	// "fifo") for this agent in this rig.
+	SchedulingPolicy *string `toml:"scheduling_policy,omitempty" jsonschema:"enum=priority_fifo,enum=fifo"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -1299,6 +1303,17 @@ type Workspace struct {
 	// MaxActiveSessions is the workspace-level cap on total concurrent sessions.
 	// Nil means unlimited. Agents and rigs inherit this if they don't set their own.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
+	// SchedulingPolicy is the operator's work-admission order for capacity that
+	// pools share. When several pools compete for one workspace, rig, or agent
+	// cap, their requests are ordered by this policy — a per-pool setting cannot
+	// arbitrate between two pools, so the city's value decides. "priority_fifo"
+	// (default) or "fifo"; empty means "priority_fifo".
+	//
+	// A pool's own scheduling_policy still governs the order it admits its own
+	// work (discovery, claims, continuations, retry). This value governs only
+	// which competing request wins scarce shared capacity, which is why a pack
+	// cannot set it.
+	SchedulingPolicy string `toml:"scheduling_policy,omitempty" jsonschema:"enum=priority_fifo,enum=fifo"`
 	// SessionTemplate is a template string supporting placeholders: {{.City}},
 	// {{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls tmux session naming.
 	// Default (empty): "{{.Agent}}" — just the sanitized agent name. Per-city
@@ -3257,6 +3272,19 @@ type Agent struct {
 	// sessions; "off" or empty preserves the SDK's default mouse-off startup
 	// behavior for headless sessions.
 	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// SchedulingPolicy sets the order in which this agent (or worker pool)
+	// admits ready work. "priority_fifo" (default) takes the most urgent
+	// priority band first, oldest first within a band. "fifo" takes the oldest
+	// ready bead first and ignores priority. Empty means "priority_fifo".
+	//
+	// The policy governs ordering only. Which beads are eligible at all is
+	// decided by the work query; a custom work_query narrows eligibility and
+	// does not set scheduling order. The one selected policy applies across
+	// every admission path: work discovery, cross-store claims, continuation
+	// assignment, lost-claim retry, and nested-cap admission. Recovery of work
+	// this agent already owns is always admitted ahead of new work under either
+	// policy, and no running session is ever preempted.
+	SchedulingPolicy string `toml:"scheduling_policy,omitempty" jsonschema:"enum=priority_fifo,enum=fifo"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
@@ -3866,6 +3894,11 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: mouse_mode must be \"on\", \"off\", or empty, got %q", a.QualifiedName(), a.MouseMode)
+		}
+		// SchedulingPolicy enum. Delegated to the beads package so the config
+		// surface and the comparators that implement it cannot drift apart.
+		if err := beads.AdmissionPolicy(a.SchedulingPolicy).Validate(); err != nil {
+			return fmt.Errorf("agent %q: scheduling_policy: %w", a.QualifiedName(), err)
 		}
 		if a.MinActiveSessions != nil && *a.MinActiveSessions < 0 {
 			return fmt.Errorf("agent %q: min_active_sessions must be >= 0", a.Name)

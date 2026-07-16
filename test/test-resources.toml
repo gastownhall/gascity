@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 523
-baseline_files = 152
+baseline_calls = 524
+baseline_files = 153
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 396
-baseline_files = 106
+baseline_calls = 397
+baseline_files = 107
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -218,8 +218,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 394
-baseline_files = 105
+baseline_calls = 395
+baseline_files = 106
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"

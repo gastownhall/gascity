@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -1450,6 +1451,105 @@ func TestComputePoolDesiredStates_InFlightSelectionRespectsCapsInStableOrder(t *
 		if got := reqs[i].SessionBeadID; got != want {
 			t.Fatalf("request[%d].SessionBeadID = %q, want %q; requests=%#v", i, got, want, reqs)
 		}
+	}
+}
+
+// inFlightPoolSessionBoundTo builds a pool session that already spent a new
+// demand slot and is bound to a specific trigger bead.
+func inFlightPoolSessionBoundTo(id, triggerBeadID string) beads.Bead {
+	session := pendingPoolSessionBead(id)
+	session.Metadata[beadmeta.TriggerBeadIDMetadataKey] = triggerBeadID
+	return session
+}
+
+// TestComputePoolDesiredStates_InFlightReuseSkipsDemandByIdentityNotIndex pins
+// the fix for in-flight reuse consuming demand positionally. A session already
+// bound to the lower-ranked P2 bead used to make the materializer start reading
+// fresh demand at index 1 — which, with demand sorted [P0, P2], re-created the
+// P2 bead the in-flight session already owned and never materialized P0's
+// request metadata at all. The new session then launched with the wrong
+// pack/workspace/brain-parent context.
+func TestComputePoolDesiredStates_InFlightReuseSkipsDemandByIdentityNotIndex(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	base := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	sessions := []beads.Bead{inFlightPoolSessionBoundTo("sess-inflight", "w-p2-old")}
+
+	// Demand arrives rank-ordered: the urgent new P0 bead outranks the old P2
+	// bead the in-flight session is already working.
+	demand := map[string]scaleCheckDemand{
+		"claude": {
+			Count:       2,
+			WorkBeadIDs: []string{"w-p0-new", "w-p2-old"},
+			Titles:      map[string]string{"w-p0-new": "urgent", "w-p2-old": "routine"},
+			Priorities:  map[string]int{"w-p0-new": 0, "w-p2-old": 2},
+			CreatedAt:   map[string]time.Time{"w-p0-new": base.Add(time.Hour), "w-p2-old": base},
+			Packs:       map[string]string{"w-p0-new": "pack-p0", "w-p2-old": "pack-p2"},
+			Workspaces:  map[string]string{"w-p0-new": "ws-p0", "w-p2-old": "ws-p2"},
+			StoreRefs:   map[string]string{"w-p0-new": "rig:alpha", "w-p2-old": "rig:beta"},
+			ParentSIDs:  map[string]string{"w-p0-new": "brain-p0", "w-p2-old": "brain-p2"},
+		},
+	}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(
+		cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 2}, demand, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 (one in-flight reuse plus one fresh), requests=%#v", len(reqs), reqs)
+	}
+
+	var fresh []SessionRequest
+	inFlight := 0
+	for _, req := range reqs {
+		if req.SessionBeadID == "sess-inflight" {
+			inFlight++
+			if req.WorkBeadID != "w-p2-old" {
+				t.Fatalf("in-flight request WorkBeadID = %q, want w-p2-old", req.WorkBeadID)
+			}
+			continue
+		}
+		fresh = append(fresh, req)
+	}
+	if inFlight != 1 {
+		t.Fatalf("in-flight requests = %d, want 1; requests=%#v", inFlight, reqs)
+	}
+	if len(fresh) != 1 {
+		t.Fatalf("fresh requests = %d, want 1; requests=%#v", len(fresh), reqs)
+	}
+
+	got := fresh[0]
+	if got.WorkBeadID == "w-p2-old" {
+		t.Fatalf("fresh request duplicates the work the in-flight session already owns: %+v", got)
+	}
+	if got.WorkBeadID != "w-p0-new" {
+		t.Fatalf("fresh request WorkBeadID = %q, want w-p0-new (highest-ranked remaining demand)", got.WorkBeadID)
+	}
+	// The fresh request must carry P0's full launch context, not a bare slot.
+	if got.WorkBeadTitle != "urgent" {
+		t.Errorf("WorkBeadTitle = %q, want urgent", got.WorkBeadTitle)
+	}
+	if beads.PriorityValue(got.BeadPriority) != 0 {
+		t.Errorf("BeadPriority = %v, want 0", got.BeadPriority)
+	}
+	if !got.WorkCreatedAt.Equal(base.Add(time.Hour)) {
+		t.Errorf("WorkCreatedAt = %v, want %v", got.WorkCreatedAt, base.Add(time.Hour))
+	}
+	if got.WorkPack != "pack-p0" {
+		t.Errorf("WorkPack = %q, want pack-p0", got.WorkPack)
+	}
+	if got.WorkWorkspace != "ws-p0" {
+		t.Errorf("WorkWorkspace = %q, want ws-p0", got.WorkWorkspace)
+	}
+	if got.WorkStoreRef != "rig:alpha" {
+		t.Errorf("WorkStoreRef = %q, want rig:alpha", got.WorkStoreRef)
+	}
+	if got.BrainParentSID != "brain-p0" {
+		t.Errorf("BrainParentSID = %q, want brain-p0", got.BrainParentSID)
 	}
 }
 

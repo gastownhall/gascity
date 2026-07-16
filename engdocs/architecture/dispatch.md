@@ -159,12 +159,44 @@ resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
 canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
 the temporary migration predicate reads `gc.run_target=<target>` only on
 `gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
-work-query form appends `--sort hybrid --limit=20` to the canonical probe
-and prints the first ready match, then filters the migration probe to roots
-with empty `gc.routed_to`. The wider candidate window lets a blocked head
-fall through to ready work behind it. The routed queue uses priority-band
-FIFO: lower numeric priorities run first, with creation time and bead ID as
-deterministic tie-breakers within a band. The count form unions canonical and migration
+work-query form fetches the canonical probe unbounded (`--limit 0`), orders it
+with `jq` by the pool's policy, takes the first 20 rows, and prints the first
+ready match; it then filters the migration probe to roots with empty
+`gc.routed_to`. The candidate window is wider than one row so a blocked head
+has ready work behind it to fall through to.
+
+The routed queue's order is the pool's `scheduling_policy`, not a fixed
+contract. `priority_fifo` (the default, and the behavior when the setting is
+absent) runs lower numeric priorities first, with creation time and bead ID
+as deterministic tie-breakers within a band. `fifo` runs oldest-first and
+ignores priority, tie-breaking on bead ID.
+
+**bd does not choose the window, and must not.** No `bd --sort` policy
+reproduces `priority_fifo`. Verified against beads v1.1.0
+(`internal/storage/sqlbuild/ready.go`, `internal/storage/issueops/ready_work.go`):
+`oldest` is `created ASC, id ASC` (exactly `FIFOLess`); `priority` is
+`priority ASC, created DESC, id ASC`, which is LIFO inside a band; and
+`hybrid` sorts everything created in the last 48h ahead of everything older
+and replaces the older rows' band with `999`, so an aged P0 lands behind every
+fresh P2 with its priority discarded. Any of these can fill a truncated window
+with rows the policy ranks below an aged P0 — the Go-side re-sort
+(`orderedHookCandidates`) cannot rescue a row that was never fetched, so under
+sustained fresh arrivals that P0 starves. Ordering in `jq` before truncating
+makes the window the policy's true top rows regardless of bd's sort semantics.
+`beads.AdmissionPolicy.JQSortKey()` and `beads.LessFunc()` are the two
+spellings of the one comparator and are asserted equal by test.
+
+**`priority_fifo` accepts starvation; that is the trade, and it is why `fifo`
+exists.** Strict band priority means a continuously refilled P0 queue can
+starve P2 and unprioritized work indefinitely: if a claimable P0 exists before
+every claim, the hook never reaches P2, and shared caps can do the same. There
+is no aging or fairness escape hatch. This is a deliberate reversal of the
+policy this document carried before: *"unassigned routed pool work is FIFO
+before priority, so newer high-priority work does not jump ahead of older ready
+work already queued for the same target."* A pool that wants the old guarantee
+sets `scheduling_policy = "fifo"`, which cannot starve — it admits strictly in
+arrival order.
+The count form unions canonical and migration
 probes and deduplicates by bead ID before piping through `jq 'length'`.
 Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
@@ -259,8 +291,10 @@ regressions.
     `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
     worker and reconciler must also share the temporary migration predicate
     for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
-    `gc.routed_to`; only the worker's first-row form adds native
-    `bd ready --sort hybrid --limit=20` selection to the canonical probe.
+    `gc.routed_to`; only the worker's first-row form adds the jq
+    policy-ordering + 20-row window to the canonical probe. The two forms must
+    agree on the predicate; the count form is order-free by design, since a
+    count does not depend on order.
     Any pool-demand predicate change to one (added filter, modified target
     resolution, new state) MUST be reflected in the other. Diverging the two
     re-introduces the protocol-mismatch class — the reconciler
@@ -372,7 +406,8 @@ name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
 # Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
-#   --unassigned --exclude-type=epic --json --sort hybrid --limit=20,
+#   --unassigned --exclude-type=epic --json --limit 0
+#   | jq 'sort_by(<scheduling_policy key>) | .[:20]',
 #   then a temporary gc.run_target workflow-root migration fallback
 ```
 

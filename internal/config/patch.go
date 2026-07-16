@@ -133,6 +133,10 @@ type AgentPatch struct {
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
 	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// SchedulingPolicy overrides the work-admission order ("priority_fifo" or
+	// "fifo"). This is the operator-authoritative route for a shared pool whose
+	// pack ships a different default.
+	SchedulingPolicy *string `toml:"scheduling_policy,omitempty" jsonschema:"enum=priority_fifo,enum=fifo"`
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
@@ -549,6 +553,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.MouseMode != nil {
 		a.MouseMode = *p.MouseMode
+	}
+	if p.SchedulingPolicy != nil {
+		a.SchedulingPolicy = *p.SchedulingPolicy
 	}
 	// InjectFragments uses presence-aware semantics via *[]string: a nil
 	// pointer means "leave unchanged"; a non-nil pointer (even to an

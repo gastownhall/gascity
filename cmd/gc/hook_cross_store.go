@@ -221,7 +221,7 @@ func bestClaimStoreWithSeed(command string, stores []hookStore, primary hookStor
 			}
 			continue
 		}
-		if !ok || (foundBest && !hookClaimRankLess(rank, bestRank)) {
+		if !ok || (foundBest && !hookClaimRankLess(rank, bestRank, opts.Policy)) {
 			continue
 		}
 		bestOut, bestStore, bestRank = out, store, rank
@@ -249,7 +249,7 @@ func bestHookClaimCandidate(output string, opts hookClaimOptions, requiredFreshP
 	found := false
 	for _, candidate := range candidates {
 		rank, ok := hookClaimRank(candidate, opts, requiredFreshPriority)
-		if !ok || (found && !hookClaimRankLess(rank, best)) {
+		if !ok || (found && !hookClaimRankLess(rank, best, opts.Policy)) {
 			continue
 		}
 		best, found = rank, true
@@ -265,9 +265,11 @@ func hookClaimRank(candidate beads.Bead, opts hookClaimOptions, requiredFreshPri
 	case status == "open" && hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates):
 		return hookClaimCandidateRank{tier: 1, bead: candidate}, true
 	case hookCandidateClaimable(candidate, opts.RouteTargets):
-		priority := beads.PriorityValue(candidate.Priority)
-		if requiredFreshPriority != nil && priority != *requiredFreshPriority {
-			return hookClaimCandidateRank{}, false
+		// Cross-store arm of the band latch. Inert when the policy has no bands.
+		if opts.Policy.HasPriorityBands() && requiredFreshPriority != nil {
+			if beads.PriorityValue(candidate.Priority) != *requiredFreshPriority {
+				return hookClaimCandidateRank{}, false
+			}
 		}
 		return hookClaimCandidateRank{tier: 2, bead: candidate}, true
 	default:
@@ -275,11 +277,15 @@ func hookClaimRank(candidate beads.Bead, opts hookClaimOptions, requiredFreshPri
 	}
 }
 
-func hookClaimRankLess(left, right hookClaimCandidateRank) bool {
+// hookClaimRankLess orders claim candidates: recovery tier first (tiers 0/1,
+// work this session already owns), then the pool's policy within a tier. The
+// tier comparison precedes the policy comparison, which is what keeps
+// recovery-first true under every policy.
+func hookClaimRankLess(left, right hookClaimCandidateRank, policy beads.AdmissionPolicy) bool {
 	if left.tier != right.tier {
 		return left.tier < right.tier
 	}
-	return beads.ReadyLess(left.bead, right.bead)
+	return beads.LessFunc(policy)(left.bead, right.bead)
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that firstStoreWithWork

@@ -147,7 +147,13 @@ func computePoolDesiredStates(
 	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionInfos)
 
 	var resumeRequests []SessionRequest
-	wakeRequestedTemplates := make(map[string]struct{})
+	// wakeRequestIndex maps a template to the position of its wake request in
+	// resumeRequests, so a later bead the pool ranks higher can REPLACE the one
+	// already recorded. Dedup runs before the canonical sort, so keeping the
+	// first bead seen would let a P0 be dropped behind a P2 and make the template
+	// compete for scarce capacity at the wrong band.
+	wakeRequestIndex := make(map[string]int)
+	wakePolicyFor := admissionPolicyForTemplates(cfg)
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -219,11 +225,7 @@ func computePoolDesiredStates(
 				// canonical template.
 				continue
 			}
-			if _, ok := wakeRequestedTemplates[template]; ok {
-				continue
-			}
-			wakeRequestedTemplates[template] = struct{}{}
-			resumeRequests = append(resumeRequests, SessionRequest{
+			candidate := SessionRequest{
 				Template:       template,
 				BeadPriority:   beadPriority(wb),
 				Tier:           "wake-known-identity",
@@ -232,7 +234,19 @@ func computePoolDesiredStates(
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-			})
+			}
+			if idx, ok := wakeRequestIndex[template]; ok {
+				// One wake per template still, but it must represent the bead
+				// this pool would actually claim next. Replacing the whole
+				// request (not just its id) keeps the pack/workspace/brain-parent
+				// context bound to the bead that won.
+				if wakeCandidateLess(candidate, resumeRequests[idx], wakePolicyFor(template)) {
+					resumeRequests[idx] = candidate
+				}
+				continue
+			}
+			wakeRequestIndex[template] = len(resumeRequests)
+			resumeRequests = append(resumeRequests, candidate)
 			if trace != nil {
 				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 					"tier":      "wake-known-identity",
@@ -243,7 +257,7 @@ func computePoolDesiredStates(
 	}
 
 	limits := newNestedCapLimits(cfg)
-	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	usage := acceptedNestedCapUsage(limits, resumeRequests, cfg.SharedAdmissionPolicy())
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
 	resumeSessionBeadIDs := make(map[string]struct{}, len(resumeRequests))
 	for _, req := range resumeRequests {
@@ -285,59 +299,91 @@ func computePoolDesiredStates(
 					"anonymous_new": newCount - inFlightCount,
 				})
 			}
+			// Reused in-flight sessions are already bound to specific work, so
+			// the demand they cover is removed by trigger identity rather than
+			// by count. Advancing an index instead would let a session bound to
+			// low-ranked work push the materializer past higher-ranked demand:
+			// it would re-create the bead the session already owns and drop the
+			// urgent bead's request metadata on the floor.
+			boundWorkBeadIDs := make(map[string]struct{}, inFlightCount)
 			for j := 0; j < inFlightCount; j++ {
 				req := inFlight[j]
+				if workBeadID := strings.TrimSpace(req.WorkBeadID); workBeadID != "" {
+					boundWorkBeadIDs[workBeadID] = struct{}{}
+				}
 				allRequests = append(allRequests, req)
 			}
-			for j := inFlightCount; j < newCount; j++ {
+			demand := scaleCheckDemand[template]
+			remaining := unboundDemandWorkBeadIDs(demand, boundWorkBeadIDs)
+			for j := 0; j < newCount-inFlightCount; j++ {
 				workBeadID := ""
-				workBeadTitle := ""
-				var workBeadPriority *int
-				var workCreatedAt time.Time
-				workPack := ""
-				workWorkspace := ""
-				workStoreRef := ""
-				workParentSID := ""
-				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
-					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
-					if demand.Titles != nil {
-						workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
-					}
-					if priority, ok := demand.Priorities[workBeadID]; ok {
-						workBeadPriority = &priority
-					}
-					workCreatedAt = demand.CreatedAt[workBeadID]
-					if demand.Packs != nil {
-						workPack = strings.TrimSpace(demand.Packs[workBeadID])
-					}
-					if demand.Workspaces != nil {
-						workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
-					}
-					if demand.StoreRefs != nil {
-						workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-					}
-					if demand.ParentSIDs != nil {
-						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
-					}
+				if j < len(remaining) {
+					workBeadID = remaining[j]
 				}
-				req := SessionRequest{
-					Template:       template,
-					BeadPriority:   workBeadPriority,
-					Tier:           "new",
-					WorkBeadID:     workBeadID,
-					WorkBeadTitle:  workBeadTitle,
-					WorkCreatedAt:  workCreatedAt,
-					WorkPack:       workPack,
-					WorkWorkspace:  workWorkspace,
-					WorkStoreRef:   workStoreRef,
-					BrainParentSID: workParentSID,
-				}
-				allRequests = append(allRequests, req)
+				allRequests = append(allRequests, newDemandSessionRequest(template, workBeadID, demand))
 			}
 		}
 	}
 
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+// unboundDemandWorkBeadIDs returns demand's work bead IDs in rank order with
+// every ID an in-flight session is already bound to removed. Fresh requests draw
+// from this list in order, so the highest-ranked work no session already owns
+// always gets materialized first. Blank IDs are dropped rather than allowed to
+// occupy a slot: they carry no work to launch against.
+func unboundDemandWorkBeadIDs(demand scaleCheckDemand, bound map[string]struct{}) []string {
+	if len(demand.WorkBeadIDs) == 0 {
+		return nil
+	}
+	remaining := make([]string, 0, len(demand.WorkBeadIDs))
+	for _, id := range demand.WorkBeadIDs {
+		workBeadID := strings.TrimSpace(id)
+		if workBeadID == "" {
+			continue
+		}
+		if _, ok := bound[workBeadID]; ok {
+			continue
+		}
+		remaining = append(remaining, workBeadID)
+	}
+	return remaining
+}
+
+// newDemandSessionRequest materializes a fresh "new"-tier request for template,
+// carrying workBeadID's launch context from demand. An empty workBeadID yields
+// an anonymous request: scale_check reported demand that no bead in the demand
+// map accounts for, so the slot is filled without work metadata.
+func newDemandSessionRequest(template, workBeadID string, demand scaleCheckDemand) SessionRequest {
+	req := SessionRequest{
+		Template:   template,
+		Tier:       "new",
+		WorkBeadID: workBeadID,
+	}
+	if workBeadID == "" {
+		return req
+	}
+	if demand.Titles != nil {
+		req.WorkBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
+	}
+	if priority, ok := demand.Priorities[workBeadID]; ok {
+		req.BeadPriority = &priority
+	}
+	req.WorkCreatedAt = demand.CreatedAt[workBeadID]
+	if demand.Packs != nil {
+		req.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
+	}
+	if demand.Workspaces != nil {
+		req.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+	}
+	if demand.StoreRefs != nil {
+		req.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+	}
+	if demand.ParentSIDs != nil {
+		req.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+	}
+	return req
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
@@ -435,11 +481,13 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
-// Preserves recovery requests first, then admits fresh capacity in canonical
-// priority-band FIFO order, rejecting any request that would exceed a cap.
+// Preserves recovery requests first, then admits fresh capacity in the order the
+// city's shared admission policy selects, rejecting any request that would
+// exceed a cap. The city value arbitrates because these caps are shared: the
+// competing requests can come from pools with different per-pool policies.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
 	sortedRequests := append([]SessionRequest(nil), requests...)
-	sortSessionRequests(sortedRequests)
+	sortSessionRequests(sortedRequests, cfg.SharedAdmissionPolicy())
 
 	limits := newNestedCapLimits(cfg)
 	usage := newNestedCapUsage()
@@ -570,10 +618,20 @@ func newNestedCapUsage() nestedCapUsage {
 	}
 }
 
-func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {
+// wakeCandidateLess reports whether wake request a represents work the pool
+// admits before b's, under policy. Wake requests always carry a real work bead
+// (id and creation time), so the bead comparator applies directly.
+func wakeCandidateLess(a, b SessionRequest, policy beads.AdmissionPolicy) bool {
+	return beads.LessFunc(policy)(
+		beads.Bead{ID: a.WorkBeadID, Priority: a.BeadPriority, CreatedAt: a.WorkCreatedAt},
+		beads.Bead{ID: b.WorkBeadID, Priority: b.BeadPriority, CreatedAt: b.WorkCreatedAt},
+	)
+}
+
+func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest, policy beads.AdmissionPolicy) nestedCapUsage {
 	usage := newNestedCapUsage()
 	sorted := append([]SessionRequest(nil), requests...)
-	sortSessionRequests(sorted)
+	sortSessionRequests(sorted, policy)
 	for _, req := range sorted {
 		if usage.canAccept(req, limits) {
 			usage.accept(req, limits)
@@ -582,34 +640,80 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 	return usage
 }
 
-func sortSessionRequests(requests []SessionRequest) {
+// sortSessionRequests orders competing session requests for scarce capacity.
+//
+// Recovery of committed capacity always sorts first, ahead of any policy
+// comparison, so no running work is displaced by newer or more urgent work
+// under any policy. Only the ordering among peers is policy-dependent.
+//
+// This deliberately mirrors beads.LessFunc rather than delegating to it: a
+// SessionRequest may carry no WorkCreatedAt or WorkBeadID, which the Bead
+// comparator has no notion of. The two must stay in step by band semantics,
+// not by shared code.
+func sortSessionRequests(requests []SessionRequest, policy beads.AdmissionPolicy) {
 	sort.SliceStable(requests, func(i, j int) bool {
-		left, right := requests[i], requests[j]
-		leftRecovery := preservesCommittedCapacity(left)
-		rightRecovery := preservesCommittedCapacity(right)
-		if leftRecovery != rightRecovery {
-			return leftRecovery
+		return sessionRequestLess(requests[i], requests[j], policy)
+	})
+}
+
+// sessionRequestLess reports whether left outranks right for a scarce slot
+// under policy. It is the comparator sortSessionRequests applies, and it is a
+// strict weak ordering: every comparison either separates the two requests or
+// falls through to one that does, ending at a total tie-break on stable
+// identity.
+//
+// A request that carries no work bead is ordered by sentinel rather than by
+// skipping the comparison. Skipping made an anonymous request compare equal to
+// every peer in its band while those peers still ordered among themselves, so
+// equivalence was not transitive and sort.SliceStable returned input-order
+// dependent results — a newer bead could hold a slot ahead of an older one.
+func sessionRequestLess(left, right SessionRequest, policy beads.AdmissionPolicy) bool {
+	leftRecovery := preservesCommittedCapacity(left)
+	rightRecovery := preservesCommittedCapacity(right)
+	if leftRecovery != rightRecovery {
+		return leftRecovery
+	}
+	if leftRecovery {
+		leftResume := isResumeLikeTier(left.Tier)
+		rightResume := isResumeLikeTier(right.Tier)
+		if leftResume != rightResume {
+			return leftResume
 		}
-		if leftRecovery {
-			leftResume := isResumeLikeTier(left.Tier)
-			rightResume := isResumeLikeTier(right.Tier)
-			if leftResume != rightResume {
-				return leftResume
-			}
-		}
+	}
+	if policy.HasPriorityBands() {
 		leftPriority := beads.PriorityValue(left.BeadPriority)
 		rightPriority := beads.PriorityValue(right.BeadPriority)
 		if leftPriority != rightPriority {
 			return leftPriority < rightPriority
 		}
-		if !left.WorkCreatedAt.IsZero() && !right.WorkCreatedAt.IsZero() && !left.WorkCreatedAt.Equal(right.WorkCreatedAt) {
-			return left.WorkCreatedAt.Before(right.WorkCreatedAt)
-		}
-		if left.WorkBeadID != "" && right.WorkBeadID != "" && left.WorkBeadID != right.WorkBeadID {
-			return left.WorkBeadID < right.WorkBeadID
-		}
-		return false
-	})
+	}
+	// Sentinel ordering for missing work identity: a request with no
+	// timestamp, and then a request with no work bead ID, sorts after every
+	// peer that has one. An anonymous request is scale_check demand that could
+	// not be attributed to a bead, so it is the least specific claim on the
+	// slot and yields to work we can name. The sentinel is explicit because
+	// the zero time.Time would otherwise sort as the oldest possible reading
+	// and put anonymous requests first.
+	if left.WorkCreatedAt.IsZero() != right.WorkCreatedAt.IsZero() {
+		return right.WorkCreatedAt.IsZero()
+	}
+	if !left.WorkCreatedAt.Equal(right.WorkCreatedAt) {
+		return left.WorkCreatedAt.Before(right.WorkCreatedAt)
+	}
+	if (left.WorkBeadID == "") != (right.WorkBeadID == "") {
+		return right.WorkBeadID == ""
+	}
+	if left.WorkBeadID != right.WorkBeadID {
+		return left.WorkBeadID < right.WorkBeadID
+	}
+	// Total tie-break on stable identity. Without it two distinct requests
+	// could compare equal in both directions and leave the sort input-order
+	// dependent again; both fields are stable across ticks, so the resulting
+	// order is reproducible.
+	if left.Template != right.Template {
+		return left.Template < right.Template
+	}
+	return left.SessionBeadID < right.SessionBeadID
 }
 
 func preservesCommittedCapacity(request SessionRequest) bool {

@@ -383,6 +383,12 @@
               "null"
             ]
           },
+          "SchedulingPolicy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Scope": {
             "type": [
               "string",
@@ -540,6 +546,7 @@
           "ResumeCommand",
           "WakeMode",
           "MouseMode",
+          "SchedulingPolicy",
           "PreStartAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",
