@@ -167,8 +167,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4332,
-			BaselineFiles:   200,
+			BaselineCalls:   4336,
+			BaselineFiles:   201,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -364,8 +364,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4326,
-			BaselineFiles:   200,
+			BaselineCalls:   4330,
+			BaselineFiles:   201,
 			ReportedCalls:   4339,
 			ReportedFiles:   199,
 			OwnerBead:       "ga-80po0c.2.1",
