@@ -76,6 +76,18 @@ var retainedRealOwners = []retainedRealOwner{
 		reviewed: runnableKey{
 			packageDir:  "cmd/gc",
 			packageName: "main",
+			owner:       "TestDoSessionWait_RegistersReadyWaitForRigDependency",
+		},
+		retained: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
+			owner:       "TestCmdSessionWait_AllowsRigDependencyBeads",
+		},
+	},
+	{
+		reviewed: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
 			owner:       "TestDoSessionWake_PokesManagedControllerAfterStateChange",
 		},
 		retained: runnableKey{
@@ -94,6 +106,18 @@ var retainedRealOwners = []retainedRealOwner{
 			packageDir:  "cmd/gc",
 			packageName: "main",
 			owner:       "TestCmdSessionWait_AllowsRigDependencyBeads",
+		},
+	},
+	{
+		reviewed: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
+			owner:       "TestDoMailInbox_RendersMessagesFromReader",
+		},
+		retained: runnableKey{
+			packageDir:  "cmd/gc",
+			packageName: "main",
+			owner:       "TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox",
 		},
 	},
 }

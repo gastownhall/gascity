@@ -2394,8 +2394,130 @@ start_command = "true"
 	}
 }
 
+func TestDoSessionWait_RegistersReadyWaitForRigDependency(t *testing.T) {
+	const (
+		sessionID = "gcg-session-1"
+		depID     = "ga-dep-1"
+		originID  = "gcg-origin-1"
+	)
+	now := time.Date(2026, time.July, 16, 6, 30, 0, 0, time.UTC)
+	cityStore := waitPrefixedStore{
+		Store: beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:        sessionID,
+			Title:     "worker session",
+			Type:      sessionBeadType,
+			Status:    "open",
+			Labels:    []string{sessionBeadLabel},
+			CreatedAt: now.Add(-time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Revision:  1,
+			Metadata: map[string]string{
+				"session_name":       "worker",
+				"continuation_epoch": "1",
+			},
+		}}, nil),
+		prefix: "gcg",
+	}
+	rigStore := waitPrefixedStore{
+		Store: beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:        depID,
+			Title:     "rig dependency",
+			Type:      "task",
+			Status:    "closed",
+			CreatedAt: now.Add(-time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Revision:  1,
+		}}, nil),
+		prefix: "ga",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doSessionWait(sessionID, []string{depID}, false, "block", false, &stdout, &stderr, sessionWaitDeps{
+		sessions:         sessionFrontDoor(cityStore),
+		dependencies:     newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}),
+		now:              func() time.Time { return now },
+		createdBySession: originID,
+	})
+	if code != 0 {
+		t.Fatalf("doSessionWait() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "already ready") {
+		t.Fatalf("stdout = %q, want already-ready result", got)
+	}
+
+	waits, err := cityStore.ListByLabel("session:"+sessionID, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(wait): %v", err)
+	}
+	if len(waits) != 1 {
+		t.Fatalf("wait count = %d, want 1", len(waits))
+	}
+	wait := waits[0]
+	if wait.Status != "open" {
+		t.Fatalf("wait status = %q, want open", wait.Status)
+	}
+	for key, want := range map[string]string{
+		"state":              waitStateReady,
+		"created_at":         now.Format(time.RFC3339),
+		"ready_at":           now.Format(time.RFC3339),
+		"dep_ids":            depID,
+		"dep_mode":           "all",
+		"created_by_session": originID,
+	} {
+		if got := wait.Metadata[key]; got != want {
+			t.Fatalf("wait metadata[%q] = %q, want %q", key, got, want)
+		}
+	}
+	if wait.Description != "block" {
+		t.Fatalf("wait description = %q, want block", wait.Description)
+	}
+}
+
 func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+	setWaitTestFileBeads(t)
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag = ""
+	rigFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	})
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	cityToml := `[workspace]
+name = "gascity"
+prefix = "gc"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	cityFlag = cityPath
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(city): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigPath); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(rig): %v", err)
+	}
+	dep := beads.Bead{ID: "fe-1", Title: "rig dep", Status: "closed", Type: "task"}
+	writeTestFileStoreBeads(t, rigPath, []beads.Bead{dep})
 
 	cityStore, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -2417,15 +2539,12 @@ func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	dep, err := rigStore.Create(beads.Bead{Title: "rig dep"})
+	gotDep, err := rigStore.Get(dep.ID)
 	if err != nil {
-		t.Fatalf("create rig dep bead: %v", err)
+		t.Fatalf("get rig dep bead: %v", err)
 	}
-	if err := rigStore.Close(dep.ID); err != nil {
-		t.Fatalf("close rig dep bead: %v", err)
-	}
-	if got := beadPrefix(nil, dep.ID); got != "fe" {
-		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
+	if gotDep.Status != "closed" {
+		t.Fatalf("rig dep status = %q, want closed", gotDep.Status)
 	}
 
 	var stdout, stderr bytes.Buffer

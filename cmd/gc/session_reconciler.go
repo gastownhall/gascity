@@ -2394,6 +2394,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			beadRequested := infoByID[id].RestartRequested == "true"
 			if tmuxRequested || beadRequested {
+				// A pinned configured named session is an operator-declared
+				// critical conversation (for example, the mayor). Do not let
+				// collateral reconciler restart flags (progress-stall, stale
+				// runtime metadata, or other non-explicit requests) abruptly
+				// kill it. Explicit controller resets set
+				// continuation_reset_pending through SessionHandle.Reset and
+				// still proceed so planned graceful recycle remains possible.
+				explicitControllerReset := strings.TrimSpace(infoByID[id].ContinuationResetPending) == "true"
+				if runtimeRunning && pinnedConfiguredNamedSessionKillProtected(infoByID[id]) && !explicitControllerReset {
+					if tmuxRequested && dops != nil {
+						if err := dops.clearRestartRequested(name); err != nil && !runtime.IsSessionGone(err) {
+							fmt.Fprintf(stderr, "session reconciler: clearing deferred restart-requested marker for pinned named session %s (bead %s): %v\n", name, id, err) //nolint:errcheck
+						}
+					}
+					if beadRequested {
+						// applyStore: the clear is persisted and folded in one call, and
+						// the fold correctly does not advance past a rejected write —
+						// this entry is not read again this tick (we continue below).
+						tick.applyStore(id, sessFront, sessionpkg.MetadataPatch{"restart_requested": ""})
+					}
+					fmt.Fprintf(stderr, "session reconciler: skipping abrupt restart-requested kill for pinned named session %s (bead %s)\n", name, id) //nolint:errcheck
+					continue
+				}
 				if runtimeRunning {
 					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
@@ -4500,12 +4523,32 @@ func namedSessionActivelyInUseInfo(info sessionpkg.Info, sp runtime.Provider, na
 	return active
 }
 
+// pinnedConfiguredNamedSessionKillProtected reports whether info is a configured
+// named session the operator has pinned awake (gc session pin). It reads the
+// typed session.Info projection, matching the Info-threaded reconciler paths
+// that call it.
+func pinnedConfiguredNamedSessionKillProtected(info sessionpkg.Info) bool {
+	return isNamedSessionInfo(info) && strings.TrimSpace(info.PinAwake) == "true"
+}
+
 // shouldDeferNamedSessionConfigDrift threads typed session.Info end to end
 // (WI-6 R3): the active-use reason reads its pending-interaction deferral off
 // Info via namedSessionActiveUseReasonInfo (the runtime activity probes inside it
 // stay raw, §7), and the persisted deferral-timer read/write side is likewise
 // typed.
 func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
+	// A pinned configured named session is an operator-declared critical
+	// conversation (for example, the mayor). Config drift must never collaterally
+	// recycle it. The deferral timer is still recorded so the drift stays
+	// observable rather than silently ignored.
+	if pinnedConfiguredNamedSessionKillProtected(info) {
+		if clk != nil && (info.ConfigDriftDeferredKey != driftKey || info.ConfigDriftDeferredAt == "") {
+			if err := recordNamedSessionConfigDriftDeferredAt(info, sessFront, clk.Now().UTC(), driftKey); err != nil {
+				return "", false, err
+			}
+		}
+		return "pinned", true, nil
+	}
 	reason, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
 	if !active {
 		return "", false, nil
