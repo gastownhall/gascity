@@ -210,6 +210,13 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	}
 }
 
+// listCallsPerFeedBuild is how many store List calls one workflow-projection
+// build costs: listActiveWorkflowProjectionBeads issues one Live,
+// status-scoped read per active status, because bd is the only reader that can
+// filter on the raw status (gc-4zb). These tests assert how often the feed
+// rebuilds, so they count builds in reads rather than pinning a literal.
+var listCallsPerFeedBuild = len(activeWorkflowProjectionStatuses)
+
 func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 	state := newFakeState(t)
 	rigStore := &countingStore{Store: beads.NewMemStore()}
@@ -249,8 +256,8 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second feed = %d, want 200", rec.Code)
 	}
-	if rigStore.listCalls != 1 {
-		t.Fatalf("rig List calls after cached repeat = %d, want 1", rigStore.listCalls)
+	if rigStore.listCalls != listCallsPerFeedBuild {
+		t.Fatalf("rig List calls after cached repeat = %d, want %d (one build)", rigStore.listCalls, listCallsPerFeedBuild)
 	}
 	if cityStore.listByLabelCalls != 1 {
 		t.Fatalf("city ListByLabel calls after cached repeat = %d, want 1", cityStore.listByLabelCalls)
@@ -262,8 +269,8 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("third feed = %d, want 200", rec.Code)
 	}
-	if rigStore.listCalls != 2 {
-		t.Fatalf("rig List calls after index change = %d, want 2", rigStore.listCalls)
+	if want := 2 * listCallsPerFeedBuild; rigStore.listCalls != want {
+		t.Fatalf("rig List calls after index change = %d, want %d (two builds)", rigStore.listCalls, want)
 	}
 	if cityStore.listByLabelCalls != 2 {
 		t.Fatalf("city ListByLabel calls after index change = %d, want 2", cityStore.listByLabelCalls)
@@ -313,8 +320,8 @@ func TestHandleFormulaFeedCachesAcrossIndexChanges(t *testing.T) {
 			t.Fatalf("feed #%d = %d, want 200", i, rec.Code)
 		}
 	}
-	if rigStore.listCalls != 1 {
-		t.Fatalf("rig List calls after cached repeat = %d, want 1", rigStore.listCalls)
+	if rigStore.listCalls != listCallsPerFeedBuild {
+		t.Fatalf("rig List calls after cached repeat = %d, want %d (one build)", rigStore.listCalls, listCallsPerFeedBuild)
 	}
 
 	// A moving event sequence — the busy-city scenario from #3208 — must
@@ -327,8 +334,8 @@ func TestHandleFormulaFeedCachesAcrossIndexChanges(t *testing.T) {
 			t.Fatalf("feed after event %d = %d, want 200", i, rec.Code)
 		}
 	}
-	if rigStore.listCalls != 1 {
-		t.Fatalf("rig List calls across index churn = %d, want 1 (feed must key on time bucket)", rigStore.listCalls)
+	if rigStore.listCalls != listCallsPerFeedBuild {
+		t.Fatalf("rig List calls across index churn = %d, want %d (one build; feed must key on time bucket)", rigStore.listCalls, listCallsPerFeedBuild)
 	}
 }
 
