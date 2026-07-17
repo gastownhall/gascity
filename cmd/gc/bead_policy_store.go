@@ -97,6 +97,17 @@ func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error)
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
 }
 
+// ReadyContext preserves the policy-expanded read tier for deadline-sensitive
+// Ready projections. Optional capabilities are hidden by the embedded Store
+// interface, so forward explicitly just like Count.
+func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := s.Store.(beads.ContextReadyReader)
+	if !ok {
+		return nil, fmt.Errorf("reading ready beads through policy store: %w", beads.ErrReadyContextUnsupported)
+	}
+	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
+}
+
 // Count implements beads.Counter with the same read-tier expansion as List.
 // The embedded Store interface does not promote optional capabilities, so
 // the delegation must be explicit. Inner stores without a Counter report

@@ -92,6 +92,14 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
+	// runProj is the server-owned per-city warm run projection backing
+	// GET /v0/city/{name}/runs and the single-run/steps reads. It cold-loads the
+	// event log asynchronously, then tails only newly appended events, so a poll
+	// serves a warm read instead of re-replaying the whole history each request.
+	// Lazily created on first read; see runs_projector.go.
+	runProjMu sync.Mutex
+	runProj   *runProjector
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests

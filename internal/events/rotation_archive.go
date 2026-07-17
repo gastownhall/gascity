@@ -126,9 +126,12 @@ func parseLegacyArchiveBasename(name string) (time.Time, error) {
 // archiveOverlapsFilter reports whether the archive's seq range can
 // possibly contain events that satisfy filter. The skip-fast read path
 // uses this to avoid gunzipping archives whose entire window has
-// already been excluded by the caller's AfterSeq predicate.
+// already been excluded by the caller's AfterSeq or BeforeSeq predicate.
 func archiveOverlapsFilter(info archiveInfo, filter Filter) bool {
 	if filter.AfterSeq > 0 && info.LastSeq <= filter.AfterSeq {
+		return false
+	}
+	if filter.BeforeSeq > 0 && info.FirstSeq >= filter.BeforeSeq {
 		return false
 	}
 	return true

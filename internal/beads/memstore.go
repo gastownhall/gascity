@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -94,7 +95,8 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	}
 	b.CreatedAt = time.Now()
 	b.UpdatedAt = b.CreatedAt
-	b.Revision = 1 // first version; every subsequent mutation bumps it
+	b.Revision = 1   // first version; every subsequent mutation bumps it
+	b.ClaimFence = 0 // no ownership history yet; the first claim bumps it to 1
 
 	stored := cloneBead(b)
 	m.beads = append(m.beads, stored)
@@ -128,10 +130,36 @@ func (m *MemStore) indexOfLocked(id string) int {
 	return -1
 }
 
+// isOwnershipTransition reports whether an update changes a bead's ownership
+// context — an assignee change, or a reopen (closed→open, after which a fresh
+// claim starts a new ownership generation). It mirrors beads'
+// issueops.IsOwnershipTransition so the ClaimFence bump discipline matches the
+// bd-backed store. Deliberate exclusions: a close is not a transition (guarded
+// verbs reject closed rows anyway, and bumping on close would invalidate a
+// legitimate ownership snapshot for no gain); an in_progress→open change that
+// keeps the assignee is not one either — the row stays claimable only by the
+// same owner, and the eventual release bumps at the real boundary.
+func isOwnershipTransition(oldStatus, oldAssignee string, opts UpdateOpts) bool {
+	if opts.Assignee != nil && *opts.Assignee != oldAssignee {
+		return true
+	}
+	// A reopen is closed→a real non-closed status. An empty status string is not
+	// a status write beads recognizes (its IsOwnershipTransition short-circuits
+	// on statusStr == ""), so exclude it here too to keep the predicates literally
+	// aligned.
+	if opts.Status != nil && *opts.Status != "" && oldStatus == "closed" && *opts.Status != "closed" {
+		return true
+	}
+	return false
+}
+
 // applyUpdateLocked applies the non-nil fields of opts to the bead at index i,
-// stamps UpdatedAt, and bumps the revision. The caller must hold m.mu. It is
-// shared by Update and UpdateIfMatch so both bump identically.
+// stamps UpdatedAt, bumps the revision, and — when the update is an ownership
+// transition (assignee change or reopen) — bumps the ownership fence. The
+// caller must hold m.mu. It is shared by Update and UpdateIfMatch so both bump
+// identically.
 func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
+	oldStatus, oldAssignee := m.beads[i].Status, m.beads[i].Assignee
 	if opts.Title != nil {
 		m.beads[i].Title = *opts.Title
 	}
@@ -179,6 +207,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
+	if isOwnershipTransition(oldStatus, oldAssignee, opts) {
+		m.beads[i].ClaimFence++
+	}
 }
 
 // Update modifies fields of an existing bead. Only non-nil fields in opts
@@ -210,6 +241,7 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
+		m.beads[i].ClaimFence++ // clearing an owner is an ownership transition
 		return true, nil
 	}
 	return false, nil
@@ -244,9 +276,16 @@ func (m *MemStore) Reopen(id string) error {
 			if m.beads[i].Status == "open" {
 				return nil
 			}
+			wasClosed := m.beads[i].Status == "closed"
 			m.beads[i].Status = "open"
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
+			if wasClosed {
+				// closed→open starts a new ownership generation; an
+				// in_progress→open reopen keeps the same owner and is not a
+				// transition.
+				m.beads[i].ClaimFence++
+			}
 			return nil
 		}
 	}
@@ -316,15 +355,57 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.readyLocked(context.Background(), q)
+}
+
+// ReadyContext implements ContextReadyReader for the in-memory store. Lock
+// acquisition and the projection scan both observe ctx, so a status request
+// never abandons a goroutine behind a concurrent in-memory writer.
+func (m *MemStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !m.mu.TryLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !m.mu.TryLock() {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+	defer m.mu.Unlock()
+	return m.readyLocked(ctx, readyQueryFromArgs(query))
+}
+
+func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error) {
+	cancellable := ctx != nil && ctx.Done() != nil
+	contextErr := func() error {
+		if !cancellable {
+			return nil
+		}
+		return ctx.Err()
+	}
 
 	statusByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
+		if err := contextErr(); err != nil {
+			return nil, err
+		}
 		statusByID[bead.ID] = bead.Status
 	}
 
 	var result []Bead
 	now := time.Now().UTC()
 	for _, b := range m.beads {
+		if err := contextErr(); err != nil {
+			return nil, err
+		}
 		if !IsReadyCandidateForTier(b, now, q.TierMode) {
 			continue
 		}
@@ -333,6 +414,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		}
 		blocked := false
 		for _, dep := range m.deps {
+			if err := contextErr(); err != nil {
+				return nil, err
+			}
 			if dep.IssueID != b.ID {
 				continue
 			}

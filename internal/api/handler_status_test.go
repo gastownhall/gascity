@@ -96,18 +96,6 @@ func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(open): %v", err)
 	}
-	ready, err := store.Create(beads.Bead{Type: "task", Title: "ready survivor", Status: "ready"})
-	if err != nil {
-		t.Fatalf("Create(ready): %v", err)
-	}
-	readyStatus := "ready"
-	if err := store.Update(ready.ID, beads.UpdateOpts{Status: &readyStatus}); err != nil {
-		t.Fatalf("Update(ready): %v", err)
-	}
-	ready, err = store.Get(ready.ID)
-	if err != nil {
-		t.Fatalf("Get(ready): %v", err)
-	}
 	inProgress, err := store.Create(beads.Bead{Type: "task", Title: "claimed survivor", Status: "in_progress"})
 	if err != nil {
 		t.Fatalf("Create(in_progress): %v", err)
@@ -121,10 +109,15 @@ func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 		t.Fatalf("Get(in_progress): %v", err)
 	}
 	state.stores["myrig"] = &failingBeadStore{
-		Store:      store,
-		listResult: []beads.Bead{open, ready, inProgress},
+		Store:       store,
+		listResult:  []beads.Bead{open, inProgress},
+		readyResult: []beads.Bead{open},
 		listErr: &beads.PartialResultError{
 			Op:  "bd list",
+			Err: errors.New("skipped 1 corrupt bead"),
+		},
+		readyErr: &beads.PartialResultError{
+			Op:  "bd ready",
 			Err: errors.New("skipped 1 corrupt bead"),
 		},
 	}
@@ -149,6 +142,38 @@ func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
 	}
 	if len(resp.PartialErrors) == 0 {
 		t.Fatalf("PartialErrors empty")
+	}
+}
+
+func TestHandleStatusPreservesStoredCountsWhenReadyFails(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Type: "task", Title: "open survivor", Status: "open"}); err != nil {
+		t.Fatalf("Create(open): %v", err)
+	}
+	claimed, err := store.Create(beads.Bead{Type: "task", Title: "claimed survivor", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(in_progress): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update(in_progress): %v", err)
+	}
+	state.stores["myrig"] = &failingBeadStore{
+		Store:    store,
+		readyErr: errors.New("ready projection unavailable"),
+	}
+
+	resp := getStatus(t, state)
+
+	if resp.Work.Open != 1 || resp.Work.Ready != 0 || resp.Work.InProgress != 1 {
+		t.Fatalf("Work = %+v, want stored-count survivors open=1 in_progress=1", resp.Work)
+	}
+	if !resp.Partial {
+		t.Fatal("Partial = false, want true for Ready failure")
+	}
+	if joined := strings.Join(resp.PartialErrors, "; "); !strings.Contains(joined, "ready projection unavailable") {
+		t.Fatalf("PartialErrors = %v, want Ready failure", resp.PartialErrors)
 	}
 }
 

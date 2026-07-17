@@ -358,10 +358,12 @@ func (f *fakeMutatorState) CreateRig(r config.Rig) error {
 // clone/SSRF and just appends the rig (emitting synthetic progress) so handler
 // tests can exercise the 202 flow without a network. If onStep is set it emits
 // a clone + done step. onManifest is invoked record-then-create with the
-// created dir so persistence/rollback wiring is exercised. When provisionFailN
-// is set it returns provisionErr after the manifest is reported (a failure once
-// the dir exists), without appending the rig.
-func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error) {
+// created dir so persistence/rollback wiring is exercised; mirroring the real
+// path, a pre-clone onManifest error is fail-closed (abort before appending the
+// rig) while the post-init one is best-effort. When provisionFailN is set it
+// returns provisionErr after the manifest is reported (a failure once the dir
+// exists), without appending the rig.
+func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest) error) (config.Rig, error) {
 	_, hasDeadline := ctx.Deadline()
 	f.provisionMu.Lock()
 	f.provisionCtxHadDeadline = hasDeadline
@@ -381,9 +383,13 @@ func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	if r.Path == "" {
 		r.Path = "rigs/" + r.Name
 	}
-	// Record-then-create: manifest the dir before "cloning".
+	// Record-then-create: manifest the dir before "cloning". A pre-clone persist
+	// failure is fail-closed (mirror the real ProvisionRigFromGit): abort before
+	// appending the rig so no un-manifested rig is created.
 	if onManifest != nil {
-		onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
+		if err := onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path}); err != nil {
+			return config.Rig{}, err
+		}
 	}
 
 	f.provisionMu.Lock()
@@ -399,8 +405,11 @@ func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	}
 
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
+	// Post-init manifest is best-effort in the real path (a complete rig is
+	// forward-reconciled, never torn down), so a persist error here does not fail
+	// the provision.
 	if onManifest != nil {
-		onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
+		_ = onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
 	}
 	if onStep != nil {
 		onStep("done", "Rig added.", false)

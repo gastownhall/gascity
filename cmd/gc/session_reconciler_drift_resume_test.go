@@ -382,3 +382,69 @@ func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserv
 			got.Metadata["started_config_hash"])
 	}
 }
+
+func TestReconcileSessionBeads_ConfigDriftDefersPinnedNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "new-cmd", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	tp := TemplateParams{
+		Command:                 "new-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+		ResolvedProvider:        &config.ResolvedProvider{Name: "fake", Command: "new-cmd"},
+	}
+	env.desiredState[sessionName] = tp
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	priorStartedConfigHash := runtime.CoreFingerprint(oldRuntime)
+	if currentHash := runtime.CoreFingerprint(templateParamsToConfig(tp)); priorStartedConfigHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", priorStartedConfigHash, currentHash)
+	}
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"pin_awake":                  "true",
+		"session_key":                "prior-key",
+		"started_config_hash":        priorStartedConfigHash,
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Fatalf("reconcile woken = %d, want 0 while pinned drift is deferred", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("pinned named session %q was stopped for config drift", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] == string(sessionpkg.StateStartPending) || got.Metadata["state"] == string(sessionpkg.StateCreating) {
+		t.Fatalf("state = %q, want no config-drift reset while pinned", got.Metadata["state"])
+	}
+	if got.Metadata["started_config_hash"] != priorStartedConfigHash {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" {
+		t.Fatal("config_drift_deferred_at = empty, want pinned deferral recorded")
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		t.Fatal("config_drift_deferred_key = empty, want pinned deferral recorded")
+	}
+}

@@ -153,6 +153,11 @@
           "status": "complete"
         },
         {
+          "key": "pre-review-ci",
+          "label": "Pre-review CI",
+          "status": "complete"
+        },
+        {
           "key": "review",
           "label": "Review loop",
           "status": "active"
@@ -183,7 +188,7 @@
         "stepId": "review-loop",
         "stage": {
           "status": "available",
-          "index": 2,
+          "index": 3,
           "key": "review",
           "label": "Review loop"
         },

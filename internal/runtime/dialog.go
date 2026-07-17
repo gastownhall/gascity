@@ -66,7 +66,7 @@ func newStartupDialogConfig(opts []StartupDialogOption) startupDialogConfig {
 // sessions. Handles (in order):
 //  1. Claude resume selector — requires Down+Enter to resume the full session
 //  2. Codex update dialog ("Update available") — requires Down+Enter to skip
-//  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
+//  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?", pi "Trust project folder?")
 //  4. External CLAUDE.md imports dialog (Claude "Allow external CLAUDE.md file imports?") — requires Enter to allow (option 1 pre-selected)
 //  5. MCP trust dialog (Claude "New MCP server found in this project") — requires Down+Enter to trust all project MCP servers
 //  6. Codex hook review dialog — requires Down+Enter to trust hooks
@@ -444,8 +444,9 @@ func containsPostUpdateStartupDialog(content string) bool {
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?". In both cases the safe
-// continue option is pre-selected, so Enter accepts.
+// "Do you trust the contents of this directory?"; pi (>= 0.79) shows
+// "Trust project folder?". In all cases the safe continue option is
+// pre-selected, so Enter accepts.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	timeout time.Duration,
@@ -508,7 +509,8 @@ func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
-		strings.Contains(content, "Do you trust the files in this folder?")
+		strings.Contains(content, "Do you trust the files in this folder?") ||
+		strings.Contains(content, "Trust project folder?")
 }
 
 func containsPostTrustStartupDialog(content string) bool {

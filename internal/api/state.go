@@ -121,7 +121,8 @@ type State interface {
 	// Read paths with their own short request budget (e.g. GET /status) use
 	// this instead of reading through the shared store so a slow bd command
 	// cannot pin a Dolt connection past the caller's own deadline
-	// (gascity ga-cdmx6x).
+	// (gascity ga-cdmx6x). Implementations must observe ctx during resolution
+	// and finish any work they start before returning after cancellation.
 	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
 
 	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
@@ -329,10 +330,15 @@ type StateMutator interface {
 	// when non-nil, is called record-then-create at each resource-creation
 	// checkpoint (before the clone with CreatedDir set; after init with any
 	// minted DoltDB) so the caller can persist the G14 rollback manifest and
-	// capture it for teardown. It returns the provisioned rig so the caller can
-	// report its resolved prefix/branch. This is the async server-side rig-add
-	// path (C4b/C4c); the sync CreateRig stays git-blind.
-	ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error)
+	// capture it for teardown. onManifest's error is load-bearing at the
+	// pre-clone checkpoint: if durable persistence of CreatedDir fails there,
+	// ProvisionRigFromGit MUST abort before cloning (fail closed) rather than
+	// create an unmanifested directory the boot sweep and re-clone pre-drop
+	// cannot discover — leaving it would wedge the request_id/name. It returns
+	// the provisioned rig so the caller can report its resolved prefix/branch.
+	// This is the async server-side rig-add path (C4b/C4c); the sync CreateRig
+	// stays git-blind.
+	ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest) error) (config.Rig, error)
 
 	// TeardownPartialRig removes the created rig working tree and drops the
 	// managed Dolt database named in the manifest (best-effort), then repairs

@@ -73,7 +73,7 @@ var nativeDoltOpenReadyStatuses = []beadslib.Status{
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
 	nativeDoltOpenEnvMu         sync.Mutex
-	errNativeIssueMetadataParse = errors.New("native issue metadata parse")
+	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
 var nativeDoltOpenEnvKeys = []string{

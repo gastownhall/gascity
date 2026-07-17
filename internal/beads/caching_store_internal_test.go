@@ -14,6 +14,28 @@ import (
 	"time"
 )
 
+func TestCachingStoreReadyContextRejectsIncompleteDependencyProjection(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	cache.mu.Lock()
+	cache.state = cacheLive
+	cache.beads = map[string]Bead{
+		"work": {ID: "work", Type: "task", Status: "open", Title: "possibly blocked work"},
+	}
+	cache.deps = map[string][]Dep{
+		"work": {{IssueID: "work", DependsOnID: "missing-blocker", Type: "blocks"}},
+	}
+	cache.depsComplete = false
+	cache.mu.Unlock()
+
+	rows, err := cache.ReadyContext(context.Background())
+	if !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("ReadyContext error = %v, want ErrCacheUnavailable", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("ReadyContext rows = %+v, want no result from incomplete dependency projection", rows)
+	}
+}
+
 func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	t.Parallel()
 

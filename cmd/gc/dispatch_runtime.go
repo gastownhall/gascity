@@ -877,6 +877,9 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
+	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+		return queue, err
+	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {
 		return nil, err
