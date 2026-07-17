@@ -990,20 +990,21 @@ func TestPruneRetiredSystemPacksKeepsTreeWhenManifestUnreadable(t *testing.T) {
 	}
 }
 
-// TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache pins the
-// self-healing contract that replaced per-city materialization refresh:
-// stale or corrupted bundled-source cache content is detected on the next
-// EnsureBuiltinRuntimeAssets call — even after the per-city ready cache
-// reported success, because the ready fast path revalidates via
-// requiredBuiltinSourcesUsable — and rehydrated from the embedded packs.
-func TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache(t *testing.T) {
+// TestEnsureBuiltinRuntimeAssetsWarmPathLeavesContentDriftToFullValidation
+// keeps command-time preflight cheap: after a city is ready,
+// EnsureBuiltinRuntimeAssets validates the marker/hash contract rather than
+// walking every bundled cache file. Full file-content validation remains the
+// responsibility of builtinpacks.ValidateSyntheticRepo and the repair/install
+// paths that call it before materializing.
+func TestEnsureBuiltinRuntimeAssetsWarmPathLeavesContentDriftToFullValidation(t *testing.T) {
 	clearGCEnv(t) // isolated GC_HOME so the corruption never touches the shared test cache
 	city := t.TempDir()
 
 	materializeBuiltinPacksForTest(t, city)
 
 	target := bundledGcBeadsBdScriptForTest(t)
-	if err := os.WriteFile(target, []byte("#!/bin/sh\necho corrupted\n"), 0o755); err != nil {
+	corrupted := []byte("#!/bin/sh\necho corrupted\n")
+	if err := os.WriteFile(target, corrupted, 0o755); err != nil {
 		t.Fatalf("corrupting cached script: %v", err)
 	}
 
@@ -1011,13 +1012,60 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache(t *testing.T) {
 		t.Fatalf("EnsureBuiltinRuntimeAssets after corruption: %v", err)
 	}
 
-	want := readBundledPackFileForTest(t, "bd", "assets/scripts/gc-beads-bd.sh")
 	got, err := os.ReadFile(target)
 	if err != nil {
-		t.Fatalf("ReadFile(rehydrated script): %v", err)
+		t.Fatalf("ReadFile(corrupted script): %v", err)
 	}
-	if string(got) != want {
-		t.Fatalf("corrupted cached script was not rehydrated to embedded content; got:\n%s", got)
+	if string(got) != string(corrupted) {
+		t.Fatalf("warm runtime preflight repaired corrupted content; got:\n%s", got)
+	}
+
+	source, ok := builtinpacks.Source("bd")
+	if !ok {
+		t.Fatal("bundled bd pack is not registered")
+	}
+	cachePath, err := packman.RepoCachePath(source, bundledPackImportCommit())
+	if err != nil {
+		t.Fatalf("RepoCachePath(bd): %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, bundledPackImportCommit()); err == nil {
+		t.Fatal("full synthetic validation unexpectedly accepted corrupted cached content")
+	}
+}
+
+// TestEnsureBuiltinRuntimeAssetsWarmPathSkipsFullSyntheticValidation guards
+// the command hot path: once a city is ready, runtime preflight must not walk
+// the whole synthetic cache tree. Full file-set validation belongs to repair
+// and doctor/install paths; the warm preflight only needs the marker contract
+// so every gc command does not repeatedly rescan the embedded pack cache.
+func TestEnsureBuiltinRuntimeAssetsWarmPathSkipsFullSyntheticValidation(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME so the sentinel never touches shared cache state
+	city := t.TempDir()
+
+	materializeBuiltinPacksForTest(t, city)
+
+	source, ok := builtinpacks.Source("bd")
+	if !ok {
+		t.Fatal("bundled bd pack is not registered")
+	}
+	cachePath, err := packman.RepoCachePath(source, bundledPackImportCommit())
+	if err != nil {
+		t.Fatalf("RepoCachePath(bd): %v", err)
+	}
+	sentinel := filepath.Join(cachePath, "hot-path-full-validation-sentinel")
+	if err := os.WriteFile(sentinel, []byte("left for the full validator"), 0o644); err != nil {
+		t.Fatalf("writing sentinel: %v", err)
+	}
+
+	if err := EnsureBuiltinRuntimeAssets(city, io.Discard); err != nil {
+		t.Fatalf("EnsureBuiltinRuntimeAssets warm path: %v", err)
+	}
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("warm runtime preflight performed full synthetic validation and repaired the cache; sentinel stat err = %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, bundledPackImportCommit()); err == nil {
+		t.Fatal("full synthetic validation unexpectedly accepted the sentinel fixture")
 	}
 }
 

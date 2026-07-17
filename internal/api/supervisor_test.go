@@ -806,6 +806,7 @@ func TestSupervisorEventListFilterIsEmptyMatchesEventsFilterZeroValue(t *testing
 		filter events.Filter
 	}{
 		{name: "type", filter: events.Filter{Type: events.BeadCreated}},
+		{name: "types", filter: events.Filter{Types: []string{events.BeadCreated}}},
 		{name: "actor", filter: events.Filter{Actor: "human"}},
 		{name: "subject", filter: events.Filter{Subject: "gc-1"}},
 		{name: "since", filter: events.Filter{Since: time.Unix(1, 0)}},
@@ -816,6 +817,33 @@ func TestSupervisorEventListFilterIsEmptyMatchesEventsFilterZeroValue(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if supervisorEventListFilterIsEmpty(tt.filter) {
+				t.Fatalf("filter %+v reported empty", tt.filter)
+			}
+		})
+	}
+}
+
+func TestEventListFilterIsEmptyMatchesEventsFilterZeroValue(t *testing.T) {
+	if !filterIsEmpty(events.Filter{}) {
+		t.Fatal("zero-value filter reported non-empty")
+	}
+
+	tests := []struct {
+		name   string
+		filter events.Filter
+	}{
+		{name: "type", filter: events.Filter{Type: events.BeadCreated}},
+		{name: "types", filter: events.Filter{Types: []string{events.BeadCreated}}},
+		{name: "actor", filter: events.Filter{Actor: "human"}},
+		{name: "subject", filter: events.Filter{Subject: "gc-1"}},
+		{name: "since", filter: events.Filter{Since: time.Unix(1, 0)}},
+		{name: "until", filter: events.Filter{Until: time.Unix(1, 0)}},
+		{name: "after_seq", filter: events.Filter{AfterSeq: 1}},
+		{name: "limit", filter: events.Filter{Limit: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if filterIsEmpty(tt.filter) {
 				t.Fatalf("filter %+v reported empty", tt.filter)
 			}
 		})

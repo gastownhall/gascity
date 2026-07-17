@@ -197,8 +197,8 @@ func listWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event,
 }
 
 func filterIsEmpty(f events.Filter) bool {
-	return f.Type == "" && f.Actor == "" && f.Subject == "" &&
-		f.Since.IsZero() && f.Until.IsZero() && f.AfterSeq == 0
+	return f.Type == "" && len(f.Types) == 0 && f.Actor == "" && f.Subject == "" &&
+		f.Since.IsZero() && f.Until.IsZero() && f.AfterSeq == 0 && f.Limit == 0
 }
 
 func parseEventSince(value string) (time.Duration, bool, error) {

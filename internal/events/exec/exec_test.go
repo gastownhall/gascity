@@ -161,6 +161,39 @@ esac
 	}
 }
 
+func TestListSendsTypesFilter(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  list) cat > "`+outFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	_, err := p.List(events.Filter{Types: []string{events.BeadCreated, events.BeadClosed}})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read filter: %v", err)
+	}
+	var f events.Filter
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("unmarshal filter: %v", err)
+	}
+	if len(f.Types) != 2 || f.Types[0] != events.BeadCreated || f.Types[1] != events.BeadClosed {
+		t.Fatalf("filter.Types = %#v, want bead created+closed", f.Types)
+	}
+}
+
 func TestListAppliesSDKFilterAndStripsScriptLimit(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
@@ -478,6 +511,8 @@ case "$op" in
     # Read filter from stdin, apply filters, output JSON array.
     filter=$(cat)
     type_filter=$(echo "$filter" | jq -r '.Type // empty')
+    types_filter=$(echo "$filter" | jq -c '.Types // []')
+    types_len=$(echo "$types_filter" | jq -r 'length')
     actor_filter=$(echo "$filter" | jq -r '.Actor // empty')
     after_seq=$(echo "$filter" | jq -r '.AfterSeq // 0')
     since=$(echo "$filter" | jq -r '.Since // empty')
@@ -491,6 +526,9 @@ case "$op" in
     jq_filter="."
     if [ -n "$type_filter" ]; then
       jq_filter="$jq_filter | select(.type == \"$type_filter\")"
+    fi
+    if [ "$types_len" != "0" ]; then
+      jq_filter="$jq_filter | select(.type as \$event_type | $types_filter | index(\$event_type))"
     fi
     if [ -n "$actor_filter" ]; then
       jq_filter="$jq_filter | select(.actor == \"$actor_filter\")"

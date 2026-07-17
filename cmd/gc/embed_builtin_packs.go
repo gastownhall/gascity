@@ -207,7 +207,7 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
+		if builtinpacks.ValidateSyntheticRepoFast(cachePath, commit) == nil {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
@@ -224,7 +224,7 @@ func requiredBuiltinSourcesUsable(cityPath string) bool {
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
+		if builtinpacks.ValidateSyntheticRepoFast(cachePath, commit) != nil {
 			return false
 		}
 	}

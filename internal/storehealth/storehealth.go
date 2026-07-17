@@ -90,8 +90,10 @@ func WalkSize(path string) int64 {
 	return total
 }
 
-// LastMaintenance returns the timestamp and status ("success" or
-// "failed") of the most-recent store-maintenance event in provider.
+// LastMaintenance returns the timestamp and status ("success" or "failed") of
+// the latest-appended store-maintenance event in provider order. Event logs are
+// append-only, and this intentionally does not reinterpret out-of-order event
+// timestamps as recency.
 // Zero time and empty status when no events, provider is nil, or the
 // provider returns an error.
 func LastMaintenance(ep events.Provider) (time.Time, string) {
@@ -102,22 +104,29 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		latestTs     time.Time
 		latestStatus string
 	)
-	for _, spec := range []struct {
-		typ    string
-		status string
-	}{
-		{events.StoreMaintenanceDone, "success"},
-		{events.StoreMaintenanceFailed, "failed"},
-	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
-		if err != nil {
-			continue
-		}
-		for _, e := range evts {
-			if e.Ts.After(latestTs) {
-				latestTs = e.Ts
-				latestStatus = spec.status
-			}
+	statusForType := map[string]string{
+		events.StoreMaintenanceDone:   "success",
+		events.StoreMaintenanceFailed: "failed",
+	}
+	filter := events.Filter{Types: []string{
+		events.StoreMaintenanceDone,
+		events.StoreMaintenanceFailed,
+	}}
+	var (
+		evts []events.Event
+		err  error
+	)
+	if tail, ok := ep.(events.TailProvider); ok {
+		evts, err = tail.ListTail(filter, 1)
+	} else {
+		evts, err = ep.List(filter)
+	}
+	if err != nil {
+		return latestTs, latestStatus
+	}
+	for i := len(evts) - 1; i >= 0; i-- {
+		if status, ok := statusForType[evts[i].Type]; ok {
+			return evts[i].Ts, status
 		}
 	}
 	return latestTs, latestStatus

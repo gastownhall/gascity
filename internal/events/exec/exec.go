@@ -34,6 +34,7 @@ type Provider struct {
 
 type listScriptFilter struct {
 	Type     string
+	Types    []string `json:"Types,omitempty"`
 	Actor    string
 	Since    time.Time
 	AfterSeq uint64
@@ -69,6 +70,7 @@ func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
 	p.ensureRunning()
 	scriptFilter := listScriptFilter{
 		Type:     filter.Type,
+		Types:    filter.Types,
 		Actor:    filter.Actor,
 		Since:    filter.Since,
 		AfterSeq: filter.AfterSeq,
