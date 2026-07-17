@@ -410,6 +410,44 @@ func TestClassifyRetryAttemptWithPostconditionsMissingRequiredArtifactContextSta
 	}
 }
 
+func TestClassifyRetryAttemptWithPostconditionsResolvesWorktreeFromRootWhenSourceIsCrossStore(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	worktree := t.TempDir()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			// Cross-store shape (vp-kvp delivery): the root lives in the
+			// subject's store, but its source convoy lives in another store
+			// entirely, so a same-store Get on the source id returns
+			// ErrNotFound. The rebase gate stamps work_dir on the root too;
+			// the validator must use it instead of failing the latch with
+			// missing_required_artifact_context after the attempt passed.
+			"gc.input_convoy_id": "ga-cross-store-source",
+			"work_dir":           worktree,
+		},
+	})
+	if err := os.WriteFile(filepath.Join(worktree, "codex-review.md"), []byte("review"), 0o644); err != nil {
+		t.Fatalf("writing artifact: %v", err)
+	}
+
+	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	if got.Outcome != "pass" {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want pass (worktree must resolve from the root bead when the source is cross-store)", got)
+	}
+}
+
 func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBeforeStat(t *testing.T) {
 	t.Parallel()
 
