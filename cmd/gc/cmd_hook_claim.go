@@ -570,9 +570,24 @@ func writeRunMap(runID, beadID string, sessionKeys ...string) {
 			continue
 		}
 		seen[name] = true
-		tmp := filepath.Join(dir, name+".json.tmp")
-		if os.WriteFile(tmp, body, 0o644) == nil {
-			_ = os.Rename(tmp, filepath.Join(dir, name+".json"))
+		// Unique temp name (not a predictable "<stem>.json.tmp") so a
+		// pre-planted symlink in the world-writable dir can't be followed on
+		// write. The "*" expands before the trailing ".tmp", so any leftover
+		// still ends in ".tmp" and pruneRunMap's ".json"-only match ignores it.
+		f, err := os.CreateTemp(dir, name+".json.*.tmp")
+		if err != nil {
+			continue
+		}
+		tmp := f.Name()
+		_, werr := f.Write(body)
+		cerr := f.Close()
+		if werr != nil || cerr != nil {
+			_ = os.Remove(tmp)
+			continue
+		}
+		_ = os.Chmod(tmp, 0o644)
+		if os.Rename(tmp, filepath.Join(dir, name+".json")) != nil {
+			_ = os.Remove(tmp)
 		}
 	}
 	// Reap dead sessions' entries so the dir doesn't leak one stale file per
