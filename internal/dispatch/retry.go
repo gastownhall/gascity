@@ -451,6 +451,14 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 	if err != nil {
 		return "", "", fmt.Errorf("loading required artifact workflow root %s: %w", rootID, markTransientControllerBoundaryError(err))
 	}
+	// The rebase gate stamps work_dir on the root as well as the source, and
+	// the root always lives in the subject's own store. Prefer it: the source
+	// bead of a cross-store root (gc.root_store_ref pointing at another rig)
+	// is not resolvable through this store, and dereferencing it used to fail
+	// passing attempts with missing_required_artifact_context.
+	if worktree := strings.TrimSpace(root.Metadata["work_dir"]); worktree != "" {
+		return worktree, "", nil
+	}
 	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])

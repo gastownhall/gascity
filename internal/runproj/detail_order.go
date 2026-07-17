@@ -210,6 +210,20 @@ func aliasVariants(value, formulaName string) []string {
 	}
 	stripped := stripFormulaPrefix(clean, formulaName)
 	candidates := []string{clean, stripped, stripScopeCheckSuffix(clean), stripScopeCheckSuffix(stripped)}
+	// Retry iterations suffix step ids with .attempt.N; the compiled formula
+	// ranks the authored base id, so each candidate also contributes its
+	// attempt-stripped form (else those groups rank +Inf and sort last).
+	for _, c := range candidates {
+		candidates = append(candidates, stripAttemptSuffix(c))
+	}
+	// The compiled formula's preview carries only iteration-1 refs, so later
+	// iterations (scope.iteration.2.step) would rank +Inf and sort after the
+	// run's final steps. Iteration-agnostic variants let every iteration rank
+	// at the authored step position; the stable sort keeps iteration order
+	// within the tie.
+	for _, c := range candidates {
+		candidates = append(candidates, stripIterationSegments(c))
+	}
 	seen := make(map[string]bool)
 	var out []string
 	for _, candidate := range candidates {

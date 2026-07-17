@@ -1047,8 +1047,11 @@ func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	// Append (not overwrite) each invocation's args: for an external endpoint
+	// health issues the SELECT 1 reachability probe AND a SHOW DATABASES catalog
+	// query, so a single-write fake would clobber the SELECT 1 record.
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
-printf '%s\n' "$@" > "$FAKE_DOLT_ARGS"
+printf '%s\n' "$@" >> "$FAKE_DOLT_ARGS"
 exit 0
 `)
 
@@ -1098,6 +1101,258 @@ exit 0
 		if !strings.Contains(gotArgs, want) {
 			t.Fatalf("fake dolt args missing %q; got:\n%s\nhealth output:\n%s", want, args, out)
 		}
+	}
+}
+
+// smartFakeDoltForExternal is a fake `dolt` client that answers the health
+// command's SQL probes for a configured external endpoint: SELECT 1 succeeds
+// (reachable), SHOW DATABASES returns a remote catalog, and the per-database
+// count queries return fixed numbers. It lets the enumeration path be exercised
+// without a live server.
+const smartFakeDoltForExternal = `#!/bin/sh
+q=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-q" ] && q="$a"
+  prev="$a"
+done
+case "$q" in
+  *"SHOW DATABASES"*) printf 'Database\ninformation_schema\nmysql\nac\ndh\nhq\n' ;;
+  *"FROM dolt_log"*)  printf 'count\n42\n' ;;
+  *"FROM issues"*)    printf 'count\n7\n' ;;
+esac
+exit 0
+`
+
+// TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL is the primary
+// regression guard for su-deol8: for a reachable configured external Dolt
+// endpoint the health report must enumerate databases from SQL (SHOW DATABASES)
+// rather than the local on-disk data-dir scan — which sees nothing for a remote
+// server and previously reported databases=[] despite healthy SQL. It also
+// asserts the report distinguishes an external endpoint (server.external=true)
+// from a downed local server: server.running/pid stay at their local-process
+// defaults but must not be read as authoritative "down" while reachable.
+func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	emptyDataDir := t.TempDir()
+
+	// Local managed precheck must fail so the external SQL path is taken; the
+	// on-disk data dir is empty, proving databases come from SQL, not the scan.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=superlzy-dolt",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=superlzy",
+		"GC_DOLT_PASSWORD=secret",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+		Databases []struct {
+			Name      string `json:"name"`
+			Commits   int    `json:"commits"`
+			OpenBeads int    `json:"open_beads"`
+		} `json:"databases"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; want reachable external endpoint\n%s", out)
+	}
+	if !report.Server.External {
+		t.Fatalf("server.external = false; want true for a non-local configured host\n%s", out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for external host; local-process signal must stay false\n%s", out)
+	}
+
+	got := map[string]struct {
+		commits, open int
+	}{}
+	for _, db := range report.Databases {
+		got[db.Name] = struct{ commits, open int }{db.Commits, db.OpenBeads}
+	}
+	for _, name := range []string{"ac", "dh", "hq"} {
+		d, ok := got[name]
+		if !ok {
+			t.Fatalf("database %q missing from SQL-enumerated report (databases=[] regression); got %+v\n%s", name, report.Databases, out)
+		}
+		if d.commits != 42 || d.open != 7 {
+			t.Fatalf("database %q counts = commits %d open %d; want 42/7 from SQL\n%s", name, d.commits, d.open, out)
+		}
+	}
+	for _, sys := range []string{"information_schema", "mysql"} {
+		if _, ok := got[sys]; ok {
+			t.Fatalf("system database %q leaked into report; SHOW DATABASES system filter failed\n%s", sys, out)
+		}
+	}
+}
+
+// TestHealthScriptLocalEndpointIsNotExternal guards the local managed-Dolt path:
+// a reachable server on a loopback host must report server.external=false so the
+// external-endpoint branch never masks a genuinely downed local server.
+func TestHealthScriptLocalEndpointIsNotExternal(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+if [ "$1" = "-z" ] && [ "$2" = "127.0.0.1" ] && [ "$3" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.Running {
+		t.Fatalf("server.running = false; want true for a reachable local managed server\n%s", out)
+	}
+	if report.Server.External {
+		t.Fatalf("server.external = true for loopback host; want false (local managed)\n%s", out)
+	}
+}
+
+// TestHealthScriptNonOneLoopbackHostIsExternal pins the host-classification
+// contract for a non-.1 loopback address (127.0.0.2): it must be treated as an
+// external endpoint (server.external=true), matching the sibling gc-beads-bd
+// `is_remote`/`restart`/`recover` scripts, which classify only 127.0.0.1 as the
+// local managed server. A future re-broadening of is_local_dolt_host back to the
+// whole 127.* block — which would split the health/status/logs commands from the
+// restart/recover contract — is caught here (su-deol8).
+func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	emptyDataDir := t.TempDir()
+
+	// Local managed precheck must fail so classification alone decides the path;
+	// the smart fake answers the external SELECT 1 / SHOW DATABASES probes.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.External {
+		t.Fatalf("server.external = false for 127.0.0.2; a non-.1 loopback host must classify as external to match the is_remote contract\n%s", out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for 127.0.0.2; the local-process signal must stay false for a non-local host\n%s", out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; the fake external endpoint answers SELECT 1\n%s", out)
 	}
 }
 

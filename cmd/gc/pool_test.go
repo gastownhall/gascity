@@ -1032,6 +1032,60 @@ func TestRunPoolOnBootError(t *testing.T) {
 	}
 }
 
+// TestRunPoolOnBootLogsRecoveryOutput proves a hook that returns NO error but
+// emits a gc-recovery diagnostic on stdout (a bd write the loop could not
+// complete, which exits 0) is still surfaced to the controller log.
+func TestRunPoolOnBootLogsRecoveryOutput(t *testing.T) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		return "gc-recovery: on_boot reopen failed for gc-1: boom\n", nil
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+		},
+	}
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	if !strings.Contains(stderr.String(), "on_boot dog: gc-recovery: on_boot reopen failed for gc-1: boom") {
+		t.Errorf("stderr = %q, want the recovery diagnostic surfaced", stderr.String())
+	}
+}
+
+// TestRunPoolOnBootSilentOnEmptyOutput proves a clean hook (no diagnostic)
+// produces no recovery line, so the controller log is not spammed.
+func TestRunPoolOnBootSilentOnEmptyOutput(t *testing.T) {
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "", nil }
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+		},
+	}
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	if strings.Contains(stderr.String(), "gc-recovery") {
+		t.Errorf("clean hook produced a recovery line: %q", stderr.String())
+	}
+}
+
+// TestRunPoolOnBootIgnoresCustomHookStdout proves a user on_boot override that
+// writes arbitrary stdout (no gc-recovery marker) is NOT surfaced or mislabeled
+// — only the default template's marked diagnostics reach the recovery log.
+func TestRunPoolOnBootIgnoresCustomHookStdout(t *testing.T) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		return "booting up the custom hook\n", nil
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "echo booting up the custom hook"},
+		},
+	}
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+	if strings.Contains(stderr.String(), "booting up the custom hook") {
+		t.Errorf("custom on_boot stdout was surfaced into the recovery log: %q", stderr.String())
+	}
+}
+
 func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	var dirs []string
 	runner := func(_ string, dir string, _ map[string]string) (string, error) {

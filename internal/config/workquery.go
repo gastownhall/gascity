@@ -513,6 +513,14 @@ func (a *Agent) EffectiveScaleCheck() string {
 	return a.EffectivePoolDemandQuery()
 }
 
+// RecoveryHookMarker prefixes every diagnostic the DEFAULT on_death/on_boot
+// recovery hooks print to stdout when a bd release fails. It is the contract
+// between the generated templates (which emit it) and the controller callers
+// (which surface only marked output): a user-supplied on_death/on_boot override
+// is passed through verbatim and carries no marker, so its stdout is not
+// mislabeled or spammed into the recovery log.
+const RecoveryHookMarker = "gc-recovery:"
+
 // EffectiveOnDeath returns the on_death command for this agent.
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.
@@ -549,8 +557,8 @@ func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>/dev/null; ` +
+		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }
@@ -584,5 +592,5 @@ func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} bd update {} --status open 2>/dev/null`
+		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
 }

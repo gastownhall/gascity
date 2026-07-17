@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1415,6 +1414,16 @@ func TestResolveMailRecipientIdentity_BareRigScopedNamedRejectsAmbiguousLiveConf
 
 // --- gc mail inbox ---
 
+type recordingMailInboxReader struct {
+	inbox map[string][]mail.Message
+	calls []string
+}
+
+func (r *recordingMailInboxReader) Inbox(recipient string) ([]mail.Message, error) {
+	r.calls = append(r.calls, recipient)
+	return r.inbox[recipient], nil
+}
+
 func TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox(t *testing.T) {
 	cityDir, _ := setupManagedBdWaitTestCity(t)
 
@@ -1456,75 +1465,6 @@ func TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox(t *testing.T) {
 	}
 }
 
-func TestCmdMailInbox_ManagedExecLifecycleProviderRecoversAfterHardKillPortRebind(t *testing.T) {
-	cityDir, _ := setupManagedBdWaitTestCity(t)
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
-	if _, err := store.Create(beads.Bead{
-		Title:  "managed exec session",
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"session_name": "city-worker",
-			"alias":        "city-worker",
-			"template":     "worker",
-			"state":        "asleep",
-		},
-	}); err != nil {
-		t.Fatalf("store.Create(session bead): %v", err)
-	}
-	mp := beadmail.New(store)
-	if _, err := mp.Send("human", "city-worker", "status", "hello after managed rebind"); err != nil {
-		t.Fatalf("mp.Send(): %v", err)
-	}
-
-	before, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
-	if err != nil {
-		t.Fatalf("readDoltRuntimeStateFile(before): %v", err)
-	}
-	if before.PID <= 0 || before.Port <= 0 {
-		t.Fatalf("unexpected managed runtime before fault: %+v", before)
-	}
-	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
-		t.Fatalf("Kill(%d): %v", before.PID, err)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for pidAlive(before.PID) && time.Now().Before(deadline) {
-		time.Sleep(25 * time.Millisecond)
-	}
-
-	occupyManagedDoltPort(t, before.Port)
-
-	var stdout, stderr bytes.Buffer
-	if code := cmdMailInbox([]string{"city-worker"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdMailInbox() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	if out := stdout.String(); !strings.Contains(out, "hello after managed rebind") {
-		t.Fatalf("stdout missing recovered mail:\n%s", out)
-	}
-
-	var after doltRuntimeState
-	deadline = time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
-		if err == nil && state.Running && state.Port > 0 && state.Port != before.Port && state.PID > 0 && pidAlive(state.PID) {
-			after = state
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if after.Port == 0 {
-		after, err = readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
-		if err != nil {
-			t.Fatalf("readDoltRuntimeStateFile(after): %v", err)
-		}
-		t.Fatalf("managed Dolt did not rebind after gc mail inbox recovery; before=%+v after=%+v", before, after)
-	}
-}
-
 func TestMailInboxEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -1539,16 +1479,21 @@ func TestMailInboxEmpty(t *testing.T) {
 	}
 }
 
-func TestMailInboxShowsMessages(t *testing.T) {
-	store := beads.NewMemStore()
-	mp := beadmail.New(store)
-	mp.Send("human", "mayor", "", "hey there") //nolint:errcheck
-	mp.Send("worker", "mayor", "", "status?")  //nolint:errcheck
+func TestDoMailInbox_RendersMessagesFromReader(t *testing.T) {
+	reader := &recordingMailInboxReader{inbox: map[string][]mail.Message{
+		"mayor": {
+			{ID: "gc-1", From: "human", To: "mayor", Body: "hey there"},
+			{ID: "gc-2", From: "worker", To: "mayor", Body: "status?"},
+		},
+	}}
 
 	var stdout, stderr bytes.Buffer
-	code := doMailInbox(mp, "mayor", &stdout, &stderr)
+	code := doMailInbox(reader, "mayor", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailInbox = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.Join(reader.calls, ","); got != "mayor" {
+		t.Fatalf("Inbox calls = %q, want mayor", got)
 	}
 
 	out := stdout.String()

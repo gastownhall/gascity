@@ -432,6 +432,15 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 	return ReadFiltered(r.path, filter)
 }
 
+// ListInFlight returns events matching the filter, including any still stranded
+// in an in-flight events.jsonl.rotating-* file during the asynchronous
+// compression window that plain List cannot see. Results are seq-ordered and
+// de-duplicated by seq. It implements [InFlightProvider] so the event-list
+// keyset walk cannot skip a just-rotated segment mid-rotation.
+func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
+	return ReadFilteredWithInFlight(r.path, filter)
+}
+
 // ListTail returns trailing matching events from the underlying file.
 func (r *FileRecorder) ListTail(filter Filter, limit int) ([]Event, error) {
 	return ReadFilteredTail(r.path, filter, limit)

@@ -31,8 +31,17 @@ while [ $# -gt 0 ]; do
 done
 
 log_file="$DOLT_LOG_FILE"
+host="${GC_DOLT_HOST:-127.0.0.1}"
 
 if [ ! -f "$log_file" ]; then
+  if ! is_local_dolt_host "$host"; then
+    # Configured external Dolt endpoint: the server log lives on the remote
+    # host, not in this city's local pack state. A missing local log is an
+    # expected limitation of pointing at an external endpoint, not a failure —
+    # do not hard-fail the way a missing managed-server log would (su-deol8).
+    echo "gc dolt logs: external Dolt endpoint $host:$GC_DOLT_PORT — server logs live on the remote host and are not available locally." >&2
+    exit 0
+  fi
   echo "gc dolt logs: log file not found: $log_file" >&2
   exit 1
 fi

@@ -35,6 +35,19 @@ DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 
+# is_local_dolt_host returns 0 (true) when the argument names the local managed
+# Dolt server — loopback, the unspecified address, or an unset/empty host — and
+# 1 (false) for a configured external endpoint. The health, status, and logs
+# commands share it so they agree on whether GC owns a local managed process or
+# is merely pointed at a remote server it cannot inspect on-disk. Mirrors the
+# gc-beads-bd `is_remote` classification (gastownhall/gascity su-deol8).
+is_local_dolt_host() {
+  case "$1" in
+    ""|127.0.0.1|0.0.0.0|localhost|::1|"[::1]") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 read_runtime_state_flag() (
   state_file="$1"
   key="$2"
