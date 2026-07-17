@@ -89,9 +89,10 @@ type MailArchiveInput struct {
 // MailReplyInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/reply.
 type MailReplyInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Message ID."`
-	Rig  string `query:"rig" required:"false" doc:"Rig hint."`
-	Body struct {
+	ID             string `path:"id" doc:"Message ID."`
+	Rig            string `query:"rig" required:"false" doc:"Rig hint."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		From    string `json:"from,omitempty" doc:"Sender name."`
 		Subject string `json:"subject,omitempty" doc:"Reply subject."`
 		Body    string `json:"body,omitempty" doc:"Reply body."`

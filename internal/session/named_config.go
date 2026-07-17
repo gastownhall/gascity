@@ -187,6 +187,13 @@ func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])
 }
 
+// NamedSessionModeInfo is the session.Info mirror of NamedSessionMode: it trims
+// the raw configured_named_mode metadata (Info.ConfiguredNamedMode carries the
+// verbatim value), so the trimmed result is byte-identical to the bead form.
+func NamedSessionModeInfo(i Info) string {
+	return strings.TrimSpace(i.ConfiguredNamedMode)
+}
+
 // IsNamedSessionInfo is the session.Info mirror of IsNamedSessionBead:
 // Info.ConfiguredNamedSession already projects the trimmed
 // configured_named_session == "true" flag.

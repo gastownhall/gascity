@@ -21,9 +21,11 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type sweepLivenessProvider struct {
@@ -430,7 +432,7 @@ func stubManagedDoltStoreOpeners(t *testing.T) {
 	t.Helper()
 	prevCityStore := newControllerStateOpenCityStore
 	prevSweepStore := newCityRuntimeOpenSweepStore
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
 	newCityRuntimeOpenSweepStore = func(string, string) (beads.Store, error) {
@@ -3836,6 +3838,189 @@ func TestControlDispatcherOnlyConfig_IncludesRigScopedDispatchers(t *testing.T) 
 	}
 	if filtered.Agents[1].QualifiedName() != "gascity/control-dispatcher" {
 		t.Fatalf("filtered rig dispatcher = %q, want gascity/control-dispatcher", filtered.Agents[1].QualifiedName())
+	}
+}
+
+func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	control, err := rigStore.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				Dir:               "fixture",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &maxActive,
+			},
+		},
+	}
+
+	firstRuntime := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath:      cityPath,
+		cityName:      "test-city",
+		cfg:           cfg,
+		sp:            firstRuntime,
+		dops:          newDrainOps(firstRuntime),
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+	}
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
+	cs := &controllerState{
+		cfg:           cfg,
+		sp:            firstRuntime,
+		beadStores:    map[string]beads.Store{"fixture": rigStore},
+		cityBeadStore: cityStore,
+		eventProv:     events.NewFake(),
+		cityName:      "test-city",
+		cityPath:      cityPath,
+	}
+	cr.setControllerState(cs)
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := make(map[string]bool)
+	runMainTick := func() {
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+	}
+
+	// The targeted dispatcher signal path must both materialize and start the
+	// canonical max-one rig dispatcher without a full controller reconcile.
+	cr.controlDispatcherTick(context.Background())
+	sessions, err := loadSessionBeads(cityStore)
+	if err != nil {
+		t.Fatalf("load sessions: %v", err)
+	}
+	var rigSession beads.Bead
+	for _, candidate := range sessions {
+		if candidate.Metadata["template"] == "fixture/core.control-dispatcher" {
+			rigSession = candidate
+			break
+		}
+	}
+	if rigSession.ID == "" {
+		t.Fatalf("rig dispatcher session not materialized: %+v", sessions)
+	}
+	initialDeadline := time.NewTimer(testutil.GoroutineRaceTimeout)
+	initialTicker := time.NewTicker(10 * time.Millisecond)
+	defer initialDeadline.Stop()
+	defer initialTicker.Stop()
+	for {
+		current, getErr := cityStore.Get(rigSession.ID)
+		started := firstRuntime.CountCalls("Start", rigSession.Metadata["session_name"]) > 0
+		if getErr == nil && started && current.Metadata["state"] == "active" && current.Metadata["pending_create_claim"] == "" {
+			rigSession = current
+			break
+		}
+		select {
+		case <-initialDeadline.C:
+			t.Fatalf("initial rig dispatcher did not finish starting; session=%+v calls=%+v", current, firstRuntime.SnapshotCalls())
+		case <-initialTicker.C:
+		}
+	}
+
+	// Reproduce the historical wedge: the rig process vanished and #3765
+	// stamped the city route onto a control bead physically stored in the rig.
+	if err := cityStore.SetMetadataBatch(rigSession.ID, map[string]string{
+		"state":        "asleep",
+		"sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing),
+	}); err != nil {
+		t.Fatalf("mark rig dispatcher runtime-missing: %v", err)
+	}
+	if err := rigStore.SetMetadata(control.ID, beadmeta.RoutedToMetadataKey, "core.control-dispatcher"); err != nil {
+		t.Fatalf("stamp legacy city route: %v", err)
+	}
+
+	replacementRuntime := runtime.NewFake()
+	cr.sp = replacementRuntime
+	cr.dops = newDrainOps(replacementRuntime)
+	cs.sp = replacementRuntime
+	// The normal controller reconcile retires the dead pool bead before
+	// materializing its replacement, so allow its bounded multi-tick convergence
+	// path without relying on the targeted dispatcher signal. Wait after each
+	// pass so the next tick observes committed async-start state instead of racing
+	// four reconciles ahead of their completion.
+	for tick := range 4 {
+		runMainTick()
+		if !cr.waitForAsyncStarts() {
+			t.Fatalf("replacement async starts did not settle after recovery tick %d", tick+1)
+		}
+	}
+	recoveryDeadline := time.NewTimer(testutil.GoroutineRaceTimeout)
+	recoveryTicker := time.NewTicker(10 * time.Millisecond)
+	defer recoveryDeadline.Stop()
+	defer recoveryTicker.Stop()
+	for {
+		hasStart := false
+		for _, call := range replacementRuntime.SnapshotCalls() {
+			if call.Method == "Start" {
+				hasStart = true
+				break
+			}
+		}
+		if hasStart {
+			break
+		}
+		select {
+		case <-recoveryDeadline.C:
+			t.Fatalf("replacement rig dispatcher start was not scheduled; calls=%+v", replacementRuntime.SnapshotCalls())
+		case <-recoveryTicker.C:
+		}
+	}
+
+	repaired, err := rigStore.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get repaired control: %v", err)
+	}
+	if got := repaired.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
+		t.Fatalf("repaired gc.routed_to = %q, want fixture/core.control-dispatcher", got)
+	}
+	recoveredSessions, err := loadSessionBeads(cityStore)
+	if err != nil {
+		t.Fatalf("load recovered sessions: %v", err)
+	}
+	rigSessionNames := make(map[string]bool)
+	for _, candidate := range recoveredSessions {
+		if candidate.Metadata["template"] == "fixture/core.control-dispatcher" {
+			rigSessionNames[candidate.Metadata["session_name"]] = true
+		}
+	}
+	started := false
+	for _, call := range replacementRuntime.SnapshotCalls() {
+		if call.Method == "Start" && rigSessionNames[call.Name] {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf("runtime-missing rig dispatcher did not converge to a started replacement; sessions=%+v calls=%+v", recoveredSessions, replacementRuntime.SnapshotCalls())
 	}
 }
 

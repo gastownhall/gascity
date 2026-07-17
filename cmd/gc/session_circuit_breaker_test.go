@@ -14,23 +14,6 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// shortenStaleKeyDetectDelayForTest zeroes both the cmd/gc and internal/session
-// stale-key detection delays for the duration of t. Tests that loop through
-// the reconciler start path many times (the circuit-breaker tests below) would
-// otherwise pay 2s per iteration on each layer, dominating test wall time.
-// The Fake runtime is synchronous so the post-start IsRunning check always
-// succeeds — no real wait is needed.
-func shortenStaleKeyDetectDelayForTest(t *testing.T) {
-	t.Helper()
-	prevLocal := staleKeyDetectDelay
-	staleKeyDetectDelay = 0
-	restoreSession := sessionpkg.SetStaleKeyDetectDelayForTest(0)
-	t.Cleanup(func() {
-		staleKeyDetectDelay = prevLocal
-		restoreSession()
-	})
-}
-
 // breakerAt is a tiny helper that returns a breaker with explicit config
 // for tests so we can use fake clocks freely.
 func breakerAt(window time.Duration, maxRestarts int) *sessionCircuitBreaker {
@@ -717,7 +700,7 @@ func TestComputeNamedSessionProgressSignatures(t *testing.T) {
 		{ID: "wb-2", Assignee: "session-a", Status: "in_progress"},
 		{ID: "wb-3", Assignee: "worker-1", Status: "open"}, // ignored: not named
 	}
-	got := computeNamedSessionProgressSignatures(sessionBeads, work)
+	got := computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work)
 	if _, ok := got["rig-a/session-a"]; !ok {
 		t.Fatalf("expected signature for session-a, got keys=%v", got)
 	}
@@ -730,7 +713,7 @@ func TestComputeNamedSessionProgressSignatures(t *testing.T) {
 		{ID: "wb-1", Assignee: "rig-a/session-a", Status: "closed"},
 		{ID: "wb-2", Assignee: "session-a", Status: "in_progress"},
 	}
-	got2 := computeNamedSessionProgressSignatures(sessionBeads, work2)
+	got2 := computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work2)
 	if got["rig-a/session-a"] == got2["rig-a/session-a"] {
 		t.Fatalf("signature should change when assignee bead status changes")
 	}
@@ -760,7 +743,7 @@ func TestComputeNamedSessionProgressSignaturesSkipsAmbiguousBareKeys(t *testing.
 		{ID: "wb-alias", Assignee: "shared-alias", Status: "in_progress"},
 	}
 
-	got := computeNamedSessionProgressSignatures(sessionBeads, work)
+	got := computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work)
 	if got["rig-a/session"] != "" {
 		t.Fatalf("rig-a signature = %q, want empty for ambiguous bare keys", got["rig-a/session"])
 	}
@@ -769,7 +752,7 @@ func TestComputeNamedSessionProgressSignaturesSkipsAmbiguousBareKeys(t *testing.
 	}
 
 	work = append(work, beads.Bead{ID: "wb-exact", Assignee: "rig-a/session", Status: "closed"})
-	got = computeNamedSessionProgressSignatures(sessionBeads, work)
+	got = computeNamedSessionProgressSignatures(sessionInfosFromBeads(sessionBeads), work)
 	if got["rig-a/session"] == "" {
 		t.Fatal("exact identity assignment should still contribute a signature")
 	}
@@ -855,7 +838,6 @@ func createCircuitTestNamedSessionWithIdentity(
 }
 
 func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testing.T) {
-	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSessionWithoutCircuit(env)
 	env.addDesired("session-a", "template-a", false)
@@ -880,7 +862,6 @@ func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testin
 }
 
 func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
-	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
@@ -926,7 +907,6 @@ func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
 }
 
 func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T) {
-	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
@@ -1131,7 +1111,6 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 }
 
 func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
-	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
@@ -1180,7 +1159,6 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 }
 
 func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testing.T) {
-	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)

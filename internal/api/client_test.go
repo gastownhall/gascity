@@ -464,7 +464,7 @@ func TestClientReadOnlyFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for read-only rejection: %v", err)
 	}
 	if IsConnError(err) {
@@ -478,7 +478,7 @@ func TestClientConnErrorShouldFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for connection error: %v", err)
 	}
 }
@@ -503,7 +503,7 @@ func TestClientCacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live rejection: %v", err)
 	}
 	if IsConnError(err) {
@@ -533,7 +533,7 @@ func TestClientGenericFiveHundredNoFallbackByDefault(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if ShouldFallback(err) {
+	if ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = true for generic 500: %v", err)
 	}
 }
@@ -556,7 +556,7 @@ func TestClientBusinessErrorNoFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if ShouldFallback(err) {
+	if ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = true for business error: %v", err)
 	}
 }
@@ -605,7 +605,7 @@ func TestClientEnumeratedErrorResponseCarriesProblemDetail(t *testing.T) {
 	// detail from the per-status field.
 	if _, err := c.ListBeads(ListBeadsOpts{}); err == nil {
 		t.Fatal("ListBeads: expected error, got nil")
-	} else if !ShouldFallback(err) {
+	} else if !ShouldFallback(nil, err) {
 		t.Fatalf("ListBeads 503 cache-not-live should be fallbackable (pdOf per-status extraction): %v", err)
 	}
 }
@@ -968,7 +968,7 @@ func TestClientListRigs_CacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
 	}
 }
@@ -984,7 +984,7 @@ func TestClientListRigs_ConnErrorFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
 	}
 }
@@ -1055,7 +1055,7 @@ func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
 	}
 }
@@ -1150,7 +1150,7 @@ func TestClientListConvoys_CacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
 	}
 }
@@ -1164,7 +1164,7 @@ func TestClientListConvoys_ConnErrorFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
 	}
 }
@@ -1317,7 +1317,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
 	}
 }
@@ -1342,10 +1342,10 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 	if !IsStoreSlowError(err) {
 		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
 	}
-	if ShouldFallbackForRead(err) {
+	if ShouldFallbackForRead(nil, err) {
 		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
 	}
-	if ShouldFallback(err) {
+	if ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = true for store_slow: %v", err)
 	}
 }
@@ -1359,7 +1359,7 @@ func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
 	}
 }
@@ -1413,7 +1413,7 @@ func TestClientGetMail_CacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
 	}
 }
@@ -1438,10 +1438,10 @@ func TestClientGetMail_StoreSlowDoesNotFallback(t *testing.T) {
 	if !IsStoreSlowError(err) {
 		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
 	}
-	if ShouldFallbackForRead(err) {
+	if ShouldFallbackForRead(nil, err) {
 		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
 	}
-	if ShouldFallback(err) {
+	if ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = true for store_slow: %v", err)
 	}
 }
@@ -1455,7 +1455,7 @@ func TestClientGetMail_ConnErrorFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
 	}
 }
@@ -1506,7 +1506,7 @@ func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
 	}
 }
@@ -1531,10 +1531,10 @@ func TestClientCountMail_StoreSlowDoesNotFallback(t *testing.T) {
 	if !IsStoreSlowError(err) {
 		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
 	}
-	if ShouldFallbackForRead(err) {
+	if ShouldFallbackForRead(nil, err) {
 		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
 	}
-	if ShouldFallback(err) {
+	if ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = true for store_slow: %v", err)
 	}
 }
@@ -1548,7 +1548,7 @@ func TestClientCountMail_ConnErrorFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}
-	if !ShouldFallback(err) {
+	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
 	}
 }

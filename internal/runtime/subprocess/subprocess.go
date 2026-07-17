@@ -573,7 +573,8 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		lastErr            error
 		firstActionableErr error
 	)
-	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
+	legacyPath := p.legacySockPath(name)
+	for _, sp := range []string{p.sockPath(name), legacyPath} {
 		err := func(sockPath string) error {
 			conn, err := net.DialTimeout("unix", sockPath, timeout)
 			if err != nil {
@@ -595,6 +596,12 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		}(sp)
 		if err == nil {
 			return nil
+		}
+		// The canonical hashed path above is always addressable. An older
+		// name-based path can exceed sockaddr_un and cannot contain a live
+		// compatibility socket; retain the canonical result in that case.
+		if sp == legacyPath && len(legacyPath) > socketPathLimit && errors.Is(err, syscall.EINVAL) {
+			continue
 		}
 		if !isUnavailableSocketError(err) && firstActionableErr == nil {
 			firstActionableErr = err

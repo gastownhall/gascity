@@ -164,6 +164,22 @@ func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
 	}
 }
 
+func TestStopUnknownSessionWithVeryLongSocketDirIsIdempotent(t *testing.T) {
+	longDir := filepath.Join(t.TempDir(), strings.Repeat("p", 120))
+	p := NewProviderWithDir(longDir)
+	const name = "never-started-conformance-session"
+
+	if got := len(p.legacySockPath(name)); got <= socketPathLimit {
+		t.Fatalf("legacy socket path length = %d, want greater than %d", got, socketPathLimit)
+	}
+	if p.socketDir() == p.dir {
+		t.Fatal("test setup did not select the short fallback socket directory")
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop unknown session with overlong legacy socket path: %v", err)
+	}
+}
+
 func TestStartDuplicateNameFails(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Start(context.Background(), "dup", runtime.Config{Command: "sleep 3600"}); err != nil {
@@ -559,29 +575,9 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+	gotCommand := startRejectingControlSocket(t, p.sockPath(name))
 
-	lis, err := net.Listen("unix", p.sockPath(name))
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	t.Cleanup(func() { _ = lis.Close() })
-
-	gotCommand := make(chan string, 1)
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck
-
-		line, readErr := bufio.NewReader(conn).ReadString('\n')
-		if readErr == nil {
-			gotCommand <- strings.TrimSpace(line)
-		}
-		_, _ = conn.Write([]byte("nope\n"))
-	}()
-
-	err = p.stopBySocket(name)
+	err := p.stopBySocket(name)
 	if err == nil {
 		t.Fatal("stopBySocket succeeded, want error")
 	}
@@ -597,6 +593,54 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 	if _, statErr := os.Stat(p.sockNamePath(name)); statErr != nil {
 		t.Fatalf("socket name path err = %v, want socket name preserved after failed stop", statErr)
 	}
+}
+
+func TestStopBySocket_PreservesCanonicalErrorWhenLegacyPathIsTooLong(t *testing.T) {
+	longDir := filepath.Join(t.TempDir(), strings.Repeat("p", 120))
+	p := NewProviderWithDir(longDir)
+	const name = "reject-stop"
+
+	if got := len(p.legacySockPath(name)); got <= socketPathLimit {
+		t.Fatalf("legacy socket path length = %d, want greater than %d", got, socketPathLimit)
+	}
+	if err := os.MkdirAll(filepath.Dir(p.sockPath(name)), 0o755); err != nil {
+		t.Fatalf("MkdirAll canonical socket directory: %v", err)
+	}
+	_ = startRejectingControlSocket(t, p.sockPath(name))
+
+	err := p.stopBySocket(name)
+	if err == nil || !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("stopBySocket error = %v, want canonical unexpected-response error", err)
+	}
+}
+
+func startRejectingControlSocket(t *testing.T, path string) <-chan string {
+	t.Helper()
+	lis, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen %q: %v", path, err)
+	}
+	t.Cleanup(func() {
+		_ = lis.Close()
+		_ = os.Remove(path)
+		_ = os.Remove(filepath.Dir(path))
+	})
+
+	gotCommand := make(chan string, 1)
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotCommand <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+	return gotCommand
 }
 
 func TestStopBySocket_FallsBackToLegacySocketWhenCanonicalRejectsStop(t *testing.T) {

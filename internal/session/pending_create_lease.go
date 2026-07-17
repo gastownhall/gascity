@@ -1,53 +1,54 @@
 package session
 
-import (
-	"strings"
-
-	"github.com/gastownhall/gascity/internal/beads"
-)
+import "strings"
 
 // PendingCreateLease is the typed projection of the optimistic-concurrency
-// tuple a session bead carries around a create/start attempt. It is a pure
-// value: constructed from a session bead, never holding a store.
-// All persisted keys are unchanged on disk; this type only centralizes the
-// reads and the transition decisions that were previously scattered across
-// the async-start staleness helpers in cmd/gc.
+// tuple a session carries around a create/start attempt. It is a pure value:
+// constructed from a session Info snapshot, never holding a store. All
+// persisted keys are unchanged on disk; this type only centralizes the reads
+// and the transition decisions that were previously scattered across the
+// async-start staleness helpers in cmd/gc.
 type PendingCreateLease struct {
-	Closed bool // bead Status == "closed" (trimmed compare)
+	Closed bool // Info.Closed (bead Status == "closed")
 
 	// Identity fence. InstanceToken is authoritative when non-empty;
 	// Generation is the legacy fallback, compared as a trimmed string and
 	// never parsed (preserves the pre-refactor semantics exactly).
-	InstanceToken string // strings.TrimSpace(metadata["instance_token"])
-	Generation    string // strings.TrimSpace(metadata["generation"])
+	InstanceToken string // strings.TrimSpace(Info.InstanceToken)
+	Generation    string // strings.TrimSpace(Info.Generation)
 
 	// Claim is the boolean the protocol keys on.
-	Claim bool // strings.TrimSpace(metadata["pending_create_claim"]) == "true"
+	Claim bool // Info.PendingCreateClaim (pending_create_claim == "true")
 
 	// State is the trimmed typed state every gate uses.
 	State State
 }
 
-// LeaseFromBead projects the pending-create tuple off a raw session bead.
-func LeaseFromBead(b beads.Bead) PendingCreateLease {
+// LeaseFromInfo projects the pending-create tuple off a typed session Info.
+// The raw metadata reads (instance_token, generation, pending_create_claim,
+// state, closed) already happened at the store edge when the Info was
+// decoded, so the lease trims the identity fields it compares as strings and
+// otherwise reads the projected values verbatim — the same values the legacy
+// asyncStart* helpers read off Info directly.
+func LeaseFromInfo(i Info) PendingCreateLease {
 	return PendingCreateLease{
-		Closed:        strings.TrimSpace(b.Status) == "closed",
-		InstanceToken: strings.TrimSpace(b.Metadata["instance_token"]),
-		Generation:    strings.TrimSpace(b.Metadata["generation"]),
-		Claim:         strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true",
-		State:         State(strings.TrimSpace(b.Metadata["state"])),
+		Closed:        i.Closed,
+		InstanceToken: strings.TrimSpace(i.InstanceToken),
+		Generation:    strings.TrimSpace(i.Generation),
+		Claim:         i.PendingCreateClaim,
+		State:         State(strings.TrimSpace(i.MetadataState)),
 	}
 }
 
 // LeaseCommitVerdict is what the async-start commit gate returns when an
-// in-flight start result meets the current bead. The two mutually-exclusive
+// in-flight start result meets the current session. The two mutually-exclusive
 // boolean helpers it replaces (asyncStartSessionStillCurrent /
 // asyncStartStaleRuntimeCleanupAllowed) fuse into this two-outcome enum.
 type LeaseCommitVerdict int
 
 const (
 	// LeaseCommit means the result is still current — commit it against the
-	// current bead.
+	// current session.
 	LeaseCommit LeaseCommitVerdict = iota
 	// LeaseDiscardStopRuntime means the result is stale — discard it and (subject
 	// to the separate runningSessionMatchesPendingCreate runtime probe) stop
@@ -71,11 +72,11 @@ func StateConfirmsPendingStart(s State) bool {
 }
 
 // SameIdentity reports whether the receiver (the prepared snapshot taken at
-// enqueue) and current describe the same session bead. instance_token is
+// enqueue) and current describe the same session. instance_token is
 // authoritative when the prepared side has one; only fall back to generation
-// when the prepared bead has no token (legacy pre-instance_token snapshots).
-// Generation drift with a matching token is a normal consequence of
-// concurrent reconciler phases and must not invalidate an in-flight start
+// when the prepared snapshot has no token (legacy pre-instance_token
+// snapshots). Generation drift with a matching token is a normal consequence
+// of concurrent reconciler phases and must not invalidate an in-flight start
 // result (#1542).
 func (l PendingCreateLease) SameIdentity(current PendingCreateLease) bool {
 	if l.InstanceToken != "" {
@@ -98,7 +99,7 @@ func (l PendingCreateLease) CommitVerdict(current PendingCreateLease) LeaseCommi
 	if !l.SameIdentity(current) {
 		return LeaseDiscardStopRuntime
 	}
-	// If the bead has progressed to a live state (active or awake), the spawn
+	// If the session has progressed to a live state (active or awake), the spawn
 	// already succeeded and another phase cleared pending_create_claim. The
 	// async result still carries useful metadata — commit it rather than
 	// discarding as stale. This row fires before the claim-cleared row below,

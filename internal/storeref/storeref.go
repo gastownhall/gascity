@@ -17,6 +17,25 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// ScopeRigContext returns the rig identity encoded by a canonical workflow
+// store reference and reports whether the reference identifies a known scope.
+// City refs return an empty rig context with ok=true; rig refs return the rig
+// name. Unknown, legacy-bare, and incomplete refs return ok=false so callers
+// can apply an explicit compatibility fallback rather than mistaking them for
+// the city store.
+func ScopeRigContext(storeRef string) (rigContext string, ok bool) {
+	storeRef = strings.TrimSpace(storeRef)
+	switch {
+	case strings.HasPrefix(storeRef, "city:"):
+		return "", strings.TrimSpace(strings.TrimPrefix(storeRef, "city:")) != ""
+	case strings.HasPrefix(storeRef, "rig:"):
+		rigContext = strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+		return rigContext, rigContext != ""
+	default:
+		return "", false
+	}
+}
+
 // HasIDPrefix is the optional accessor a store implements to declare the id
 // prefix it mints (SQLiteStore, BdStore, CachingStore implement it; the bd/Dolt
 // work store reports its configured prefix or "").

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -416,6 +418,45 @@ func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t
 	}
 	if got != want {
 		t.Fatalf("resolveStoredSessionLogSource() path = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStoredSessionLogSource_ProviderConstructionFailureReturnsDiagnostic(t *testing.T) {
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_SESSION", "broken")
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"provider":     "claude",
+			"session_name": "mayor",
+			"state":        "asleep",
+			"work_dir":     t.TempDir(),
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	path, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{t.TempDir()})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want provider failure diagnostic")
+	}
+	if path != "" {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty", path)
+	}
+	if provider != "claude" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
+	}
+	if got, want := diagnostic, "constructing session provider: injected provider failure"; got != want {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want %q", got, want)
 	}
 }
 

@@ -104,11 +104,12 @@ func (s *MuxSource) rebuild(ctx context.Context) error {
 	resume := make(map[string]uint64, len(provs))
 	s.mu.Lock()
 	for city, p := range provs {
+		floor, floorInitialized := s.floor[city]
 		switch {
 		case cur[city] > 0:
 			resume[city] = cur[city] // resume from acked
-		case s.floor[city] > 0:
-			resume[city] = s.floor[city] // keep the floor; never re-floor to a newer head
+		case floorInitialized:
+			resume[city] = floor // keep the floor; never re-floor to a newer head
 		default:
 			head, err := p.LatestSeq()
 			if err != nil {

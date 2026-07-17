@@ -31,6 +31,10 @@ vi.mock('./routes/Runs', () => ({
   RunsPage: () => <h1>Runs route</h1>,
 }));
 
+vi.mock('./routes/CockpitHome', () => ({
+  CockpitHomePage: () => <h1>Cockpit home route</h1>,
+}));
+
 function LocationProbe() {
   const location = useLocation();
   return <output data-testid="pathname">{location.pathname}</output>;
@@ -86,5 +90,12 @@ describe('App routes', () => {
 
     expect(await screen.findByRole('heading', { name: 'Runs route' })).toBeTruthy();
     expect(screen.getByTestId('pathname').textContent).toBe('/runs');
+  });
+
+  it('/ renders the live cockpit fallback', async () => {
+    renderAt('/');
+
+    expect(await screen.findByRole('heading', { name: 'Cockpit home route' })).toBeTruthy();
+    expect(screen.getByTestId('pathname').textContent).toBe('/');
   });
 });

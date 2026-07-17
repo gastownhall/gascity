@@ -239,6 +239,19 @@ build; full rationale is in the architecture docs):
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Vendor-neutral hosted-service wire.** The OSS client of a hosted
+  Gas City service (`internal/cliauth`, `internal/serviceproto`, the
+  `gc login`/`gc whoami` commands) speaks a generic, published protocol
+  (`docs/reference/specs/service-protocol-v0.md`) and holds an **opaque
+  bearer** it never parses. Account/commercial policy — trial, billing,
+  credit, plan, quota, org/tenant identity — must **never** be a wire
+  field; it travels only in the opaque server-authored `message`/`links`
+  fields the CLI prints verbatim (spec §5). Default endpoint URLs (e.g.
+  `defaultServiceURL = "https://gascity.com"`) are **configuration data,
+  not commercial code** — sanctioned exactly like the pack-registry
+  default. Enforced by `scripts/check-core-boundary.sh` check (f) and the
+  `internal/cliauth` wire golden test; all provisioning/billing/trial
+  logic lives server-side in the private hosted repos.
 
 ## Active migrations
 
@@ -391,14 +404,30 @@ full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
 the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
 ~10 cascading cache-miss errors across the executor pool.
 
-**Safe alternative for cold builds:**
+**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
+shim already routes the default `GOCACHE` to a shared **on-disk** cache
+(`~/.cache/go-build`) and pins compile/link temp to disk
+(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
+corrupted by a normal build.
+
+**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
+RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
+tool-output capture dir. A bare `mktemp -d` (no `-p` dir) resolves against the
+unset `$TMPDIR`, which defaults to `/tmp` — one cold cache built there is
+2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent
+on the host (incident gm-tkz1r / ga-x9k9b9, 2026-07). The shim deliberately
+does **not** relocate a `GOCACHE` you set explicitly, so an explicit `/tmp` path
+defeats it.
+
+**If you truly need an isolated cold build** (a from-scratch compile without
+`go clean -cache`), put the throwaway cache **on disk** and remove it
+unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
+linker's own scratch also stays off tmpfs:
 
 ```bash
-GOCACHE=$(mktemp -d) go build ./cmd/gc/
+tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
+GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
 ```
-
-This isolates the cache to a throwaway directory without touching the shared
-pool. Clean up with `rm -rf` after if disk space matters.
 
 **Exception:** `go clean -testcache` is explicitly allowed. It clears only the
 test-result cache, not the compiled-object cache, and does not corrupt

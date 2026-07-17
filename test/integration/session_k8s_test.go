@@ -38,7 +38,14 @@ func TestK8sSessionConformance(t *testing.T) {
 	runtimetest.RunLifecycleTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		id := atomic.AddInt64(&counter, 1)
 		name := fmt.Sprintf("gc-k8s-conform-%d", id)
-		t.Cleanup(func() { _ = p.Stop(name) })
+		// The external gc-session-k8s script can leave a partially created pod
+		// when Start fails. Keep this fallback until that script rolls back its
+		// own failed starts; the shared runner owns successful-start cleanup.
+		t.Cleanup(func() {
+			if err := p.Stop(name); err != nil {
+				t.Errorf("Stop(%q) during K8s fallback cleanup: %v", name, err)
+			}
+		})
 		return p, runtime.Config{
 			Command: "sleep 300",
 			WorkDir: "/tmp",

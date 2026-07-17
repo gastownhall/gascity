@@ -331,7 +331,7 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 		return ""
 	}
 	if family == "mimocode" {
-		// MiMo Code supports explicit ACP sessions, but --never-ask-questions
+		// MiMo Code supports explicit ACP sessions, but --never-ask
 		// — the flag that suppresses the question/plan gates headless runs
 		// require — is not taken by the `mimo acp` subcommand, and ACPArgs
 		// replaces Args, so an ACP default would compose a launch without it.

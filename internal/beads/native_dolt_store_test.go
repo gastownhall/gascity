@@ -1484,6 +1484,47 @@ func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	}
 }
 
+// TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore proves the guarded
+// single-key ambient read serializes with an in-flight native Dolt open. A native
+// open for a non-external scope unsets BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu
+// for the duration of the open, so a bare os.Getenv could observe that transient unset.
+// AmbientNativeDoltOpenEnv must block until restore and then observe the true ambient
+// "1", never the concurrent scope's transient value.
+func TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
+	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
+	})
+	if err != nil {
+		t.Fatalf("withNativeDoltOpenEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+	tlsCh := make(chan string, 1)
+	go func() {
+		tlsCh <- AmbientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS")
+	}()
+	select {
+	case got := <-tlsCh:
+		t.Fatalf("ambient TLS read completed during native open (got %q); it must block on nativeDoltOpenEnvMu", got)
+	case <-time.After(10 * time.Millisecond):
+	}
+	restoreEnv()
+	restored = true
+	select {
+	case got := <-tlsCh:
+		if got != "1" {
+			t.Fatalf("ambient TLS after native open restore = %q, want 1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ambient TLS read did not complete after native open env restored")
+	}
+}
+
 func TestBdStorePurgeWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
 	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{

@@ -7,11 +7,12 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// TestPoolSessionIsLive_Matrix exercises the liveness predicate used by the
-// runningSessions counter in buildDesiredState. An asleep or drained bead
+// TestPoolSessionIsLiveInfo_Matrix exercises the liveness predicate used by the
+// runningSessions counter in buildDesiredState. An asleep or drained session
 // must not count as live; everything else is treated as live so that the
-// isCold probe is never suppressed by an unknown/future state.
-func TestPoolSessionIsLive_Matrix(t *testing.T) {
+// isCold probe is never suppressed by an unknown/future state. Fed through the
+// session.Info codec, matching the production read path.
+func TestPoolSessionIsLiveInfo_Matrix(t *testing.T) {
 	cases := []struct {
 		name string
 		meta map[string]string
@@ -31,9 +32,9 @@ func TestPoolSessionIsLive_Matrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := poolSessionIsLive(beads.Bead{Metadata: tc.meta})
+			got := poolSessionIsLiveInfo(sessionpkg.Info{MetadataState: tc.meta["state"], SleepReason: tc.meta["sleep_reason"]})
 			if got != tc.want {
-				t.Fatalf("poolSessionIsLive(%v) = %v, want %v", tc.meta, got, tc.want)
+				t.Fatalf("poolSessionIsLiveInfo(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
 		})
 	}

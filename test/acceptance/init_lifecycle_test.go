@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir)
+	if err := helpers.StageIdleProviderBinary(filepath.Join(gcHome, "bin"), "claude"); err != nil {
+		panic("acceptance: staging idle Claude process double: " + err.Error())
+	}
 
 	// In-process config loads and packman cache lookups must resolve the
 	// same isolated GC_HOME the subprocess env uses. internal/testenv
@@ -57,6 +60,23 @@ func TestMain(m *testing.M) {
 	// Best-effort supervisor stop.
 	helpers.RunGC(testEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	os.Exit(code)
+}
+
+func TestTierAUsesHermeticClaudeProcessDouble(t *testing.T) {
+	wantDir := filepath.Join(testEnv.Get("GC_HOME"), "bin")
+	pathEntries := filepath.SplitList(testEnv.Get("PATH"))
+	if len(pathEntries) == 0 || pathEntries[0] != wantDir {
+		t.Fatalf("Tier A PATH starts with %v, want hermetic provider directory %q", pathEntries, wantDir)
+	}
+
+	wantPath := filepath.Join(wantDir, "claude")
+	info, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatalf("Tier A Claude process double: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("Tier A Claude process double mode = %v, want executable", info.Mode())
+	}
 }
 
 // TestInitMinimal verifies that gc init with the default minimal

@@ -262,35 +262,49 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 // Body validation (Name and Provider required with minLength:"1") is
 // enforced by the framework from AgentCreateInput's struct tags.
 func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateInput) (*AgentCreatedOutput, error) {
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		return nil, errMutationsNotSupported
-	}
+	// Idempotency: create at most once per Idempotency-Key. The cached value is
+	// the qualified agent name (the response body is rebuilt from it), and the
+	// visibility wait stays inside the closure so a cached 201 keeps its strict
+	// read-after-write meaning. A create that fails after the durable config
+	// write (visibility timeout 503/504) releases the reservation, so a
+	// same-key retry re-runs the create and surfaces the conflict — identical
+	// to an unkeyed retry today.
+	qualifiedName, err := withIdempotency(s.idem, "/v0/agents", input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			sm, ok := s.state.(StateMutator)
+			if !ok {
+				return "", errMutationsNotSupported
+			}
 
-	a := config.Agent{
-		Name:     input.Body.Name,
-		Dir:      input.Body.Dir,
-		Provider: input.Body.Provider,
-		Scope:    input.Body.Scope,
-	}
+			a := config.Agent{
+				Name:     input.Body.Name,
+				Dir:      input.Body.Dir,
+				Provider: input.Body.Provider,
+				Scope:    input.Body.Scope,
+			}
 
-	if err := sm.CreateAgent(a); err != nil {
-		return nil, mutationError(err)
-	}
-	// Block until the new agent is reachable through findAgent, so the
-	// 201 response is a strict read-after-write signal: a follow-up
-	// POST /sling against the same target will not race a stale runtime
-	// config snapshot. This is intentionally scoped to agents because sling
-	// target resolution reads the agent projection immediately after create.
-	qualifiedName := a.QualifiedName()
-	if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
-		waitCtx, cancel := context.WithTimeout(ctx, s.agentCreateVisibilityWaitTimeout())
-		err := waiter.WaitForAgentVisibility(waitCtx, qualifiedName)
-		cancel()
-		if err != nil {
-			log.Printf("api: agent %s visibility confirmation failed after create: %v", qualifiedName, err)
-			return nil, agentVisibilityWaitHTTPError(err)
-		}
+			if err := sm.CreateAgent(a); err != nil {
+				return "", mutationError(err)
+			}
+			// Block until the new agent is reachable through findAgent, so the
+			// 201 response is a strict read-after-write signal: a follow-up
+			// POST /sling against the same target will not race a stale runtime
+			// config snapshot. This is intentionally scoped to agents because sling
+			// target resolution reads the agent projection immediately after create.
+			name := a.QualifiedName()
+			if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
+				waitCtx, cancel := context.WithTimeout(ctx, s.agentCreateVisibilityWaitTimeout())
+				err := waiter.WaitForAgentVisibility(waitCtx, name)
+				cancel()
+				if err != nil {
+					log.Printf("api: agent %s visibility confirmation failed after create: %v", name, err)
+					return "", agentVisibilityWaitHTTPError(err)
+				}
+			}
+			return name, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	resp := &AgentCreatedOutput{}
 	resp.Body.Status = "created"

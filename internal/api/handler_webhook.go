@@ -620,8 +620,9 @@ type OrderRunInput struct {
 
 // OrderRunOutput is the response for POST /v0/city/{cityName}/order/{name}/run.
 type OrderRunOutput struct {
-	Status int `json:"-"`
-	Body   struct {
+	Status   int    `json:"-"`
+	Location string `header:"Location" doc:"Runs-list URL. An order dispatches asynchronously, so no single run root is known at response time; the dispatched run appears in the list once it materializes."`
+	Body     struct {
 		Status     string `json:"status" doc:"\"dispatched\" when the order fired."`
 		ScopedName string `json:"scoped_name,omitempty" doc:"Rig-qualified name of the fired order."`
 		TrackingID string `json:"tracking_id,omitempty" doc:"Tracking bead id for the dispatch."`
@@ -664,7 +665,7 @@ func (s *Server) humaHandleOrderRun(ctx context.Context, input *OrderRunInput) (
 	if !result.Dispatched {
 		return nil, apierr.WebhookRejected.Msg("rejected: " + result.Reason)
 	}
-	out := &OrderRunOutput{Status: http.StatusAccepted}
+	out := &OrderRunOutput{Status: http.StatusAccepted, Location: runsListPath(input.CityName)}
 	out.Body.Status = "dispatched"
 	out.Body.ScopedName = result.Dispatch.ScopedName
 	out.Body.TrackingID = result.Dispatch.TrackingID

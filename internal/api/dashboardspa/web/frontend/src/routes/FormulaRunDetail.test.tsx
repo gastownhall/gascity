@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FormulaRunDetailPage, runDetailNudgeRefresh } from './FormulaRunDetail';
@@ -19,6 +19,8 @@ import {
 } from 'gas-city-dashboard-shared';
 import { ApiClientError } from '../api/client';
 import rawFormulaRunDetailFixture from '../test/fixtures/formula-run-detail.json';
+
+import type { LoadRunDetailOptions } from '../supervisor/runDetail';
 
 const loadSupervisorFormulaRunDetail = vi.hoisted(() => vi.fn());
 
@@ -446,20 +448,106 @@ describe('FormulaRunDetailPage', () => {
     expect(diffUrls()).toHaveLength(2);
   });
 
-  it('does not refresh from city events before the initial run detail identifies the run', async () => {
+  it('refreshes a not-yet-loaded run from city events anchored on the ROUTE runId (F4)', async () => {
+    // The printed deep-link case: before the initial detail load resolves (or
+    // after it failed), the run's own eventual bead events must nudge a
+    // refresh — the matcher anchors on the route's runId, never on a loaded
+    // detail (the old `detail === null → return false` early-return made the
+    // failed state permanent). Events identifying a DIFFERENT run stay
+    // ignored; an identity-less (ambient) event matches, mirroring the
+    // non-terminal ambient behavior after load — a root bead's own events may
+    // carry no run identity.
     const initialLoad = deferred<FormulaRunDetail>();
     loadSupervisorFormulaRunDetail.mockReturnValue(initialLoad.promise);
 
     renderPage();
     const cityStream = requireCityEventSource();
+    // The SSE precheck 503 is fatal to EventSource: the detail stream closes
+    // terminally, releasing the nudge lane back to detail refreshes.
+    act(() => requireRunDetailStream().fail());
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.bead}updated` });
+    // Another run's event: no refresh.
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'other-run' } } },
+    });
     await Promise.resolve();
-
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    // This run's event: the detail refresh fires even though no detail ever
+    // loaded.
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'gc-adopt-pr-active' } } },
+    });
+    await waitFor(() => expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2));
+
     initialLoad.resolve(detail);
     await screen.findByRole('heading', { name: /adopt pr #42/i });
+  });
+
+  it('recovers a failed warming load when the run’s bead events later arrive (F4)', async () => {
+    // A deep link printed right after `gc sling` can exhaust even the long
+    // warming budget before the controller's cache-reconcile emits the run's
+    // bead events. Those eventual events must nudge the page out of the
+    // failed state — the run's detail loads on the retriggered refresh.
+    loadSupervisorFormulaRunDetail.mockRejectedValueOnce(
+      new ApiClientError(503, 'run view is warming', undefined, 'unknown_run'),
+    );
+
+    renderPage();
+    await screen.findByRole('alert');
+    const cityStream = requireCityEventSource();
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'gc-adopt-pr-active' } } },
+    });
+
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('renders honest recording copy while an unknown run is inside its warming grace (F4)', async () => {
+    // While the loader polls the graced 503 (body reason 'unknown_run': the
+    // projection is warm but has never seen this run), the interim copy must
+    // say honestly that the run may still be being recorded — or may not
+    // exist — rather than implying a client-side wait bug or failing outright.
+    loadSupervisorFormulaRunDetail.mockImplementation(
+      (_runId: string, options?: LoadRunDetailOptions) => {
+        options?.onWarming?.({ reason: 'unknown_run' });
+        return new Promise<FormulaRunDetail>(() => {});
+      },
+    );
+
+    renderPage();
+
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toMatch(/may still be being recorded/i);
+    expect(status.textContent).toMatch(/couple of minutes/i);
+    expect(status.textContent).toMatch(/may no longer exist/i);
+    // Interim, not terminal: no error alert while the poll is still running.
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the generic loading copy for a cold-replay warming 503 (no reason)', async () => {
+    // The projection-still-warming 503 carries no reason: the run is not in
+    // doubt, the fold just hasn't caught up — so the plain loading copy stays.
+    loadSupervisorFormulaRunDetail.mockImplementation(
+      (_runId: string, options?: LoadRunDetailOptions) => {
+        options?.onWarming?.({ reason: undefined });
+        return new Promise<FormulaRunDetail>(() => {});
+      },
+    );
+
+    renderPage();
+
+    expect(await screen.findByText(/^Loading formula run\.$/i)).toBeTruthy();
+    expect(screen.queryByText(/may still be being recorded/i)).toBeNull();
   });
 
   it('does not load the execution-folder diff before the initial run detail is ready', async () => {
@@ -574,8 +662,12 @@ describe('FormulaRunDetailPage', () => {
     const runUrls = fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
     // The detail loader is scope-independent now (the BFF projection derives the
     // run's scope from its own root bead); the route's scope still drives the
-    // separate run-diff fetch below.
-    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith('gc-adopt-pr-active');
+    // separate run-diff fetch below. The second argument is the warming-poll
+    // wiring (onWarming/keepPolling).
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith(
+      'gc-adopt-pr-active',
+      expect.anything(),
+    );
     expect(runUrls).toContain(
       '/api/city/test-city/runs/gc-adopt-pr-active/diff?scope_kind=city&scope_ref=racoon-city',
     );

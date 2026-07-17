@@ -118,28 +118,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
-		check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
-			NoConvoy: opts.NoConvoy,
-		})
-		if check.Idempotent {
-			result.Idempotent = true
-			result.DryRun = opts.DryRun
-			result.BeadID = opts.BeadOrFormula
-			result.Method = "bead"
-			// Honor --nudge even when the route is already in place. The bead is
-			// routed to the target, but a warm pool slot may have missed its
-			// wake (its startup nudge was swallowed, or work was routed after it
-			// went idle). Re-slinging with --nudge must still deliver a wake;
-			// otherwise the idempotent short-circuit silently drops it and the
-			// slot sits idle on work it never began. The claim path is
-			// idempotent/CAS-safe, so a redundant nudge is harmless. Suppressed
-			// for dry-run, which must not mutate or signal anything.
-			if opts.Nudge && !opts.DryRun {
-				result.NudgeAgent = &a
-			}
+		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
 			return result, nil
 		}
-		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
 	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
@@ -147,13 +128,16 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
-	// Reassign: clear any existing human assignee before routing so the
-	// target pool/agent can claim the bead. Without this, beads claimed
-	// by `bd update --claim` stay invisible to the pool's claim filter
-	// even after sling sets gc.routed_to. See gastownhall/gascity#1007.
+	// Reassign: make the bead claimable by the target pool/agent before
+	// routing — clear any existing assignee and reopen it if a prior actor
+	// left it in_progress. Without this, a bead claimed by `bd update --claim`
+	// (status=in_progress, assignee=<actor>) stays invisible to the pool's
+	// claim filter even after sling sets gc.routed_to: clearing the assignee
+	// alone is not enough because IsReadyCandidate requires status=open. See
+	// gastownhall/gascity#1007 (assignee) and #3231 (status).
 	if opts.Reassign && !opts.DryRun {
-		if err := clearHumanAssignee(opts.BeadOrFormula, deps); err != nil {
-			return result, fmt.Errorf("clearing assignee for %s: %w", opts.BeadOrFormula, err)
+		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
+			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
 		}
 	}
 
@@ -175,6 +159,57 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	return result, nil
+}
+
+// resolveIdempotentShortCircuit runs the plain-bead pre-flight idempotency
+// check and reports whether the sling is a settled no-op. When it returns true,
+// result is populated for an early idempotent return; otherwise any bead-state
+// warnings are appended to result and the sling proceeds. An explicit --on
+// formula on a routed-but-unmoleculed root is not treated as idempotent, so the
+// formula still attaches. If the molecule-attachment probe cannot complete, the
+// fail-closed idempotent state is preserved and the probe failure is surfaced
+// as a bead warning rather than silently flipping into a mutating attach path.
+func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) bool {
+	check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
+		NoConvoy: opts.NoConvoy,
+	})
+	if check.Idempotent {
+		needsAttach, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
+		switch {
+		case probeErr != nil:
+			// The attachment probe failed, so we cannot prove the routed bead
+			// lacks a live molecule. Preserve the fail-closed idempotent result
+			// instead of risking a duplicate attachment, and surface the probe
+			// failure so it is not silently swallowed.
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+				"could not verify molecule attachment for %s; treating --on as an idempotent no-op: %v",
+				opts.BeadOrFormula, probeErr))
+		case needsAttach:
+			// The bead is routed to the target but carries no molecule — an
+			// earlier plain sling routed it raw. Do not treat --on as an
+			// idempotent no-op; fall through so the formula attaches.
+			check.Idempotent = false
+		}
+	}
+	if !check.Idempotent {
+		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
+		return false
+	}
+	result.Idempotent = true
+	result.DryRun = opts.DryRun
+	result.BeadID = opts.BeadOrFormula
+	result.Method = "bead"
+	// Honor --nudge even when the route is already in place. The bead is routed
+	// to the target, but a warm pool slot may have missed its wake (its startup
+	// nudge was swallowed, or work was routed after it went idle). Re-slinging
+	// with --nudge must still deliver a wake; otherwise the idempotent
+	// short-circuit silently drops it and the slot sits idle on work it never
+	// began. The claim path is idempotent/CAS-safe, so a redundant nudge is
+	// harmless. Suppressed for dry-run, which must not mutate or signal anything.
+	if opts.Nudge && !opts.DryRun {
+		result.NudgeAgent = &a
+	}
+	return true
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
@@ -216,6 +251,42 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+// onFormulaNeedsAttachment reports whether this is an --on sling whose target
+// bead the caller has already determined reads Idempotent (gc.routed_to ==
+// target, or pool-labeled) but that has no attached molecule yet. The
+// routed-idempotency check treats such a bead as a done no-op, but a bead can be
+// routed raw by an earlier plain sling; a later `--on <formula>` must still
+// attach the formula, or the repair root sits routed-but-unfanned. When a
+// molecule is already attached, --on stays idempotent (skip), and re-attach is
+// handled by the attachment path (CheckNoMoleculeChildren errors on a live
+// molecule; a stale one is burned).
+//
+// The returned error is non-nil only when the molecule-attachment probe could
+// not complete. In that case the result is (false, err): the caller cannot
+// prove the bead is unmoleculed, so it must preserve the fail-closed idempotent
+// state rather than clear it and risk minting a duplicate attachment.
+func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (bool, error) {
+	if opts.OnFormula == "" {
+		return false, nil
+	}
+	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
+	if err != nil {
+		return false, err
+	}
+	if hasMolecule {
+		return false, nil
+	}
+	// No molecule attached. Only override idempotency for an UNCLAIMED bead — the
+	// routed-raw footgun (gc.routed_to set, no assignee, no molecule). If a worker
+	// has already claimed it (assignee set), leave it idempotent rather than
+	// re-attaching a formula onto work in progress.
+	bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store)
+	if !ok {
+		return false, nil
+	}
+	return strings.TrimSpace(bead.Assignee) == "", nil
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
@@ -1426,28 +1497,30 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
 }
 
-// clearHumanAssignee unsets the bead's assignee if non-empty. It checks the
-// city primary store (deps.Store) first; if the bead is not there it sweeps
-// the source-workflow stores (deps.SourceWorkflowStores) so rig-prefixed beads
-// — whose record lives in a rig store, not deps.Store — still get cleared.
-// No-op when the assignee is already empty, no store is available, or the bead
-// is absent from every store. Errors on a real primary-store read failure, a
-// store-Update failure, or a SourceWorkflowStores listing/read failure. See
-// SlingOpts.Reassign, #1007, and #3408.
-func clearHumanAssignee(beadID string, deps SlingDeps) error {
+// reopenForReassign makes a bead claimable by a target pool before routing:
+// it clears any assignee and reopens the bead if a prior actor left it
+// in_progress. It checks the city primary store (deps.Store) first; if the
+// bead is not there it sweeps the source-workflow stores
+// (deps.SourceWorkflowStores) so rig-prefixed beads — whose record lives in a
+// rig store, not deps.Store — are still reopened. No-op when the bead is
+// already open and unassigned, no store is available, or the bead is absent
+// from every store. Errors on a real primary-store read failure, a store-Update
+// failure, or a SourceWorkflowStores listing/read failure. See
+// SlingOpts.Reassign, #1007, #3408 (assignee), and #3231 (status).
+func reopenForReassign(beadID string, deps SlingDeps) error {
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {
-			return clearAssigneeInStore(deps.Store, beadID, b)
+			return reopenForReassignInStore(deps.Store, beadID, b)
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
-			return fmt.Errorf("reading %s from primary store to clear assignee: %w", beadID, err)
+			return fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
 		}
 		// ErrNotFound: the record is not in the city primary store. For
 		// rig-prefixed beads it lives in a rig store, so fall through to the
 		// source-workflow sweep below.
 	}
-	// Sweep the source-workflow stores and clear the bead in whichever one
+	// Sweep the source-workflow stores and reopen the bead in whichever one
 	// holds it. Mirrors the multi-store pattern in sourceWorkflowRootByID,
 	// which likewise consults the workflow stores when deps.Store lacks (or
 	// omits) the bead.
@@ -1456,7 +1529,7 @@ func clearHumanAssignee(beadID string, deps SlingDeps) error {
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		return fmt.Errorf("listing source-workflow stores to clear assignee for %s: %w", beadID, err)
+		return fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
 	}
 	for _, info := range stores {
 		if info.Store == nil {
@@ -1467,19 +1540,32 @@ func clearHumanAssignee(beadID string, deps SlingDeps) error {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("reading %s from store %q to clear assignee: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+			return fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return clearAssigneeInStore(info.Store, beadID, b)
+		return reopenForReassignInStore(info.Store, beadID, b)
 	}
 	return nil
 }
 
-// clearAssigneeInStore unsets the assignee on b in store, returning nil when
-// the assignee is already empty so no spurious store write occurs.
-func clearAssigneeInStore(store beads.Store, beadID string, b beads.Bead) error {
-	if strings.TrimSpace(b.Assignee) == "" {
+// reopenForReassignInStore clears b's assignee and resets an in_progress
+// status back to open in a single update, returning nil without writing when
+// the bead is already open and unassigned so no spurious store write occurs.
+// The status reset is what makes a bead that an order or human previously
+// claimed (status=in_progress) claimable again — IsReadyCandidate requires
+// status=open, so clearing the assignee alone leaves it routed-but-unclaimable
+// (gastownhall/gascity#3231).
+func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) error {
+	var update beads.UpdateOpts
+	if strings.TrimSpace(b.Assignee) != "" {
+		empty := ""
+		update.Assignee = &empty
+	}
+	if b.Status == "in_progress" {
+		open := "open"
+		update.Status = &open
+	}
+	if update.Assignee == nil && update.Status == nil {
 		return nil
 	}
-	empty := ""
-	return store.Update(beadID, beads.UpdateOpts{Assignee: &empty})
+	return store.Update(beadID, update)
 }

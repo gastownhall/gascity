@@ -558,6 +558,16 @@ func ReadFrom(path string, offset int64) ([]Event, int64, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	return readEventsFrom(f, offset)
+}
+
+// readEventsFrom scans events from an already-open active log starting at offset,
+// returning the decoded events and the offset advanced past every complete line.
+// A trailing partial line (no newline) does not advance the offset, so a later
+// read re-reads it once the writer completes it. Reading from a caller-supplied
+// fd (rather than re-opening by path) lets a tailer pin the file identity across
+// a concurrent rotation.
+func readEventsFrom(f *os.File, offset int64) ([]Event, int64, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, offset, fmt.Errorf("seeking events: %w", err)
 	}

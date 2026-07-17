@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -42,6 +43,69 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	// diagnostic text — wrapping here would change that caller-visible text and
 	// break runtime fidelity.
 	return s.store.SetMetadataBatch(id, map[string]string(patch))
+}
+
+// ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
+// refreshed Info as a LOCAL fold — info.ApplyPatch(patch) — never a re-Get. It
+// is the write-returns-Info chokepoint the reconciler routes its direct
+// write+fold two-steps through: a store Get per patch would blow the tick budget
+// under Dolt (~2s/bd-op; the reconciler does ~57-61 patch writes per tick), and
+// the coherent caller-held Info already carries the pre-image the fold needs, so
+// no read is required.
+//
+// An empty patch is a no-op: it returns info unchanged with no write (matching
+// ApplyPatch's len==0 short-circuit). On a persist error the INPUT info is
+// returned UNCHANGED with the error — the snapshot never advances past a write
+// the store rejected, so an error-ignoring caller stays consistent with the
+// store and an error-checking caller can bail.
+//
+// The fold is byte-identical to re-projecting the patched bead
+// (TestInfoApplyPatchMatchesReprojection is the equivalence oracle). It cannot
+// express a status close: patches never flip Info.Closed (see info_apply_patch.go),
+// so in-memory closes fold via MarkClosed instead, and the one NDI witness close
+// (finalizeDrainAckStoppedSession) is the single documented Store.Get refresh.
+// The handle-only ApplyPatch(id, patch) form remains for callers that hold no
+// coherent Info snapshot.
+func (s *Store) ApplyPatchInfo(info Info, patch MetadataPatch) (Info, error) {
+	if len(patch) == 0 {
+		return info, nil
+	}
+	if err := s.ApplyPatch(info.ID, patch); err != nil {
+		return info, err
+	}
+	return info.ApplyPatch(patch), nil
+}
+
+// UpdateMetadataInfo persists patch for info.ID via a SINGLE
+// Store.Update(id, UpdateOpts{Metadata: patch}) and folds the patch onto Info on
+// success. It is the write-returns-Info chokepoint for provenance clusters that
+// must commit ALL-OR-NOTHING across every supported backend.
+//
+// One-operation contract (why this is NOT ApplyPatchInfo): ApplyPatch routes
+// through SetMetadataBatch, which some backends decompose into one op PER KEY
+// (the exec: store issues one `bd` subprocess per map key, in nondeterministic
+// order), so a failure on the Nth key leaves an arbitrary subset of the cluster
+// committed — a mixed identity/provenance row. A single Update carries the whole
+// metadata map in one backend operation: exec: emits one JSON --set-metadata
+// subprocess, native Dolt keeps its read/merge/write transaction isolation, and
+// the caching/DoltLite stores keep their existing single-write refresh path. The
+// trigger/provenance cluster (trigger id, store ref, brain parent, pack,
+// workspace, workdir) therefore commits atomically or not at all.
+//
+// An empty patch is a no-op: it returns info unchanged with no write. On a
+// persist error the INPUT info is returned UNCHANGED with the error, so a caller
+// that logs-and-continues keeps its pre-write in-memory Info (never a partially
+// applied fold) and the durable row is left exactly as the backend left it. On
+// success the fold is info.ApplyPatch(patch) — byte-identical to re-projecting
+// the patched bead, exactly as ApplyPatchInfo folds.
+func (s *Store) UpdateMetadataInfo(info Info, patch MetadataPatch) (Info, error) {
+	if len(patch) == 0 {
+		return info, nil
+	}
+	if err := s.store.Update(info.ID, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return info, err
+	}
+	return info.ApplyPatch(patch), nil
 }
 
 // SetState heals a session to the given lifecycle state with a state_reason.
@@ -261,6 +325,18 @@ func (s *Store) RepairType(id string) error {
 		return err
 	}
 	return nil
+}
+
+// RepairTypeBestEffort re-issues the empty-type heal (RepairType) and logs a
+// failure instead of returning it, for the read paths that heal a type-lost
+// session bead as a side effect (the API/worker Get compositions and the raw
+// assignee-normalize lane). It preserves the best-effort logging the retired
+// RepairEmptyType emitted — the heal must never abort the current operation, but
+// a silent drop would hide a failing write. The log line matches RepairEmptyType.
+func (s *Store) RepairTypeBestEffort(id string) {
+	if err := s.RepairType(id); err != nil {
+		log.Printf("session %s: repairing empty bead type: %v", id, err)
+	}
 }
 
 // Store returns the embedded strongly-typed session-class bead store. It is a

@@ -13,10 +13,19 @@ import (
 // exported for use as a test double in cross-package tests. It is safe for
 // concurrent use.
 type MemStore struct {
+	condWritesStamp
+
 	mu    sync.Mutex
 	beads []Bead
 	deps  []Dep
 	seq   int
+
+	// DisableConditionalWrites makes the ConditionalWriter methods return
+	// ErrConditionalWriteUnsupported while leaving every other interface intact,
+	// so tests can drive the auto-degrade / require-fail-closed resolver cells
+	// against a store that reports incapable at runtime (no interface-stripping
+	// wrapper — see the class_store optional-capability lesson).
+	DisableConditionalWrites bool
 }
 
 var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
@@ -85,6 +94,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	}
 	b.CreatedAt = time.Now()
 	b.UpdatedAt = b.CreatedAt
+	b.Revision = 1 // first version; every subsequent mutation bumps it
 
 	stored := cloneBead(b)
 	m.beads = append(m.beads, stored)
@@ -107,63 +117,81 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	return cloneBead(stored), nil
 }
 
+// indexOfLocked returns the slice index of the bead with the given ID, or -1 if
+// no bead matches. The caller must hold m.mu.
+func (m *MemStore) indexOfLocked(id string) int {
+	for i := range m.beads {
+		if m.beads[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// applyUpdateLocked applies the non-nil fields of opts to the bead at index i,
+// stamps UpdatedAt, and bumps the revision. The caller must hold m.mu. It is
+// shared by Update and UpdateIfMatch so both bump identically.
+func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
+	if opts.Title != nil {
+		m.beads[i].Title = *opts.Title
+	}
+	if opts.Status != nil {
+		m.beads[i].Status = *opts.Status
+	}
+	if opts.Description != nil {
+		m.beads[i].Description = *opts.Description
+	}
+	if opts.Priority != nil {
+		m.beads[i].Priority = cloneIntPtr(opts.Priority)
+	}
+	if opts.ParentID != nil {
+		m.beads[i].ParentID = *opts.ParentID
+	}
+	if opts.Assignee != nil {
+		m.beads[i].Assignee = *opts.Assignee
+	}
+	if opts.Type != nil {
+		m.beads[i].Type = *opts.Type
+	}
+	if len(opts.Metadata) > 0 {
+		if m.beads[i].Metadata == nil {
+			m.beads[i].Metadata = make(map[string]string, len(opts.Metadata))
+		}
+		for k, v := range opts.Metadata {
+			m.beads[i].Metadata[k] = v
+		}
+	}
+	if len(opts.Labels) > 0 {
+		m.beads[i].Labels = append(m.beads[i].Labels, opts.Labels...)
+	}
+	if len(opts.RemoveLabels) > 0 {
+		remove := make(map[string]bool, len(opts.RemoveLabels))
+		for _, rl := range opts.RemoveLabels {
+			remove[rl] = true
+		}
+		filtered := m.beads[i].Labels[:0]
+		for _, l := range m.beads[i].Labels {
+			if !remove[l] {
+				filtered = append(filtered, l)
+			}
+		}
+		m.beads[i].Labels = filtered
+	}
+	m.beads[i].UpdatedAt = time.Now()
+	m.beads[i].Revision++
+}
+
 // Update modifies fields of an existing bead. Only non-nil fields in opts
 // are applied. Returns a wrapped ErrNotFound if the ID does not exist.
 func (m *MemStore) Update(id string, opts UpdateOpts) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i := range m.beads {
-		if m.beads[i].ID == id {
-			if opts.Title != nil {
-				m.beads[i].Title = *opts.Title
-			}
-			if opts.Status != nil {
-				m.beads[i].Status = *opts.Status
-			}
-			if opts.Description != nil {
-				m.beads[i].Description = *opts.Description
-			}
-			if opts.Priority != nil {
-				m.beads[i].Priority = cloneIntPtr(opts.Priority)
-			}
-			if opts.ParentID != nil {
-				m.beads[i].ParentID = *opts.ParentID
-			}
-			if opts.Assignee != nil {
-				m.beads[i].Assignee = *opts.Assignee
-			}
-			if opts.Type != nil {
-				m.beads[i].Type = *opts.Type
-			}
-			if len(opts.Metadata) > 0 {
-				if m.beads[i].Metadata == nil {
-					m.beads[i].Metadata = make(map[string]string, len(opts.Metadata))
-				}
-				for k, v := range opts.Metadata {
-					m.beads[i].Metadata[k] = v
-				}
-			}
-			if len(opts.Labels) > 0 {
-				m.beads[i].Labels = append(m.beads[i].Labels, opts.Labels...)
-			}
-			if len(opts.RemoveLabels) > 0 {
-				remove := make(map[string]bool, len(opts.RemoveLabels))
-				for _, rl := range opts.RemoveLabels {
-					remove[rl] = true
-				}
-				filtered := m.beads[i].Labels[:0]
-				for _, l := range m.beads[i].Labels {
-					if !remove[l] {
-						filtered = append(filtered, l)
-					}
-				}
-				m.beads[i].Labels = filtered
-			}
-			m.beads[i].UpdatedAt = time.Now()
-			return nil
-		}
+	i := m.indexOfLocked(id)
+	if i < 0 {
+		return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
 	}
-	return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+	m.applyUpdateLocked(i, opts)
+	return nil
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
@@ -181,6 +209,7 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		m.beads[i].Status = "open"
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
+		m.beads[i].Revision++
 		return true, nil
 	}
 	return false, nil
@@ -198,6 +227,7 @@ func (m *MemStore) Close(id string) error {
 			}
 			m.beads[i].Status = "closed"
 			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].Revision++
 			return nil
 		}
 	}
@@ -216,6 +246,7 @@ func (m *MemStore) Reopen(id string) error {
 			}
 			m.beads[i].Status = "open"
 			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].Revision++
 			return nil
 		}
 	}
@@ -237,6 +268,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		}
 		m.beads[i].Status = "closed"
 		m.beads[i].UpdatedAt = time.Now()
+		m.beads[i].Revision++
 		if m.beads[i].Metadata == nil {
 			m.beads[i].Metadata = make(map[string]string, len(metadata))
 		}
@@ -398,6 +430,7 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 			}
 			m.beads[i].Metadata[key] = value
 			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].Revision++
 			return nil
 		}
 	}
@@ -420,6 +453,7 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 				m.beads[i].Metadata[k] = v
 			}
 			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].Revision++
 			return nil
 		}
 	}
