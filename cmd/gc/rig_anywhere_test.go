@@ -1903,6 +1903,33 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 	})
 
+	// Regression (#4364): an explicit path argument that is itself a valid
+	// city must resolve successfully even when an unrelated registered
+	// sibling city has a broken .gc/site.toml. Before the fix,
+	// resolveContextFromPath always scanned every registered rig binding
+	// first (fail-closed), so one broken sibling aborted resolution of a
+	// perfectly healthy explicit target before validateCityPath ever got a
+	// chance to try it directly -- surfacing as a misleading "run gc init
+	// <path> first" hint on a city that already exists and needs no init.
+	t.Run("path_argument_valid_city_succeeds_despite_broken_sibling_binding", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		targetCity := setupCity(t, "valid-target")
+
+		badCity := setupCity(t, "broken-sibling")
+		if err := os.WriteFile(config.SiteBindingPath(badCity), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, badCity, "broken-sibling")
+
+		ctx, err := resolveContextFromPath(targetCity)
+		if err != nil {
+			t.Fatalf("resolveContextFromPath error: %v (want success on the valid explicit target despite an unrelated broken sibling)", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, targetCity)
+	})
+
 	// Regression: gc stop (and other commands that scan registered rig
 	// bindings) must not abort when a sibling city's directory has been
 	// deleted out from under the registry. Resolution still succeeds on

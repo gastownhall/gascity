@@ -739,18 +739,23 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
+	// Validate the explicit target directly before scanning the registry for
+	// rig bindings. An unrelated registered city with a broken/stale config
+	// must not abort resolution of a perfectly healthy explicit target
+	// (#4364) -- this mirrors resolveCityNameContext's f.localIsCity-first
+	// ordering for named refs.
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return resolvedContext{
+			CityPath: cityPath,
+			RigName:  rigFromCwdDir(cityPath, abs),
+		}, nil
+	}
 	ctx, ok, err := resolveRigPathToContext(abs)
 	if err != nil {
 		return resolvedContext{}, err
 	}
 	if ok {
 		return ctx, nil
-	}
-	if cityPath, err := validateCityPath(abs); err == nil {
-		return resolvedContext{
-			CityPath: cityPath,
-			RigName:  rigFromCwdDir(cityPath, abs),
-		}, nil
 	}
 	cityPath, err := findCity(abs)
 	if err != nil {
