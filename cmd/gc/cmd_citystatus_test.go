@@ -1279,14 +1279,19 @@ func TestControllerStatusGuidance(t *testing.T) {
 	}
 }
 
-type slowStatusRunningProvider struct {
+type blockingStatusRunningProvider struct {
 	runtime.Provider
-	delay   time.Duration
+	entered chan<- struct{}
+	release <-chan struct{}
 	running bool
 }
 
-func (p slowStatusRunningProvider) IsRunning(string) bool {
-	time.Sleep(p.delay)
+func (p blockingStatusRunningProvider) IsRunning(string) bool {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
 	return p.running
 }
 
@@ -1300,7 +1305,10 @@ func TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped(t *testi
 	statusProviderCallTimeout = 10 * time.Millisecond
 	statusProviderTimeoutWarning = func() {}
 
-	base := slowStatusRunningProvider{Provider: runtime.NewFake(), delay: 100 * time.Millisecond, running: true}
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	base := blockingStatusRunningProvider{Provider: runtime.NewFake(), entered: entered, release: release, running: true}
 	sp := newBoundedStatusProvider(base)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
