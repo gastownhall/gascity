@@ -33,18 +33,22 @@ func warmCrossStoreCfg(t *testing.T, cityPath string) *config.City {
 	}
 }
 
+// warmWorkerTemplate is the single pool template every fixture in this file
+// exercises.
+const warmWorkerTemplate = "gascity/worker"
+
 // createWarmSessionBead makes the pool WARM the way the reconciler sees it: an
 // open, awake, pool-managed session bead. isCold is computed from session
 // BEADS (no process probe), so this is exactly the input that flips the
 // warm/cold gate.
-func createWarmSessionBead(t *testing.T, store beads.Store, template string) {
+func createWarmSessionBead(t *testing.T, store beads.Store) {
 	t.Helper()
 	if _, err := store.Create(beads.Bead{
 		Status: "open",
 		Type:   sessionBeadType,
 		Metadata: map[string]string{
 			"session_name": "gc__worker-1",
-			"template":     template,
+			"template":     warmWorkerTemplate,
 			"state":        "active",
 			"pool_managed": "true",
 		},
@@ -58,7 +62,7 @@ func createWarmSessionBead(t *testing.T, store beads.Store, template string) {
 // (collectAllOpenSessionInfos + isPoolManagedSessionInfo +
 // poolSessionIsLiveInfo + template identity equivalence). Without this the
 // tests could silently pin the cold path and pass for the wrong reason.
-func requireWarm(t *testing.T, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, template string) {
+func requireWarm(t *testing.T, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) {
 	t.Helper()
 	infos, err := collectAllOpenSessionInfos(cfg, cityStore, rigStores, nil)
 	if err != nil {
@@ -67,22 +71,22 @@ func requireWarm(t *testing.T, cfg *config.City, cityStore beads.Store, rigStore
 	running := 0
 	for _, si := range infos {
 		if isPoolManagedSessionInfo(si) && poolSessionIsLiveInfo(si) &&
-			agentTemplateIdentitiesEquivalent(cfg, si.Template, template) {
+			agentTemplateIdentitiesEquivalent(cfg, si.Template, warmWorkerTemplate) {
 			running++
 		}
 	}
 	if running == 0 {
-		t.Fatalf("fixture is not WARM: no live pool-managed session info matched template %q (infos=%d) — the test would exercise the cold path instead", template, len(infos))
+		t.Fatalf("fixture is not WARM: no live pool-managed session info matched template %q (infos=%d) — the test would exercise the cold path instead", warmWorkerTemplate, len(infos))
 	}
 }
 
-func createRoutedBead(t *testing.T, store beads.Store, template, title string) {
+func createRoutedBead(t *testing.T, store beads.Store, title string) {
 	t.Helper()
 	if _, err := store.Create(beads.Bead{
 		Title:    title,
 		Type:     "task",
 		Status:   "open",
-		Metadata: map[string]string{"gc.routed_to": template},
+		Metadata: map[string]string{"gc.routed_to": warmWorkerTemplate},
 	}); err != nil {
 		t.Fatalf("create routed bead %q: %v", title, err)
 	}
@@ -104,14 +108,14 @@ func TestBuildDesiredState_WarmRigPoolSeesCityStoreRoutedDemand(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	rigStores := map[string]beads.Store{"gascity": rigStore}
 
-	createWarmSessionBead(t, cityStore, "gascity/worker")
-	requireWarm(t, cfg, cityStore, rigStores, "gascity/worker")
+	createWarmSessionBead(t, cityStore)
+	requireWarm(t, cfg, cityStore, rigStores)
 
 	// Routed demand delivered cross-store into the CITY store; the rig store
 	// stays empty. Before the fix the warm pool probed only the rig store and
 	// read 0 here.
 	for i := 0; i < 3; i++ {
-		createRoutedBead(t, cityStore, "gascity/worker", "cross-store routed work")
+		createRoutedBead(t, cityStore, "cross-store routed work")
 	}
 
 	dsResult := buildDesiredStateWithSessionBeads(
@@ -139,12 +143,12 @@ func TestBuildDesiredState_WarmRigPoolCityProbeDoesNotDoubleCountRigDemand(t *te
 	rigStore := beads.NewMemStore()
 	rigStores := map[string]beads.Store{"gascity": rigStore}
 
-	createWarmSessionBead(t, cityStore, "gascity/worker")
-	requireWarm(t, cfg, cityStore, rigStores, "gascity/worker")
+	createWarmSessionBead(t, cityStore)
+	requireWarm(t, cfg, cityStore, rigStores)
 
 	// One routed bead in EACH store: expect a count of exactly 2 (1+1), not 3+.
-	createRoutedBead(t, rigStore, "gascity/worker", "rig-store routed work")
-	createRoutedBead(t, cityStore, "gascity/worker", "city-store routed work")
+	createRoutedBead(t, rigStore, "rig-store routed work")
+	createRoutedBead(t, cityStore, "city-store routed work")
 
 	dsResult := buildDesiredStateWithSessionBeads(
 		"gc", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
@@ -176,10 +180,10 @@ func TestBuildDesiredState_WarmAliasedRigStoreDoesNotDoubleCountDemand(t *testin
 	cityStore := beads.NewMemStore()
 	rigStores := map[string]beads.Store{"gascity": aliasStore{cityStore}}
 
-	createWarmSessionBead(t, cityStore, "gascity/worker")
-	requireWarm(t, cfg, cityStore, rigStores, "gascity/worker")
+	createWarmSessionBead(t, cityStore)
+	requireWarm(t, cfg, cityStore, rigStores)
 
-	createRoutedBead(t, cityStore, "gascity/worker", "shared-backing routed work")
+	createRoutedBead(t, cityStore, "shared-backing routed work")
 
 	dsResult := buildDesiredStateWithSessionBeads(
 		"gc", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
@@ -206,10 +210,10 @@ func TestBuildDesiredState_WarmRigPoolMissingRigStoreStaysPartialNoCityProbe(t *
 	// No rig store entry: the pool's own target is errored/unavailable.
 	rigStores := map[string]beads.Store{}
 
-	createWarmSessionBead(t, cityStore, "gascity/worker")
-	requireWarm(t, cfg, cityStore, rigStores, "gascity/worker")
+	createWarmSessionBead(t, cityStore)
+	requireWarm(t, cfg, cityStore, rigStores)
 
-	createRoutedBead(t, cityStore, "gascity/worker", "city routed work while rig store down")
+	createRoutedBead(t, cityStore, "city routed work while rig store down")
 
 	dsResult := buildDesiredStateWithSessionBeads(
 		"gc", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
@@ -247,11 +251,11 @@ func TestBuildDesiredState_WarmNamedBackingRigPoolSeesCityStoreRoutedDemand(t *t
 	rigStore := beads.NewMemStore()
 	rigStores := map[string]beads.Store{"gascity": rigStore}
 
-	createWarmSessionBead(t, cityStore, "gascity/worker")
-	requireWarm(t, cfg, cityStore, rigStores, "gascity/worker")
+	createWarmSessionBead(t, cityStore)
+	requireWarm(t, cfg, cityStore, rigStores)
 
 	for i := 0; i < 3; i++ {
-		createRoutedBead(t, cityStore, "gascity/worker", "cross-store routed work")
+		createRoutedBead(t, cityStore, "cross-store routed work")
 	}
 
 	dsResult := buildDesiredStateWithSessionBeads(
