@@ -91,6 +91,7 @@ func TestFileStore(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunFenceConformance(t, factory)
 }
 
 func TestFileStoreConditionalWriterConformance(t *testing.T) {
@@ -189,6 +190,135 @@ func TestFileStoreRevisionSurvivesReopen(t *testing.T) {
 	staleTitle := "v-stale"
 	if err := w.UpdateIfMatch(bumped.ID, afterBumped.Revision, beads.UpdateOpts{Title: &staleTitle}); !beads.IsPreconditionFailed(err) {
 		t.Fatalf("UpdateIfMatch at now-stale revision: got %v, want PreconditionFailed", err)
+	}
+}
+
+// TestFileStoreFenceSurvivesReopen proves the ownership fence round-trips
+// through disk — ClaimFence is json:"-" on Bead, so it only survives via the
+// out-of-band Fences map. reloadFromDisk runs before every write, so a dropped
+// fence would reset to 0 mid-session in cross-process mode and silently defeat a
+// guarded release. Two beads (one transitioned, one never claimed) catch
+// per-bead persistence bugs: a reload that resets a fenced bead to 0, or a
+// persist that spuriously writes a fence for an untouched fence-0 bead.
+func TestFileStoreFenceSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenced, err := s1.Create(beads.Bead{Title: "fenced"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Three ownership transitions: claim → handoff → unclaim (fence → 3).
+	for _, a := range []string{"worker-a", "worker-b", ""} {
+		assignee := a
+		if err := s1.Update(fenced.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	untouched, err := s1.Create(beads.Bead{Title: "untouched"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeFenced, err := s1.Get(fenced.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeFenced.ClaimFence != 3 {
+		t.Fatalf("after 3 transitions ClaimFence = %d, want 3", beforeFenced.ClaimFence)
+	}
+
+	// Reopen from disk in a fresh handle (a second process).
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFenced, err := s2.Get(fenced.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFenced.ClaimFence != beforeFenced.ClaimFence {
+		t.Fatalf("fence did not survive reopen: %d -> %d", beforeFenced.ClaimFence, afterFenced.ClaimFence)
+	}
+	afterUntouched, err := s2.Get(untouched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterUntouched.ClaimFence != 0 {
+		t.Fatalf("never-claimed bead came back with ClaimFence %d, want 0", afterUntouched.ClaimFence)
+	}
+}
+
+// TestFileStoreReleaseIfCurrentFenceSurvivesReopen covers the marquee
+// guarded-release round-trip: a release through ReleaseIfCurrent (the
+// ConditionalAssignmentReleaser path, NOT on the base Store interface, so the
+// interface-typed fence conformance cannot reach it) must bump the fence AND
+// persist it across a fresh handle. Deleting the save from
+// FileStore.ReleaseIfCurrent ships green without this test.
+func TestFileStoreReleaseIfCurrentFenceSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s1.Create(beads.Bead{Title: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Claim and set in_progress so ReleaseIfCurrent applies.
+	if err := s1.Update(b.ID, beads.UpdateOpts{Assignee: ptr("worker-1"), Status: ptr("in_progress")}); err != nil {
+		t.Fatal(err)
+	}
+	released, err := s1.ReleaseIfCurrent(b.ID, "worker-1")
+	if err != nil || !released {
+		t.Fatalf("ReleaseIfCurrent released=%v err=%v", released, err)
+	}
+	before, err := s1.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ClaimFence == 0 {
+		t.Fatalf("ReleaseIfCurrent did not bump ClaimFence: %+v", before)
+	}
+
+	// Reopen from disk in a fresh handle (a second process).
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := s2.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ClaimFence != before.ClaimFence {
+		t.Fatalf("released fence did not survive reopen: %d -> %d", before.ClaimFence, after.ClaimFence)
+	}
+	if after.Status != "open" || after.Assignee != "" {
+		t.Fatalf("released bead after reopen = %+v, want open/unassigned", after)
+	}
+}
+
+// TestFileStoreLegacyFileHasZeroFence pins the fence downgrade fail-safe: a file
+// written by a fence-unaware binary carries beads but no "fences" map, and must
+// load with ClaimFence 0 (absent ≡ 0) — never a spurious re-seed. This is the
+// fence analog of TestFileStoreConditionalWriteLegacyFileNoRevisions.
+func TestFileStoreLegacyFileHasZeroFence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	legacy := `{"seq":1,"beads":[{"id":"gc-1","title":"legacy","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}]}`
+	if err := (fsys.OSFS{}).WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClaimFence != 0 {
+		t.Fatalf("legacy file with no fences map loaded ClaimFence = %d, want 0", got.ClaimFence)
 	}
 }
 

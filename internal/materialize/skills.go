@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -174,9 +175,15 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 
 	addEntry := func(entry SkillEntry) {
 		if existing, dup := nameOwner[entry.Name]; dup {
+			winner := cat.Entries[existing].Origin
+			slog.Debug("skill shared-catalog name shadowed",
+				"name", entry.Name,
+				"winner", winner,
+				"loser", entry.Origin,
+			)
 			cat.Shadowed = append(cat.Shadowed, ShadowedEntry{
 				Name:   entry.Name,
-				Winner: cat.Entries[existing].Origin,
+				Winner: winner,
 				Loser:  entry.Origin,
 			})
 			return
