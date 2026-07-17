@@ -237,6 +237,114 @@ func (e RunStepStatus) Valid() bool {
 	}
 }
 
+// Defines values for StatusConditionalWriteStoreVerdictLatch.
+const (
+	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
+	StatusConditionalWriteStoreVerdictLatchUnlatched StatusConditionalWriteStoreVerdictLatch = "unlatched"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWriteStoreVerdictLatch enum.
+func (e StatusConditionalWriteStoreVerdictLatch) Valid() bool {
+	switch e {
+	case StatusConditionalWriteStoreVerdictLatchIncapable:
+		return true
+	case StatusConditionalWriteStoreVerdictLatchUnlatched:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWriteStoreVerdictProbe.
+const (
+	StatusConditionalWriteStoreVerdictProbeCapable   StatusConditionalWriteStoreVerdictProbe = "capable"
+	StatusConditionalWriteStoreVerdictProbeIncapable StatusConditionalWriteStoreVerdictProbe = "incapable"
+	StatusConditionalWriteStoreVerdictProbeUnprobed  StatusConditionalWriteStoreVerdictProbe = "unprobed"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWriteStoreVerdictProbe enum.
+func (e StatusConditionalWriteStoreVerdictProbe) Valid() bool {
+	switch e {
+	case StatusConditionalWriteStoreVerdictProbeCapable:
+		return true
+	case StatusConditionalWriteStoreVerdictProbeIncapable:
+		return true
+	case StatusConditionalWriteStoreVerdictProbeUnprobed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesEffective.
+const (
+	StatusConditionalWritesEffectiveActive         StatusConditionalWritesEffective = "active"
+	StatusConditionalWritesEffectiveDegraded       StatusConditionalWritesEffective = "degraded"
+	StatusConditionalWritesEffectiveFailClosed     StatusConditionalWritesEffective = "fail_closed"
+	StatusConditionalWritesEffectiveOff            StatusConditionalWritesEffective = "off"
+	StatusConditionalWritesEffectivePendingRestart StatusConditionalWritesEffective = "pending_restart"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesEffective enum.
+func (e StatusConditionalWritesEffective) Valid() bool {
+	switch e {
+	case StatusConditionalWritesEffectiveActive:
+		return true
+	case StatusConditionalWritesEffectiveDegraded:
+		return true
+	case StatusConditionalWritesEffectiveFailClosed:
+		return true
+	case StatusConditionalWritesEffectiveOff:
+		return true
+	case StatusConditionalWritesEffectivePendingRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesMode.
+const (
+	StatusConditionalWritesModeAuto    StatusConditionalWritesMode = "auto"
+	StatusConditionalWritesModeOff     StatusConditionalWritesMode = "off"
+	StatusConditionalWritesModeRequire StatusConditionalWritesMode = "require"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesMode enum.
+func (e StatusConditionalWritesMode) Valid() bool {
+	switch e {
+	case StatusConditionalWritesModeAuto:
+		return true
+	case StatusConditionalWritesModeOff:
+		return true
+	case StatusConditionalWritesModeRequire:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesOrigin.
+const (
+	Builtin StatusConditionalWritesOrigin = "builtin"
+	Config  StatusConditionalWritesOrigin = "config"
+	Env     StatusConditionalWritesOrigin = "env"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesOrigin enum.
+func (e StatusConditionalWritesOrigin) Valid() bool {
+	switch e {
+	case Builtin:
+		return true
+	case Config:
+		return true
+	case Env:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SubmitIntent.
 const (
 	Default      SubmitIntent = "default"
@@ -3505,7 +3613,8 @@ type StatusBody struct {
 	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
 
 	// BeadsVersion Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
-	BeadsVersion *string `json:"beads_version,omitempty"`
+	BeadsVersion      *string                  `json:"beads_version,omitempty"`
+	ConditionalWrites *StatusConditionalWrites `json:"conditional_writes,omitempty"`
 
 	// DoltVersion Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
 	DoltVersion *string          `json:"dolt_version,omitempty"`
@@ -3549,6 +3658,60 @@ type StatusBody struct {
 	Work    StatusWorkCounts `json:"work"`
 }
 
+// StatusConditionalWriteStoreVerdict defines model for StatusConditionalWriteStoreVerdict.
+type StatusConditionalWriteStoreVerdict struct {
+	// Capable What the write path uses today: false only on a definitive incapable verdict.
+	Capable bool `json:"capable"`
+
+	// Kind Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).
+	Kind string `json:"kind"`
+
+	// Latch Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+	Latch StatusConditionalWriteStoreVerdictLatch `json:"latch"`
+
+	// Probe Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+	Probe StatusConditionalWriteStoreVerdictProbe `json:"probe"`
+
+	// Reason Incapable cause, verbatim from the probe or latch.
+	Reason *string `json:"reason,omitempty"`
+
+	// StoreId Store scope: city, or rig/<name>.
+	StoreId string `json:"store_id"`
+}
+
+// StatusConditionalWriteStoreVerdictLatch Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+type StatusConditionalWriteStoreVerdictLatch string
+
+// StatusConditionalWriteStoreVerdictProbe Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+type StatusConditionalWriteStoreVerdictProbe string
+
+// StatusConditionalWrites defines model for StatusConditionalWrites.
+type StatusConditionalWrites struct {
+	// Effective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+	Effective StatusConditionalWritesEffective `json:"effective"`
+
+	// Mode Boot-latched beads.conditional_writes mode.
+	Mode StatusConditionalWritesMode `json:"mode"`
+
+	// Notices Retained rollout notices (env overrides, drift, invalid spellings).
+	Notices *[]StatusRolloutNotice `json:"notices,omitempty"`
+
+	// Origin Where the latched mode came from.
+	Origin StatusConditionalWritesOrigin `json:"origin"`
+
+	// Stores Per-store verdicts, one row per controller-owned store.
+	Stores *[]StatusConditionalWriteStoreVerdict `json:"stores,omitempty"`
+}
+
+// StatusConditionalWritesEffective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+type StatusConditionalWritesEffective string
+
+// StatusConditionalWritesMode Boot-latched beads.conditional_writes mode.
+type StatusConditionalWritesMode string
+
+// StatusConditionalWritesOrigin Where the latched mode came from.
+type StatusConditionalWritesOrigin string
+
 // StatusMailCounts defines model for StatusMailCounts.
 type StatusMailCounts struct {
 	// Total Total number of messages.
@@ -3589,6 +3752,27 @@ type StatusRigDetail struct {
 
 	// Suspended Whether the rig is suspended (either explicitly or because all its agents are suspended).
 	Suspended bool `json:"suspended"`
+}
+
+// StatusRolloutNotice defines model for StatusRolloutNotice.
+type StatusRolloutNotice struct {
+	// ConfigValue Raw config spelling; empty when unset.
+	ConfigValue *string `json:"config_value,omitempty"`
+
+	// EnvValue Raw env spelling as found.
+	EnvValue *string `json:"env_value,omitempty"`
+
+	// EnvVar Environment variable involved, when env-related.
+	EnvVar *string `json:"env_var,omitempty"`
+
+	// FlagKey Rollout gate key the notice is about.
+	FlagKey string `json:"flag_key"`
+
+	// Kind Notice kind (env_overrides_config, pending_restart, invalid_value, ...).
+	Kind string `json:"kind"`
+
+	// Message Human-readable line carrying the gate and the outcome.
+	Message string `json:"message"`
 }
 
 // StatusSessionCountsDetail defines model for StatusSessionCountsDetail.

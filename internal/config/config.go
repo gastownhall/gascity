@@ -1319,6 +1319,11 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
+	// in which cron order schedules are evaluated when an order does not set
+	// its own tz. Empty means the controller's process-local zone. Invalid
+	// names fail order discovery loudly rather than falling back silently.
+	Timezone string `toml:"timezone,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Suspended is the deprecated pre-runtime-state city suspension

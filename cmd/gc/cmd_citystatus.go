@@ -30,9 +30,11 @@ type StatusJSON struct {
 	Suspended     bool                   `json:"suspended"`
 	Health        HealthJSON             `json:"health"`
 	Beads         *beads.BeadsDiagnostic `json:"beads,omitempty"`
-	Agents        []StatusAgentJSON      `json:"agents"`
-	Rigs          []StatusRigJSON        `json:"rigs"`
-	Summary       StatusSummaryJSON      `json:"summary"`
+	// ConditionalWrites mirrors the API status block verbatim (§12.5).
+	ConditionalWrites *api.StatusConditionalWrites `json:"conditional_writes,omitempty"`
+	Agents            []StatusAgentJSON            `json:"agents"`
+	Rigs              []StatusRigJSON              `json:"rigs"`
+	Summary           StatusSummaryJSON            `json:"summary"`
 }
 
 type WorkspaceJSON struct {
@@ -276,11 +278,12 @@ func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView],
 // helpers produce identical output on the API path.
 func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapshot {
 	snapshot := cityStatusSnapshot{
-		CityName:   v.CityName,
-		CityPath:   v.CityPath,
-		Suspended:  v.Suspended,
-		Controller: controllerStatusForCity(cityPath),
-		Beads:      v.Beads,
+		CityName:          v.CityName,
+		CityPath:          v.CityPath,
+		Suspended:         v.Suspended,
+		Controller:        controllerStatusForCity(cityPath),
+		Beads:             v.Beads,
+		ConditionalWrites: v.ConditionalWrites,
 		Summary: StatusSummaryJSON{
 			TotalAgents:       v.Summary.TotalAgents,
 			RunningAgents:     v.Summary.RunningAgents,

@@ -8069,6 +8069,10 @@
             "description": "Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
             "type": "string"
           },
+          "conditional_writes": {
+            "$ref": "#/components/schemas/StatusConditionalWrites",
+            "description": "Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface."
+          },
           "dolt_version": {
             "description": "Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
             "type": "string"
@@ -8174,6 +8178,112 @@
         ],
         "type": "object"
       },
+      "StatusConditionalWriteStoreVerdict": {
+        "additionalProperties": false,
+        "properties": {
+          "capable": {
+            "description": "What the write path uses today: false only on a definitive incapable verdict.",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).",
+            "type": "string"
+          },
+          "latch": {
+            "description": "Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.",
+            "enum": [
+              "incapable",
+              "unlatched"
+            ],
+            "type": "string"
+          },
+          "probe": {
+            "description": "Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.",
+            "enum": [
+              "capable",
+              "incapable",
+              "unprobed"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Incapable cause, verbatim from the probe or latch.",
+            "type": "string"
+          },
+          "store_id": {
+            "description": "Store scope: city, or rig/\u003cname\u003e.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_id",
+          "kind",
+          "probe",
+          "latch",
+          "capable"
+        ],
+        "type": "object"
+      },
+      "StatusConditionalWrites": {
+        "additionalProperties": false,
+        "properties": {
+          "effective": {
+            "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).",
+            "enum": [
+              "off",
+              "active",
+              "degraded",
+              "fail_closed",
+              "pending_restart"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "description": "Boot-latched beads.conditional_writes mode.",
+            "enum": [
+              "off",
+              "auto",
+              "require"
+            ],
+            "type": "string"
+          },
+          "notices": {
+            "description": "Retained rollout notices (env overrides, drift, invalid spellings).",
+            "items": {
+              "$ref": "#/components/schemas/StatusRolloutNotice"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "origin": {
+            "description": "Where the latched mode came from.",
+            "enum": [
+              "builtin",
+              "config",
+              "env"
+            ],
+            "type": "string"
+          },
+          "stores": {
+            "description": "Per-store verdicts, one row per controller-owned store.",
+            "items": {
+              "$ref": "#/components/schemas/StatusConditionalWriteStoreVerdict"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "origin",
+          "effective"
+        ],
+        "type": "object"
+      },
       "StatusMailCounts": {
         "additionalProperties": false,
         "properties": {
@@ -8257,6 +8367,41 @@
           "name",
           "path",
           "suspended"
+        ],
+        "type": "object"
+      },
+      "StatusRolloutNotice": {
+        "additionalProperties": false,
+        "properties": {
+          "config_value": {
+            "description": "Raw config spelling; empty when unset.",
+            "type": "string"
+          },
+          "env_value": {
+            "description": "Raw env spelling as found.",
+            "type": "string"
+          },
+          "env_var": {
+            "description": "Environment variable involved, when env-related.",
+            "type": "string"
+          },
+          "flag_key": {
+            "description": "Rollout gate key the notice is about.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Notice kind (env_overrides_config, pending_restart, invalid_value, ...).",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable line carrying the gate and the outcome.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "flag_key",
+          "message"
         ],
         "type": "object"
       },

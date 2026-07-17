@@ -286,8 +286,21 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	// through the dependency graph without making the workflow root a
 	// readiness blocker for finalizers and teardown work.
 	if graphWorkflow && rootKey != "" {
+		singleStep := graphWorkflowIsSingleStep(plan.Nodes, rootKey)
 		for _, node := range plan.Nodes {
 			if node.Key == rootKey {
+				continue
+			}
+			// Single-step workflows deadlock if the generated workflow-finalize
+			// gains a "tracks" edge back to the root: the compiler already emits
+			// root --blocks--> workflow-finalize (addWorkflowRootDeps), so a
+			// workflow-finalize --tracks--> root edge closes a mutual finalize
+			// <-> root cycle that neither controller-managed bead can ever
+			// break — both stay open forever (su-mla5h). The root already
+			// reaches the finalizer through that blocks edge and the finalizer
+			// carries gc.root_bead_id, so the ownership tracks edge is redundant
+			// here. Multi-step workflows keep the tracks edge unchanged.
+			if singleStep && node.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 				continue
 			}
 			if graphApplyPlanHasEdgeFromKeyToTarget(plan.Edges, node.Key, rootKey, "") {
@@ -329,6 +342,30 @@ func ensureGraphNodeMetadata(node *beads.GraphApplyNode) {
 	if node.Metadata == nil {
 		node.Metadata = make(map[string]string, 1)
 	}
+}
+
+// graphWorkflowIsSingleStep reports whether a graph workflow plan carries a
+// single worker-executed step. Control beads (workflow-finalize, scope-check,
+// fanout, ...) and spec sidecars are compiler-generated scaffolding, not
+// authored work, so they are excluded from the count. A single-step workflow
+// is the shape that deadlocks on the generated finalize <-> root edge pair
+// (su-mla5h).
+func graphWorkflowIsSingleStep(nodes []beads.GraphApplyNode, rootKey string) bool {
+	workSteps := 0
+	for _, node := range nodes {
+		if node.Key == rootKey {
+			continue
+		}
+		kind := node.Metadata[beadmeta.KindMetadataKey]
+		if beadmeta.IsControlKind(kind) || kind == beadmeta.KindSpec {
+			continue
+		}
+		workSteps++
+		if workSteps > 1 {
+			return false
+		}
+	}
+	return workSteps == 1
 }
 
 func graphApplyPlanHasEdgeFromKeyToTarget(edges []beads.GraphApplyEdge, fromKey, toKey, toID string) bool {

@@ -153,7 +153,11 @@ func TestAdvanceAttachEpochFenceLoserPath(t *testing.T) {
 	control := setupWorkflowChild(t, store, root.ID, "Control")
 	_ = store.SetMetadata(control.ID, "gc.control_epoch", "2")
 
-	sub, err := store.Create(beads.Bead{Title: "loser sub-DAG root"})
+	// Production creates fenced candidates speculatively (fence-pending);
+	// the loser path claims that marker before neutralizing.
+	sub, err := store.Create(beads.Bead{Title: "loser sub-DAG root", Metadata: map[string]string{
+		beadmeta.AttachFencePendingMetadataKey: "true",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +182,51 @@ func TestAdvanceAttachEpochFenceLoserPath(t *testing.T) {
 		if dep.DependsOnID == sub.ID {
 			t.Fatal("blocking edge to the loser's root was not detached")
 		}
+	}
+}
+
+// TestAdvanceAttachEpochFenceLoserSkipsActivatedCandidate pins the claim
+// contract that closes the recovery/loser race: when idempotency recovery on
+// a racing processor has already activated (claimed) the loser's candidate,
+// the fence loser must NOT neutralize it — the sub-DAG is live under
+// someone else's adoption. The loser skips and converges via the retry.
+func TestAdvanceAttachEpochFenceLoserSkipsActivatedCandidate(t *testing.T) {
+	store := newStampedAttachStore(t, gate.Auto)
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "2")
+
+	// The candidate's marker was already cleared: a recovery racer claimed
+	// and activated it between this loser's creation and its fence CAS.
+	sub, err := store.Create(beads.Bead{Title: "activated-by-recovery root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(control.ID, sub.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	result := &Result{RootID: sub.ID, IDMapping: map[string]string{"root": sub.ID}}
+
+	err = advanceAttachEpochFence(store, conflictOnlyWriter{}, control.ID, 1, result)
+	if !errors.Is(err, ErrEpochConflict) {
+		t.Fatalf("fence loser err = %v, want ErrEpochConflict", err)
+	}
+	subAfter, _ := store.Get(sub.ID)
+	if subAfter.Metadata["molecule_failed"] == "true" {
+		t.Fatal("loser neutralized a candidate that recovery had activated (live sub-DAG killed)")
+	}
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	edge := false
+	for _, dep := range deps {
+		if dep.DependsOnID == sub.ID {
+			edge = true
+		}
+	}
+	if !edge {
+		t.Fatal("blocking edge to the activated root was detached; the live sub-DAG lost its gate")
 	}
 }
 

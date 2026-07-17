@@ -944,12 +944,17 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 
 func (p *Provider) recipientSessionMatchesByCurrentAddress(recipient string, closed bool) ([]beads.Bead, error) {
 	var matches []beads.Bead
-	b, err := p.sessionStore.Get(recipient)
-	if err == nil && session.IsSessionBeadOrRepairable(b) && sessionRouteStatusMatches(b, closed) {
-		session.RepairEmptyType(p.sessionStore, &b)
-		matches = appendUniqueSessionRecipientMatch(matches, b)
-	} else if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return nil, fmt.Errorf("looking up session %q: %w", recipient, err)
+	// Slash recipients (e.g. "rig/agent.name") are never bare bead IDs. Skip
+	// store.Get to prevent the ephemeral-tier fallback inside BdStore.Get from
+	// emitting a bd query clause containing the slash form.
+	if !strings.Contains(recipient, "/") {
+		b, err := p.sessionStore.Get(recipient)
+		if err == nil && session.IsSessionBeadOrRepairable(b) && sessionRouteStatusMatches(b, closed) {
+			session.RepairEmptyType(p.sessionStore, &b)
+			matches = appendUniqueSessionRecipientMatch(matches, b)
+		} else if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return nil, fmt.Errorf("looking up session %q: %w", recipient, err)
+		}
 	}
 
 	status := ""

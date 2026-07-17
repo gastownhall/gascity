@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -516,6 +517,18 @@ func (fs *FileStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return nil, err
 	}
 	return fs.MemStore.Ready(query...)
+}
+
+// ReadyContext vetoes ContextReadyReader for FileStore. Refreshing the JSON
+// file is context-blind, so the promoted MemStore method would falsely promise
+// cancellation and would skip the required on-disk refresh entirely.
+func (fs *FileStore) ReadyContext(ctx context.Context, _ ...ReadyQuery) ([]Bead, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("reading ready beads from file store: %w", ErrReadyContextUnsupported)
 }
 
 // Children reloads the on-disk store before listing child beads.

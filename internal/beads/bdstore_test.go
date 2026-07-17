@@ -370,6 +370,54 @@ func TestBdStoreGet(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetFallsBackToEphemeralForWisps(t *testing.T) {
+	// bd show does not query the wisps table, so Get for a wisp ID returns
+	// ErrNotFound from bd show. Get must fall back to bd query with
+	// ephemeral=true so that wisp-tier beads (e.g. auto-handoff mail created
+	// by gc handoff --auto) are retrievable.
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-abc`: {
+			err: fmt.Errorf("issue gc-wisp-abc not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-abc --all --limit 1`: {
+			out: []byte(`[{"id":"gc-wisp-abc","title":"context cycle","status":"open","issue_type":"message","assignee":"claude","ephemeral":true}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	b, err := s.Get("gc-wisp-abc")
+	if err != nil {
+		t.Fatalf("Get wisp: %v", err)
+	}
+	if b.ID != "gc-wisp-abc" {
+		t.Errorf("ID = %q, want %q", b.ID, "gc-wisp-abc")
+	}
+	if !b.Ephemeral {
+		t.Error("Ephemeral = false, want true")
+	}
+}
+
+func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-missing`: {
+			err: fmt.Errorf("issue gc-wisp-missing not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-missing --all --limit 1`: {
+			out: []byte(`[]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-wisp-missing")
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	cutoff := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	runner := func(_, name string, args ...string) ([]byte, error) {

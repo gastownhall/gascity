@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -236,4 +237,121 @@ func TestControllerStateRolloutDriftThroughReloadSeams(t *testing.T) {
 	if n := cs.RolloutDriftNotices(); n != nil {
 		t.Errorf("convergent reload via updateConfigAndProviderOnly did not clear drift: %+v", n)
 	}
+}
+
+// TestConditionalWritesStatusBlock proves the §12.5 status-wire block renders
+// the daemon's own latched snapshot: boot mode + origin, per-store verdicts
+// from the side-effect-free inspector, retained notices, and the aggregate
+// effective verdict (fail_closed beats degraded beats pending_restart beats
+// active; off short-circuits).
+func TestConditionalWritesStatusBlock(t *testing.T) {
+	openStamped := func(t *testing.T, mode gate.Mode) beads.Store {
+		t.Helper()
+		dir := t.TempDir()
+		toml := "[workspace]\nname = \"t\"\nprefix = \"ga\"\n\n[beads]\nprovider = \"file\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true)
+		if err != nil {
+			t.Fatalf("openStoreResultAtForCityWithMode: %v", err)
+		}
+		return result.Store
+	}
+	disableFencing := func(t *testing.T, s beads.Store) beads.Store {
+		t.Helper()
+		inner := s
+		for {
+			target, ok := inner.(beads.ConditionalWritesResolveTargeter)
+			if !ok {
+				break
+			}
+			inner = target.ConditionalWritesResolveTarget()
+		}
+		fs, ok := inner.(*beads.FileStore)
+		if !ok {
+			t.Fatalf("front door resolve target is %T, want *beads.FileStore", inner)
+		}
+		fs.DisableConditionalWrites = true
+		return s
+	}
+
+	t.Run("require with an incapable store is fail_closed", func(t *testing.T) {
+		cs := &controllerState{
+			rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Require)),
+		}
+		cs.cityBeadStore = openStamped(t, gate.Require)
+		cs.beadStores = map[string]beads.Store{
+			"good": openStamped(t, gate.Require),
+			"bad":  disableFencing(t, openStamped(t, gate.Require)),
+		}
+		got := cs.ConditionalWritesStatus()
+		if got == nil {
+			t.Fatal("nil status block")
+		}
+		if got.Mode != "require" || got.Effective != "fail_closed" {
+			t.Fatalf("mode=%q effective=%q, want require/fail_closed", got.Mode, got.Effective)
+		}
+		if len(got.Stores) != 3 {
+			t.Fatalf("stores = %d rows, want 3 (city + 2 rigs)", len(got.Stores))
+		}
+		byID := map[string]api.StatusConditionalWriteStoreVerdict{}
+		for _, v := range got.Stores {
+			byID[v.StoreID] = v
+		}
+		if v := byID["rig/bad"]; v.Capable || v.Probe != "incapable" || v.Reason == "" {
+			t.Fatalf("rig/bad verdict = %+v, want incapable with reason", v)
+		}
+		if v := byID["city"]; !v.Capable || v.Kind != "file" {
+			t.Fatalf("city verdict = %+v, want capable kind=file", v)
+		}
+	})
+
+	t.Run("auto with an incapable store is degraded", func(t *testing.T) {
+		cs := &controllerState{
+			rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Auto)),
+		}
+		cs.cityBeadStore = disableFencing(t, openStamped(t, gate.Auto))
+		got := cs.ConditionalWritesStatus()
+		if got.Effective != "degraded" {
+			t.Fatalf("effective = %q, want degraded", got.Effective)
+		}
+	})
+
+	t.Run("all capable is active; drift downgrades to pending_restart", func(t *testing.T) {
+		cs := &controllerState{
+			rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Auto)),
+		}
+		cs.cityBeadStore = openStamped(t, gate.Auto)
+		if got := cs.ConditionalWritesStatus(); got.Effective != "active" {
+			t.Fatalf("effective = %q, want active", got.Effective)
+		}
+		cs.noteRolloutDrift(&config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}})
+		got := cs.ConditionalWritesStatus()
+		if got.Effective != "pending_restart" {
+			t.Fatalf("effective after drift = %q, want pending_restart", got.Effective)
+		}
+		if len(got.Notices) == 0 {
+			t.Fatal("drift produced no wire notice")
+		}
+	})
+
+	t.Run("off renders off with no store rows", func(t *testing.T) {
+		cs := &controllerState{rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Off))}
+		cs.cityBeadStore = openStamped(t, gate.Off)
+		got := cs.ConditionalWritesStatus()
+		if got.Mode != "off" || got.Effective != "off" {
+			t.Fatalf("mode=%q effective=%q, want off/off", got.Mode, got.Effective)
+		}
+		if len(got.Stores) != 0 {
+			t.Fatalf("off mode rendered %d store rows, want 0", len(got.Stores))
+		}
+	})
+
+	t.Run("zero flags render as off", func(t *testing.T) {
+		cs := &controllerState{}
+		if got := cs.ConditionalWritesStatus(); got.Mode != "off" || got.Effective != "off" {
+			t.Fatalf("zero-flags block = %+v, want off/off", got)
+		}
+	})
 }

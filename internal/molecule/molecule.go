@@ -368,6 +368,45 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	}, nil
 }
 
+// Attach fence-pending marker states. A candidate settles exactly once:
+// the marker moves one-way from "true" (pending, unclaimed) to either
+// "activating" (claimed by an activator; step activation is idempotent and
+// finishable by any processor) or "failed" (claimed by a neutralizer), and
+// "activating" completes to "" (live). Every transition is a CAS on the
+// marker, so activation and neutralization can never both win the same
+// candidate — the race a plain SetMetadata leaves open (a recovery racer
+// activates a candidate while its fence-losing owner neutralizes it).
+const (
+	attachFencePendingUnclaimed  = "true"
+	attachFencePendingActivating = "activating"
+	attachFencePendingFailed     = "failed"
+)
+
+// claimAttachCandidate moves rootID's fence-pending marker from → to via
+// metadata CAS. It returns (true, nil) when this caller won the claim,
+// (false, nil) on a clean loss (someone else settled the candidate), and an
+// error only on transport/ambiguous failures. Stores without a conditional
+// writer never create pending markers (fencedDeferred requires the fence
+// writer), so a missing writer here means a mixed-fleet artifact; the
+// fallback is the legacy racy read-check-set, which is no worse than the
+// pre-claim behavior.
+func claimAttachCandidate(store beads.Store, rootID, from, to string) (bool, error) {
+	if writer, ok := beads.ConditionalWriterFor(store); ok {
+		return writer.CompareAndSetMetadataKey(rootID, beadmeta.AttachFencePendingMetadataKey, from, to)
+	}
+	b, err := store.Get(rootID)
+	if err != nil {
+		return false, err
+	}
+	if b.Metadata[beadmeta.AttachFencePendingMetadataKey] != from {
+		return false, nil
+	}
+	if err := store.SetMetadata(rootID, beadmeta.AttachFencePendingMetadataKey, to); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
 func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
@@ -388,6 +427,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 	// and convergence depends on the retry finding the winner.
 	failedRootID := ""
 	var pending []beads.Bead
+	var activating []beads.Bead
 	for _, b := range all {
 		if b.Metadata[beadmeta.IdempotencyKeyMetadataKey] != key {
 			continue
@@ -395,46 +435,83 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 		if b.Metadata[beadmeta.RootBeadIDMetadataKey] != rootBeadID {
 			continue
 		}
-		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
+		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" ||
+			b.Metadata[beadmeta.AttachFencePendingMetadataKey] == attachFencePendingFailed {
 			if failedRootID == "" {
 				failedRootID = b.ID
 			}
 			continue
 		}
-		if b.Metadata[beadmeta.AttachFencePendingMetadataKey] == "true" {
+		switch b.Metadata[beadmeta.AttachFencePendingMetadataKey] {
+		case attachFencePendingUnclaimed:
 			// A pre-fence speculative candidate (deferred, never activated).
 			// It must not be adopted as the duplicate while a live activated
 			// root can exist; collect it for deterministic recovery below.
 			pending = append(pending, b)
 			continue
+		case attachFencePendingActivating:
+			// Claimed by an activator that has not completed (a crash between
+			// claim and marker-clear, or a live co-activator). The claim is
+			// the settlement: this candidate IS the survivor; activation is
+			// idempotent and finishable by any processor.
+			activating = append(activating, b)
+			continue
 		}
 		return adoptExistingAttach(store, recipe, rootBeadID, attachBeadID, expectedEpoch, b)
 	}
-	if len(pending) > 0 {
-		// Only pending candidates survive under this key: the fence committed
-		// (or is unresolved) but no candidate was activated — an ambiguous
-		// fence error, or a crash between fence and activation. The epoch
-		// value cannot identify the winner (expected+1 is non-identifying),
-		// so recovery is DETERMINISTIC instead: every processor picks the
-		// lexicographically smallest candidate, activates it, and neutralizes
-		// the rest. Identical inputs yield the identical pick from any racer,
-		// so exactly one candidate ever becomes runnable.
-		sort.Slice(pending, func(i, j int) bool { return pending[i].ID < pending[j].ID })
-		winner := pending[0]
-		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, winner)
+	if len(activating) > 0 {
+		// A claimed-but-incomplete activation outranks every unclaimed
+		// candidate: finishing it is convergent, while picking a different
+		// winner would race the claim holder. (Two candidates can never both
+		// hold an activation claim — the claim is a one-way CAS from the
+		// unclaimed state, and recovery neutralizes the rest before claiming
+		// its own pick.)
+		sort.Slice(activating, func(i, j int) bool { return activating[i].ID < activating[j].ID })
+		survivor := activating[0]
+		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, survivor)
 		if err != nil {
 			return nil, err
 		}
-		if err := activateAttachCandidate(store, winner.ID, idMapping); err != nil {
-			return nil, fmt.Errorf("activating recovered attach candidate %s: %w", winner.ID, err)
+		if err := activateAttachCandidate(store, survivor.ID, idMapping); err != nil {
+			return nil, fmt.Errorf("finishing claimed attach candidate %s: %w", survivor.ID, err)
 		}
+		return adoptExistingAttach(store, recipe, rootBeadID, attachBeadID, expectedEpoch, survivor)
+	}
+	if len(pending) > 0 {
+		// Only unclaimed pending candidates survive under this key: the fence
+		// committed (or is unresolved) but no candidate was activated — an
+		// ambiguous fence error, or a crash between fence and activation. The
+		// epoch value cannot identify the winner (expected+1 is
+		// non-identifying), so recovery is DETERMINISTIC instead: every
+		// processor picks the lexicographically smallest candidate. The
+		// non-winners are claimed-and-neutralized FIRST, then the winner is
+		// claimed for activation; any lost claim means a racing processor
+		// settled that candidate concurrently (a fence loser neutralizing its
+		// own sub-DAG, or another recovery), so recovery surfaces the
+		// convergent conflict and the retry re-lists the settled state.
+		sort.Slice(pending, func(i, j int) bool { return pending[i].ID < pending[j].ID })
+		winner := pending[0]
 		for _, loser := range pending[1:] {
+			won, claimErr := claimAttachCandidate(store, loser.ID, attachFencePendingUnclaimed, attachFencePendingFailed)
+			if claimErr != nil {
+				return nil, fmt.Errorf("claiming stale attach candidate %s: %w", loser.ID, claimErr)
+			}
+			if !won {
+				return nil, fmt.Errorf("attach recovery lost the claim on %s (settled concurrently): %w", loser.ID, ErrEpochConflict)
+			}
 			if err := markFailedReporting(store, []string{loser.ID}); err != nil {
 				return nil, fmt.Errorf("neutralizing stale attach candidate %s: %w", loser.ID, err)
 			}
 			if err := store.DepRemove(attachBeadID, loser.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
 				return nil, fmt.Errorf("detaching stale attach candidate %s: %w", loser.ID, err)
 			}
+		}
+		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, winner)
+		if err != nil {
+			return nil, err
+		}
+		if err := activateAttachCandidate(store, winner.ID, idMapping); err != nil {
+			return nil, fmt.Errorf("activating recovered attach candidate %s: %w", winner.ID, err)
 		}
 		return adoptExistingAttach(store, recipe, rootBeadID, attachBeadID, expectedEpoch, winner)
 	}
@@ -576,6 +653,18 @@ func advanceAttachEpochFence(store beads.Store, writer beads.ConditionalWriter, 
 	// The candidate stays deferred (never activated), so even when marking
 	// fails it is inert — not runnable — until a later pass neutralizes it or
 	// recovery deterministically resolves the survivors.
+	// Claim the candidate before neutralizing: idempotency recovery on a
+	// racing processor may have deterministically picked THIS candidate and
+	// activated it. A lost claim means the sub-DAG is live (or being
+	// activated) under someone else's adoption — neutralizing it now would
+	// kill a root another caller was just handed. Skip and converge: the
+	// retry adopts the live root through findExistingAttach.
+	if won, claimErr := claimAttachCandidate(store, result.RootID, attachFencePendingUnclaimed, attachFencePendingFailed); claimErr != nil {
+		return fmt.Errorf("epoch conflict on %s (claiming losing sub-DAG %s for neutralization failed: %w): %w",
+			attachBeadID, result.RootID, claimErr, ErrEpochConflict)
+	} else if !won {
+		return ErrEpochConflict
+	}
 	createdIDs := make([]string, 0, len(result.IDMapping))
 	for _, id := range result.IDMapping {
 		createdIDs = append(createdIDs, id)
@@ -1492,6 +1581,27 @@ func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Option
 // mid-activation leaves a pending root that recovery re-activates
 // idempotently — activation updates are no-ops once applied).
 func activateAttachCandidate(store beads.Store, rootID string, idMapping map[string]string) error {
+	// Claim the candidate before touching any step: only the claim winner
+	// (or a co-activator finishing an idempotent activation) may proceed. A
+	// candidate settled as "failed" was neutralized — activating it now
+	// would resurrect a sub-DAG some other processor already killed.
+	if won, err := claimAttachCandidate(store, rootID, attachFencePendingUnclaimed, attachFencePendingActivating); err != nil {
+		return fmt.Errorf("claiming attach candidate %s for activation: %w", rootID, err)
+	} else if !won {
+		b, err := store.Get(rootID)
+		if err != nil {
+			return fmt.Errorf("re-reading contested attach candidate %s: %w", rootID, err)
+		}
+		switch b.Metadata[beadmeta.AttachFencePendingMetadataKey] {
+		case "":
+			return nil // already fully activated
+		case attachFencePendingActivating:
+			// A co-activator is mid-flight; activation is idempotent, so
+			// finish it here too — whoever completes last clears the marker.
+		default:
+			return fmt.Errorf("attach candidate %s was neutralized before activation: %w", rootID, ErrEpochConflict)
+		}
+	}
 	ids := make([]string, 0, len(idMapping))
 	for _, id := range idMapping {
 		if id != "" {
@@ -1504,8 +1614,17 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 			return fmt.Errorf("activating %s: %w", id, err)
 		}
 	}
-	if err := store.SetMetadata(rootID, beadmeta.AttachFencePendingMetadataKey, ""); err != nil {
+	if won, err := claimAttachCandidate(store, rootID, attachFencePendingActivating, ""); err != nil {
 		return fmt.Errorf("clearing fence-pending marker on %s: %w", rootID, err)
+	} else if !won {
+		b, err := store.Get(rootID)
+		if err != nil {
+			return fmt.Errorf("re-reading attach candidate %s after activation: %w", rootID, err)
+		}
+		if b.Metadata[beadmeta.AttachFencePendingMetadataKey] != "" {
+			return fmt.Errorf("attach candidate %s marker moved to %q during activation: %w",
+				rootID, b.Metadata[beadmeta.AttachFencePendingMetadataKey], ErrEpochConflict)
+		}
 	}
 	return nil
 }

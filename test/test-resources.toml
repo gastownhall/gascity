@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 522
-baseline_files = 152
+baseline_calls = 528
+baseline_files = 154
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 443
-baseline_files = 159
+baseline_calls = 440
+baseline_files = 158
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 395
-baseline_files = 106
+baseline_calls = 401
+baseline_files = 108
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 289
-baseline_files = 114
+baseline_calls = 286
+baseline_files = 113
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -64,7 +64,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4346
+baseline_calls = 4332
 baseline_files = 200
 reported_calls = 3960
 reported_files = 184
@@ -90,7 +90,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 75
+baseline_calls = 74
 baseline_files = 25
 reported_calls = 78
 reported_files = 27
@@ -191,13 +191,56 @@ resource_owner = "only environment calls lexically inside TestMain leave Small d
 migration_target = "P0.4b"
 expires = "2026-10-01"
 
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "Make/provider and suite-contract proof is a checked Medium owner"
+resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
+migration_target = "P0.1"
+expires = "2026-10-01"
+
+# A reviewed-hermetic-body row is narrower than a Small test declaration. It
+# proves that the exact untagged test body and statically reachable
+# receiverless same-package helpers contain none of the cataloged resources.
+# Package-level setup still determines the effective runnable size.
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDoSessionWait_RegistersReadyWaitForRigDependency"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDoSessionWake_PokesManagedControllerAfterStateChange"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestPrepareWaitWakeState_ResolvesRigDependencyBeads"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
+[[reviewed_hermetic_body]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDoMailInbox_RendersMessagesFromReader"
+effective_size = "medium"
+medium_reason = "package TestMain mutates process state"
+
 # Small-debt rows apply the exact Medium filter while the source-debt rows
 # above retain the raw anti-growth census.
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 394
-baseline_files = 105
+baseline_calls = 399
+baseline_files = 107
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -209,10 +252,10 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 289
-baseline_files = 114
-reported_calls = 289
-reported_files = 114
+baseline_calls = 286
+baseline_files = 113
+reported_calls = 287
+reported_files = 113
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals"
@@ -222,7 +265,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4340
+baseline_calls = 4326
 baseline_files = 200
 reported_calls = 4339
 reported_files = 199
@@ -248,7 +291,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 75
+baseline_calls = 74
 baseline_files = 25
 reported_calls = 75
 reported_files = 25

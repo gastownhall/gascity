@@ -307,6 +307,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		PartialErrors:       partialErrors,
 		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
+		ConditionalWrites:   s.conditionalWritesStatus(),
 		AgentDetails:        agentDetails,
 		RigDetails:          rigDetails,
 		NamedSessionDetails: namedSessionDetails,
@@ -316,6 +317,22 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 
 type cityBeadsDiagnosticProvider interface {
 	CityBeadsDiagnostic() *beads.BeadsDiagnostic
+}
+
+// conditionalWritesStatusProvider is implemented by the controller State to
+// expose its latched conditional-writes snapshot (§12.5). The State builds
+// the block because only it holds the boot-latched rollout flags, the drift
+// notices, and every controller-owned store handle.
+type conditionalWritesStatusProvider interface {
+	ConditionalWritesStatus() *StatusConditionalWrites
+}
+
+func (s *Server) conditionalWritesStatus() *StatusConditionalWrites {
+	provider, ok := s.state.(conditionalWritesStatusProvider)
+	if !ok {
+		return nil
+	}
+	return provider.ConditionalWritesStatus()
 }
 
 func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
@@ -532,67 +549,187 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 
 // statusWorkResult is one store's contribution to the work counts.
 type statusWorkResult struct {
-	wc   workCounts
-	errs []string
+	wc       workCounts
+	readyIDs []string
+	errs     []string
 }
 
-// statusWorkCounts tallies open/ready/in_progress work across all rig
-// stores. Stores exposing beads.Counter answer without hydrating rows —
-// the caching layer counts matches in memory when its cache is clean
-// (#1896) — with the per-store timeout canceling any delegated backing
-// query instead of leaking a goroutine that pins a connection.
-// Stores without a Counter (or whose Counter cannot answer the query
-// shape) keep the legacy hydrating List path. Stores are queried
-// concurrently; results aggregate in deterministic rig order.
+// statusWorkCounts tallies persisted open/in_progress work across BeadStores
+// and federates canonical Ready work exactly like GET /beads/ready: the city
+// store first, then BeadStores excluding the CityName alias. Stores exposing
+// beads.Counter answer persisted counts without hydrating rows — the caching
+// layer counts matches in memory when its cache is clean (#1896). Stores are
+// queried concurrently; results aggregate in deterministic city/rig order.
 func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
-	// store is counted exactly once.
+	// store's persisted statuses are counted exactly once.
 	rigNames := sortedRigNames(stores)
-	results := make([]statusWorkResult, len(rigNames))
+	type workQuery struct {
+		label         string
+		store         beads.Store
+		includeStored bool
+		includeReady  bool
+	}
+	queries := make([]workQuery, 0, len(rigNames)+1)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		queries = append(queries, workQuery{
+			label:        "city",
+			store:        cityStore,
+			includeReady: true,
+		})
+	}
+	cityName := s.state.CityName()
+	for _, rigName := range rigNames {
+		queries = append(queries, workQuery{
+			label:         "rig " + rigName,
+			store:         stores[rigName],
+			includeStored: true,
+			includeReady:  rigName != cityName,
+		})
+	}
+
+	results := make([]statusWorkResult, len(queries))
 	var wg sync.WaitGroup
-	for i, rigName := range rigNames {
+	for i, query := range queries {
 		wg.Add(1)
-		go func(i int, rigName string, store beads.Store) {
+		go func(i int, query workQuery) {
 			defer wg.Done()
-			results[i] = statusStoreWorkCounts(ctx, s.state, rigName, store)
-		}(i, rigName, stores[rigName])
+			results[i] = statusStoreWorkCountsFor(
+				ctx,
+				s.state,
+				query.label,
+				query.store,
+				query.includeStored,
+				query.includeReady,
+			)
+		}(i, query)
 	}
 	wg.Wait()
 
 	var wc workCounts
 	var errs []string
+	seenReady := make(map[string]bool)
 	for _, r := range results {
 		wc.Open += r.wc.Open
-		wc.Ready += r.wc.Ready
 		wc.InProgress += r.wc.InProgress
+		for _, id := range r.readyIDs {
+			if seenReady[id] {
+				continue
+			}
+			seenReady[id] = true
+			wc.Ready++
+		}
 		errs = append(errs, r.errs...)
 	}
 	return wc, errs
 }
 
-// statusStoreWorkCounts counts one store's work beads, preferring the
-// hydration-free Counter path. Operational count failures (timeouts,
-// connection errors) report a partial error without retrying via List —
-// the List scan would hit the same backend and pay the timeout again.
+// statusStoreWorkCounts counts one store's persisted open/in-progress work
+// and independently derives ready work through the canonical live Ready
+// projection. Both reads share one per-store deadline. Operational Count
+// failures report a partial error without retrying via List — the List scan
+// would hit the same backend — but do not discard a successful Ready result.
 func statusStoreWorkCounts(ctx context.Context, state State, rigName string, store beads.Store) statusWorkResult {
+	return statusStoreWorkCountsFor(ctx, state, "rig "+rigName, store, true, true)
+}
+
+func statusStoreWorkCountsFor(
+	ctx context.Context,
+	state State,
+	label string,
+	store beads.Store,
+	includeStored bool,
+	includeReady bool,
+) statusWorkResult {
+	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+
+	type storedResult struct {
+		wc  workCounts
+		err error
+	}
+	type readyResult struct {
+		rows []beads.Bead
+		err  error
+	}
+	storedDone := make(chan storedResult, 1)
+	stored := &storedResult{}
+	if includeStored {
+		stored = nil
+		go func() {
+			wc, err := statusStoredWorkCounts(ctx, state, store)
+			storedDone <- storedResult{wc: wc, err: err}
+		}()
+	}
+	ready := &readyResult{}
+	if includeReady {
+		// ContextReadyReader and ScopedStoreLike both guarantee cleanup before
+		// returning after cancellation. Invoke this branch synchronously so the
+		// coordinator cannot return while scoped resolution is still cleaning up.
+		rows, err := statusReadyStoreWithTimeout(ctx, state, store)
+		ready = &readyResult{rows: rows, err: err}
+	}
+
+	for stored == nil {
+		select {
+		case value := <-storedDone:
+			stored = &value
+			storedDone = nil
+		case <-ctx.Done():
+			// Prefer a result that completed at the deadline boundary. The channel
+			// is buffered, so a context-blind legacy operation can finish later
+			// without blocking on its abandoned result send.
+			if stored == nil {
+				select {
+				case value := <-storedDone:
+					stored = &value
+					storedDone = nil
+				default:
+				}
+			}
+			if stored == nil {
+				err := ctx.Err()
+				if errors.Is(err, context.DeadlineExceeded) {
+					err = fmt.Errorf("stored counts timed out: %w", err)
+				}
+				stored = &storedResult{err: err}
+			}
+		}
+	}
+
+	result := statusWorkResult{wc: stored.wc}
+	if stored.err != nil {
+		result.errs = append(result.errs, fmt.Sprintf("%s work: %v", label, stored.err))
+	}
+	if ready.err != nil {
+		result.errs = append(result.errs, fmt.Sprintf("%s work ready: %v", label, ready.err))
+	}
+	if ready.err == nil || (beads.IsPartialResult(ready.err) && len(ready.rows) > 0) {
+		result.wc.Ready = len(ready.rows)
+		result.readyIDs = make([]string, 0, len(ready.rows))
+		for _, row := range ready.rows {
+			result.readyIDs = append(result.readyIDs, row.ID)
+		}
+	}
+	return result
+}
+
+// statusStoredWorkCounts counts the persisted open/in-progress buckets,
+// preferring the hydration-free Counter path and falling back to List only
+// when Count explicitly reports that the query shape is unsupported.
+func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store) (workCounts, error) {
 	if counter, ok := store.(beads.Counter); ok {
 		wc, err := statusCountWork(ctx, counter)
-		if err == nil {
-			return statusWorkResult{wc: wc}
-		}
-		if !errors.Is(err, beads.ErrCountUnsupported) {
-			return statusWorkResult{errs: []string{fmt.Sprintf("rig %s work: %v", rigName, err)}}
+		if err == nil || !errors.Is(err, beads.ErrCountUnsupported) {
+			return wc, err
 		}
 	}
 
 	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
-	var result statusWorkResult
-	if err != nil {
-		result.errs = append(result.errs, fmt.Sprintf("rig %s work: %v", rigName, err))
-		if !beads.IsPartialResult(err) || len(list) == 0 {
-			return result
-		}
+	var wc workCounts
+	if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
+		return wc, err
 	}
 	for _, b := range list {
 		if slices.Contains(statusWorkExcludedTypes, b.Type) {
@@ -600,37 +737,29 @@ func statusStoreWorkCounts(ctx context.Context, state State, rigName string, sto
 		}
 		switch b.Status {
 		case "in_progress":
-			result.wc.InProgress++
-		case "ready":
-			result.wc.Ready++
+			wc.InProgress++
 		case "open":
-			result.wc.Open++
+			wc.Open++
 		}
 	}
-	return result
+	return wc, err
 }
 
-// statusCountWork fills the work-count buckets via beads.Counter. One
-// shared statusStoreReadTimeout window bounds all three bucket queries —
-// the same per-store budget the legacy single-List path had, though the
-// three queries consume it serially — and derives from ctx, so a slow
-// backend query is canceled (releasing its connection) rather than
-// abandoned.
+// statusCountWork fills the persisted work-count buckets via beads.Counter.
+// Readiness is not a stored status; statusStoreWorkCounts derives it through
+// Ready instead. The caller supplies the shared per-store deadline.
 func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, error) {
-	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
-	defer cancel()
 	var wc workCounts
 	for _, bucket := range []struct {
 		status string
 		dst    *int
 	}{
 		{"open", &wc.Open},
-		{"ready", &wc.Ready},
 		{"in_progress", &wc.InProgress},
 	} {
 		n, err := counter.Count(ctx, beads.ListQuery{Status: bucket.status, AllowScan: true}, statusWorkExcludedTypes...)
 		if err != nil {
-			return workCounts{}, err
+			return wc, err
 		}
 		*bucket.dst = n
 	}
@@ -650,6 +779,9 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
 	type listResult struct {
 		rows []beads.Bead
 		err  error
@@ -658,7 +790,7 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	go func() {
 		// Resolve the ctx-bound scoped store INSIDE the timed goroutine so a
 		// slow, ctx-blind resolution (a store mutex held by the reconcile
-		// loop) is bounded by the same time.After as the list instead of
+		// loop) is bounded by the same request deadline as the list instead of
 		// hanging the handler synchronously (gc-08qgn).
 		readStore := store
 		if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
@@ -673,9 +805,63 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	select {
 	case result := <-done:
 		return result.rows, result.err
-	case <-time.After(statusStoreReadTimeout):
-		return nil, fmt.Errorf("list timed out after %s", statusStoreReadTimeout)
+	case <-reqCtx.Done():
+		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("list timed out: %w", reqCtx.Err())
+		}
+		return nil, reqCtx.Err()
 	}
+}
+
+// statusReadyStoreWithTimeout reads the same live canonical Ready projection
+// as GET /beads/ready. Policy-aware stores retain their tier behavior through
+// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
+// cancellation cannot leak a child beyond the status request.
+func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
+	var capabilityErr error
+	if reader, ok := store.(beads.ContextReadyReader); ok {
+		rows, err := reader.ReadyContext(reqCtx)
+		if !errors.Is(err, beads.ErrReadyContextUnsupported) {
+			return rows, statusReadyError(err)
+		}
+		capabilityErr = err
+	}
+
+	// ScopedStoreLike is part of the context-aware read contract: resolution
+	// must finish its own cleanup before returning after reqCtx cancellation.
+	// Keep it synchronous so the status deadline cannot abandon a resolver
+	// goroutine after the response has returned.
+	scoped, err := state.ScopedStoreLike(reqCtx, store)
+	if err != nil {
+		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
+	}
+	if scoped == nil {
+		if capabilityErr == nil {
+			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
+		}
+		return nil, capabilityErr
+	}
+
+	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
+	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
+	// needed to enforce the deadline.
+	rows, err := beads.HandlesFor(scoped).Live.Ready()
+	return rows, statusReadyError(err)
+}
+
+func statusReadyError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("ready timed out: %w", err)
+	}
+	return err
 }
 
 func statusMailCountWithTimeout(mp interface {

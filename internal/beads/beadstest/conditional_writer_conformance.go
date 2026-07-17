@@ -363,6 +363,102 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		}
 	})
 
+	t.Run(name+"/update_if_match_contention_commits_one_complete_metadata_pair", func(t *testing.T) {
+		s := open(t)
+		w := writerFor(t, s)
+		b, err := s.Create(beads.Bead{Title: "fenced-metadata-pair"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := b.ID
+		if err := s.SetMetadata(id, "sibling", "preserved"); err != nil {
+			t.Fatal(err)
+		}
+		before, err := s.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		const racers = 16
+		type updateResult struct {
+			racer int
+			err   error
+		}
+		results := make(chan updateResult, racers)
+		start := make(chan struct{})
+		var ready, done sync.WaitGroup
+		ready.Add(racers)
+		done.Add(racers)
+		for i := 0; i < racers; i++ {
+			go func(racer int) {
+				defer done.Done()
+				ready.Done()
+				<-start
+				value := strconv.Itoa(racer)
+				results <- updateResult{
+					racer: racer,
+					err: w.UpdateIfMatch(id, before.Revision, beads.UpdateOpts{Metadata: map[string]string{
+						"pair_left_" + value:  "left-" + value,
+						"pair_right_" + value: "right-" + value,
+					}}),
+				}
+			}(i)
+		}
+		ready.Wait()
+		close(start)
+		done.Wait()
+		close(results)
+
+		winner := -1
+		for result := range results {
+			switch {
+			case result.err == nil:
+				if winner != -1 {
+					t.Fatalf("multiple UpdateIfMatch winners: racers %d and %d", winner, result.racer)
+				}
+				winner = result.racer
+			case !beads.IsPreconditionFailed(result.err):
+				t.Fatalf("losing racer %d returned %v, want PreconditionFailedError", result.racer, result.err)
+			}
+		}
+		if winner == -1 {
+			t.Fatal("no UpdateIfMatch racer won")
+		}
+
+		after, err := s.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for racer := 0; racer < racers; racer++ {
+			value := strconv.Itoa(racer)
+			leftKey := "pair_left_" + value
+			rightKey := "pair_right_" + value
+			left, hasLeft := after.Metadata[leftKey]
+			right, hasRight := after.Metadata[rightKey]
+			if racer == winner {
+				if want := "left-" + value; !hasLeft || left != want {
+					t.Fatalf("winner metadata %s = (%q, %v), want (%q, true)", leftKey, left, hasLeft, want)
+				}
+				if want := "right-" + value; !hasRight || right != want {
+					t.Fatalf("winner metadata %s = (%q, %v), want (%q, true)", rightKey, right, hasRight, want)
+				}
+				continue
+			}
+			if hasLeft {
+				t.Fatalf("losing racer %d left partial metadata %s=%q", racer, leftKey, left)
+			}
+			if hasRight {
+				t.Fatalf("losing racer %d left partial metadata %s=%q", racer, rightKey, right)
+			}
+		}
+		if got := after.Metadata["sibling"]; got != "preserved" {
+			t.Fatalf("unrelated sibling metadata = %q, want %q", got, "preserved")
+		}
+		if after.Revision == before.Revision {
+			t.Fatalf("sole successful UpdateIfMatch did not bump revision %d", before.Revision)
+		}
+	})
+
 	t.Run(name+"/contention", func(t *testing.T) {
 		s := open(t)
 		w := writerFor(t, s)

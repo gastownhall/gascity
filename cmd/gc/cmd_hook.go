@@ -747,6 +747,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			filtered = append(filtered, item)
 			continue
 		}
+		if isClosedHookCandidate(obj) {
+			continue
+		}
 		if isFutureDeferredHookCandidate(obj, now) {
 			continue
 		}
@@ -806,7 +809,7 @@ func isDepBlockedHookCandidate(item map[string]any) bool {
 // isSelfBlockedHookCandidate reports whether a candidate carries bd's own
 // is_blocked marker or an explicit status=="blocked", independent of the
 // blocked_by dependency array checked by isDepBlockedHookCandidate. An
-// absent is_blocked field is treated as NOT blocked — bd's denormalized
+// absent is_blocked field is treated as NOT blocked - bd's denormalized
 // projection is not always populated, and over-filtering here would strand
 // otherwise-ready work.
 func isSelfBlockedHookCandidate(item map[string]any) bool {
@@ -817,6 +820,14 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth
+// against upstream Dolt status-index drift that can cause bd list --status=open
+// to return closed beads (gcy-1on).
+func isClosedHookCandidate(item map[string]any) bool {
+	status, ok := item["status"].(string)
+	return ok && strings.EqualFold(strings.TrimSpace(status), "closed")
 }
 
 func normalizeWorkQueryOutput(output string) string {

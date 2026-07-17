@@ -3169,6 +3169,10 @@
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."
         },
+        "timezone": {
+          "type": "string",
+          "description": "Timezone is the city-default IANA time zone (e.g. \"America/New_York\")\nin which cron order schedules are evaluated when an order does not set\nits own tz. Empty means the controller's process-local zone. Invalid\nnames fail order discovery loudly rather than falling back silently."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the provider's command for all agents."

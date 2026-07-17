@@ -3543,6 +3543,10 @@ export type StatusBody = {
      */
     beads_version?: string;
     /**
+     * Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface.
+     */
+    conditional_writes?: StatusConditionalWrites;
+    /**
      * Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
      */
     dolt_version?: string;
@@ -3612,6 +3616,56 @@ export type StatusBody = {
     work: StatusWorkCounts;
 };
 
+export type StatusConditionalWriteStoreVerdict = {
+    /**
+     * What the write path uses today: false only on a definitive incapable verdict.
+     */
+    capable: boolean;
+    /**
+     * Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).
+     */
+    kind: string;
+    /**
+     * Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+     */
+    latch: 'incapable' | 'unlatched';
+    /**
+     * Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+     */
+    probe: 'capable' | 'incapable' | 'unprobed';
+    /**
+     * Incapable cause, verbatim from the probe or latch.
+     */
+    reason?: string;
+    /**
+     * Store scope: city, or rig/<name>.
+     */
+    store_id: string;
+};
+
+export type StatusConditionalWrites = {
+    /**
+     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+     */
+    effective: 'off' | 'active' | 'degraded' | 'fail_closed' | 'pending_restart';
+    /**
+     * Boot-latched beads.conditional_writes mode.
+     */
+    mode: 'off' | 'auto' | 'require';
+    /**
+     * Retained rollout notices (env overrides, drift, invalid spellings).
+     */
+    notices?: Array<StatusRolloutNotice> | null;
+    /**
+     * Where the latched mode came from.
+     */
+    origin: 'builtin' | 'config' | 'env';
+    /**
+     * Per-store verdicts, one row per controller-owned store.
+     */
+    stores?: Array<StatusConditionalWriteStoreVerdict> | null;
+};
+
 export type StatusMailCounts = {
     /**
      * Total number of messages.
@@ -3662,6 +3716,33 @@ export type StatusRigDetail = {
      * Whether the rig is suspended (either explicitly or because all its agents are suspended).
      */
     suspended: boolean;
+};
+
+export type StatusRolloutNotice = {
+    /**
+     * Raw config spelling; empty when unset.
+     */
+    config_value?: string;
+    /**
+     * Raw env spelling as found.
+     */
+    env_value?: string;
+    /**
+     * Environment variable involved, when env-related.
+     */
+    env_var?: string;
+    /**
+     * Rollout gate key the notice is about.
+     */
+    flag_key: string;
+    /**
+     * Notice kind (env_overrides_config, pending_restart, invalid_value, ...).
+     */
+    kind: string;
+    /**
+     * Human-readable line carrying the gate and the outcome.
+     */
+    message: string;
 };
 
 export type StatusSessionCountsDetail = {

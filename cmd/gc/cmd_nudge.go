@@ -1742,6 +1742,68 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
 	return true
 }
 
+// nudgeMaintenanceStore lazily opens the Dolt-backed nudge front-door store the
+// first time a poll helper actually has front-door work to do — i.e. the flock'd
+// state.json queue is non-empty and a recover/prune/terminalize pass may need to
+// shadow a terminal-state bead. On the common idle tick the queue is empty, the
+// maintenance passes are no-ops, and the store is never opened, so N idle
+// `gc nudge poll` sidecars no longer each dial the sql-server (~2 connections:
+// main pool + a SHOW DATABASES init probe) every 2s. See
+// TestNudgePollHelpersSkipDoltOpenOnEmptyQueue.
+//
+// It owns the handle it opens and closes exactly that handle (and only if it
+// opened one), preserving the closeBeadStoreHandle ownership contract the
+// …WithStore variants model.
+type nudgeMaintenanceStore struct {
+	cityPath string
+	opened   bool
+	store    beads.NudgesStore
+	front    *nudgequeue.Store
+}
+
+// frontForState returns the front-door handle to use for the maintenance passes
+// over state, opening the underlying store on first need. When the queue has no
+// Pending/InFlight/Dead items there is nothing for recover/prune/terminalize to
+// do, so the store is left closed and the returned front is nil — every
+// maintenance pass only dereferences front while iterating a non-empty slice, so
+// a nil front is never touched on an empty queue.
+func (m *nudgeMaintenanceStore) frontForState(state *nudgeQueueState) *nudgequeue.Store {
+	if nudgeQueueHasWork(state) {
+		m.ensureOpen()
+	}
+	return m.front
+}
+
+// ensureOpen opens the underlying store exactly once (idempotent) and returns
+// it. ack uses it directly to stamp terminal beads once it has confirmed
+// terminal items to terminalize.
+func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
+	if !m.opened {
+		m.opened = true
+		m.store = openNudgeBeadStore(m.cityPath)
+		if m.store.Store != nil {
+			m.front = nudgeFrontDoor(m.store)
+		}
+	}
+	return m.store
+}
+
+// close releases the store this frame opened (if any). It never touches a
+// caller-passed store because this type only ever holds a store it opened.
+func (m *nudgeMaintenanceStore) close() error {
+	if !m.opened {
+		return nil
+	}
+	return closeBeadStoreHandle(m.store.Store)
+}
+
+// nudgeQueueHasWork reports whether the queue holds any item a maintenance pass
+// could act on. An empty queue means recover/prune/terminalize are all no-ops,
+// so the Dolt front door need not be opened for this tick.
+func nudgeQueueHasWork(state *nudgeQueueState) bool {
+	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0
+}
+
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
 	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item)
@@ -1749,14 +1811,11 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 }
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
-	var front *nudgequeue.Store
-	if store.Store != nil {
-		front = nudgeFrontDoor(store)
-	}
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		front := maint.frontForState(state)
 		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -1790,16 +1849,13 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 }
 
 func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
-	var front *nudgequeue.Store
-	if store.Store != nil {
-		front = nudgeFrontDoor(store)
-	}
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
 	var pending []queuedNudge
 	var inFlight []queuedNudge
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		front := maint.frontForState(state)
 		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -1831,16 +1887,13 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
-	var front *nudgequeue.Store
-	if store.Store != nil {
-		front = nudgeFrontDoor(store)
-	}
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
 	var pending []queuedNudge
 	var inFlight []queuedNudge
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		front := maint.frontForState(state)
 		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -2036,18 +2089,15 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 	if len(ids) == 0 {
 		return nil
 	}
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
-	var front *nudgequeue.Store
-	if store.Store != nil {
-		front = nudgeFrontDoor(store)
-	}
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
 	}
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
+		front := maint.frontForState(state)
 		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -2078,7 +2128,10 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		}
 		state.InFlight = inFlight
 		for _, item := range terminal {
-			if err := markQueuedNudgeTerminal(store, item, outcome, reason, commitBoundary, now); err != nil {
+			// terminal items come from a non-empty Pending/InFlight, so the
+			// store is already open; ensureOpen is idempotent and just returns
+			// the cached handle here.
+			if err := markQueuedNudgeTerminal(maint.ensureOpen(), item, outcome, reason, commitBoundary, now); err != nil {
 				return err
 			}
 		}
@@ -2090,18 +2143,15 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
-	var front *nudgequeue.Store
-	if store.Store != nil {
-		front = nudgeFrontDoor(store)
-	}
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
 	}
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
+		front := maint.frontForState(state)
 		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err

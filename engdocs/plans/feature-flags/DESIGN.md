@@ -1008,6 +1008,28 @@ as-built pass. Where these contradict §6.4.1 or earlier sections, these win.
    graduation forcing function now also validates the REAL `deps.env`
    (anchor floor vs `BD_PREV_VERSION`) the moment it arms.
 
+#### 6.4.3 §12.5 status wire as built (2026-07-15, post-merge follow-up)
+
+The status-wire half of §12.5 shipped standalone (the C2 ride-along never
+happened; C2 is still blocked on the beads lib bump):
+
+- `StatusBody.conditional_writes` carries `StatusConditionalWrites`
+  (mode/origin/effective + per-store `StatusConditionalWriteStoreVerdict`
+  rows + `StatusRolloutNotice` mirror of rollout.Notice). Effective severity
+  order: fail_closed > degraded > pending_restart > active; off
+  short-circuits with no store rows (notices still travel).
+- The verdicts come from `beads.InspectConditionalWrites` — a
+  side-effect-free reader of the stamp and the probe/latch memos. It NEVER
+  runs the four-verb probe: a status poll costs zero subprocesses, and an
+  unexercised store honestly reports `probe=unprobed`. Probe and latch stay
+  independent so §12.6's skew states render as written
+  (probe=capable latch=incapable → "restart to re-probe").
+- `gc status` renders the block (silent when off with no notices) and
+  includes it verbatim in `--json`. The local no-controller fallback path
+  carries no block — a stopped daemon has no latched state to show; doctor's
+  §12.1 local re-resolve remains that path's surface. The §12.5
+  doctor-queries-live-API switch is still open.
+
 ### 6.5 What each layer holds
 
 | Layer | Holds | Never holds |

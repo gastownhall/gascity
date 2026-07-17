@@ -121,7 +121,8 @@ type State interface {
 	// Read paths with their own short request budget (e.g. GET /status) use
 	// this instead of reading through the shared store so a slow bd command
 	// cannot pin a Dolt connection past the caller's own deadline
-	// (gascity ga-cdmx6x).
+	// (gascity ga-cdmx6x). Implementations must observe ctx during resolution
+	// and finish any work they start before returning after cancellation.
 	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
 
 	// NudgesBeadStore returns the store backing the nudge-queue shadow beads

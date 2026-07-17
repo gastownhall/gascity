@@ -566,8 +566,22 @@ func extractRigFlag(args []string) (string, []string) {
 	return rigName, rest
 }
 
+// extractBdDirectoryFlag returns the -C / --directory value from bd passthrough
+// args, or "" if not present. The flag is left in args so bd itself still sees it.
+func extractBdDirectoryFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "-C" || args[i] == "--directory") && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(args[i], "--directory="):
+			return strings.TrimPrefix(args[i], "--directory=")
+		}
+	}
+	return ""
+}
+
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
-// Priority: explicit rig name > explicit city > bead prefix auto-detection > GC_RIG env > enclosing rig > city root.
+// Priority: explicit rig name > explicit city > bead prefix auto-detection > -C dir rig match > GC_RIG env > enclosing rig > city root.
 func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
@@ -620,6 +634,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			if bdBeadExists(cityPath, target, arg) {
 				return target, nil
 			}
+		}
+	}
+
+	// Honor -C / --directory passed to bd: if it names a path inside a
+	// registered rig, use that rig's store. This lets `gc bd create -C
+	// /path/to/packs-rig ...` route to the packs rig even when GC_RIG
+	// or cwd point elsewhere. The flag stays in bdArgs so bd itself still
+	// sees it and changes directory accordingly.
+	if cdDir := extractBdDirectoryFlag(args); cdDir != "" {
+		if rig, ok, err := resolveRigForDir(cfg, cityPath, cdDir); err != nil {
+			return execStoreTarget{}, err
+		} else if ok {
+			return bdRigScopeTarget(cityPath, rig), nil
 		}
 	}
 

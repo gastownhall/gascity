@@ -1788,6 +1788,19 @@ export const zStatusAgentDetail = z.object({
     suspended: z.boolean()
 });
 
+export const zStatusConditionalWriteStoreVerdict = z.object({
+    capable: z.boolean(),
+    kind: z.string(),
+    latch: z.enum(['incapable', 'unlatched']),
+    probe: z.enum([
+        'capable',
+        'incapable',
+        'unprobed'
+    ]),
+    reason: z.string().optional(),
+    store_id: z.string()
+});
+
 export const zStatusMailCounts = z.object({
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     unread: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
@@ -1808,6 +1821,37 @@ export const zStatusRigDetail = z.object({
     name: z.string(),
     path: z.string(),
     suspended: z.boolean()
+});
+
+export const zStatusRolloutNotice = z.object({
+    config_value: z.string().optional(),
+    env_value: z.string().optional(),
+    env_var: z.string().optional(),
+    flag_key: z.string(),
+    kind: z.string(),
+    message: z.string()
+});
+
+export const zStatusConditionalWrites = z.object({
+    effective: z.enum([
+        'off',
+        'active',
+        'degraded',
+        'fail_closed',
+        'pending_restart'
+    ]),
+    mode: z.enum([
+        'off',
+        'auto',
+        'require'
+    ]),
+    notices: z.array(zStatusRolloutNotice).nullish(),
+    origin: z.enum([
+        'builtin',
+        'config',
+        'env'
+    ]),
+    stores: z.array(zStatusConditionalWriteStoreVerdict).nullish()
 });
 
 export const zStatusSessionCountsDetail = z.object({
@@ -1838,6 +1882,7 @@ export const zStatusBody = z.object({
     agents: zStatusAgentCounts,
     beads: zBeadsDiagnostic.optional(),
     beads_version: z.string().optional(),
+    conditional_writes: zStatusConditionalWrites.optional(),
     dolt_version: z.string().optional(),
     mail: zStatusMailCounts,
     name: z.string(),

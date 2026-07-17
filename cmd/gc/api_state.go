@@ -1983,7 +1983,7 @@ var controllerDropManagedDoltDatabase = func(cs *controllerState, ctx context.Co
 	if err := fatalPortResolutionError(resolution); err != nil {
 		return fmt.Errorf("resolving dolt port: %w", err)
 	}
-	client, err := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
+	client, err := newSQLCleanupDoltClient(cs.cityPath, host, strconv.Itoa(resolution.Port))
 	if err != nil {
 		return fmt.Errorf("opening dolt connection: %w", err)
 	}

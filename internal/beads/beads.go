@@ -21,9 +21,17 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrMetadataParse is returned when a bead exists but its stored metadata
+// cannot be decoded into the Store object model.
+var ErrMetadataParse = errors.New("bead metadata parse")
+
 // ErrCacheUnavailable is returned by cache-only read handles when the cache
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
+
+// ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
+// projection stops when the caller's context is canceled.
+var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 
 // ErrStoreClosed is returned when a caller uses a bead store after its backing
 // handle has been closed.
@@ -634,6 +642,14 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+}
+
+// ContextReadyReader is an optional Ready capability for deadline-sensitive
+// callers. Implementations must stop all work started by ReadyContext before
+// returning after ctx cancellation; callers may treat ErrCacheUnavailable as a
+// partial read and ErrReadyContextUnsupported as a capability veto.
+type ContextReadyReader interface {
+	ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error)
 }
 
 // StorageClass selects the physical bead storage tier for adapters that
