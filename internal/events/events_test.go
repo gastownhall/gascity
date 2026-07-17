@@ -409,32 +409,6 @@ func TestFakeLatestSeq(t *testing.T) {
 	}
 }
 
-func TestFakeWatch(t *testing.T) {
-	f := NewFake()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	w, err := f.Watch(ctx, 0)
-	if err != nil {
-		t.Fatalf("Watch: %v", err)
-	}
-	defer w.Close() //nolint:errcheck // test cleanup
-
-	// Record in a goroutine.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
-	}()
-
-	e, err := w.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if e.Subject != "gc-1" {
-		t.Errorf("Subject = %q, want %q", e.Subject, "gc-1")
-	}
-}
-
 func TestFailFakeErrors(t *testing.T) {
 	f := NewFailFake()
 

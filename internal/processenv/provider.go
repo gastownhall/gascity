@@ -99,7 +99,7 @@ func IsProviderCredentialEnv(key string) bool {
 
 // ProviderProcessPassthroughEnv returns non-GC process context that provider
 // sessions need to start reliably: user/home, provider auth/config, locale,
-// XDG, telemetry, and Claude nesting resets.
+// time zone, XDG, telemetry, and Claude nesting resets.
 func ProviderProcessPassthroughEnv() map[string]string {
 	m := make(map[string]string)
 	if v := os.Getenv("PATH"); v != "" {
@@ -111,6 +111,10 @@ func ProviderProcessPassthroughEnv() map[string]string {
 	for _, key := range []string{
 		"USER",
 		"LOGNAME",
+		// TZ keeps spawned sessions on the host wall clock so any in-session
+		// time reasoning (e.g. `gc order check`, date math in scripts) agrees
+		// with the supervisor instead of defaulting to UTC.
+		"TZ",
 		"CLAUDE_CONFIG_DIR",
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_SUBAGENT_MODEL",

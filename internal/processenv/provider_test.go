@@ -109,3 +109,22 @@ func TestProviderProcessPassthroughEnvKeepsExplicitLocaleAndXDG(t *testing.T) {
 		}
 	}
 }
+
+// TZ passes through to spawned provider sessions so in-session time
+// reasoning (e.g. `gc order check`) agrees with the supervisor's wall clock
+// instead of defaulting to UTC in the constructed env.
+func TestProviderProcessPassthroughEnvIncludesTZ(t *testing.T) {
+	t.Setenv("TZ", "America/New_York")
+	m := ProviderProcessPassthroughEnv()
+	if m["TZ"] != "America/New_York" {
+		t.Errorf(`m["TZ"] = %q, want "America/New_York"`, m["TZ"])
+	}
+}
+
+func TestProviderProcessPassthroughEnvOmitsUnsetTZ(t *testing.T) {
+	t.Setenv("TZ", "")
+	m := ProviderProcessPassthroughEnv()
+	if v, ok := m["TZ"]; ok {
+		t.Errorf(`m["TZ"] = %q present, want absent when host TZ is unset`, v)
+	}
+}

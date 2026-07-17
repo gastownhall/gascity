@@ -220,7 +220,7 @@ func runKind(formula RunLaneFormula) string {
 
 // runLane builds a single lane. Port of TS runLane.
 func runLane(rootID string, issues []runIssue, feedScopes map[string]RunFeedScope) RunLane {
-	phase := mapRunPhase(issues)
+	phase := mapRunPhase(rootID, issues)
 	updatedAt := latestUpdatedAt(issues)
 	formula := runFormula(rootID, issues)
 	formulaName, hasFormula := runFormulaName(formula)
@@ -246,8 +246,13 @@ func runLane(rootID string, issues []runIssue, feedScopes map[string]RunFeedScop
 	formulaStages := stagesForFormula(formulaName, hasFormula)
 	formulaStageResolved := false
 	if len(formulaStages) > 0 && progress.Status == "active_step" {
+		// A live retry exposes an attempt-suffixed active step id; the stage
+		// tables list authored base ids, so strip the suffix before matching
+		// (mirrors formulaActiveStageIndex, which resolves the stage ladder the
+		// same way).
+		activeBaseStepID := stripAttemptSuffix(progress.StepID)
 		for _, st := range formulaStages {
-			if containsString(st.steps, progress.StepID) {
+			if containsString(st.steps, activeBaseStepID) {
 				formulaStageResolved = true
 				break
 			}

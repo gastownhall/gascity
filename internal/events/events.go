@@ -351,6 +351,19 @@ type TailProvider interface {
 	ListTail(filter Filter, limit int) ([]Event, error)
 }
 
+// InFlightProvider is an optional extension for providers whose plain List can
+// momentarily miss events stranded in an in-flight rotation file. When a
+// file-backed provider rotates, the just-rotated segment lives only in the
+// events.jsonl.rotating-* file until a background goroutine gzips it into the
+// canonical .gz archive; List reads archives + the active file, so during that
+// window it cannot see the segment. ListInFlight folds those events back in,
+// preserving seq order and de-duplicating by seq, so a keyset walk cannot skip
+// a whole seq range mid-rotation. Providers with no such window (in-memory
+// fakes, exec scripts) need not implement it.
+type InFlightProvider interface {
+	ListInFlight(filter Filter) ([]Event, error)
+}
+
 // Watcher yields events one at a time. Created by [Provider.Watch].
 // Callers must call Close() when done watching.
 type Watcher interface {

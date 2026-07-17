@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -970,44 +971,43 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	return eventsListError(resp.StatusCode(), resp.Body)
 }
 
+// fetchCityEvents fetches the newest page of city events (up to 500). It
+// deliberately does NOT follow next_cursor: gc events means "recent
+// activity", and a full descending drain of a large city's event history
+// (100 MB+ logs) would blow the command timeout for no user benefit. The
+// API serves the page seq-DESC (newest first); gc events prints
+// chronologically, so the page is re-sorted ascending.
 func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]cliWireEvent, error) {
 	limit := int64(500)
-	var all []cliWireEvent
-	var cursor *string
-
-	for {
-		params := &genclient.GetV0CityByCityNameEventsParams{
-			Cursor: cursor,
-			Limit:  &limit,
-		}
-		if strings.TrimSpace(typeFilter) != "" {
-			params.Type = &typeFilter
-		}
-		if strings.TrimSpace(sinceFlag) != "" {
-			params.Since = &sinceFlag
-		}
-		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
-		if err != nil {
-			return nil, &eventsAPITransportError{err: err}
-		}
-		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
-			return nil, err
-		}
-		if resp.JSON200 == nil || resp.JSON200.Items == nil {
-			return all, nil
-		}
-		for _, item := range *resp.JSON200.Items {
-			wire, err := cityWireEventFromTyped(item)
-			if err != nil {
-				return nil, fmt.Errorf("decoding city event list item: %w", err)
-			}
-			all = append(all, wire)
-		}
-		if resp.JSON200.NextCursor == nil || strings.TrimSpace(*resp.JSON200.NextCursor) == "" {
-			return all, nil
-		}
-		cursor = resp.JSON200.NextCursor
+	params := &genclient.GetV0CityByCityNameEventsParams{
+		Limit: &limit,
 	}
+	if strings.TrimSpace(typeFilter) != "" {
+		params.Type = &typeFilter
+	}
+	if strings.TrimSpace(sinceFlag) != "" {
+		params.Since = &sinceFlag
+	}
+	resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+	if err != nil {
+		return nil, &eventsAPITransportError{err: err}
+	}
+	if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
+		return nil, err
+	}
+	if resp.JSON200 == nil || resp.JSON200.Items == nil {
+		return nil, nil
+	}
+	all := make([]cliWireEvent, 0, len(*resp.JSON200.Items))
+	for _, item := range *resp.JSON200.Items {
+		wire, err := cityWireEventFromTyped(item)
+		if err != nil {
+			return nil, fmt.Errorf("decoding city event list item: %w", err)
+		}
+		all = append(all, wire)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	return all, nil
 }
 
 func fetchCityHeadIndex(ctx context.Context, client *genclient.ClientWithResponses, cityName string) (string, error) {

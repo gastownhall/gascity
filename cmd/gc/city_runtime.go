@@ -971,8 +971,16 @@ func (cr *CityRuntime) tick(
 			if *prevPoolRunning != nil {
 				for sn, info := range cr.poolDeathHandlers {
 					if (*prevPoolRunning)[sn] && !currentSet[sn] {
-						if _, err := shellRunHook(info.Command, info.Dir, info.Env); err != nil {
+						out, err := shellRunHook(info.Command, info.Dir, info.Env)
+						if err != nil {
 							fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+						}
+						// Surface only the DEFAULT hook's gc-recovery diagnostic for
+						// a bd release it could not complete (the loop exits 0 even
+						// when a bd write fails, so this is the only signal). A user
+						// on_death override carries no marker and is left alone.
+						if strings.Contains(out, config.RecoveryHookMarker) {
+							fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
 						}
 					}
 				}
@@ -2261,7 +2269,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessionpkg.NewStore(sessStore), store, cr.nudgesBeadStore(), time.Now(), sessionBeads)
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil

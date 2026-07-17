@@ -207,8 +207,94 @@ func IsInternalIP(ip net.IP) bool {
 				return true
 			}
 		}
+		return false
+	}
+	// A non-v4-mapped IPv6 address may still carry an embedded IPv4 destination
+	// the host's transition machinery ultimately routes to. To4() above unwraps
+	// only ::ffff:a.b.c.d, so decode the NAT64 (64:ff9b::/96), 6to4 (2002::/16),
+	// IPv4-translated (::ffff:0:0:0/96), and deprecated IPv4-compatible (::/96)
+	// forms and re-classify the embedded address — otherwise a git URL naming
+	// e.g. 64:ff9b::a00:1, 2002:0a00:0001::, or ::ffff:0:10.0.0.1 reaches an
+	// RFC1918/internal IPv4 after the fence classifies it public. The same
+	// prefixes wrapping a public IPv4 (NAT64/6to4 legitimately do) stay allowed,
+	// because the re-classification runs on the decoded address.
+	if embedded := embeddedTransitionIPv4(ip); embedded != nil {
+		return IsInternalIP(embedded)
 	}
 	return false
+}
+
+// embeddedTransitionIPv4 returns the IPv4 address an IPv6 transition literal
+// embeds, or nil when ip is not one of the decoded forms. It recognizes the
+// RFC 6052 well-known NAT64 prefix 64:ff9b::/96, the IPv4-translated
+// ::ffff:0:0:0/96 form, and the deprecated IPv4-compatible ::/96 form (all with
+// the embedded IPv4 in the low 32 bits), plus the 6to4 prefix 2002::/16
+// (embedded IPv4 in bits 16..48). The v4-mapped ::ffff:a.b.c.d form is
+// intentionally NOT handled here — IsInternalIP's To4() already unwraps it — so
+// a v4 or v4-mapped input returns nil and the classifier never recurses on it.
+// Teredo and ORCHID are out of scope: they do not encode a routable embedded
+// IPv4 destination the fence must re-classify.
+func embeddedTransitionIPv4(ip net.IP) net.IP {
+	v6 := ip.To16()
+	if v6 == nil || ip.To4() != nil {
+		return nil
+	}
+	switch {
+	case isNAT64WellKnown(v6):
+		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
+	case v6[0] == 0x20 && v6[1] == 0x02: // 6to4 2002::/16
+		return net.IPv4(v6[2], v6[3], v6[4], v6[5])
+	case isIPv4Translated(v6):
+		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
+	case isIPv4Compatible(v6):
+		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
+	}
+	return nil
+}
+
+// isNAT64WellKnown reports whether the 16-byte IPv6 v6 falls in the RFC 6052
+// well-known NAT64 prefix 64:ff9b::/96, whose low 32 bits carry the embedded
+// IPv4.
+func isNAT64WellKnown(v6 net.IP) bool {
+	if v6[0] != 0x00 || v6[1] != 0x64 || v6[2] != 0xff || v6[3] != 0x9b {
+		return false
+	}
+	for _, b := range v6[4:12] {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// isIPv4Translated reports whether the 16-byte IPv6 v6 is an IPv4-translated
+// address (::ffff:0:0:0/96, RFC 6052 §2.1), whose low 32 bits carry the embedded
+// IPv4. The prefix is eight zero bytes, then 0xffff at bytes 8-9 and zero at
+// bytes 10-11 — distinct from the v4-mapped ::ffff:a.b.c.d form (0xffff at bytes
+// 10-11), which To4() unwraps and IsInternalIP handles before this is reached.
+// Without this decode a literal such as ::ffff:0:10.0.0.1 embeds an RFC1918
+// destination yet To4() returns nil, so the classifier would treat it as public.
+func isIPv4Translated(v6 net.IP) bool {
+	for _, b := range v6[0:8] {
+		if b != 0 {
+			return false
+		}
+	}
+	return v6[8] == 0xff && v6[9] == 0xff && v6[10] == 0 && v6[11] == 0
+}
+
+// isIPv4Compatible reports whether the 16-byte IPv6 v6 is a deprecated
+// IPv4-compatible address (::/96, RFC 4291 §2.5.5.1). The ::ffff: v4-mapped form
+// carries 0xff at bytes 10-11 and is excluded here (To4() handles it); the ::
+// and ::1 forms are already classified by IsUnspecified/IsLoopback before this
+// is reached, so any surviving match embeds a non-trivial IPv4 to re-classify.
+func isIPv4Compatible(v6 net.IP) bool {
+	for _, b := range v6[0:12] {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseLooseIPv4 decodes the legacy inet_aton host forms that net.ParseIP
