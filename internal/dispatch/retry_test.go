@@ -448,6 +448,58 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesWorktreeFromRootWhenSourc
 	}
 }
 
+func TestClassifyRetryAttemptWithPostconditionsPrefersRootWorktreeOverResolvableSource(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	rootWorktree := t.TempDir()
+	sourceWorktree := t.TempDir()
+	// Both the root and its source resolve, but each carries a *distinct*
+	// work_dir. The root is the rebase-gate-stamped review worktree and must
+	// win: a future source-first reorder would still pass every cross-store /
+	// source-fallback test above yet silently resolve the source's (possibly
+	// stale) dir here, reintroducing the "passing attempt fails its latch"
+	// failure this fix removes. This case pins the root-over-source precedence.
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "source",
+		Type:  "convoy",
+		Metadata: map[string]string{
+			"work_dir": sourceWorktree,
+		},
+	})
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.input_convoy_id": source.ID,
+			"work_dir":           rootWorktree,
+		},
+	})
+
+	var statPath string
+	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{
+		RequiredArtifactStat: func(path string) (os.FileInfo, error) {
+			statPath = path
+			return fakeFileInfo{size: 10}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	if got != (retryEvalResult{Outcome: "pass"}) {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want pass", got)
+	}
+	if want := filepath.Join(rootWorktree, "codex-review.md"); statPath != want {
+		t.Fatalf("required artifact resolved under %q, want the root worktree %q (root work_dir must win over a resolvable source carrying a different work_dir)", statPath, want)
+	}
+}
+
 func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBeforeStat(t *testing.T) {
 	t.Parallel()
 
