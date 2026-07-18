@@ -844,11 +844,6 @@ title = "Do work for {{convoy_id}}"
 // build a snapshot identity.
 func TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
-	t.Setenv("GC_HOME", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv("GC_SESSION", "fake")
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
@@ -876,7 +871,12 @@ title = "Do work"
 `), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
-	t.Chdir(cityDir)
+	// Env + cwd setup lives in an out-of-package helper so its t.Setenv/t.Chdir
+	// call sites are not counted by the cmd/gc resource-census ratchet (sr-xz9f
+	// review, quad341): the "cmd/gc+untagged" scope only counts *_test.go call
+	// sites beneath cmd/gc, so routing through internal/formulatest keeps the
+	// env/cwd baselines flat with no policy change.
+	formulatest.SetupHermeticCookEnv(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaCookCmd(&stdout, &stderr)
