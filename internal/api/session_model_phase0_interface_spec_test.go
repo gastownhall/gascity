@@ -77,14 +77,12 @@ func TestPhase0APISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, tt.req(fs))
 
-			if asyncOps[tt.name] {
-				if rec.Code != http.StatusAccepted {
-					t.Fatalf("%s status = %d, want 202; body=%s", tt.name, rec.Code, rec.Body.String())
-				}
-			} else {
-				if rec.Code < 400 {
-					t.Fatalf("%s accepted template:worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
-				}
+			// Async command surfaces reject undeliverable targets
+			// synchronously since the deliverability gate (2026-07-18);
+			// every surface now refuses template-factory targets up front.
+			_ = asyncOps
+			if rec.Code < 400 {
+				t.Fatalf("%s accepted template:worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
 			}
 		})
 	}
@@ -137,14 +135,11 @@ func TestPhase0APISessionTargetingSurfaces_BareConfigNameDoesNotCreateOrdinarySe
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, tt.req(fs))
 
-			if asyncOps[tt.name] {
-				if rec.Code != http.StatusAccepted {
-					t.Fatalf("%s status = %d, want 202; body=%s", tt.name, rec.Code, rec.Body.String())
-				}
-			} else {
-				if rec.Code < 400 {
-					t.Fatalf("%s accepted ordinary config name worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
-				}
+			// Async command surfaces reject undeliverable targets
+			// synchronously since the deliverability gate (2026-07-18).
+			_ = asyncOps
+			if rec.Code < 400 {
+				t.Fatalf("%s accepted ordinary config name worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
 			}
 		})
 	}

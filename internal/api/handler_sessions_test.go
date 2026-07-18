@@ -5852,14 +5852,12 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/sky/messages"), strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
-	}
-
-	accepted := decodeAsyncAccepted(t, rec.Body)
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil {
-		t.Fatalf("expected session message to fail for closed session, got success")
+	// The deliverability gate rejects undeliverable targets synchronously
+	// now: a closed, non-configured session can never receive the message,
+	// so the caller gets 404 instead of a 202 whose failure surfaces only
+	// as an async event (the black-holed-delivery bug, 2026-07-18).
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
@@ -7522,5 +7520,34 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 	success, failure := waitForSessionMessageResult(t, fs.eventProv, body.RequestID)
 	if success == nil {
 		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+}
+
+// The async command surfaces must refuse targets that can never deliver —
+// BEFORE returning 202. A typo'd session name used to be accepted with a
+// request_id while the message silently black-holed (the failure surfaced
+// only as an event nobody correlated; 2026-07-18: drifted Slack bindings
+// dropped cross-city wakes for days on exactly this).
+func TestSessionMessageAndSubmitRejectNonexistentTargetSynchronously(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	for _, path := range []string{"/session/no-such-session-xyz/messages", "/session/no-such-session-xyz/submit"} {
+		rec := httptest.NewRecorder()
+		req := newPostRequest(cityURL(fs, path), strings.NewReader(`{"message":"hello"}`))
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404; body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A real live session still gets the async 202 accept.
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Live")
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("live session message status = %d, want 202; body=%s", rec.Code, rec.Body.String())
 	}
 }

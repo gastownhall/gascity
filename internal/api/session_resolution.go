@@ -589,6 +589,29 @@ func (s *Server) resolveSessionIDAllowClosedWithConfig(store beads.Store, identi
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{allowClosed: true})
 }
 
+// sessionTargetDeliverable reports whether a message/submit target is
+// deliverable: it resolves to an existing session without materializing, or
+// names a configured named session the materializing async path can wake.
+// The async command handlers (POST /session/{id}/messages, /submit) used to
+// accept ANY identifier with 202 and only discover resolve_failed inside the
+// post-accept goroutine, surfacing it solely as an event — callers treating
+// 202 as delivery proof black-holed messages to typo'd/drifted session names
+// (2026-07-18: three drifted Slack company-room bindings dropped cross-city
+// wakes for days). This gate restores the declared-404 contract for targets
+// that can never deliver, while keeping the accept-then-work model for slow
+// paths (cold named-session wakes).
+func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store, identifier string) error {
+	if _, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{}); err == nil {
+		return nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return err
+	}
+	if _, ok, specErr := s.findNamedSessionSpecForTarget(store, identifier); specErr == nil && ok {
+		return nil
+	}
+	return apiSessionTargetNotFound(identifier)
+}
+
 func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{materialize: true})
 }
