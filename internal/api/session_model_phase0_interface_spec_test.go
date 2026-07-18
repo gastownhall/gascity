@@ -67,7 +67,6 @@ func TestPhase0APISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 		},
 	}
 
-	asyncOps := map[string]bool{"POST /messages": true, "POST /submit": true}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := newPhase0APIOrdinaryWorkerState(t)
@@ -80,7 +79,6 @@ func TestPhase0APISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 			// Async command surfaces reject undeliverable targets
 			// synchronously since the deliverability gate (2026-07-18);
 			// every surface now refuses template-factory targets up front.
-			_ = asyncOps
 			if rec.Code < 400 {
 				t.Fatalf("%s accepted template:worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
 			}
@@ -125,7 +123,6 @@ func TestPhase0APISessionTargetingSurfaces_BareConfigNameDoesNotCreateOrdinarySe
 		},
 	}
 
-	asyncOps := map[string]bool{"POST /messages": true, "POST /submit": true}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := newPhase0APIOrdinaryWorkerState(t)
@@ -137,7 +134,6 @@ func TestPhase0APISessionTargetingSurfaces_BareConfigNameDoesNotCreateOrdinarySe
 
 			// Async command surfaces reject undeliverable targets
 			// synchronously since the deliverability gate (2026-07-18).
-			_ = asyncOps
 			if rec.Code < 400 {
 				t.Fatalf("%s accepted ordinary config name worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
 			}

@@ -574,7 +574,11 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
-		return nil, humaStoreError(err)
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return nil, humaResolveError(err)
 	}
 
 	intent := input.Body.Intent
@@ -627,7 +631,11 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
-		return nil, humaStoreError(err)
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return nil, humaResolveError(err)
 	}
 
 	reqID, reqIDErr := newRequestID()
