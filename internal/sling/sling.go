@@ -267,9 +267,11 @@ type FormulaOpts struct {
 	NoConvoy bool
 	Owned    bool
 	// Reassign clears any existing human assignee before routing. Meaningful
-	// on AttachFormula (an existing bead may be claimed); a no-op on a fresh
-	// LaunchFormula (a minted root bead has no assignee). Kept here so the API
-	// formula paths honor the wire reassign field, matching RouteOpts.
+	// on AttachFormula (an existing bead may be claimed, and the attach route
+	// is !IsFormula); a guaranteed no-op on a fresh LaunchFormula, whose
+	// IsFormula route is skipped by shouldReopenForReassign so the formula name
+	// is never mistaken for a bead ID. Kept here so the API formula paths honor
+	// the wire reassign field, matching RouteOpts.
 	Reassign  bool
 	DryRun    bool
 	SkipPoke  bool
