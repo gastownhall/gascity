@@ -313,7 +313,8 @@ for changed Go-tool build inputs (`.go`, `.c`, `.cc`, `.cpp`, `.cxx`, `.m`,
 `.h`, `.hh`, `.hpp`, `.hxx`, `.f`, `.F`, `.for`, `.f90`, `.s`, `.S`, `.sx`,
 `.swig`, `.swigcxx`, and `.syso`) and maps changed embedded files to every
 owning package using `EmbedFiles`, `TestEmbedFiles`, and `XTestEmbedFiles` from
-the canonical records in one complete `go list -test -json ./...` graph.
+the canonical records in one complete
+`go list -mod=readonly -test -json ./...` graph.
 Additions, modifications, deletions, and both sides of cross-package moves are
 included. Git rename coalescing is disabled so a move cannot hide the old
 package. Native compiler include and linker inputs can have recognized or
@@ -329,10 +330,13 @@ exported facts, including through test-only imports. If the package graph
 cannot be loaded completely, affected lint fails safe to `./...` instead of
 trusting a partial graph. This includes a deleted required embed input. A
 deleted glob member no longer appears in the current resolved embed inventory,
-so any deletion beneath a package that has neither a current embed owner nor a
-current direct package owner also fails safe to full scope. This guard runs
-before native shared-input shortcuts, including for recognized headers. File
-selection is NUL-delimited. Formatting remains limited to
+so a deletion that may match any current `EmbedPatterns`, `TestEmbedPatterns`,
+or `XTestEmbedPatterns` entry fails safe even when a nested package still owns
+the deleted build-input directory. Any other deletion beneath a package that
+has neither a current embed owner nor a current direct package owner also fails
+safe to full scope. These guards run before native shared-input shortcuts,
+including for recognized headers. File selection is NUL-delimited. Formatting
+remains limited to
 changed `.go` paths, excludes deletions and symlinks, accepts only existing
 regular files, and never invokes the formatter with an empty file list.
 

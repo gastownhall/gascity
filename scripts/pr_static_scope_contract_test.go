@@ -178,6 +178,30 @@ import _ "example.com/static-scope/missing"
 		fixture.requireNoCalls(t)
 	})
 
+	t.Run("deleted nested Go file beneath ancestor embed falls back to full", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": `package alpha
+
+import "embed"
+
+//go:embed child/**
+var Data embed.FS
+`,
+			"alpha/child/delete.go": "package child\n\nfunc Delete() {}\n",
+			"alpha/child/keep.go":   "package child\n\nfunc Keep() {}\n",
+		})
+		if err := os.Remove(filepath.Join(fixture.repoRoot, "alpha", "child", "delete.go")); err != nil {
+			t.Fatalf("delete nested embedded Go file: %v", err)
+		}
+
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
+			t.Errorf("lint-affected did not fail closed for a deleted nested embedded Go file: %v\n%s", err, output)
+		}
+		fixture.requireCalls(t, []string{"run", "./..."})
+		fixture.requireGoCalls(t, []string{"vet", "./..."})
+	})
+
 	t.Run("cross-package rename with a spaced file name", func(t *testing.T) {
 		const movedBody = `
 func Moved() int {
@@ -390,6 +414,49 @@ var Data string
 		fixture.resetCalls(t)
 		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
 			t.Errorf("lint-affected failed for an embedded-file diff: %v\n%s", err, output)
+		}
+		fixture.requireCalls(t, []string{"run", "./alpha"})
+		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
+	})
+
+	t.Run("package discovery requests read-only module mode", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+
+		strictGo := filepath.Join(t.TempDir(), "go")
+		writeExecutable(t, strictGo, `#!/bin/sh
+set -eu
+: "${STATIC_SCOPE_GO_LOG:?}"
+: "${STATIC_SCOPE_REAL_GO:?}"
+if [ "${1-}" = "list" ]; then
+  readonly=0
+  for arg in "$@"; do
+    if [ "$arg" = "-mod=readonly" ]; then
+      readonly=1
+    fi
+  done
+  if [ "$readonly" -ne 1 ]; then
+    echo "go list did not request -mod=readonly" >&2
+    exit 97
+  fi
+  exec "$STATIC_SCOPE_REAL_GO" "$@"
+fi
+if [ "${1-}" = "vet" ]; then
+  printf 'CALL\000' >> "$STATIC_SCOPE_GO_LOG"
+  for arg in "$@"; do
+    printf 'ARG\000%s\000' "$arg" >> "$STATIC_SCOPE_GO_LOG"
+  done
+  printf 'END\000' >> "$STATIC_SCOPE_GO_LOG"
+  exit 0
+fi
+exec "$STATIC_SCOPE_REAL_GO" "$@"
+`)
+
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTargetWithGo("lint-affected", strictGo); err != nil {
+			t.Errorf("lint-affected failed with a read-only go list guard: %v\n%s", err, output)
 		}
 		fixture.requireCalls(t, []string{"run", "./alpha"})
 		fixture.requireGoCalls(t, []string{"vet", "./alpha"})

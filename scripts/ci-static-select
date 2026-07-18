@@ -39,6 +39,7 @@ GO_BUILD_INPUT_SUFFIXES = frozenset(
 )
 
 EMBED_FILE_FIELDS = ("EmbedFiles", "TestEmbedFiles", "XTestEmbedFiles")
+EMBED_PATTERN_FIELDS = ("EmbedPatterns", "TestEmbedPatterns", "XTestEmbedPatterns")
 
 NATIVE_SOURCE_FIELDS = (
     "CgoFiles",
@@ -168,6 +169,23 @@ def embedded_repo_path(relative_dir: str, embedded: str) -> str:
     return posixpath.join(relative_dir, normalized)
 
 
+def embedded_repo_pattern(relative_dir: str, pattern: str) -> str:
+    if pattern.startswith("all:"):
+        pattern = pattern.removeprefix("all:")
+    return embedded_repo_path(relative_dir, pattern)
+
+
+def deleted_path_may_match_embed_pattern(path: str, pattern: str) -> bool:
+    meta_index = next(
+        (index for index, character in enumerate(pattern) if character in "*?[\\"),
+        len(pattern),
+    )
+    literal_prefix = pattern[:meta_index]
+    if meta_index == len(pattern):
+        return path == pattern or path.startswith(pattern + "/")
+    return path.startswith(literal_prefix)
+
+
 def path_is_beneath_package(path: str, package_dir: str) -> bool:
     return package_dir == "." or path.startswith(package_dir + "/")
 
@@ -179,7 +197,9 @@ def affected_package_args(
     if not changed:
         return []
 
-    raw_graph = command_output([go_tool, "list", "-test", "-json", "./..."])
+    raw_graph = command_output(
+        [go_tool, "list", "-mod=readonly", "-test", "-json", "./..."]
+    )
     package_records: list[dict[str, Any]] = []
     for package in decode_json_stream(raw_graph):
         for_test = package.get("ForTest")
@@ -199,6 +219,7 @@ def affected_package_args(
     import_by_dir: dict[str, str] = {}
     arg_by_import: dict[str, str] = {}
     embed_owners: dict[str, set[str]] = defaultdict(set)
+    embed_patterns: list[str] = []
     native_imports: set[str] = set()
 
     for package in package_records:
@@ -230,6 +251,9 @@ def affected_package_args(
         for field in EMBED_FILE_FIELDS:
             for embedded in string_list(package, field):
                 embed_owners[embedded_repo_path(relative_dir, embedded)].add(import_path)
+        for field in EMBED_PATTERN_FIELDS:
+            for pattern in string_list(package, field):
+                embed_patterns.append(embedded_repo_pattern(relative_dir, pattern))
 
         native_sources: list[str] = []
         for field in NATIVE_SOURCE_FIELDS:
@@ -246,6 +270,13 @@ def affected_package_args(
     for status, path in changed:
         owners = embed_owners.get(path, set())
         seeds.update(owners)
+        if status == "D" and any(
+            deleted_path_may_match_embed_pattern(path, pattern)
+            for pattern in embed_patterns
+        ):
+            raise SelectionError(
+                f"deleted path {path!r} may be absent from the current embed inventory"
+            )
         # Native compilers can consume inputs with arbitrary names and from
         # shared directories. The Go package inventory does not expose that
         # dependency graph, so every native package is the smallest safe scope
