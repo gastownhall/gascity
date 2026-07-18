@@ -409,8 +409,45 @@ func normalizeNonExpandingPoolSessionInfoForSelection(
 	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() || !errors.Is(err, session.ErrSessionAliasExists) {
 		return folded, err
 	}
+	// sr-wz8.1: benign self-collision. When a min=0/max=1 agent is ALSO declared
+	// as a configured [[named_session]] for the SAME template (e.g. the support
+	// pack declares intake-poller/dispatch/l1/l2-* as both pools and on_demand
+	// named sessions), the canonical alias the singleton pool wants to normalize
+	// to is PERMANENTLY reserved by that agent's own named session (see
+	// ensureSessionAliasAvailable's "reserved for configured named session"). It
+	// can therefore never succeed — and it should not: the named-session identity
+	// (what #3766 wakes) legitimately owns that name, so the pool bead keeping its
+	// ephemeral identity is correct, not a conflict. Without this guard the
+	// reconciler logs the deferral AND does a store Update (conflict counter)
+	// EVERY pass, forever (~168+/run observed), spamming logs and adding per-tick
+	// write churn (#2463). For a singleton (max=1) the only other holder of the
+	// alias could be the agent's own instance, so treating the same-template
+	// named-session reservation as benign is safe. Skip quietly.
+	if bp != nil && configHasNamedSessionForAgentTemplate(bp.city, cfgAgent) {
+		return info, nil
+	}
 	if bp != nil && bp.stderr != nil {
 		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: deferring singleton pool identity normalization for bead %s: %v\n", cfgAgent.QualifiedName(), info.ID, err) //nolint:errcheck
 	}
 	return recordDeferredNonExpandingPoolAliasConflictInfo(bp, cfgAgent, info)
+}
+
+// configHasNamedSessionForAgentTemplate reports whether cfg declares a
+// [[named_session]] whose backing template resolves to the same qualified
+// identity as cfgAgent — i.e. the agent is defined as BOTH a pool and a named
+// session. Used to recognize the sr-wz8.1 benign self-collision.
+func configHasNamedSessionForAgentTemplate(cfg *config.City, cfgAgent *config.Agent) bool {
+	if cfg == nil || cfgAgent == nil {
+		return false
+	}
+	target := strings.TrimSpace(cfgAgent.QualifiedName())
+	if target == "" {
+		return false
+	}
+	for i := range cfg.NamedSessions {
+		if strings.TrimSpace(cfg.NamedSessions[i].TemplateQualifiedName()) == target {
+			return true
+		}
+	}
+	return false
 }
