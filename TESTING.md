@@ -806,16 +806,19 @@ construction boundary because that is the wrapper returned directly by the
 runtime registry. This ledger does not recursively claim the wrapper's internal
 tmux, K8s, or hybrid constructors.
 
-`runtime.NewFake`, `subprocess.NewSeamBackedWithDir`, and
+`runtime.NewFake`, `auto.New`, `subprocess.NewSeamBackedWithDir`, and
 `acp.NewSeamBackedWithDir` are source-bound to the shared runtime contract
-below. The seam-backed proofs are the only full subprocess and ACP runtime
-contracts: the duplicate raw subprocess invocation is removed, and the
-existing ACP owner is converted in place so its fake server is still built
-once. Focused raw provider and seam tests remain for both packages, including
-legacy overlap that later consolidation may remove case by case. The default
-subprocess constructor remains a separate H5-owned gap because its reachable
-empty-city-path branch uses shared temporary state. The default ACP constructor
-is also an H5-owned gap because it always uses shared
+below. The auto proof runs the exact production composition once with two
+fresh in-memory fakes and owns no subprocess or listener; focused auto tests
+retain base-versus-ACP routing and optional-capability coverage instead of
+duplicating the full suite for each route. The seam-backed proofs are the only
+full subprocess and ACP runtime contracts: the duplicate raw subprocess
+invocation is removed, and the existing ACP owner is converted in place so its
+fake server is still built once. Focused raw provider and seam tests remain for
+both packages, including legacy overlap that later consolidation may remove
+case by case. The default subprocess constructor remains a separate H5-owned
+gap because its reachable empty-city-path branch uses shared temporary state.
+The default ACP constructor is also an H5-owned gap because it always uses shared
 `os.TempDir()/gc-acp` state. E1 (`ga-80po0c.6`) owns the Large provider/E2E
 manifest and required lane/cadence execution; it does not own
 constructor-to-contract source binding.
@@ -839,7 +842,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
 | `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production T3 bridge composition has focused tests but no full shared runtime contract |
 | `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips when the tmux executable is absent |
-| `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production auto base/ACP composition has no full shared runtime contract |
+| `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 
 Conformance tests verify the behavioral contract (create/read/update/delete,

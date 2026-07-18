@@ -246,8 +246,13 @@ func Catalog() []Entry {
 				Function: "resolveSessionTransportProvider",
 				Reason:   "conditional transport composition is outside the runtime registry",
 			},
-			Claims: []ContractClaim{waivedRuntime(autoConstructor,
-				"the production auto base/ACP composition has no full shared runtime contract",
+			Claims: []ContractClaim{provedRuntime(
+				autoConstructor,
+				"internal/runtime/auto/conformance_test.go",
+				"TestAutoConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			)},
 		},
 	}
