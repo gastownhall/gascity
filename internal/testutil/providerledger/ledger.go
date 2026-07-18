@@ -171,11 +171,16 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"full conformance covers the raw ACP provider, not the NewSeamBacked production composition",
+				"NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition",
 			),
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
-				"full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition",
+				"internal/runtime/acp/conformance_test.go",
+				"TestACPConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/acp", "acpConformanceCommand"),
+				repoSymbol("internal/runtime/acp", "acpConformanceDir"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
