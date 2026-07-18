@@ -107,7 +107,7 @@ type Server struct {
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
-	storeHealthComputer func(ctx context.Context) *StatusStoreHealth
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for

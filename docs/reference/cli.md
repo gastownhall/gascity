@@ -2778,7 +2778,15 @@ gc pack list
 
 ## gc pack registry
 
-Manage configured Gas City pack registries and inspect cached catalog entries.
+Manage configured Gas City pack registries, inspect cached catalog entries,
+authenticate to the hosted Registry, and publish packs.
+
+Native Registry login stores a per-registry API token. When no explicit,
+environment, stored native, development, or GitHub Actions credential applies,
+the canonical hosted Registry uses the existing Gasworks login through
+"gasworks credential-provider". Set GC_CREDENTIAL_PROVIDER to a JSON argv array
+to configure that command without invoking a shell. Gasworks credentials are
+never persisted by gc and are never sent to custom Registry origins.
 
 ```
 gc pack registry
@@ -2848,6 +2856,13 @@ Submit a pack publish request to Gas City Registry.
 The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
+
+--dev-auth (localhost only) replaces all other credentials. Otherwise,
+authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
+cookie and CSRF-token pair from flags or the environment, a stored native
+Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
+canonical hosted Registry. Run "gasworks login" once before using the provider,
+or use "gc pack registry login" to create a separate native Registry token.
 
 ```
 gc pack registry publish <path-to-pack-root> [flags]
@@ -2923,7 +2938,11 @@ gc pack registry show <pack-name> [flags]
 
 ## gc pack registry whoami
 
-Show the authenticated registry account
+Show the Registry account for the active credential.
+
+Explicit, environment, and stored native Registry tokens take precedence. For
+the canonical hosted Registry, gc otherwise uses the existing Gasworks login
+through the configured credential provider without storing its credential.
 
 ```
 gc pack registry whoami [flags]

@@ -137,6 +137,91 @@ func feedRunPresent(f genclient.FormulaFeedBody) bool {
 	return false
 }
 
+// TestCompletedRunProjection is the close-side analog of TestAnchorRunProjection.
+// The anchor run only ever exercises the in-progress projection (open root, one
+// started step); this asserts the SECOND seeded run — a fully closed molecule
+// (root + both steps closed, capped by a molecule.resolved event) — projects
+// with TERMINAL status across the same run views. It is the guardrail for the
+// close-edge class of break: a projection that silently drops closed roots or
+// mis-buckets a completed run leaves the census/summary/detail wrong here even
+// though every request still returns 200.
+func TestCompletedRunProjection(t *testing.T) {
+	h := newHarness(t)
+
+	t.Run("run census counts one active and one completed", func(t *testing.T) {
+		var census genclient.RunsCensusOutputBody
+		h.getJSON(h.cityURL("/runs/census"), &census)
+
+		// The in-progress anchor run stays active; the closed run-done is the one
+		// completed run. A close-side projection break shows up as completed=0.
+		if census.StatusCounts.Active != 1 {
+			t.Errorf("census active = %d, want 1 (the in-progress anchor run)", census.StatusCounts.Active)
+		}
+		if census.StatusCounts.Completed != 1 {
+			t.Errorf("census completed = %d, want 1 (the closed run-done)", census.StatusCounts.Completed)
+		}
+		if census.StatusCounts.Failed != 0 {
+			t.Errorf("census failed = %d, want 0 (run-done carries no failing gc.outcome)", census.StatusCounts.Failed)
+		}
+	})
+
+	t.Run("run summary places the completed run in a historical lane", func(t *testing.T) {
+		var summary runproj.RunSummary
+		h.getJSON(h.apiURL("/runs/summary"), &summary)
+
+		if summary.TotalHistorical == 0 {
+			t.Fatal("run summary TotalHistorical = 0; completed run absent from history")
+		}
+		if !laneInHistorical(summary, completedRunID) {
+			t.Errorf("completed run %q not present in summary HistoricalLanes", completedRunID)
+		}
+		// The in-progress anchor run must NOT leak into history — the phase
+		// bucketing (all-closed → complete) is what separates them, so a bug that
+		// treats an open root as terminal fails here.
+		if laneInHistorical(summary, anchorRunID) {
+			t.Errorf("in-progress anchor run %q leaked into HistoricalLanes", anchorRunID)
+		}
+	})
+
+	t.Run("run detail projects the completed run as terminal", func(t *testing.T) {
+		var detail runproj.FormulaRunDetail
+		h.getJSON(h.apiURL("/runs/"+completedRunID+"/detail"), &detail)
+
+		if detail.RunID != completedRunID {
+			t.Fatalf("runId = %q, want %q", detail.RunID, completedRunID)
+		}
+		if detail.Title != completedFormula {
+			t.Errorf("title = %q, want %q", detail.Title, completedFormula)
+		}
+		if len(detail.Nodes) == 0 {
+			t.Fatal("completed run detail has no nodes; projected empty")
+		}
+		if len(detail.Lanes) == 0 {
+			t.Error("completed run detail has no lanes; projected empty")
+		}
+		// Root + both closed steps must all read a terminal presentation status,
+		// so the whole run reports terminal and phase "complete".
+		if !detail.Progress.Terminal {
+			t.Error("completed run progress.terminal = false, want true (root + both steps closed)")
+		}
+		if detail.Phase != "complete" {
+			t.Errorf("completed run phase = %q, want \"complete\"", detail.Phase)
+		}
+	})
+}
+
+// laneInHistorical reports whether the run appears specifically in the summary's
+// historical (completed) lane bucket, so a caller can assert a completed run
+// landed in history and did not leak into the active lanes.
+func laneInHistorical(s runproj.RunSummary, id string) bool {
+	for _, lane := range s.HistoricalLanes {
+		if lane.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // TestBeadsView asserts the beads list federates the seeded city store and one
 // bead detail projects.
 func TestBeadsView(t *testing.T) {
@@ -151,13 +236,23 @@ func TestBeadsView(t *testing.T) {
 		t.Errorf("beads list missing seeded work bead %q", corpusWorkBeadID)
 	}
 
+	// The all=true (IncludeClosed) read must surface the close-side rows: the
+	// completed run's closed molecule + both closed steps and the closed source
+	// task. Closed work is hidden without all=true, so a regression that drops
+	// IncludeClosed — or a beads view that filters closed run beads — fails here.
+	for _, id := range []string{completedRunID, completedStepA, completedStepB, corpusSourceBeadID} {
+		if !beadClosed(list, id) {
+			t.Errorf("beads list (all=true) missing seeded closed bead %q with status=closed", id)
+		}
+	}
+
 	var bead genclient.Bead
 	h.getJSON(h.cityURL("/bead/"+corpusWorkBeadID), &bead)
 	if bead.Id != corpusWorkBeadID {
 		t.Errorf("bead detail id = %q, want %q", bead.Id, corpusWorkBeadID)
 	}
-	if bead.Title == "" {
-		t.Error("bead detail has empty title; detail projected thin")
+	if bead.Title != corpusWorkBeadName {
+		t.Errorf("bead detail title = %q, want %q", bead.Title, corpusWorkBeadName)
 	}
 }
 
@@ -168,6 +263,21 @@ func containsBead(list genclient.ListBodyBead, id string) bool {
 	for _, b := range *list.Items {
 		if b.Id == id {
 			return true
+		}
+	}
+	return false
+}
+
+// beadClosed reports whether the list contains a bead with the given id AND a
+// "closed" status. It proves the beads view surfaces a real close-side row, not
+// merely that the id is present at some non-terminal status.
+func beadClosed(list genclient.ListBodyBead, id string) bool {
+	if list.Items == nil {
+		return false
+	}
+	for _, b := range *list.Items {
+		if b.Id == id {
+			return b.Status == "closed"
 		}
 	}
 	return false
@@ -241,12 +351,56 @@ func TestEventsView(t *testing.T) {
 	if list.Total == 0 || list.Items == nil || len(*list.Items) == 0 {
 		t.Fatal("events feed empty; seeded event log not projected")
 	}
-	// The seeded event log carries exactly five events (3 created + woke +
-	// updated). Seeded mail does not appear here: it is written via beadmail over
-	// MemStore.Create, which emits no event-log entry, and is asserted separately
-	// by TestMailView. So the feed reflects just the five seeded log records.
-	if list.Total < 5 {
-		t.Errorf("events total = %d, want >= 5 seeded events", list.Total)
+	// The seeded event log carries fifteen records: the five open-run events
+	// (3 bead.created + session.woke + bead.updated) plus the completed run's
+	// full close-side lifecycle (3 bead.created + session.woke + 2 bead.updated
+	// transitions + 3 bead.closed close edges + 1 molecule.resolved). Seeded mail
+	// does NOT appear here: it is written via beadmail over MemStore.Create, which
+	// emits no event-log entry, and is asserted separately by TestMailView.
+	if list.Total < 15 {
+		t.Errorf("events total = %d, want >= 15 seeded events", list.Total)
+	}
+
+	// Tally the typed envelope union to prove the completed run's close edges and
+	// its molecule.resolved record project with their real discriminated types
+	// (not a lossy generic decode). A close-side projection break — dropping a
+	// bead.closed root, or a molecule.resolved that no longer decodes — fails here
+	// even though the feed still returns 200.
+	closedSubjects := map[string]bool{}
+	moleculeResolvedIssue := ""
+	for _, item := range *list.Items {
+		kind, err := item.Discriminator()
+		if err != nil {
+			t.Fatalf("event discriminator: %v", err)
+		}
+		switch kind {
+		case "bead.closed":
+			ev, err := item.AsTypedEventStreamEnvelopeBeadClosed()
+			if err != nil {
+				t.Fatalf("decode bead.closed envelope: %v", err)
+			}
+			if ev.Subject != nil {
+				closedSubjects[*ev.Subject] = true
+			}
+		case "molecule.resolved":
+			ev, err := item.AsTypedEventStreamEnvelopeMoleculeResolved()
+			if err != nil {
+				t.Fatalf("decode molecule.resolved envelope: %v", err)
+			}
+			moleculeResolvedIssue = ev.Payload.IssueId
+		}
+	}
+
+	// Every step close AND the root close must project as a bead.closed edge.
+	for _, subject := range []string{completedStepA, completedStepB, completedRunID} {
+		if !closedSubjects[subject] {
+			t.Errorf("events feed missing bead.closed close edge for %q", subject)
+		}
+	}
+	// The molecule.resolved event projects with its typed payload naming the
+	// resolved run — the attribution join for the completed molecule.
+	if moleculeResolvedIssue != completedRunID {
+		t.Errorf("molecule.resolved payload issue_id = %q, want %q", moleculeResolvedIssue, completedRunID)
 	}
 
 	// The SSE stream endpoint must serve (a heartbeat/frame is enough — the run

@@ -1188,22 +1188,40 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 		},
 	}
 	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	// churn_count and wake_attempts are the crash/churn accrual counters a
+	// closed session carries into reopen, and production never writes them
+	// alone: ChurnAccrualPatch pairs churn_count with sleep_reason=context-churn
+	// and WakeFailureAccrualPatch increments wake_attempts. Derive the seed
+	// values from those real writers (instead of an impossible partial state)
+	// so this test exercises the full stale set and stays honest if the
+	// counter keys or quarantine thresholds ever change.
+	staleChurnCount := session.ChurnAccrualPatch(defaultMaxChurnCycles-1, defaultMaxChurnCycles, now).Patch["churn_count"]
+	staleWakeAttempts := session.WakeFailureAccrualPatch(defaultMaxWakeAttempts-1, defaultMaxWakeAttempts, now).Patch["wake_attempts"]
 	closed, err := store.Create(beads.Bead{
 		Title:  "mayor",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name":               sessionName,
-			"alias":                      "mayor",
-			"template":                   "mayor",
-			"state":                      "suspended",
-			"close_reason":               "suspended",
-			"creation_complete_at":       now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
-			"last_woke_at":               now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
-			"started_config_hash":        "old-config",
-			"started_live_hash":          "old-live",
-			"live_hash":                  "old-runtime",
-			"startup_dialog_verified":    "true",
+			"session_name":            sessionName,
+			"alias":                   "mayor",
+			"template":                "mayor",
+			"state":                   "suspended",
+			"close_reason":            "suspended",
+			"creation_complete_at":    now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			"last_woke_at":            now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			"started_config_hash":     "old-config",
+			"started_live_hash":       "old-live",
+			"live_hash":               "old-runtime",
+			"startup_dialog_verified": "true",
+			"sleep_reason":            "context-churn",
+			"churn_count":             staleChurnCount,
+			"quarantined_until":       now.Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+			"wake_attempts":           staleWakeAttempts,
+			"held_until":              now.Add(-4 * time.Minute).UTC().Format(time.RFC3339),
+			// Store.SetWaitHold co-writes wait_hold and sleep_intent with the
+			// same reason, so seed them as the real paired blocker/intent state.
+			"wait_hold":                  "wait",
+			"sleep_intent":               "wait",
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
@@ -1233,9 +1251,22 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 		"started_live_hash",
 		"live_hash",
 		"startup_dialog_verified",
+		"sleep_reason",
+		"quarantined_until",
+		"held_until",
+		"wait_hold",
+		"sleep_intent",
 	} {
 		if got := reopened.Metadata[key]; got != "" {
 			t.Fatalf("%s = %q, want empty on recreate", key, got)
+		}
+	}
+	// The crash/churn accrual counters reset to "0" (not cleared to empty), so
+	// the reopened fresh runtime is not left one failure away from immediate
+	// re-quarantine.
+	for _, key := range []string{"wake_attempts", "churn_count"} {
+		if got := reopened.Metadata[key]; got != "0" {
+			t.Fatalf("%s = %q, want %q on recreate", key, got, "0")
 		}
 	}
 }

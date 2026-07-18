@@ -3792,13 +3792,13 @@ type StatusStoreHealth struct {
 	// LastGcStatus Status of last maintenance run ('success' or 'failed').
 	LastGcStatus *string `json:"last_gc_status,omitempty"`
 
-	// LiveRows Live bead row count.
+	// LiveRows Retained bead row count used as the denominator, including open and closed beads.
 	LiveRows int64 `json:"live_rows"`
 
 	// Path On-disk path of the Dolt store.
 	Path string `json:"path"`
 
-	// RatioMbPerRow Derived megabytes per row.
+	// RatioMbPerRow Derived megabytes per retained row, including open and closed beads.
 	RatioMbPerRow float64 `json:"ratio_mb_per_row"`
 
 	// SizeBytes Total bytes of the store directory.
