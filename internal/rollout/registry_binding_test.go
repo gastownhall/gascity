@@ -86,6 +86,26 @@ func TestBeadsVersionAnchorPending(t *testing.T) {
 	}
 }
 
+// TestGuardedReleaseVersionAnchorPending documents the guarded-release gate's
+// "pending" anchor state, mirroring TestBeadsVersionAnchorPending: the
+// VersionAnchor names a deps.env key that is currently ABSENT (the guarded-verb
+// bd pin is untagged), which is legal. When the key lands, this test flips and
+// prompts wiring the consumer swap (A-G2b) and the graduation tooth.
+func TestGuardedReleaseVersionAnchorPending(t *testing.T) {
+	t.Parallel()
+	s := beadsGuardedReleaseSpec()
+	if s.VersionAnchor != "BD_GUARDED_RELEASE_MIN_VERSION" {
+		t.Fatalf("guarded-release VersionAnchor = %q, want BD_GUARDED_RELEASE_MIN_VERSION", s.VersionAnchor)
+	}
+	present, err := depsEnvHasKey("../../deps.env", s.VersionAnchor)
+	if err != nil {
+		t.Skipf("deps.env not readable from the package dir: %v", err)
+	}
+	if present {
+		t.Errorf("%s is now present in deps.env — the guarded-release gate has graduated past pending; wire the consumer swap and graduation tooth", s.VersionAnchor)
+	}
+}
+
 // --- reflection helpers (test-only) ---
 
 func setConfigFieldNonDefault(t *testing.T, cfg *config.City, path string, def Default) {

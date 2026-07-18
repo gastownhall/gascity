@@ -37,10 +37,25 @@ jobs:
 
             if (!current.data.some(l => l.name === target)) return;
 
-            await github.rest.issues.removeLabel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: number,
-              name: target,
-            });
-            console.log(`Removed '${target}' from #${number} (triaged with '${added}')`);
+            // The check above narrows a race but cannot close it: adding
+            // several non-status labels at once fires one `labeled` event
+            // (and one job) each, and they run concurrently. Every run sees
+            // the label present here, then all race to remove it. The winner
+            // gets 204; the losers get 404 "Label does not exist". Treat an
+            // already-absent label as success so a benign lost race does not
+            // paint a red X on the PR's checks.
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                name: target,
+              });
+              console.log(`Removed '${target}' from #${number} (triaged with '${added}')`);
+            } catch (err) {
+              if (err.status === 404) {
+                console.log(`'${target}' already absent from #${number} (concurrent removal); nothing to do`);
+                return;
+              }
+              throw err;
+            }

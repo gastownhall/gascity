@@ -301,6 +301,15 @@ func SortBeads(items []Bead, order SortOrder) {
 	sortBeadsForQuery(items, order)
 }
 
+// SortBeadsReadyOrder sorts ready results into the canonical
+// (priority, created_at, id) ascending order used by the SQL-backed ready
+// readers, matching CachedReady's own ordering (#3208). Callers that assemble
+// a ready-shaped result from a source other than CachedReady/Ready (e.g. a
+// single batched bd ready fallback) use this to match that canonical order.
+func SortBeadsReadyOrder(items []Bead) {
+	sortBeadsReadyOrder(items)
+}
+
 // sortBeadsReadyOrder sorts ready results into the canonical
 // (priority, created_at, id) ascending order used by the SQL-backed ready
 // readers (a nil priority sorts as 2, matching their COALESCE(i.priority, 2)),

@@ -168,6 +168,18 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 		t.Errorf("config accessor default = %q, want %q", got, Off)
 	}
 
+	// beads.guarded_release: Mode gate, default Off.
+	guarded := byKey[keyBeadsGuardedRelease]
+	if guarded.Default.Mode == nil || *guarded.Default.Mode != Off {
+		t.Fatalf("guarded-release Spec.Default = %v, want Off", guarded.Default.Mode)
+	}
+	if def.BeadsGuardedRelease() != Off {
+		t.Errorf("defaultFlags guarded-release = %q, want off", def.BeadsGuardedRelease())
+	}
+	if got := (config.BeadsConfig{}).NormalizedGuardedRelease(); got != string(Off) {
+		t.Errorf("config accessor guarded-release default = %q, want %q", got, Off)
+	}
+
 	// daemon.formula_v2: bool gate, default true.
 	fv2 := byKey[keyDaemonFormulaV2]
 	if fv2.Default.Bool == nil || *fv2.Default.Bool != true {

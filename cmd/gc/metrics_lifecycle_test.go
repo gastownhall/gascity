@@ -1375,7 +1375,7 @@ func TestProductMetricsLifecycleCommandPathMatrixAttemptsOnce(t *testing.T) {
 		{name: "version", args: []string{"version"}, wantID: productmetrics.CommandVersion, wantOutput: "stdout", wantRecord: true},
 		{name: "user completion", args: []string{"completion", "bash"}, wantID: productMetricsGeneratedCommandID20, wantOutput: "stdout", wantRecord: true},
 		{name: "private completion", args: []string{"__complete", "status"}},
-		{name: "jsonl failure", args: []string{"events", "--json"}, wantID: productMetricsGeneratedCommandID50, wantExit: 1, wantOutput: "stderr", wantRecord: true},
+		{name: "events failure", args: []string{"events", "--after", "1", "--after-cursor", "x"}, wantID: productMetricsGeneratedCommandID50, wantExit: 1, wantOutput: "stderr", wantRecord: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
