@@ -58,24 +58,24 @@ func TestDockerSessionProtocol(t *testing.T) {
 			t.Errorf("container %q remains after failed start", fixture.containerName)
 		}
 
+		// Rollback force-removes the created container by immutable ID and does
+		// not gate removal behind a graceful "stop -t 10": a slow stop would
+		// outrun the exec provider's cancellation grace and leak the container.
 		calls := fixture.calls(t)
-		runAt, stopAt, removeAt := -1, -1, -1
+		runAt := -1
 		for i, call := range calls {
-			switch {
-			case len(call) > 0 && call[0] == "run" && runAt == -1:
+			if len(call) > 0 && call[0] == "run" {
 				runAt = i
-			case runAt >= 0 && len(call) == 4 && call[0] == "stop" && call[1] == "-t" && call[2] == "10" && call[3] == dockerProtocolContainerID:
-				stopAt = i
-			case runAt >= 0 && len(call) == 3 && call[0] == "rm" && call[1] == "-f" && call[2] == dockerProtocolContainerID:
-				removeAt = i
+				break
 			}
 		}
 		if runAt < 0 {
 			t.Fatalf("docker run was not observed; calls:\n%s", formatDockerProtocolCalls(calls))
 		}
-		if runAt >= stopAt || stopAt >= removeAt {
-			t.Errorf("post-run cleanup order = run:%d stop:%d rm:%d, want run < stop < rm; calls:\n%s",
-				runAt, stopAt, removeAt, formatDockerProtocolCalls(calls))
+		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
+		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
+			t.Errorf("failed-start cleanup = %v, want exactly one immutable-ID rm -f; calls:\n%s",
+				cleanup, formatDockerProtocolCalls(calls))
 		}
 	})
 
@@ -126,7 +126,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 			t.Fatalf("exact 120-line prompt observations = %d, want exactly 1; calls:\n%s",
 				captureCalls, formatDockerProtocolCalls(calls))
 		}
-		if cleanupCalls := dockerProtocolCleanupCallsAfterRun(calls, dockerProtocolContainerID); len(cleanupCalls) != 0 {
+		if cleanupCalls := dockerProtocolCleanupCallsAfterRun(calls); len(cleanupCalls) != 0 {
 			t.Fatalf("successful start invoked cleanup guard: %v\ncalls:\n%s", cleanupCalls, formatDockerProtocolCalls(calls))
 		}
 	})
@@ -193,9 +193,87 @@ func TestDockerSessionProtocol(t *testing.T) {
 			t.Errorf("container %q remains after start context cancellation; calls:\n%s",
 				fixture.containerName, formatDockerProtocolCalls(calls))
 		}
-		cleanup := dockerProtocolCleanupCallsAfterRun(calls, dockerProtocolContainerID)
-		if len(cleanup) != 2 {
-			t.Errorf("immutable-ID cleanup calls = %v, want stop then remove; calls:\n%s",
+		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
+		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
+			t.Errorf("immutable-ID cleanup calls = %v, want a single force-remove; calls:\n%s",
+				cleanup, formatDockerProtocolCalls(calls))
+		}
+	})
+
+	t.Run("start_cancellation_removes_container_despite_stalled_stop", func(t *testing.T) {
+		fixture := newDockerProtocolFixture(t, fakeSource)
+		fixture.allowImage(t)
+		fixture.writeState(t, "prompt-output", "not ready >\n")
+		// A graceful "docker stop" that waits out its timeout outruns the exec
+		// provider's ~2s cancellation grace. If rollback ever regressed to
+		// "stop -t 10" before "rm -f", the adapter would be force-killed
+		// mid-stop and the container would leak. Rollback must go straight to
+		// "rm -f", so this stall is never triggered on the fixed path.
+		fixture.writeState(t, "stop-stall-seconds", "5\n")
+
+		provider := runtimeexec.NewProvider(fixture.adapterWrapper(t, adapter))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := provider.Start(ctx, fixture.containerName, gcruntime.Config{
+			Command:           "sleep infinity",
+			WorkDir:           fixture.workDir,
+			ReadyPromptPrefix: "> ",
+			Env: map[string]string{
+				"GC_DOCKER_HOME_MOUNT": "false",
+				"GC_DOCKER_IMAGE":      "gc-protocol-test:latest",
+			},
+		})
+		if err == nil {
+			t.Fatal("start succeeded when prompt appeared only mid-line")
+		}
+
+		calls := fixture.calls(t)
+		if fixture.containerExists() {
+			t.Errorf("container %q leaked after cancellation with a stalled stop; calls:\n%s",
+				fixture.containerName, formatDockerProtocolCalls(calls))
+		}
+		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
+		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
+			t.Errorf("cancellation cleanup = %v, want a single force-remove that never blocks on stop; calls:\n%s",
+				cleanup, formatDockerProtocolCalls(calls))
+		}
+	})
+
+	t.Run("start_cancellation_during_ready_delay_removes_container", func(t *testing.T) {
+		fixture := newDockerProtocolFixture(t, fakeSource)
+		fixture.allowImage(t)
+
+		// With no ready_prompt_prefix, start takes the ready_delay_ms fallback: a
+		// single foreground `sleep` far longer than the exec provider's ~2s
+		// cancellation grace. A plain foreground sleep would keep the shell from
+		// running its rollback trap until the sleep returned, so the provider
+		// would force-kill the shell mid-delay and leak the just-created
+		// container. The cooperative interrupt must reach that foreground child
+		// so the trap force-removes the container inside the grace window.
+		provider := runtimeexec.NewProvider(fixture.adapterWrapper(t, adapter))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := provider.Start(ctx, fixture.containerName, gcruntime.Config{
+			Command:      "sleep infinity",
+			WorkDir:      fixture.workDir,
+			ReadyDelayMs: 5000,
+			Env: map[string]string{
+				"GC_DOCKER_HOME_MOUNT": "false",
+				"GC_DOCKER_IMAGE":      "gc-protocol-test:latest",
+			},
+		})
+		if err == nil {
+			t.Fatal("start succeeded despite cancellation during the readiness delay")
+		}
+
+		calls := fixture.calls(t)
+		if fixture.containerExists() {
+			t.Errorf("container %q leaked after cancellation during ready_delay_ms; calls:\n%s",
+				fixture.containerName, formatDockerProtocolCalls(calls))
+		}
+		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
+		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
+			t.Errorf("ready-delay cancellation cleanup = %v, want a single immutable-ID force-remove; calls:\n%s",
 				cleanup, formatDockerProtocolCalls(calls))
 		}
 	})
@@ -439,7 +517,12 @@ func dockerProtocolCallCount(calls [][]string, want []string) int {
 	return count
 }
 
-func dockerProtocolCleanupCallsAfterRun(calls [][]string, containerName string) [][]string {
+// dockerProtocolCleanupCallsAfterRun returns the immutable-ID cleanup calls
+// (a graceful "stop -t 10" or a force "rm -f") observed after the first
+// "docker run", so tests can assert exactly how a created container is torn
+// down. It still matches the graceful stop so a regression that reintroduces
+// it before the force-remove is caught.
+func dockerProtocolCleanupCallsAfterRun(calls [][]string) [][]string {
 	runAt := -1
 	for i, call := range calls {
 		if len(call) > 0 && call[0] == "run" {
@@ -453,8 +536,8 @@ func dockerProtocolCleanupCallsAfterRun(calls [][]string, containerName string) 
 
 	var cleanup [][]string
 	for _, call := range calls[runAt+1:] {
-		if reflect.DeepEqual(call, []string{"stop", "-t", "10", containerName}) ||
-			reflect.DeepEqual(call, []string{"rm", "-f", containerName}) {
+		if reflect.DeepEqual(call, []string{"stop", "-t", "10", dockerProtocolContainerID}) ||
+			reflect.DeepEqual(call, []string{"rm", "-f", dockerProtocolContainerID}) {
 			cleanup = append(cleanup, call)
 		}
 	}

@@ -260,9 +260,13 @@ cleanup_failed_start() {
     local container_id="$FAILED_START_CONTAINER_ID"
     local container_name="$FAILED_START_CONTAINER_NAME" cleanup_output
     trap - EXIT INT TERM HUP
-    if ! cleanup_output=$(docker stop -t 10 "$container_id" 2>&1); then
-        echo "gc: warning: failed to stop container '$container_name' ($container_id) after startup error${cleanup_output:+: $cleanup_output}" >&2
-    fi
+    # Roll back with a single force-remove instead of a graceful "stop -t 10"
+    # followed by "rm -f". A failed start has no live session worth draining,
+    # and cooperative cancellation gives this cleanup only a short grace window:
+    # the exec provider force-kills the adapter ~2s after signaling interrupt.
+    # A graceful stop that waited out its timeout would be killed before "rm -f"
+    # ran, leaking the container. "docker rm -f" sends SIGKILL and removes in one
+    # bounded step, so rollback completes inside the grace window.
     if ! cleanup_output=$(docker rm -f "$container_id" 2>&1); then
         echo "gc: warning: failed to remove container '$container_name' ($container_id) after startup error${cleanup_output:+: $cleanup_output}" >&2
     fi
