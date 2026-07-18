@@ -994,31 +994,67 @@ func TestClientListSessions(t *testing.T) {
 		if r.URL.Path != "/v0/city/alpha/sessions" {
 			t.Fatalf("path = %q, want /v0/city/alpha/sessions", r.URL.Path)
 		}
-		// Verify query parameters were propagated by the wrapper.
+		// Every page propagates the filters and asks for the 1000-row server
+		// cap explicitly; a refactor that dropped either would trip here.
 		if got, want := r.URL.Query().Get("state"), "active"; got != want {
 			t.Errorf("state query = %q, want %q", got, want)
 		}
 		if got, want := r.URL.Query().Get("template"), "mayor"; got != want {
 			t.Errorf("template query = %q, want %q", got, want)
 		}
-		w.Header().Set("X-GC-Cache-Age-S", "2.5")
+		if got, want := r.URL.Query().Get("limit"), "1000"; got != want {
+			t.Errorf("limit query = %q, want %q", got, want)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"items": []map[string]any{
-				{
-					"id":           "gc-abc",
-					"template":     "mayor",
-					"state":        "active",
-					"title":        "Overseer",
-					"session_name": "mayor",
-					"provider":     "claude",
-					"created_at":   "2026-04-23T10:00:00Z",
-					"attached":     true,
-					"running":      true,
+		// Two pages walked via next_cursor prove ListSessions follows the
+		// keyset walk to completion instead of truncating at the first
+		// server-cap page.
+		switch cursor := r.URL.Query().Get("cursor"); cursor {
+		case "":
+			w.Header().Set("X-GC-Cache-Age-S", "2.5")
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{
+						"id":           "gc-abc",
+						"template":     "mayor",
+						"state":        "active",
+						"title":        "Overseer",
+						"session_name": "mayor",
+						"provider":     "claude",
+						"created_at":   "2026-04-23T10:00:00Z",
+						"attached":     true,
+						"running":      true,
+					},
 				},
-			},
-			"total": 1,
-		})
+				"next_cursor": "page2",
+				"total":       2,
+			})
+		case "page2":
+			// A different cache-age header on the later page proves the merged
+			// result reports the first page's age, not the last.
+			w.Header().Set("X-GC-Cache-Age-S", "9.9")
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{
+						"id":           "gc-def",
+						"template":     "polecat",
+						"state":        "active",
+						"title":        "Worker",
+						"session_name": "polecat",
+						"provider":     "claude",
+						"created_at":   "2026-04-23T09:00:00Z",
+						"attached":     false,
+						"running":      true,
+					},
+				},
+				"total": 2,
+			})
+		default:
+			// Guard against an over-walk: emit an empty terminal page so the
+			// loop stops, and fail the test.
+			t.Errorf("unexpected extra page request, cursor = %q", cursor)
+			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 2}) //nolint:errcheck
+		}
 	}))
 	defer ts.Close()
 
@@ -1027,14 +1063,14 @@ func TestClientListSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(got.Body) != 1 {
-		t.Fatalf("items = %d, want 1", len(got.Body))
+	if len(got.Body) != 2 {
+		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body))
 	}
-	if got.Body[0].ID != "gc-abc" || got.Body[0].Template != "mayor" {
-		t.Errorf("got[0] = %+v", got.Body[0])
+	if got.Body[0].ID != "gc-abc" || got.Body[1].ID != "gc-def" {
+		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body[0].ID, got.Body[1].ID)
 	}
 	if got.AgeSeconds != 2.5 {
-		t.Errorf("AgeSeconds = %v, want 2.5", got.AgeSeconds)
+		t.Errorf("AgeSeconds = %v, want 2.5 (first page's age)", got.AgeSeconds)
 	}
 }
 

@@ -68,6 +68,24 @@ var grandfatheredDialects = map[string][]string{
 	"GET /v0/city/{cityName}/session/{id}/transcript":   {"after", "before", "tail"},
 }
 
+// boundedLimitOnlyFeeds is the "METHOD path" allowlist of endpoints that
+// expose only `limit` (no cursor) and deliberately do NOT support a keyset
+// walk — they return a bounded, most-recent-N view. Owner sign-off
+// 2026-07-18: these predate or intentionally sit outside the keyset program
+// and stay limit-only. A NEW limit-only endpoint must either adopt keyset
+// (cursor + limit via PaginationParam) or be added here in its own review;
+// otherwise a sixth silent pagination dialect could ship as a bare `limit`
+// param without anyone noticing, the exact drift this guard exists to stop.
+// Unlike keyset lists, these are not held to the unified default/maximum
+// limit schema — each feed keeps its own documented bound.
+var boundedLimitOnlyFeeds = map[string]bool{
+	"GET /v0/city/{cityName}/formulas/feed":        true,
+	"GET /v0/city/{cityName}/formulas/{name}/runs": true,
+	"GET /v0/city/{cityName}/orders/feed":          true,
+	"GET /v0/city/{cityName}/runs":                 true,
+	"GET /v0/events":                               true,
+}
+
 type specParam struct {
 	Name   string          `json:"name"`
 	In     string          `json:"in"`
@@ -88,6 +106,8 @@ type limitSchema struct {
 // one human-readable violation per contract breach:
 //   - a pagination param set that is neither keyset (subset of
 //     {cursor, limit}) nor an exact grandfathered dialect
+//   - a limit-only param set ({limit} with no cursor) on an operation that is
+//     not allowlisted in boundedLimitOnlyFeeds (a new silent limit-only dialect)
 //   - a cursor-speaking operation that does not declare a 400 response
 //     (invalid cursors are a typed 400, never a silent page-1 restart)
 //   - a cursor-speaking operation whose limit schema does not pin the
@@ -100,6 +120,7 @@ func checkPaginationDialects(paths map[string]map[string]specOperation) []string
 	}
 	sort.Strings(keys)
 	seenGrandfathered := map[string]bool{}
+	seenBoundedFeed := map[string]bool{}
 	for _, path := range keys {
 		for _, method := range []string{"get", "post", "put", "patch", "delete"} {
 			op, ok := paths[path][method]
@@ -151,7 +172,19 @@ func checkPaginationDialects(paths map[string]map[string]specOperation) []string
 			}
 
 			if !hasCursor {
-				continue // bounded limit-only feed: allowed
+				// Limit-only feed ({limit}, no cursor): a bounded read with no
+				// keyset walk. Legitimate for a recent-N feed, but adding one
+				// must be conscious — otherwise a sixth pagination dialect ships
+				// as a bare limit param with no review. The exact operation must
+				// be allowlisted in boundedLimitOnlyFeeds.
+				if !boundedLimitOnlyFeeds[opKey] {
+					violations = append(violations, fmt.Sprintf(
+						"%s exposes a limit-only pagination feed that is not allowlisted: adopt keyset (cursor + limit via PaginationParam), or if this is an intentional bounded feed, add it to boundedLimitOnlyFeeds with owner sign-off",
+						opKey))
+					continue
+				}
+				seenBoundedFeed[opKey] = true
+				continue
 			}
 			if _, ok := op.Responses["400"]; !ok {
 				violations = append(violations, fmt.Sprintf(
@@ -175,6 +208,12 @@ func checkPaginationDialects(paths map[string]map[string]specOperation) []string
 		if !seenGrandfathered[opKey] {
 			violations = append(violations, fmt.Sprintf(
 				"%s is grandfathered but no longer in the spec (or went keyset): remove its grandfatheredDialects entry", opKey))
+		}
+	}
+	for opKey := range boundedLimitOnlyFeeds {
+		if !seenBoundedFeed[opKey] {
+			violations = append(violations, fmt.Sprintf(
+				"%s is allowlisted as a bounded limit-only feed but no longer appears as one in the spec (or adopted keyset): remove its boundedLimitOnlyFeeds entry", opKey))
 		}
 	}
 	sort.Strings(violations)
@@ -280,6 +319,27 @@ func TestPaginationDialectCheckerCatchesViolations(t *testing.T) {
 				"/v0/other": {"get": {Parameters: []specParam{{Name: "limit", In: "query", Schema: limitOK}}, Responses: resp200}},
 			},
 			want: "no longer in the spec",
+		},
+		{
+			name: "unlisted limit-only feed rejected",
+			paths: map[string]map[string]specOperation{
+				"/v0/gadgets": {"get": {Parameters: []specParam{
+					{Name: "limit", In: "query", Schema: limitOK},
+				}, Responses: resp200}},
+			},
+			want: "not allowlisted",
+		},
+		{
+			name: "stale bounded-feed entry rejected",
+			paths: map[string]map[string]specOperation{
+				// A pure keyset endpoint with none of the allowlisted bounded
+				// feeds present, so every boundedLimitOnlyFeeds entry reports
+				// itself stale.
+				"/v0/gadgets": {"get": {Parameters: []specParam{
+					{Name: "cursor", In: "query"}, {Name: "limit", In: "query", Schema: limitOK},
+				}, Responses: resp400}},
+			},
+			want: "no longer appears as one in the spec",
 		},
 	}
 	for _, tc := range cases {

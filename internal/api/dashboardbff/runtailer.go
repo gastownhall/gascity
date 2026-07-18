@@ -654,35 +654,55 @@ func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name strin
 	if base == "" {
 		return nil, false
 	}
-	// limit=1000 = the server cap: this enrichment wants every session, and
-	// the unified default (100) would silently drop rows on a large fleet.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/city/"+name+"/sessions?limit=1000", nil)
-	if err != nil {
-		return nil, false
+	// This enrichment wants every session. Walk the keyset pages until the
+	// server stops minting next_cursor and merge them, so a fleet larger than
+	// one server-cap page is fully covered instead of silently truncated at the
+	// first page. Each page requests the 1000-row server cap.
+	var all []runproj.DashboardSession
+	cursor := ""
+	for {
+		u := base + "/v0/city/" + name + "/sessions?limit=1000"
+		if cursor != "" {
+			u += "&cursor=" + url.QueryEscape(cursor)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, false
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := m.httpc.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close() //nolint:errcheck
+			return nil, false
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		resp.Body.Close() //nolint:errcheck
+		if err != nil {
+			return nil, false
+		}
+		var env struct {
+			Items      []runproj.DashboardSession `json:"items"`
+			NextCursor string                     `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(body, &env); err != nil {
+			return nil, false
+		}
+		all = append(all, env.Items...)
+		// Stop at the last page. The equal-cursor guard is a safety net against
+		// a server that fails to advance the cursor, so the walk can never spin
+		// forever on a degenerate response.
+		if env.NextCursor == "" || env.NextCursor == cursor {
+			break
+		}
+		cursor = env.NextCursor
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := m.httpc.Do(req)
-	if err != nil {
-		return nil, false
+	if all == nil {
+		all = []runproj.DashboardSession{}
 	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return nil, false
-	}
-	var env struct {
-		Items []runproj.DashboardSession `json:"items"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, false
-	}
-	if env.Items == nil {
-		env.Items = []runproj.DashboardSession{}
-	}
-	return env.Items, true
+	return all, true
 }
 
 // formulaNodeRef decodes the ordering-relevant id of a compiled-formula preview
