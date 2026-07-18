@@ -52,6 +52,18 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 	}
 	var faf fallbackAfterFetch
 	if errors.As(err, &faf) {
+		// A remote city is authoritative and must never fall back to the caller's
+		// LOCAL store (gate G1). An after-fetch fallback sentinel means the remote
+		// API round-tripped but cannot serve this response shape (e.g. a
+		// graph/workflow convoy); for a remote client that is a hard error, not a
+		// cue to read the operator's own store. Only the local/serverless lane may
+		// take the richer local path here. This mirrors the ShouldFallbackForRead
+		// gate below, which the errors.As short-circuit would otherwise bypass.
+		if c.IsRemote() {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc %s: remote city cannot serve this read (%s)\n", cmdName, faf.Reason) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		logRoute(stderr, cmdName, "fallback", faf.Reason)
 		return localRender()
 	}

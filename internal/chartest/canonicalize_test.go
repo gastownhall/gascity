@@ -67,6 +67,37 @@ func TestCanonicalizeStreams_CrossSurfaceIdentityAsserted(t *testing.T) {
 	}
 }
 
+func TestCanonicalize_RowOrderBlindSpot(t *testing.T) {
+	// Documents the KNOWN limitation: two rows differing ONLY by a volatile token
+	// canonicalize identically regardless of emission order, so a byte-exact
+	// golden cannot catch a reorder among them. Pinned so a future change that
+	// accidentally makes such order observable is noticed and the doc caveat on
+	// Canonicalizer updated.
+	forward := chartest.NewCanonicalizer(beadRule)
+	reverse := chartest.NewCanonicalizer(beadRule)
+	got := string(forward.Canonicalize([]byte("b-aaa ready\nb-bbb ready")))
+	rev := string(reverse.Canonicalize([]byte("b-bbb ready\nb-aaa ready")))
+	if got != rev {
+		t.Fatalf("expected order-blind canonicalization, got %q vs %q", got, rev)
+	}
+	if got != "BEAD-1 ready\nBEAD-2 ready" {
+		t.Fatalf("canonicalized = %q, want %q", got, "BEAD-1 ready\nBEAD-2 ready")
+	}
+}
+
+func TestCanonicalize_StableColumnMakesOrderObservable(t *testing.T) {
+	// Proves the documented mitigation: seeding each row with a distinct STABLE
+	// column makes a reorder change the canonicalized bytes, so a multi-row
+	// golden that must protect order can.
+	forward := chartest.NewCanonicalizer(beadRule)
+	reverse := chartest.NewCanonicalizer(beadRule)
+	got := string(forward.Canonicalize([]byte("b-aaa alpha\nb-bbb beta")))
+	rev := string(reverse.Canonicalize([]byte("b-bbb beta\nb-aaa alpha")))
+	if got == rev {
+		t.Fatalf("distinct stable columns should make order observable, both = %q", got)
+	}
+}
+
 func TestCanonicalize_LongerMatchWinsAtSamePosition(t *testing.T) {
 	// Two rules that could both match at the same start: the longer match is
 	// emitted, the overlapping shorter one skipped — deterministic, no garbling.

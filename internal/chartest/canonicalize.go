@@ -35,6 +35,19 @@ type Stream struct {
 // time it is seen and reuses that placeholder everywhere afterward — including
 // across every stream fed to the same Canonicalizer — so cross-surface identity
 // is asserted rather than erased. Not safe for concurrent use.
+//
+// Ordering caveat — a canonicalized golden does NOT protect the relative order
+// of rows that differ ONLY by volatile tokens. Placeholders are numbered in
+// first-occurrence order, so two rows whose sole difference is a minted id or a
+// timestamp canonicalize to byte-identical text regardless of the order they
+// were emitted in ("b-a …X\nb-b …X" and its reverse both become
+// "BEAD-1 …X\nBEAD-2 …X"). A lost or inverted sort among such rows therefore
+// passes a byte-exact golden comparison. When characterizing a MULTI-ROW command
+// whose output order is a behavioral contract, seed each row with a distinct
+// STABLE column (e.g. distinct titles) so a reorder changes the canonicalized
+// bytes; do not rely on canonicalization alone to catch a row-order regression.
+// See TestCanonicalize_RowOrderBlindSpot and
+// TestCanonicalize_StableColumnMakesOrderObservable.
 type Canonicalizer struct {
 	rules []Rule
 	seen  map[string]string

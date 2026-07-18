@@ -1782,3 +1782,60 @@ func TestListBeadsDedupesAcrossPages(t *testing.T) {
 		t.Fatalf("ga-2 appeared %d times, want 1", counts["ga-2"])
 	}
 }
+
+// TestListBeadsParams proves the extracted filter mapping sets exactly the
+// requested query parameters and leaves the rest nil, and that All maps to a
+// pointer-to-true only when requested.
+func TestListBeadsParams(t *testing.T) {
+	got := listBeadsParams(ListBeadsOpts{Status: "open", Type: "task", Label: "urgent", Assignee: "me", Rig: "core", All: true})
+	if got.Status == nil || *got.Status != "open" {
+		t.Errorf("Status = %v, want open", got.Status)
+	}
+	if got.Type == nil || *got.Type != "task" {
+		t.Errorf("Type = %v, want task", got.Type)
+	}
+	if got.Label == nil || *got.Label != "urgent" {
+		t.Errorf("Label = %v, want urgent", got.Label)
+	}
+	if got.Assignee == nil || *got.Assignee != "me" {
+		t.Errorf("Assignee = %v, want me", got.Assignee)
+	}
+	if got.Rig == nil || *got.Rig != "core" {
+		t.Errorf("Rig = %v, want core", got.Rig)
+	}
+	if got.All == nil || !*got.All {
+		t.Errorf("All = %v, want *true", got.All)
+	}
+
+	empty := listBeadsParams(ListBeadsOpts{})
+	if empty.Status != nil || empty.Type != nil || empty.Label != nil || empty.Assignee != nil || empty.Rig != nil || empty.All != nil {
+		t.Errorf("empty opts set a non-nil filter: %+v", empty)
+	}
+}
+
+// TestDrainBeadPagesHardPageCap proves the hard page cap bounds a server that
+// returns infinitely many DISTINCT, strictly-advancing cursors with empty
+// pages — the one hostile shape the seenCursors repeat-guard cannot catch
+// (cursors never repeat) and opts.Limit cannot break (dedup keeps `all` empty).
+func TestDrainBeadPagesHardPageCap(t *testing.T) {
+	var reqs int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&reqs, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// A distinct, strictly-longer cursor each page, and never any items.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":       []map[string]any{},
+			"next_cursor": strings.Repeat("a", int(n)),
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.drainBeadPages(listBeadsParams(ListBeadsOpts{}), 0, 3)
+	if err == nil || !strings.Contains(err.Error(), "exceeded 3 pages") {
+		t.Fatalf("err = %v, want 'exceeded 3 pages'", err)
+	}
+	if n := atomic.LoadInt32(&reqs); n != 3 {
+		t.Fatalf("requests = %d, want 3 (page cap bounds the loop)", n)
+	}
+}

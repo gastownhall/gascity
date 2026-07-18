@@ -17,9 +17,12 @@ var updateGolden = flag.Bool("chartest-update", false, "rewrite chartest golden 
 // Capture is the full observable surface of one command invocation on one lane,
 // already canonicalized and deterministically ordered by the harness. It
 // serializes to a single golden file so a lane's whole behavior is frozen in
-// one place. Human text (Stdout/Stderr) is compared byte-exact; JSON is emitted
-// verbatim here and the differ applies the shape+additive policy (0.7) before
-// comparison of JSON-bearing goldens.
+// one place. The ENTIRE rendered golden — human text (Stdout/Stderr) and the
+// JSON run alike — is currently compared byte-exact by CompareGolden. The
+// shape+additive JSON differ (JSONShapeDiff / CanonicalizeStreams) is tested
+// scaffolding that is NOT yet wired into the comparison path; wire it before
+// characterizing a multi-element `--json` surface whose element order is
+// non-deterministic, or byte-exact comparison will flake on that order.
 type Capture struct {
 	Exit          int
 	Stdout        []byte

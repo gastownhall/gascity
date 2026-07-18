@@ -995,16 +995,21 @@ type ListBeadsOpts struct {
 	All   bool
 }
 
-// ListBeads fetches beads across all rigs via
-// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
-// query parameters. The CachedRead.AgeSeconds field carries the supervisor
-// CachingStore age from the X-GC-Cache-Age-S response header so callers can
-// surface _cache_age_s on --json output and a staleness banner on human
-// output.
-func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
-	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
-	}
+// maxBeadDrainPages hard-bounds the cursor-drain loop. The seenCursors guard
+// already aborts on a repeated cursor (immediate A,A or a longer A,B,A,B cycle),
+// but a server returning infinitely many DISTINCT, strictly-advancing cursors
+// with empty or all-duplicate pages is caught by neither that guard (cursors
+// never repeat) nor opts.Limit (dedup stops `all` from growing, so a positive
+// Limit is never reached). This cap fails loudly instead of spinning. At
+// maxPaginationLimit (1000) beads/page it admits 100M distinct beads — orders of
+// magnitude past any real city — so a legitimate drain never trips it.
+const maxBeadDrainPages = 100_000
+
+// listBeadsParams maps the caller's ListBeadsOpts filters onto the generated
+// query-parameter struct. Split out of ListBeads so the branch-heavy filter
+// mapping is a small, independently testable unit and does not inflate the
+// pagination loop's complexity.
+func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsParams {
 	params := &genclient.GetV0CityByCityNameBeadsParams{}
 	if opts.Status != "" {
 		params.Status = &opts.Status
@@ -1025,11 +1030,39 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 		t := true
 		params.All = &t
 	}
-	// Follow next_cursor to drain every page. Without this the server's page
-	// default (50) silently truncated the result, so an offline `gc beads list`
-	// in a >50-bead city showed only the first page while the direct-bd lane
-	// returned everything. AgeSeconds comes from the first page.
-	//
+	return params
+}
+
+// ListBeads fetches beads across all rigs via
+// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
+// query parameters. The CachedRead.AgeSeconds field carries the supervisor
+// CachingStore age from the X-GC-Cache-Age-S response header so callers can
+// surface _cache_age_s on --json output and a staleness banner on human
+// output.
+func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return c.drainBeadPages(listBeadsParams(opts), opts.Limit, maxBeadDrainPages)
+}
+
+// drainBeadPages follows next_cursor from the beads-list endpoint until the
+// server reports no further pages, or (when limit > 0) until limit beads have
+// been collected. Without this the server's page default (50) silently
+// truncated the result, so an offline `gc beads list` in a >50-bead city showed
+// only the first page while the direct-bd lane returned everything. Extracted
+// from ListBeads so the pagination invariants — non-nil empty slice, cross-page
+// ID dedup, and the cursor-repeat + hard-page bounds — live behind one focused,
+// separately tested seam.
+//
+// Cost: with all=true the server runs bounded mode where every page after the
+// first is a SEEKED page that disables the store's native LIMIT and re-hydrates
+// O(H) matching history (server comment, gascity#3253), and the all=true
+// response cache is keyed on cursor, so each page is a distinct cold rebuild. A
+// cold `--all` drain is therefore ≈O(H²/pageLimit) server work — much costlier
+// than the direct-bd single O(H) pass it matches. Correctness is unaffected;
+// prefer filters over `--all` on very large cities.
+func (c *Client) drainBeadPages(params *genclient.GetV0CityByCityNameBeadsParams, limit, maxPages int) (CachedRead[[]beads.Bead], error) {
 	// Initialize non-nil: an empty city (or an all-filtered-out result) must
 	// serialize as `[]`, not `null`. A nil []beads.Bead marshals to JSON null,
 	// which breaks `--json` consumers (`jq '.beads[]'`) and diverges from the
@@ -1041,17 +1074,21 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	// page boundary. Dedupe by ID so JSON/table output never carries a duplicate
 	// (a closed/deleted bead can still be skipped — inherent to offset paging
 	// without a snapshot token; the drain is still strictly better than the old
-	// page-1 truncation).
+	// page-1 truncation). AgeSeconds comes from the first page.
 	seen := make(map[string]bool)
 	// seenCursors records every next_cursor already requested. Cursors must
 	// strictly advance, so any repeat — an immediate A,A or a longer A,B,A,B
-	// cycle — is a buggy or hostile server the drain must not loop on. Tracking
-	// the full set (not just the previous cursor) closes the multi-cursor cycle.
+	// cycle — is a buggy or hostile server; abort instead of looping. This
+	// catches repeated cursors only; maxBeadDrainPages backstops a distinct-
+	// cursor flood.
 	seenCursors := make(map[string]bool)
 	for page := 0; ; page++ {
+		if page >= maxPages {
+			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination exceeded %d pages; aborting", maxPages)
+		}
 		pageLimit := maxPaginationLimit
-		if opts.Limit > 0 {
-			remaining := opts.Limit - len(all)
+		if limit > 0 {
+			remaining := limit - len(all)
 			if remaining <= 0 {
 				break
 			}
@@ -1090,9 +1127,6 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 		if next == "" {
 			break
 		}
-		// Cursors are strictly-increasing encoded offsets; any cursor seen before
-		// (an immediate repeat or a multi-cursor cycle) means a server that would
-		// loop forever. Fail loudly instead of hanging.
 		if seenCursors[next] {
 			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor repeated (%q); aborting", next)
 		}
