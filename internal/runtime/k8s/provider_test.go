@@ -349,6 +349,34 @@ func TestSendKeys(t *testing.T) {
 	}
 }
 
+// TestNudgePropagatesTransportError verifies that a transport failure (no
+// running pod for the session) surfaces as a non-nil error instead of being
+// swallowed — Nudge is not best-effort at the delivery layer, callers up
+// through worker.RuntimeHandle.Nudge and `gc session nudge` rely on this
+// error to report failed delivery (#4389).
+func TestNudgePropagatesTransportError(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	// No pod registered for this session name, so findRunningPod fails.
+	err := p.Nudge("gc-missing-agent", runtime.TextContent("hello world"))
+	if err == nil {
+		t.Fatal("Nudge: expected error for missing pod, got nil")
+	}
+}
+
+// TestSendKeysPropagatesTransportError mirrors TestNudgePropagatesTransportError
+// for SendKeys (#4389).
+func TestSendKeysPropagatesTransportError(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	err := p.SendKeys("gc-missing-agent", "Down", "Enter")
+	if err == nil {
+		t.Fatal("SendKeys: expected error for missing pod, got nil")
+	}
+}
+
 func TestInterrupt(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)

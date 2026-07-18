@@ -533,14 +533,12 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // Uses -l (literal mode) so tmux key names in the message text are not
 // interpreted as keystrokes. Content blocks are flattened to text.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	_ = p.carrier().Nudge(context.Background(), name, content) // best-effort
-	return nil
+	return p.carrier().Nudge(context.Background(), name, content)
 }
 
 // SendKeys sends bare keystrokes to the tmux session.
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	_ = p.carrier().SendKeys(context.Background(), name, keys...) // best-effort
-	return nil
+	return p.carrier().SendKeys(context.Background(), name, keys...)
 }
 
 // RunLive re-applies session_live commands. Not yet supported for K8s.
