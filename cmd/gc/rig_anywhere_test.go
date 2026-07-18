@@ -1930,6 +1930,37 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		assertSameTestPath(t, ctx.CityPath, targetCity)
 	})
 
+	// Regression: a rig directory that carries a leftover ".gc/" runtime
+	// artifact but no city.toml of its own (the exact shape
+	// resolveContextFromDir's step-7 comment already warns about for a
+	// different code path) must still resolve through its registered rig
+	// binding, not get misread as a city in its own right by the #4364
+	// city-first check. The city-first branch only accepts a target that
+	// has a real city.toml (citylayout.HasCityConfig) -- it deliberately
+	// does not fall back to HasRuntimeRoot the way validateCityPath's other
+	// callers do, so a bare ".gc/" rig dir falls through to rig resolution
+	// exactly as it did before #4364.
+	t.Run("path_argument_rig_dir_with_leftover_gc_runtime_root_resolves_via_rig_binding", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		goodCity := setupCity(t, "leftover-gc-good")
+		rigDir := filepath.Join(t.TempDir(), "leftover-gc-rig")
+		if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		registerRigBindingForResolution(t, gcHome, goodCity, "leftover-gc-good", "leftover-gc-rig", rigDir)
+
+		ctx, err := resolveContextFromPath(rigDir)
+		if err != nil {
+			t.Fatalf("resolveContextFromPath error: %v (want success via the registered rig binding)", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, goodCity)
+		if ctx.RigName != "leftover-gc-rig" {
+			t.Errorf("RigName = %q, want %q (rig dir must not be misread as its own city)", ctx.RigName, "leftover-gc-rig")
+		}
+	})
+
 	// Regression: gc stop (and other commands that scan registered rig
 	// bindings) must not abort when a sibling city's directory has been
 	// deleted out from under the registry. Resolution still succeeds on

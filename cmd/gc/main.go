@@ -744,10 +744,19 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	// must not abort resolution of a perfectly healthy explicit target
 	// (#4364) -- this mirrors resolveCityNameContext's f.localIsCity-first
 	// ordering for named refs.
-	if cityPath, err := validateCityPath(abs); err == nil {
+	//
+	// Deliberately narrower than validateCityPath: only a real city.toml
+	// qualifies here, not validateCityPath's HasRuntimeRoot fallback. A rig
+	// directory can carry a leftover ".gc/" runtime artifact with no
+	// city.toml of its own (the same shape resolveContextFromDir's step-7
+	// comment already guards against for a different code path); accepting
+	// that shape here would misread the rig dir as its own city and
+	// short-circuit before rig resolution ever runs, silently losing the
+	// real city+rig binding.
+	if citylayout.HasCityConfig(abs) {
 		return resolvedContext{
-			CityPath: cityPath,
-			RigName:  rigFromCwdDir(cityPath, abs),
+			CityPath: abs,
+			RigName:  rigFromCwdDir(abs, abs),
 		}, nil
 	}
 	ctx, ok, err := resolveRigPathToContext(abs)
