@@ -1,4 +1,266 @@
-# Gas City Testing Philosophy
+# Gas City Testing Policy
+
+This file is the canonical, normative source for how Gas City tests are
+designed, placed, reviewed, and timed. If an older plan, audit, or contributor
+document conflicts with this policy, this file wins. Existing exceptions are
+debt, not precedent. In this document, an **owner** is a tracking bead with a
+current assignee. An approved waiver must also name its reason, replacement
+proof, and expiry.
+
+### Policy versus enforcement today
+
+The rules below are normative even where automation is still being built. Do
+not describe a target as an existing gate.
+
+| Policy area | Mechanical status today |
+|---|---|
+| Sleep/process/listener/env/CWD growth | Checked by the source-resource ledger below |
+| Runtime constructor and `runtime.Fake` conformance binding | Checked by the runtime provider ledger below; several explicit waivers remain |
+| Other provider conformance | Shared suites exist, but exact production-constructor coverage is still a manual audit with known gaps |
+| Sub-five-minute PR feedback and timing ratchets | Target; current Go timing artifacts measure test execution, not workflow queue/bootstrap/graph time (`ga-80po0c.4`) |
+| Large/E2E ownership and cadence | Target; the executable manifest is owned by `ga-80po0c.6` |
+| First-attempt flake and quarantine policy | Target; required Playwright retry and legacy unledgered skips remain noncompliant debt under `ga-80po0c` |
+
+## The outcome: protected PR feedback in under five minutes
+
+The developer-visible service-level objective is p95 **under five minutes**
+from GitHub Actions PR-workflow creation until the required automated `CI`
+summary reaches a terminal conclusion. Compare the latest 20 non-superseded
+full-union runs on the same runner-policy cohort; include failed and timed-out
+attempts, and exclude only obsolete-SHA concurrency cancellations. Queueing is
+part of the developer-visible metric and is also reported separately. The
+execution sub-budget, from the first required job entering `in_progress` until
+`CI / required` completes, is p95 at most 4m30s. Current telemetry does not yet
+enforce this SLO; `ga-80po0c.4` owns that gap.
+
+The budget changes where a proof runs, never whether an important risk is
+proved:
+
+- Required PR lanes should contain fast, deterministic proofs plus the
+  relevant real boundaries. Current integration routing is coarse and the
+  dashboard job is unconditional; treat that as optimization debt, not the
+  desired endpoint.
+- Broader real-provider and full-composition proofs run on `main` when they
+  cannot fit the PR budget.
+- Credentialed, live-inference, cloud, and soak journeys belong in scheduled
+  or explicit profile lanes. The full live-inference profile matrix is
+  currently local-only; do not claim nightly coverage for it.
+
+A slow PR test may move to a later lane only after lower layers own its branch
+and error-detail matrix. The later lane must retain any unique real-composition
+risk. Moving a test without that ownership map is deleting quality, not
+improving feedback.
+
+## The authoring rule: one risk, one smallest owning proof
+
+Start with a single sentence describing the regression the test must catch.
+Then put that assertion at the smallest layer that can fail for the intended
+reason. A higher layer may prove wiring across a boundary, but it must not
+repeat the lower layer's branch matrix.
+
+Classify the observable promise first:
+
+1. **Behavior promised by a provider interface?** Add the case once to its
+   shared conformance suite and run that suite against every production
+   implementation with distinct behavior and every reusable fast substitute.
+2. **Implementation-only decision or domain transition?** Write a unit test
+   next to the code.
+3. **User-visible CLI parsing, output, or exit status?** Use testscript with
+   fast providers.
+4. **Ordering or argument plumbing between components?** Write one focused
+   coordination test with recording collaborators.
+5. **Real process, protocol, filesystem, database, browser, or provider
+   composition?** Keep one integration or end-to-end proof for that boundary.
+6. **Documentation-to-code agreement?** Put the invariant in `test/docsync`.
+
+The question is not “where can this test be made to pass?” It is “which layer
+uniquely owns this risk?” Search for an existing owner before adding a test. If
+one exists, strengthen or parameterize it instead of creating another journey.
+Conformance is a reusable testing pattern rather than a sixth execution tier:
+one contract suite is intentionally executed against multiple implementations.
+
+### RED, GREEN, refactor, measure
+
+Every behavior change and bug fix follows this loop:
+
+1. **RED:** add the smallest owning test and observe it fail for the intended
+   reason. For a bug, reproduce the reported failure before changing code.
+2. **GREEN:** make the narrowest production change that satisfies the test.
+3. **Refactor:** improve names and boundaries, remove duplicate assertions,
+   and replace expensive collaborators with proved substitutes.
+   A behavior-neutral migration records a PR-description table from every
+   retired assertion to its new owner and retained real-boundary proof. Before
+   commit, delegate independent reviews of semantic parity, speed/resource
+   policy, and repository accuracy/enforceability.
+4. **Measure:** repeat the focused test and run the affected shard. Record
+   before/after wall time when adding, moving, or materially changing tests.
+5. **Verify the boundary:** run the focused owner plus the relevant
+   conformance, coordination, or integration owner.
+
+Never write the large end-to-end test first merely because the production code
+has no seam. Refactor the code so the policy can be exercised directly, then
+retain the smallest real-boundary proof that demonstrates the wiring.
+
+## Design production code for fast proofs
+
+Core logic receives dependencies; outer constructors choose production
+implementations. Prefer an existing provider port. For one isolated side
+effect, inject a function value. Introduce a new interface only when it is a
+stable domain boundary **and** has at least two real implementations,
+consistent with Gas City's no-premature-abstraction rule.
+
+| Source of nondeterminism | Fast seam | Keep real coverage for |
+|---|---|---|
+| Bead or domain persistence | `beads.Store`, usually `beads.MemStore` in consumer tests | Store conformance and provider lifecycle |
+| Wall-time/deadline decisions | Injected clock, including `clock.Fake` | The real-clock adapter, not every consumer |
+| Timers, sleeps, scheduling, backoff | Injected timer/sleeper/scheduler or `testing/synctest` | The timer adapter, not every consumer |
+| Asynchronous completion | Channel, callback, event watcher, or notifier | One public protocol/event-stream composition |
+| Subprocess execution | Narrow executor function/interface with scripted results | Argument-to-real-binary compatibility |
+| Generated IDs or randomness | Injected generator with deterministic values | Format/entropy adapter contract |
+| Filesystem operations | `fsys.FS`, normally `fsys.Fake` for consumer logic | `fsys.OSFS` conformance and OS-specific semantics |
+
+Environment variables, current working directory, global clocks, package-level
+mutable state, and executable discovery belong at composition edges. Unit tests
+must not need them to steer domain behavior. Use `t.TempDir()` when the real
+filesystem is itself relevant; otherwise prefer `fsys.Fake`.
+
+## Choose meaningful failure edges, not Cartesian products
+
+Test each distinct obligation at its owner. For a typical operation, consider
+only the applicable boundaries:
+
+- invalid input or an absent required value;
+- collaborator unavailable before any side effect;
+- partial success requiring rollback, idempotency, or recovery;
+- cancellation or deadline propagation;
+- a concurrency conflict or lost-update boundary;
+- serialization or protocol incompatibility;
+- restart/reconnect behavior at a real provider lifecycle boundary.
+
+Equivalence classes beat exhaustive combinations. If five commands use the
+same store port, test the shared store failures in conformance, each command's
+distinct response in a unit test, and one command-to-real-store composition.
+Do not multiply every command by every provider by every error. Add another
+combination only when it represents a different contract. An escaped
+regression must first populate the missing equivalence class at the smallest
+owner; retain its high-level reproduction only when the defect uniquely
+depends on that composition.
+
+## Asynchronous tests wait for facts, not elapsed time
+
+New or modified tests must not use `time.Sleep` to wait for work to “probably”
+finish, and must not add open-coded polling loops. Instead:
+
+- expose a completion/error notification and select on it with a context;
+- capture the event cursor and subscribe before triggering work, then correlate
+  terminal success or failure by request/resource ID, close the subscription,
+  and reread durable state;
+- use a fake clock or `testing/synctest` for timers, retries, and backoff;
+- use a barrier/channel to prove a goroutine reached a state before releasing
+  it; and
+- assert the terminal state immediately after the notification.
+
+Polling is allowed only at a true black-box boundary that exposes no completion
+signal and where adding one would change the public contract. Such polling must
+use a shared helper with a context-aware ticker or bounded backoff, fail with
+the last observed state, and have one named boundary owner. Busy loops and a
+fixed sleep before the helper are forbidden. The deadline rule below supplies
+safety timeouts; those deadlines must not determine the normal test duration.
+
+## Test doubles and conformance are one contract
+
+A fast substitute is trustworthy only when it is held to the same observable
+contract as production. When a provider method or invariant changes:
+
+1. change the shared conformance suite first;
+2. run it against every behaviorally distinct production implementation or
+   composition for that port;
+3. run it against every reusable fast substitute; and
+4. keep implementation-specific tests only for behavior outside the shared
+   contract.
+
+Thin aliases that add no state, transformation, or behavior may use a focused
+exact-constructor wiring proof instead of repeating the full suite. The checked
+runtime ledger remains authoritative for runtime compositions.
+
+Skips do not count as conformance. A temporary incompatibility must be recorded
+as an explicit waiver with a tracking-bead owner, reason, replacement proof,
+and expiry. Constructor wrappers and provider compositions need coverage for the
+actual production path; proving a nearby raw implementation is not
+enough.
+
+Fakes need only model observable contract behavior used by consumers. They do
+not simulate implementation internals. Add recording only when call order or
+arguments are themselves the contract; a stateful fake is not automatically a
+spy.
+
+## Keep the critical end-to-end portfolio deliberately small
+
+An end-to-end test is admitted only when all of these are true:
+
+- it protects a high-value user journey or high-blast-radius recovery path;
+- the risk exists only when multiple real boundaries are composed;
+- lower layers already own the branch and error-detail matrix;
+- its assertions use stable public outcomes rather than internal timing;
+- it has hermetic setup, targeted cleanup, actionable diagnostics, and a named
+  owner; and
+- its lane and measured duration fit the cadence above.
+
+Each major effort must point to an existing critical journey or add the one
+missing composition proof. It does not receive a new E2E for every acceptance
+criterion. Before admitting an E2E, list the lower-layer owners it relies on
+and the unique cross-boundary failure it catches. When two journeys catch the
+same regression, keep the clearer and faster one.
+
+Record the journey, unique risk, lower-layer owners, path triggers, lane,
+budget, diagnostics, and owner in the checked E2E/provider manifest owned by
+`ga-80po0c.6`. Until that manifest lands, put the same fields in the PR
+description. On-demand coverage does not count as a release proof without a
+freshness gate for the exact release SHA.
+
+## Flakes are defects
+
+A deterministic product-test failure may not be retried into green on the same
+tested SHA. Repetition is useful for diagnosis, but a required gate must retain
+the worst product-test status across attempts. A pre-test runner/service outage
+may be retried only when classified with attached infrastructure evidence; it
+is reported separately. A code change produces a new SHA and a new result. The
+failure has one tracking-bead owner until fixed.
+
+Quarantine is forbidden until a checked ledger exists. Any future quarantine
+must include a tracking-bead owner, captured failure evidence, nonblocking
+still-failing lane, replacement coverage, and expiry that fails CI;
+quarantined coverage cannot satisfy a required gate. Capability-based local
+skips likewise require an equipped CI execution or an explicit waiver. Do not
+weaken assertions, increase sleeps, or broaden retries to hide an unknown race.
+Remove redundant tests; repair unique tests.
+
+## Timing objectives and resource ratchets
+
+Test performance claims require evidence. For a focused change, run the test
+repeatedly with the result cache disabled (for example, the command below) and
+time the relevant sharded target. This is focused diagnostic evidence, not an
+authoritative p95; the history format requires twenty comparable successful
+samples for an authoritative p95.
+
+```bash
+go test -count=10 -run '^TestName$' ./path
+```
+
+Compare like runner, OS, architecture, CPU count, cache condition, and suite
+variant. A single warm-cache run is diagnostic, not a regression baseline.
+
+No change may knowingly push the protected graph above its SLO. Once trusted
+history and workflow telemetry are authoritative, checked per-profile
+baselines must fail material regressions and lower after sustained
+improvements; increases require an expiring waiver. Until then, include
+before/after observations in the PR and treat the timing tools below as
+shard-balancing evidence rather than enforcement.
+
+The checked source-resource ledgers below are anti-growth ratchets for sleeps,
+processes, listeners, environment mutation, and CWD mutation. Reductions lower
+the checked baseline; new debt requires the same explicit, expiring policy
+change as any other waiver.
 
 ## Checked source-level resource ratchets
 
@@ -170,14 +432,15 @@ all-source audit while staying outside untagged and Small debt.
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
 
-## Three tiers, clear boundaries
+## Five test categories, clear boundaries
 
 ### 1. Unit tests (`*_test.go` next to the code)
 
 Test what the CODE does. Internal behavior, edge cases, precise failure
 injection. These are fast and run everywhere.
 
-- Use `t.TempDir()` for filesystem tests
+- Use `fsys.Fake` for consumer logic; use `t.TempDir()` when real filesystem
+  semantics own the risk
 - Use `require` for preconditions (fail immediately), `assert` for checks
 - Construct exact broken states in Go — corrupt files, concurrent writes,
   duplicate IDs, missing directories
@@ -185,14 +448,13 @@ injection. These are fast and run everywhere.
 - Same package as the code under test (access to unexported functions)
 
 ```go
-func TestBeadStore_CorruptLine(t *testing.T) {
-    dir := t.TempDir()
-    os.WriteFile(filepath.Join(dir, "beads.jsonl"),
-        []byte("{\"id\":\"gc-1\"}\nthis is not json\n"), 0644)
-    store := beads.NewStore(dir)
-    items, err := store.List()
-    require.NoError(t, err)
-    assert.Len(t, items, 1) // skips bad line, doesn't crash
+func TestFileStoreOpenCorruptedJSON(t *testing.T) {
+    f := fsys.NewFake()
+    f.Files["/city/.gc/beads.json"] = []byte("{not json!!!")
+
+    _, err := beads.OpenFileStore(f, "/city/.gc/beads.json")
+    require.Error(t, err)
+    assert.ErrorContains(t, err, "opening file store")
 }
 ```
 
@@ -217,7 +479,7 @@ fast unit-only baseline; the integration contribution comes from the
 shard-specific `coverage.integration-*.txt` profiles and their matching
 Codecov flags.
 
-#### Sharded local runners
+### Cross-category runners, timing, and resource isolation
 
 For broad local runs, prefer the repo's sharded wrappers over raw `go test`
 commands. They use the same buckets as CI, run under a scrubbed environment,
@@ -542,9 +804,9 @@ unconfined even on slice-provisioned hosts.
 
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
-Test what the USER sees. Run the real `gc` binary, assert on stdout/stderr.
-These are the tutorial regression tests — each `.txtar` corresponds to a
-tutorial's shell interactions.
+Test what the USER sees. Exercise the real CLI entrypoint by re-executing the
+package test binary, then assert on stdout/stderr. These are tutorial regression
+tests, not production-binary integration tests.
 
 - Uses `github.com/rogpeppe/go-internal/testscript`
 - Testscript defaults missing backend env vars to local fakes:
@@ -566,7 +828,7 @@ stdout 'City initialized'
 exec gc rig add $WORK/tower-of-hanoi
 stdout 'Adding rig'
 
-exec bd create 'Build a Tower of Hanoi app'
+exec gc bd create 'Build a Tower of Hanoi app'
 stdout 'status: open'
 
 -- $WORK/tower-of-hanoi/.git/HEAD --
@@ -574,7 +836,7 @@ ref: refs/heads/main
 ```
 
 When to use: CLI output format, command success/failure, user-facing error
-messages, tutorial flows end to end.
+messages, and tutorial CLI flows.
 
 **The env var rule:** if you need more than two env vars to set up a failure
 scenario, it's a unit test, not a testscript. In testscript, omitting the
@@ -582,8 +844,11 @@ session/beads env vars now means "use the fake defaults," not "use real tmux."
 
 ### 3. Integration tests (`//go:build integration`)
 
-Test that real pieces fit together. Need real tmux, real filesystem, real
-agent sessions. Run separately — not in CI by default.
+Test that real pieces fit together. These may need real tmux, a real
+filesystem, real agent sessions, or a real server. Integration shards currently
+run behind a coarse Go/shared-path gate; broader REST coverage runs on `main`.
+Use explicit profile commands for credentialed live providers until their
+scheduled matrix is wired.
 
 ```go
 //go:build integration
@@ -593,10 +858,15 @@ func TestRealTmuxSession(t *testing.T) {
 }
 ```
 
-When to use: proving the fakes are honest, smoke testing the real infra,
-testing tmux session lifecycle with real processes.
+When to use: proving real-boundary composition and testing lifecycle behavior
+that exists only with real processes. Shared conformance proves fake parity.
 
-Run with: `go test -tags integration ./test/...`
+For the broad suite, run `make test-integration-shards-parallel`. Raw `go test`
+is for a focused package or test, for example:
+
+```bash
+go test -tags integration -run '^TestHumaBinary$' ./test/integration/
+```
 
 **Supervisor binary smoke test** (`test/integration/huma_binary_test.go`):
 builds `gc`, boots the supervisor against an isolated `GC_HOME`, waits
@@ -625,10 +895,9 @@ The live API contract test has a few load-bearing rules:
   reaching into internal Go state.
 - Treat asynchronous operations as two-step contracts: the HTTP call returns
   quickly with `202 Accepted` and a `request_id`, then a `request.result.*`
-  or `request.failed` event appears. Focused Huma binary tests should use
-  `/v0/events/stream` for the critical async paths; broader coverage may poll
-  event-list endpoints when the thing being tested is the API surface rather
-  than SSE framing.
+  or `request.failed` event appears. Subscribe to `/v0/events/stream` before
+  the mutation and wait for the correlated terminal event. If the event-list
+  API itself is under test, query it once after that notification.
 - Prefer self-provisioned fixtures. The test should create its own city, rig,
   provider/agent/session, beads, mail, formulas, convoys, and order-history
   fixtures where practical, then clean them up through the API.
@@ -697,7 +966,7 @@ fetch → generated client → projection helper → render path.
 It is a **Tier 3** browser tier — it needs a built SPA bundle + Chromium, so it
 is NOT in the Go integration shard set. Run it with `make dashboard-e2e-play`
 (builds the SPA, builds the fakesupervisor with `-tags integration`, installs
-Chromium via `npx playwright install --with-deps chromium`, then runs the specs);
+Chromium via `npx playwright install chromium`, then runs the specs);
 `make dashboard-e2e` runs both layers. In CI it runs as appended steps in the
 existing **`dashboard`** job (`.github/workflows/ci.yml`), which already has Go +
 Node provisioned; a `playwright-report` artifact is uploaded on failure. Add new
@@ -705,6 +974,10 @@ routes/assertions by editing `e2e/render-smoke.spec.ts`; keep
 `e2e/fixtures/expected.ts` aligned **manually** with the exported constants in
 `test/dashport/corpus/corpus.go` (there is no automated parity check — the two
 are kept in sync by convention).
+
+The current CI Playwright configuration retries once. That is legacy,
+noncompliant debt under `ga-80po0c`; do not copy it or treat a retry-pass as
+first-attempt reliability.
 
 #### Live worker inference tests (`//go:build acceptance_c`)
 
@@ -722,8 +995,9 @@ Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`,
 `--model google/gemini-2.5-flash` by default; set
 `GC_WORKER_INFERENCE_OPENCODE_MODEL` to override it and provide
 `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` for auth.
-Nightly CI runs the configured profile matrix with its credentials and uploads
-worker report artifacts.
+The full profile matrix is not wired into nightly CI today. Nightly runs a
+separate focused Ollama Tier C subset; use the commands above for these live
+profiles until scheduled coverage is added.
 
 ### 4. Documentation sync tests (`test/docsync`)
 
@@ -741,10 +1015,7 @@ Run them directly with:
 go test ./test/docsync
 ```
 
-Gas City's own tests for this code live in `gascity_test.go` (adapter
-unit tests) and `test/integration/bdstore_test.go` (conformance).
-
-#### Two flavors of integration tests
+### Additional integration guidance
 
 **Low-level** (`internal/runtime/tmux/tmux_test.go`): test raw tmux
 operations (NewSession, HasSession, KillSession) directly against the
@@ -757,7 +1028,10 @@ run it against real tmux. Validates the tutorial experience: `gc init`,
 **BdStore conformance** (`test/integration/bdstore_test.go`): runs the
 beads conformance suite against `BdStore` backed by a real dolt server.
 Proves the full stack: dolt server → bd CLI → BdStore → beads.Store.
-Requires dolt and bd installed; skips otherwise.
+Its current caller skips before the suite because of the pinned `bd` version,
+so it is a known gap, not a passing production-constructor proof. A local
+capability skip is only convenience; required coverage needs an equipped lane
+or an explicit expiring waiver.
 
 #### Session safety for end-to-end tests
 
@@ -824,7 +1098,7 @@ if !strings.HasPrefix(ops[0], "ensure-ready") {
 
 | Question | Test type |
 |---|---|
-| Does the beads store handle corrupt JSONL? | Conformance |
+| Does `Store.Get` return `ErrNotFound` for a missing ID? | Conformance |
 | Does `gc start` call ensure-ready before init? | Coordination |
 | Does the mail provider deliver to the right inbox? | Conformance |
 | Do all three Effective* methods use the qualified name? | Coordination |
@@ -839,18 +1113,19 @@ correct results.
 ### Conformance testing
 
 Provider interfaces may expose shared conformance suites in
-`*test/conformance.go` packages. Suite availability does not prove that every
-implementation or production constructor executes the suite: each consumer
-must bind its exact constructor without a pre-run skip. The table names the
-shared suites and their current named consumers; the runtime ledger below is
-the constructor-specific source of truth.
+`*test/conformance.go` packages. Suite availability does not prove exact
+production-path coverage. Each behaviorally distinct implementation or
+composition must execute the suite without a pre-run skip; thin aliases may use
+a focused exact-constructor wiring proof. The table names current callers, not
+proof status. The runtime ledger below is the only mechanically checked
+constructor-specific inventory today.
 
-| Interface | Conformance suite | Current named consumers |
+| Interface | Conformance suite | Current suite callers |
 |---|---|---|
-| `beads.Store` | `internal/beads/beadstest/conformance.go` | MemStore, FileStore, BdStore |
+| `beads.Store` | `internal/beads/beadstest/conformance.go` | MemStore, FileStore, exec-backed stores; BdStore caller currently skips; NativeDolt caller uses a test-only storage fixture |
 | `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | See the checked runtime ledger below |
-| `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec |
-| `events.Recorder` | `internal/events/eventstest/conformance.go` | FileRecorder, exec |
+| `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec, Fake |
+| `events.Provider` | `internal/events/eventstest/conformance.go` | FileRecorder, exec, Fake |
 | `fsys.FS` | `internal/fsys/fsystest/conformance.go` | OSFS, Fake |
 
 The `fsys.FS` suite currently proves the portable namespace core: parent and
@@ -951,16 +1226,18 @@ lands, and what remains tracked but non-gating.
 
 ### Provider seam inventory
 
-All five provider seams, their lifecycle dependencies, and coordination
-test coverage. This table is the checklist for new provider implementations.
+Core provider and lifecycle seams, their dependencies, and coordination test
+coverage. This table is a checklist for new provider implementations; the
+shared-suite callers and checked runtime ledger above are the conformance
+source of truth.
 
 | Seam | Implementations | Lifecycle deps | Coordination tested? |
 |---|---|---|---|
 | **Runtime** (`runtime.Provider`) | See checked runtime ledger above | None (stateless start/stop) | Via lifecycle start order test |
-| **Beads** (`beads.Store`) | MemStore, FileStore, BdStore | ensure-ready → init → hooks | `TestLifecycleCoordination_*` |
-| **Mail** (`mail.Provider`) | beadmail, exec | Depends on beads store | No — not a lifecycle seam; conformance sufficient |
-| **Events** (`events.Recorder`) | FileRecorder, exec | None (append-only) | No — stateless append, conformance sufficient |
-| **Dolt** (internal) | dolt.EnsureRunning, dolt.StopCity | ensure → init, stop after agents | Covered by beads lifecycle (exec spy) |
+| **Beads** (`beads.Store`) | See shared-suite callers above; production selection includes NativeDoltStore and BdStore | ensure-ready → init → hooks | `TestLifecycleCoordination_*` |
+| **Mail** (`mail.Provider`) | beadmail, exec, Fake | Depends on beads store | No — not a lifecycle seam; conformance sufficient |
+| **Events** (`events.Provider`) | FileRecorder, exec, Fake | None | No — provider conformance covers record, query, and watch behavior |
+| **Managed beads lifecycle** (`cmd/gc`) | `ensureBeadsProvider`, `shutdownBeadsProvider` | ensure → init, stop after agents | Covered by beads lifecycle (exec spy) |
 
 **Adding a new provider:** When adding a new implementation of any seam:
 1. Run the conformance suite against it (mandatory)
@@ -983,11 +1260,11 @@ test (e.g., testing that a function honours a 100ms deadline).
 
 | Question you're testing | Tier |
 |---|---|
-| Does `bd create` print the right output? | Testscript |
+| Does `gc bd create` print the right output? | Testscript |
 | Does `gc start` fail gracefully without tmux? | Testscript (`GC_SESSION=fail`) |
 | Does `gc rig add` fail for a missing path? | Testscript (real missing path) |
-| Does the beads store skip corrupted JSONL lines? | Unit test |
-| Does claim return ErrAlreadyClaimed on double-claim? | Unit test |
+| Does FileStore reject corrupted JSON? | Unit test |
+| Does FileStore roll back after a save failure? | Unit test |
 | Does concurrent bead creation avoid corruption? | Unit test |
 | Does startup roll back if step 3 of 5 fails? | Unit test |
 | Does a real tmux session start and respond to send-keys? | Integration |
@@ -1002,38 +1279,43 @@ test (e.g., testing that a function honours a 100ms deadline).
 
 ## Test doubles
 
-No mock libraries. No `gomock`. No `mockgen`. Every test double is a
-hand-written concrete type that lives in the same package as the
-interface it implements.
+No mock libraries. No `gomock`. No `mockgen`. Reusable test doubles are
+hand-written concrete types kept beside the port they implement. Small
+consumer-local stubs and function fakes may remain beside their consumer when
+they are not reusable provider implementations.
 
-### The four test doubles
+### Reusable fast substitutes
 
 | Double | Interface | Package | Strategy |
 |---|---|---|---|
 | `runtime.Fake` | `runtime.Provider` | `internal/runtime` | In-memory state + spy + broken mode |
 | `fsys.Fake` | `fsys.FS` | `internal/fsys` | In-memory maps + spy + per-path error injection |
 | `beads.MemStore` | `beads.Store` | `internal/beads` | Real logic, in-memory backing (also used by `FileStore` internally) |
+| `mail.Fake` | `mail.Provider` | `internal/mail` | In-memory message state + broken mode |
+| `events.Fake` | `events.Provider` | `internal/events` | In-memory event log + event-driven watchers + read/watch failure mode |
 
 ### Spy pattern
 
-Every fake records calls as `[]Call` structs. Tests verify both the
-result AND the call sequence:
+Some fakes also record calls as `[]Call` structs. Verify interactions only when
+the arguments or ordering are the behavior under test; otherwise assert the
+resulting state. Use a synchronized snapshot accessor when calls may still be
+concurrent:
 
 ```go
 sp := runtime.NewFake()
-_ = sp.Start(context.Background(), "mayor", runtime.Config{})
-_ = sp.Attach("mayor")
+_ = sp.Start(context.Background(), "worker-a", runtime.Config{})
+_ = sp.Attach("worker-a")
 
 // Verify call sequence recorded by the fake runtime.
 want := []string{"Start", "Attach"}
-for i, c := range sp.Calls {
+for i, c := range sp.SnapshotCalls() {
     if c.Method != want[i] { ... }
 }
 ```
 
 ### Error injection strategies
 
-Three patterns, used where they fit:
+Use the narrowest pattern that expresses the failure boundary:
 
 **Per-path errors** (`fsys.Fake`) — fine-grained, fail specific operations:
 ```go
@@ -1041,29 +1323,35 @@ f := fsys.NewFake()
 f.Errors["/city/rigs"] = fmt.Errorf("disk full")
 ```
 
-**Modal errors** (`runtime.Fake`) — all-or-nothing broken mode:
+**Modal errors** (`runtime.Fake`, `mail.Fake`) — whole-provider
+unavailability. `events.NewFailFake()` fails reads and watches but still records
+events because `Recorder.Record` cannot return an error:
 ```go
-f := runtime.NewFake()
-f.Broken = true // Start/Stop/Attach and related operations return errors
+f := runtime.NewFailFake()
 ```
 
 ### Compile-time interface checks
 
-Every fake has a compile-time assertion in its test file:
+An explicit compile-time assertion is useful for a provider or adapter:
 
 ```go
 var _ Provider = (*Fake)(nil)
 ```
 
+The conformance factory also proves interface assignability. Neither form
+proves behavioral parity by itself; the shared conformance suite does.
+
 ### Fakes live next to the interface
 
-Fakes are exported types in the same package as their interface. This
-makes them importable by cross-package unit tests (e.g., `cmd/gc`
-imports `runtime.NewFake()`).
+Reusable provider fakes are exported types in the same package as their
+interface. This makes them importable by cross-package unit tests (for example,
+`cmd/gc` imports `runtime.NewFake()`). One-off stubs stay local to avoid growing
+a global support API.
 
 ## The do*() function pattern
 
-Every CLI command splits into two functions:
+Many CLI commands use this split when command wiring and testable behavior need
+separate owners:
 
 - **`cmdFoo()`** — wires up real dependencies (reads cwd, loads config,
   calls `newSessionProvider()`), then calls `doFoo()`.
@@ -1072,12 +1360,14 @@ Every CLI command splits into two functions:
 
 Unit tests call `doFoo()` directly with fakes:
 ```go
-sp := runtime.NewFake()
-code := doSessionAttach(sp, "mayor", &stdout, &stderr)
+mp := mail.NewFake()
+_, _ = mp.Send("alice", "worker-a", "Build complete", "Ready for review")
+code := doMailInbox(mp, "worker-a", &stdout, &stderr)
 ```
 
-Testscript tests call `gc foo` which routes through `cmdFoo()` →
-`doFoo()`.
+Testscript tests call `gc foo` through the real command construction path. Do
+not introduce a `do*()` wrapper mechanically when a smaller injected function
+or existing domain API is the clearer seam.
 
 ### When to use each
 
@@ -1099,8 +1389,8 @@ conditionally (socket flags, env vars, flag lists). The test verifies
 the args array, not the subprocess outcome.
 
 **When NOT to use:** When the logic under test is the orchestration
-sequence (which methods are called in what order). Use the `startOps`
-interface pattern instead.
+sequence (which methods are called in what order). Use a narrow coordination
+port or recording collaborator instead.
 
 **Example:** `tmux.executor` — `fakeExecutor` captures the `[]string`
 args passed to each tmux command. Tests verify socket flags, UTF-8
