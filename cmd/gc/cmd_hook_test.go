@@ -337,13 +337,16 @@ func TestHookHasWork(t *testing.T) {
 
 func TestDoHookClaimReturnsExistingAssignment(t *testing.T) {
 	runner := func(string, string) (string, error) {
-		return `[{"id":"hw-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, nil
+		return `[{"id":"hw-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]`, nil
 	}
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
 			t.Fatal("claim must not run for existing assigned in-progress work")
 			return beads.Bead{}, false, nil
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
 		},
 	}
 	opts := hookClaimOptions{
@@ -364,6 +367,9 @@ func TestDoHookClaimReturnsExistingAssignment(t *testing.T) {
 	}
 	if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != "hw-1" || result.Assignee != "worker-1" {
 		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	if result.RootBeadID != "root-1" || result.ContinuationGroup != "body" {
+		t.Fatalf("claim context = {%q %q}, want {root-1 body}", result.RootBeadID, result.ContinuationGroup)
 	}
 }
 
@@ -400,6 +406,9 @@ func TestDoHookClaimClaimsRoutedUnassignedWork(t *testing.T) {
 	}
 	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "hw-2" || result.Assignee != "worker-1" {
 		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	if strings.Contains(stdout.String(), "root_bead_id") || strings.Contains(stdout.String(), "continuation_group") {
+		t.Fatalf("claim result includes empty context fields: %s", stdout.String())
 	}
 }
 
@@ -932,6 +941,10 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	if got := strings.Join(result.ContinuationAssigned, ","); got != "hw-4" {
 		t.Fatalf("continuation assigned in result = %q, want hw-4", got)
 	}
+	if result.RootBeadID != "root-1" || result.ContinuationGroup != "body" {
+		t.Fatalf("claim context = {%q %q}, want {root-1 body}", result.RootBeadID, result.ContinuationGroup)
+	}
+	validateJSONAgainstResultSchema(t, []string{"hook"}, stdout.Bytes())
 }
 
 func TestHookCommandError(t *testing.T) {
@@ -1357,9 +1370,13 @@ esac
 	if result.BeadID != "hw-claim" || result.Assignee != "worker-1" || result.Reason != "claimed" {
 		t.Fatalf("unexpected claim result: %+v", result)
 	}
+	if result.RootBeadID != "root-1" || result.ContinuationGroup != "body" {
+		t.Fatalf("claim context = {%q %q}, want {root-1 body}", result.RootBeadID, result.ContinuationGroup)
+	}
 	if got := strings.Join(result.ContinuationAssigned, ","); got != "hw-next" {
 		t.Fatalf("continuation assigned = %q, want hw-next", got)
 	}
+	validateJSONAgainstResultSchema(t, []string{"hook"}, stdout.Bytes())
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", logPath, err)

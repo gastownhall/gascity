@@ -44,6 +44,12 @@
     "route": {
       "type": "string"
     },
+    "root_bead_id": {
+      "type": "string"
+    },
+    "continuation_group": {
+      "type": "string"
+    },
     "continuation_assigned": {
       "type": "array",
       "items": {

@@ -73,6 +73,8 @@ type hookClaimJSONResult struct {
 	BeadID               string   `json:"bead_id,omitempty"`
 	Assignee             string   `json:"assignee,omitempty"`
 	Route                string   `json:"route,omitempty"`
+	RootBeadID           string   `json:"root_bead_id,omitempty"`
+	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
@@ -311,6 +313,8 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 }
 
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
+	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	stampHookWorkBranch(bead, opts, ops, dir, stderr)
 	recordHookClaimSessionPointers(bead, opts, ops, dir, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
