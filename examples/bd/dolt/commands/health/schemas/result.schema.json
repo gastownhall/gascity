@@ -9,12 +9,15 @@
     },
     "server": {
       "type": "object",
-      "required": ["running", "reachable", "pid", "port", "latency_ms"],
+      "required": ["running", "reachable", "external", "pid", "port", "latency_ms"],
       "properties": {
         "running": {
           "type": "boolean"
         },
         "reachable": {
+          "type": "boolean"
+        },
+        "external": {
           "type": "boolean"
         },
         "pid": {

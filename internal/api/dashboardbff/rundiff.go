@@ -135,9 +135,18 @@ func (p *Plane) handleRunDiff(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The exec methods return a validation error when the cwd fails the
 		// shape/allowlist gate; surface that as a 400 rather than a 500 so the
-		// browser sees a client error for a bad execution path.
+		// browser sees a client error for a bad execution path. On a read-only
+		// deployment (the public floor runs with a minimal allowlist by
+		// design) the same rejection is expected for any run executing outside
+		// the served city, so tell the visitor the feature is unavailable here
+		// instead of implying the run is broken. The panel renders this
+		// message verbatim.
 		var ee *execError
 		if errors.As(err, &ee) {
+			if p.deps.ReadOnly && ee.kind == execErrValidation {
+				writeError(w, http.StatusForbidden, "Run diff isn't available on this read-only dashboard.")
+				return
+			}
 			writeError(w, http.StatusBadRequest, "invalid execution path")
 			return
 		}

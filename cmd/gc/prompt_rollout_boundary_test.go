@@ -80,6 +80,7 @@ var pinnedRenderFiles = []string{"prompt.go", "template_resolve.go", "cmd_prime.
 // config-side rename fails loudly instead of silently shrinking the guard.
 var flagValuePins = map[string]string{
 	"beads.conditional_writes": "NormalizedConditionalWrites",
+	"beads.guarded_release":    "NormalizedGuardedRelease",
 	"daemon.formula_v2":        "FormulaV2Enabled",
 }
 

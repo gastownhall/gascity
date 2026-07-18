@@ -202,6 +202,48 @@ func TestControllerStateRolloutDrift(t *testing.T) {
 	}
 }
 
+// TestNoteRolloutDriftIsolatedFromSiblingGate is the regression for the
+// cross-gate contamination a shared rollout.Resolve introduces: an out-of-enum
+// value on a SIBLING gate (beads.guarded_release) fails the whole-config
+// resolve, which noteRolloutDrift must NOT misattribute to conditional_writes.
+// Before the CW-scoped resolve, a valid conditional_writes reload alongside a
+// guarded_release typo falsely reported conditional_writes as invalid.
+func TestNoteRolloutDriftIsolatedFromSiblingGate(t *testing.T) {
+	var logs []string
+	cs := &controllerState{
+		rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Require)),
+		rolloutLogf:  func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+
+	// Valid conditional_writes that DRIFTS (require→auto) with an invalid sibling
+	// guarded_release: the notice must describe the conditional_writes DRIFT, not
+	// claim conditional_writes is invalid.
+	cs.noteRolloutDrift(&config.City{Beads: config.BeadsConfig{
+		ConditionalWrites: "auto",
+		GuardedRelease:    "requre",
+	}})
+	n := cs.RolloutDriftNotices()
+	if len(n) != 1 || n[0].FlagKey != rollout.KeyBeadsConditionalWrites {
+		t.Fatalf("want one conditional_writes notice, got %+v", n)
+	}
+	if strings.Contains(n[0].Message, "invalid") {
+		t.Errorf("sibling guarded_release typo misattributed as conditional_writes invalid: %q", n[0].Message)
+	}
+	if n[0].ConfigValue != "auto" || !strings.Contains(n[0].Message, "resolves to") {
+		t.Errorf("want a conditional_writes drift notice for auto, got %+v", n[0])
+	}
+
+	// Valid conditional_writes that is IN SYNC with the boot latch, again with an
+	// invalid sibling: drift must clear entirely — no spurious notice at all.
+	cs.noteRolloutDrift(&config.City{Beads: config.BeadsConfig{
+		ConditionalWrites: "require",
+		GuardedRelease:    "requre",
+	}})
+	if got := cs.RolloutDriftNotices(); got != nil {
+		t.Errorf("in-sync conditional_writes with an invalid sibling should clear drift, got %+v", got)
+	}
+}
+
 // TestControllerStateRolloutDriftThroughReloadSeams proves the PRODUCTION reload
 // seams — update() and updateConfigAndProviderOnly() — actually invoke
 // noteRolloutDrift, and that a reload never re-latches the boot gate. Deleting

@@ -65,6 +65,7 @@ jobs:
       worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
+      credential_provider: ${{ steps.filter.outputs.credential_provider == 'true' || steps.filter.outputs.shared == 'true' }}
       integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
       openclaw_bridge: ${{ steps.filter.outputs.openclaw_bridge }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
@@ -131,6 +132,12 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/**'
               - 'examples/gastown/**'
+            credential_provider:
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/credentialprovider/**'
+              - 'internal/testenv/**'
+              - 'internal/testutil/**'
             integration:
               - 'go.mod'
               - 'go.sum'
@@ -558,6 +565,23 @@ jobs:
           path: ${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json
           if-no-files-found: warn
           retention-days: 7
+
+  credential-provider-windows:
+    name: Credential provider / Windows process tree
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.credential_provider == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Test credential-provider unit contract
+        run: go test -count=1 ./internal/credentialprovider
+      - name: Test Windows Job Object descendant cleanup
+        run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}
@@ -1356,6 +1380,7 @@ jobs:
       - ci-preflight
       - ci-integration
       - cmd-gc-process
+      - credential-provider-windows
       - worker-core-summary
       - worker-core-phase2-summary
       - pack-gate
@@ -1377,6 +1402,7 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           allow_skipped = {
               "cmd-gc-process",
+              "credential-provider-windows",
               "pack-gate",
               "docker-session",
               "k8s-session",
