@@ -1128,7 +1128,7 @@ func TestDoRuntimeRequestRestartNamedOnDemandRequestsRestart(t *testing.T) {
 	defer cancel()
 
 	var persistCalled bool
-	persistRestart := func() error {
+	persistRestart := func() error { //nolint:unparam // test double must satisfy doRuntimeRequestRestart's func() error param; the spy never fails.
 		persistCalled = true
 		return nil
 	}
