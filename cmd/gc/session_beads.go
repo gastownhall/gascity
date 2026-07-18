@@ -444,6 +444,22 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch[session.PrimedAtMetadataKey] = ""
 			batch[session.PrimingAttemptedAtMetadataKey] = ""
 			batch[session.PromptHashMetadataKey] = ""
+			// A fresh spawn must clear the same advisory wake blockers and
+			// crash-accrual counters the canonical wake patches reset -- a
+			// stale hold/quarantine, sleep_intent, or wake/churn counter would
+			// otherwise keep gating wake or re-quarantine the reopened runtime
+			// on its first failure. Compose ClearWakeBlockersPatch so this path
+			// tracks that full set (including sleep_intent, wake_attempts, and
+			// churn_count) by construction instead of hand-listing a subset
+			// that drifts from the canonical contract.
+			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"])
+			delete(blockers, "state") // the reopen owns the target state set above.
+			for k, v := range blockers {
+				batch[k] = v
+			}
+			// ClearWakeBlockersPatch only drops sleep_reason for its recognized
+			// reasons; a fresh spawn always clears it, matching RequestWakePatch.
+			batch["sleep_reason"] = ""
 		} else {
 			batch["pending_create_started_at"] = ""
 		}

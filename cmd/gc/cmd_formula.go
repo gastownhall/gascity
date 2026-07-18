@@ -670,7 +670,7 @@ conflicting live workflow from the same source is an error.`,
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
@@ -885,8 +885,18 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 	return rootKey
 }
 
-func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, cliGraphrouteDeps(cityPath))
+func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	// cook does not route the workflow root to an agent, but rig-scoped step
+	// targets still need the invocation's rig context to resolve — the same
+	// context sling derives from its entry agent's qualified name. A rig-scoped
+	// rootStoreRef already supplies that context through the store-scope
+	// fallback in DecorateGraphWorkflowRecipeWithDefaultBinding (#4175); thread
+	// the already-resolved formulaScope.rig in explicitly as well so the cook
+	// call site states the rig context directly instead of relying solely on the
+	// store-ref encoding (empty QualifiedName so the root stays unrouted;
+	// MetadataOnly mirrors the no-session default binding).
+	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
@@ -1036,6 +1046,9 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 type formulaScope struct {
 	storeRoot   string
 	searchPaths []string
+	// rig is the resolved rig name ("" for city scope). Rig-scoped formula
+	// steps need this context to resolve bare rig-scoped targets during cook.
+	rig string
 }
 
 // resolveFormulaScope determines the rig (if any) under which a formula
@@ -1074,6 +1087,7 @@ func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaS
 	return formulaScope{
 		storeRoot:   resolveStoreScopeRoot(cityPath, rig.Path),
 		searchPaths: cfg.FormulaLayers.SearchPaths(rig.Name),
+		rig:         rig.Name,
 	}
 }
 

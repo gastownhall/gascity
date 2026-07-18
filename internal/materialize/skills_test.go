@@ -1,6 +1,8 @@
 package materialize
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -243,6 +245,65 @@ func TestLoadCityCatalogBootstrapMerge(t *testing.T) {
 	// City root + every bootstrap pack root that contributed.
 	if len(cat.OwnedRoots) < 3 {
 		t.Fatalf("want >=3 owned roots (city + 2 bootstrap), got %v", cat.OwnedRoots)
+	}
+}
+
+// TestLoadCityCatalogLogsDebugLineOnShadow is a regression guard for #4131:
+// engdocs/proposals/skill-materialization.md promises "the materializer
+// logs a debug line noting the shadowed source" on a shared-catalog name
+// collision, but addEntry's collision branch never called any logger.
+// This pins the promised signal without changing the winner/loser
+// precedence itself.
+func TestLoadCityCatalogLogsDebugLineOnShadow(t *testing.T) {
+	overrideBootstrapPacks(t, "core", "registry")
+	gcHome := setupBootstrapHome(t, map[string][]string{
+		"core":     {"alpha", "shared"},
+		"registry": {"reg-only"},
+	})
+	t.Setenv("GC_HOME", gcHome)
+
+	pack := t.TempDir()
+	cityDir := filepath.Join(pack, "skills")
+	mkSkill(t, cityDir, "city-only")
+	mkSkill(t, cityDir, "shared") // collides with core/shared — city must win
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cat, err := LoadCityCatalog(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Shadowed) != 1 {
+		t.Fatalf("want 1 shadowed entry (setup precondition), got %+v", cat.Shadowed)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "level=DEBUG") {
+		t.Fatalf("want a DEBUG-level log line on shadow, got: %q", logged)
+	}
+	if !strings.Contains(logged, "name=shared") {
+		t.Fatalf("want the shadowed name in the log line, got: %q", logged)
+	}
+	if !strings.Contains(logged, "winner=city") {
+		t.Fatalf("want the winning origin in the log line, got: %q", logged)
+	}
+	if !strings.Contains(logged, "loser=core") {
+		t.Fatalf("want the shadowed origin in the log line, got: %q", logged)
+	}
+
+	// A non-colliding load must stay silent: the debug line is diagnostic
+	// signal for an actual shadow, not routine catalog-load noise.
+	buf.Reset()
+	quietDir := filepath.Join(t.TempDir(), "skills")
+	mkSkill(t, quietDir, "solo")
+	if _, err := LoadCityCatalog(quietDir); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("want no log output for a collision-free load, got: %q", buf.String())
 	}
 }
 

@@ -29,6 +29,11 @@ type eventsAPIScope struct {
 	explicitAPI        bool
 	localOnly          bool
 	localSupervisorAPI bool
+	// gen, when non-nil, is a pre-built AUTHENTICATED genclient for a remote
+	// --context/--city-url city (bearer + TLS + 401 re-mint, backed by the
+	// no-timeout stream client). client() returns it instead of the bare local
+	// genclient so `gc events --context` streams from a hosted city.
+	gen *genclient.ClientWithResponses
 }
 
 type eventsAPIError struct {
@@ -130,6 +135,9 @@ var eventsControllerAliveHook = controllerAlive
 func (s eventsAPIScope) isSupervisor() bool { return s.cityName == "" }
 
 func (s eventsAPIScope) client() (*genclient.ClientWithResponses, error) {
+	if s.gen != nil {
+		return s.gen, nil // authenticated remote (--context/--city-url) client
+	}
 	httpClient := &http.Client{}
 	return genclient.NewClientWithResponses(
 		s.apiURL,
@@ -348,6 +356,32 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 			cityPath:           cityPath,
 			explicitAPI:        true,
 			localSupervisorAPI: localSupervisorAPI,
+		}, nil
+	}
+
+	// Remote target (--context/--city-url/env/sticky default): stream events from
+	// the hosted city with its context auth. Intercept here, before the local
+	// resolveDashboardContext path (which gates a remote target loudly). A
+	// city-discovery "not in a city directory" error is NOT fatal — the local
+	// path soft-fails it into the supervisor scope, so fall through instead of
+	// breaking `gc events` run outside a city directory against a supervisor.
+	rctx, rerr := resolveContextAllowRemote()
+	if rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		return eventsAPIScope{}, rerr
+	}
+	if rerr == nil && rctx.Remote != nil {
+		opts, oerr := remoteClientOptions(rctx.Remote)
+		if oerr != nil {
+			return eventsAPIScope{}, oerr
+		}
+		gen, gerr := gcapi.NewRemoteEventsClient(rctx.Remote.BaseURL, opts)
+		if gerr != nil {
+			return eventsAPIScope{}, gerr
+		}
+		return eventsAPIScope{
+			apiURL:   strings.TrimRight(rctx.Remote.BaseURL, "/"),
+			cityName: rctx.Remote.CityName,
+			gen:      gen,
 		}, nil
 	}
 
@@ -869,6 +903,14 @@ func doEventsRotate(scope eventsAPIScope, wait bool, stdout, stderr io.Writer) i
 	}
 	if scope.isSupervisor() {
 		fmt.Fprintln(stderr, "gc events: rotate requires a city in scope; run from a city directory or pass --city") //nolint:errcheck
+		return 1
+	}
+	// rotate is a MUTATION (POST /events/rotate). The remote events client is
+	// read-only (no city-write grant), so a hardened city would 401 even with a
+	// configured grant_command. Refuse it clearly rather than route a mutation
+	// through the read lane; the read events subcommands still stream remotely.
+	if scope.gen != nil {
+		fmt.Fprintln(stderr, "gc events rotate: not supported for a remote city (it mutates the events log; run it from the city's own host)") //nolint:errcheck
 		return 1
 	}
 

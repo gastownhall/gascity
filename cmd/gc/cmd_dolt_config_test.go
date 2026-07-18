@@ -334,6 +334,33 @@ prefix = "fe"
 	}
 }
 
+// TestDoltliteReindexCheckMatchesBuildCapability pins the ga-7hei capability
+// probe the maintenance shell gate depends on: `gc dolt-config
+// doltlite-reindex --check` must exit 0 exactly when this build can reindex in
+// process, and non-zero otherwise. The shell's doltlite_reindex_supported uses
+// that exit code to skip the stale-index-producing flatten/gc on a build that
+// cannot heal the result, so a mis-wired flag would either reintroduce the
+// unhealable-corruption bug or block maintenance on a capable build. The test
+// runs in both build tags and asserts consistency with doltliteReindexSupported.
+func TestDoltliteReindexCheckMatchesBuildCapability(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-config", "doltlite-reindex", "--dir", dir, "--check"}, &stdout, &stderr)
+	if doltliteReindexSupported() {
+		if code != 0 {
+			t.Fatalf("--check on a reindex-capable build = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		return
+	}
+	if code == 0 {
+		t.Fatalf("--check on a non-capable build exited 0; the shell gate relies on a non-zero exit to skip " +
+			"the stale-index-producing flatten/gc (ga-7hei)")
+	}
+	if !strings.Contains(stderr.String(), "gascity_native_beads") {
+		t.Fatalf("--check failure should name the native build requirement so operators know the fix, got stderr=%s", stderr.String())
+	}
+}
+
 func TestDoltStateWriteProviderCmd(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-provider-state.json")
 	var stdout, stderr bytes.Buffer

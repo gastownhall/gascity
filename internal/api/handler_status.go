@@ -281,11 +281,15 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 	versions := s.resolveComponentVersions()
 
-	// StoreHealth carries a full closed-history Dolt row scan (behind a 30s
+	// StoreHealth carries a full closed-history Dolt row scan (behind its
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
 	if !lite {
-		storeHealth = s.cachedStoreHealth(ctx, time.Now())
+		var err error
+		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
+		if err != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("store health: %v", err))
+		}
 	}
 
 	return StatusBody{

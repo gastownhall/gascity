@@ -2542,15 +2542,71 @@ doltlite_maintenance_due() {
     [ $((now - last)) -ge "$interval" ]
 }
 
+# run_doltlite_reindex rebuilds the DoltLite store's SQLite secondary indexes.
+# `bd flatten`/`bd gc` rewrite the store (like a clone/pull) and leave the
+# secondary indexes stale, so index-path reads (count/status/list) silently
+# return wrong results until a REINDEX (ga-7hei). REINDEX is SQLite-specific
+# DDL, so it must run against the physical .beads/doltlite/<db>.db file through
+# gc's in-process SQLite driver (gc dolt-config doltlite-reindex, which resolves
+# the same .db the read path opens from metadata.json). It cannot go through
+# `bd sql`: that surface speaks Dolt/MySQL and rejects REINDEX, and it is
+# refused outright in the embedded mode run_bd_doltlite forces. Best-effort and
+# non-fatal: the caller warns on non-zero exit.
+run_doltlite_reindex() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir"
+}
+
+# doltlite_reindex_supported reports whether the resolved gc helper can rebuild
+# the DoltLite SQLite indexes in process. Only a gc built with the native beads
+# SQLite driver can (gc dolt-config doltlite-reindex --check); a default build
+# returns non-zero. The maintenance path probes this BEFORE the stale-index-
+# producing flatten/gc so it never creates index corruption it cannot heal
+# (ga-7hei).
+doltlite_reindex_supported() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir" --check >/dev/null 2>&1
+}
+
 run_doltlite_existing_db_maintenance() {
     local dir="$1"
     local stamp="$dir/.beads/doltlite/.gc-maintenance.stamp"
     if ! doltlite_maintenance_due "$dir"; then
         return 0
     fi
+    # flatten/gc rewrite the store and leave its SQLite secondary indexes stale;
+    # only a reindex-capable gc build can heal that (ga-7hei). If reindex is
+    # unavailable (e.g. a default, non-native gc binary), do NOT run the
+    # stale-index-producing flatten/gc at all: creating index corruption we
+    # cannot heal and then latching the maintenance stamp "done" is worse than
+    # skipping compaction. Leave the stamp untouched so a later reindex-capable
+    # binary still runs maintenance.
+    if ! doltlite_reindex_supported "$dir"; then
+        echo "warning: skipping doltlite maintenance for $dir: no reindex-capable gc helper (build gc with -tags gascity_native_beads); leaving the store un-flattened to avoid stale indexes (ga-7hei)" >&2
+        return 0
+    fi
     echo "gc-beads-bd: running doltlite maintenance for $dir" >&2
     run_bd_doltlite "$dir" flatten --force --json >/dev/null 2>&1 || echo "warning: bd flatten failed for $dir" >&2
     run_bd_doltlite "$dir" gc --skip-decay --force --json >/dev/null 2>&1 || echo "warning: bd gc failed for $dir" >&2
+    # flatten/gc leave the SQLite secondary indexes stale; rebuild them so
+    # index-path reads don't silently return wrong data (ga-7hei). Only stamp
+    # maintenance complete when the reindex succeeds — a failed reindex (e.g. a
+    # transient SQLite lock) must stay visible and retryable on the next cycle,
+    # not be suppressed for the whole maintenance interval.
+    if ! run_doltlite_reindex "$dir"; then
+        echo "warning: doltlite reindex failed for $dir; leaving maintenance stamp unrefreshed so the next run retries (ga-7hei)" >&2
+        return 0
+    fi
     mkdir -p "$dir/.beads/doltlite" 2>/dev/null || true
     date +%s > "$stamp" 2>/dev/null || true
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -49,6 +50,8 @@ const (
 type runFoldResult struct {
 	beads        []beads.Bead
 	decodeMisses int
+	ready        bool
+	partial      bool
 }
 
 const runCensusPartialReason = "run projection is incomplete"
@@ -60,22 +63,49 @@ type RunCensusSource interface {
 	RunCensus(context.Context, string) (runproj.CanonicalRunCensus, bool)
 }
 
-// runFold reads the city event log, folds it into the latest bead snapshot per
-// id, and keeps only run-participating beads. The result is memoized in the
-// Server response cache keyed by the event log's modification time, so repeated
-// polls between appends are a pure cache hit and a new append re-folds. A city
-// with no event log yet yields an empty projection (a fresh city has no runs),
-// not an error.
-func (s *Server) runFold() (runFoldResult, error) {
+// RunProjectionSource serves immutable bead snapshots from an incremental
+// per-city projector. Production's RunCensusSource also implements this
+// capability; keeping it separate preserves the narrow census contract for
+// other sources and tests.
+type RunProjectionSource interface {
+	RunProjection(context.Context, string) (runproj.RunProjectionSnapshot, bool)
+}
+
+// RunProjectionGraceSource owns the bounded warming window for point-read
+// misses that may be valid newly-slung runs not yet visible in the event fold.
+type RunProjectionGraceSource interface {
+	RunProjectionMissInGrace(context.Context, string, string) bool
+	ForgetRunProjectionMiss(context.Context, string, string)
+}
+
+// runFold reads the warm incremental projection when the injected census source
+// provides it. Direct Server users without that capability retain the legacy
+// on-disk fold, memoized by event-log modification time. A city with no event
+// log yet yields a ready empty projection (a fresh city has no runs), not an
+// error.
+func (s *Server) runFold(ctx context.Context) (runFoldResult, error) {
+	if source, ok := s.runCensusSource.(RunProjectionSource); ok {
+		snapshot, found := source.RunProjection(ctx, s.state.CityName())
+		if !found {
+			return runFoldResult{}, errors.New("run projection source unavailable")
+		}
+		return runFoldResult{
+			beads:        snapshot.Beads,
+			decodeMisses: snapshot.DecodeMisses,
+			ready:        snapshot.Ready,
+			partial:      snapshot.Partial || !snapshot.Ready,
+		}, nil
+	}
+
 	cityRoot := strings.TrimSpace(s.state.CityPath())
 	if cityRoot == "" {
-		return runFoldResult{}, nil
+		return runFoldResult{ready: true}, nil
 	}
 	eventsPath := filepath.Join(cityRoot, ".gc", "events.jsonl")
 	fi, err := os.Stat(eventsPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return runFoldResult{}, nil
+			return runFoldResult{ready: true}, nil
 		}
 		return runFoldResult{}, err
 	}
@@ -95,6 +125,8 @@ func (s *Server) runFold() (runFoldResult, error) {
 	res := runFoldResult{
 		beads:        runproj.FilterRunBeads(proj.Beads()),
 		decodeMisses: proj.DecodeMisses(),
+		ready:        true,
+		partial:      proj.DecodeMisses() > 0,
 	}
 	s.storeResponse(key, index, res)
 	return res, nil
@@ -103,8 +135,8 @@ func (s *Server) runFold() (runFoldResult, error) {
 // humaHandleRunsList is the Huma-typed handler for GET /v0/city/{cityName}/runs.
 // It lists every run in the city (active, then waiting/blocked, then historical),
 // newest activity first, capped by limit.
-func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*RunsListOutput, error) {
-	fold, err := s.runFold()
+func (s *Server) humaHandleRunsList(ctx context.Context, input *RunsListInput) (*RunsListOutput, error) {
+	fold, err := s.runFold(ctx)
 	if err != nil {
 		return nil, runProjectionUnavailable(err)
 	}
@@ -134,6 +166,15 @@ func (s *Server) humaHandleRunsList(_ context.Context, input *RunsListInput) (*R
 		out.Body.Partial = true
 		out.Body.PartialErrors = append(out.Body.PartialErrors,
 			"run list truncated; older runs are not shown")
+	}
+	if !fold.ready {
+		out.Body.Partial = true
+		out.Body.PartialErrors = append(out.Body.PartialErrors,
+			"run projection is warming")
+	} else if fold.partial && fold.decodeMisses == 0 {
+		out.Body.Partial = true
+		out.Body.PartialErrors = append(out.Body.PartialErrors,
+			runCensusPartialReason)
 	}
 	if fold.decodeMisses > 0 {
 		out.Body.Partial = true
@@ -177,29 +218,49 @@ func runStatusCountsFromProjection(counts runproj.CanonicalRunStatusCounts) RunS
 // GET /v0/city/{cityName}/runs/{run_id}. It resolves the single run off the fold
 // via BuildRunLane, so a completed run beyond the list's historical cap is still
 // retrievable (no false 404).
-func (s *Server) humaHandleRunGet(_ context.Context, input *RunGetInput) (*RunGetOutput, error) {
-	fold, err := s.runFold()
+func (s *Server) humaHandleRunGet(ctx context.Context, input *RunGetInput) (*RunGetOutput, error) {
+	fold, err := s.runFold(ctx)
 	if err != nil {
 		return nil, runProjectionUnavailable(err)
 	}
+	if !fold.ready {
+		return nil, apierr.ServiceUnavailable.Msg("run projection is warming")
+	}
 	lane, ok := runproj.BuildRunLane(fold.beads, input.RunID)
 	if !ok {
+		if fold.partial {
+			return nil, apierr.ServiceUnavailable.Msg("run projection is incomplete")
+		}
+		if s.runProjectionMissInGrace(ctx, input.RunID) {
+			return nil, apierr.ServiceUnavailable.Msg("run projection is warming")
+		}
 		return nil, apierr.RunNotFound.Msgf("run not found: %s", input.RunID)
 	}
+	s.forgetRunProjectionMiss(ctx, input.RunID)
 	return &RunGetOutput{Body: laneToRun(lane, beadsByID(fold.beads), countStartedMembers(fold.beads, lane.ID))}, nil
 }
 
 // humaHandleRunSteps is the Huma-typed handler for
 // GET /v0/city/{cityName}/runs/{run_id}/steps. Steps are the run's member beads
 // (the root's children), each projected to a closed RunStepStatus.
-func (s *Server) humaHandleRunSteps(_ context.Context, input *RunStepsInput) (*RunStepsOutput, error) {
-	fold, err := s.runFold()
+func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (*RunStepsOutput, error) {
+	fold, err := s.runFold(ctx)
 	if err != nil {
 		return nil, runProjectionUnavailable(err)
 	}
+	if !fold.ready {
+		return nil, apierr.ServiceUnavailable.Msg("run projection is warming")
+	}
 	if _, ok := runproj.BuildRunLane(fold.beads, input.RunID); !ok {
+		if fold.partial {
+			return nil, apierr.ServiceUnavailable.Msg("run projection is incomplete")
+		}
+		if s.runProjectionMissInGrace(ctx, input.RunID) {
+			return nil, apierr.ServiceUnavailable.Msg("run projection is warming")
+		}
 		return nil, apierr.RunNotFound.Msgf("run not found: %s", input.RunID)
 	}
+	s.forgetRunProjectionMiss(ctx, input.RunID)
 
 	members := runMemberBeads(fold.beads, input.RunID)
 	out := &RunStepsOutput{}
@@ -219,6 +280,17 @@ func (s *Server) humaHandleRunSteps(_ context.Context, input *RunStepsInput) (*R
 		})
 	}
 	return out, nil
+}
+
+func (s *Server) runProjectionMissInGrace(ctx context.Context, runID string) bool {
+	source, ok := s.runCensusSource.(RunProjectionGraceSource)
+	return ok && source.RunProjectionMissInGrace(ctx, s.state.CityName(), runID)
+}
+
+func (s *Server) forgetRunProjectionMiss(ctx context.Context, runID string) {
+	if source, ok := s.runCensusSource.(RunProjectionGraceSource); ok {
+		source.ForgetRunProjectionMiss(ctx, s.state.CityName(), runID)
+	}
 }
 
 // runCanceledCloseReason is the close_reason stamped on beads wound down by a run
@@ -577,5 +649,6 @@ func normalizeRunsListLimit(limit int) int {
 // runProjectionUnavailable wraps a fold/read failure as a 503 — reading the event
 // log is a backend availability concern the caller can retry.
 func runProjectionUnavailable(err error) error {
-	return apierr.ServiceUnavailable.Msgf("run projection unavailable: %v", err)
+	log.Printf("gc api: run projection unavailable: %v", err)
+	return apierr.ServiceUnavailable.Msg("run projection unavailable")
 }

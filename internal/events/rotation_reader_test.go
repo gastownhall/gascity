@@ -117,6 +117,88 @@ func TestReadFilteredWithInFlightDedupsArchiveRotatingOverlap(t *testing.T) {
 	}
 }
 
+func TestReadFilteredWithInFlightKeepsLimitForStableArchives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	firstSource := filepath.Join(dir, "first-archive-source.jsonl")
+	writeJSONLEvents(t, firstSource, 1, 2)
+	firstArchive := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 1, 2))
+	if err := gzipAndArchive(firstSource, firstArchive, &stderr); err != nil {
+		t.Fatalf("gzip first archive: %v", err)
+	}
+	secondSource := filepath.Join(dir, "second-archive-source.jsonl")
+	writeJSONLEvents(t, secondSource, 3, 4)
+	secondArchive := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 5, 0, 0, time.UTC), 3, 4))
+	if err := gzipAndArchive(secondSource, secondArchive, &stderr); err != nil {
+		t.Fatalf("gzip second archive: %v", err)
+	}
+	writeJSONLEvents(t, path, 5)
+
+	got, err := ReadFilteredWithInFlight(path, Filter{Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadFilteredWithInFlight: %v", err)
+	}
+	if seqs := seqsOf(got); !reflect.DeepEqual(seqs, []uint64{1}) {
+		t.Fatalf("limited stable-archive seqs = %v, want [1]", seqs)
+	}
+}
+
+func TestReadFilteredWithInFlightSurvivesRotatingPromotion(t *testing.T) {
+	for _, timing := range []string{"between scans", "between list and open"} {
+		t.Run(timing, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "events.jsonl")
+			rotating := filepath.Join(dir, "events.jsonl.rotating-20260507T120500Z-seq-1-2")
+			archive := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 5, 0, 0, time.UTC), 1, 2))
+			writeJSONLEvents(t, rotating, 1, 2)
+			writeJSONLEvents(t, path, 3)
+
+			promoted := false
+			promote := func() {
+				if promoted {
+					return
+				}
+				promoted = true
+				var stderr bytes.Buffer
+				if err := gzipAndArchive(rotating, archive, &stderr); err != nil {
+					t.Fatalf("promote rotating file: %v (stderr %q)", err, stderr.String())
+				}
+			}
+
+			previous := readRotationDir
+			t.Cleanup(func() { readRotationDir = previous })
+			readRotationDir = func(path string) ([]os.DirEntry, error) {
+				switch timing {
+				case "between scans":
+					// ReadFiltered's archive snapshot has already completed. Promote
+					// before the post-active snapshot so that snapshot sees only the
+					// newly-installed archive and no rotating source.
+					promote()
+					return os.ReadDir(path)
+				case "between list and open":
+					// Return the stale rotating entry after promoting it. The reader
+					// must open the derived archive fallback when the source vanishes.
+					entries, err := os.ReadDir(path)
+					promote()
+					return entries, err
+				default:
+					t.Fatalf("unknown promotion timing %q", timing)
+					return nil, nil
+				}
+			}
+
+			got, err := ReadFilteredWithInFlight(path, Filter{})
+			if err != nil {
+				t.Fatalf("ReadFilteredWithInFlight: %v", err)
+			}
+			if seqs := seqsOf(got); !reflect.DeepEqual(seqs, []uint64{1, 2, 3}) {
+				t.Fatalf("promotion-safe seqs = %v, want [1 2 3]", seqs)
+			}
+		})
+	}
+}
+
 // seedRecorderWithRotation creates a fresh recorder, writes recordsBefore
 // events, force-rotates, then writes recordsAfter events. Returns the
 // directory holding the active log + archives; the recorder is

@@ -221,31 +221,26 @@ func routeCityStatus(
 	jsonOutput bool,
 	stdout, stderr io.Writer,
 ) int {
-	const cmdName = "status"
-	if c != nil {
-		cr, err := c.GetStatus()
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-	if code != 0 {
-		return code
-	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-	if jsonOutput {
-		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-	}
-	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+	var cr api.CachedRead[api.StatusView]
+	return routeRead(c, "status", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetStatus()
+			return err
+		},
+		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
+		func() int {
+			store, diagnostic, code := openCityStatusStore(cityPath, stderr)
+			if code != 0 {
+				return code
+			}
+			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+			if jsonOutput {
+				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+			}
+			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+		},
+	)
 }
 
 // renderCityStatusFromAPI renders the server's StatusView using the same
