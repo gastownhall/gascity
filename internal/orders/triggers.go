@@ -36,6 +36,15 @@ type CursorFunc func(orderName string) uint64
 
 // TriggerOptions carries execution context for triggers that run subprocesses.
 type TriggerOptions struct {
+	// ConditionCtx is the parent context for the condition-check subprocess.
+	// When non-nil, canceling it — a controller shutdown, a config reload, or a
+	// canceled dispatch tick — interrupts a running check promptly instead of
+	// letting a raised check_timeout keep the process alive for the full
+	// deadline. Bare callers (the API GET /v0/orders/check evaluator and the
+	// storeless CLI check) may leave it nil; checkCondition then falls back to
+	// context.Background(), preserving the timeout-only behavior for those
+	// one-shot evaluators.
+	ConditionCtx     context.Context
 	ConditionDir     string
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
@@ -302,7 +311,15 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 		// this preserves the prior 10s behavior when check_timeout is absent.
 		timeout = a.CheckTimeoutOrDefault()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Derive the check deadline from the caller's context when one is supplied so
+	// a canceled tick/shutdown/reload stops a running check before check_timeout
+	// elapses; nil opts (bare CLI/API evaluators) fall back to the background
+	// context, keeping the timeout as the sole bound.
+	parent := opts.ConditionCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
 	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)

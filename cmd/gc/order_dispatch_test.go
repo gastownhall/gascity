@@ -9564,6 +9564,73 @@ func TestOrderDispatchConditionTimeoutLogsRaiseCheckTimeout(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchCancelsConditionCheckOnContextCancel proves the dispatch tick
+// threads its own context into the condition check (PR #4190 major finding):
+// once check_timeout is operator-configurable, a slow check must not outlive a
+// canceled tick / shutdown / reload. Cancel the dispatch context as soon as the
+// check is observably running and assert dispatch returns promptly instead of
+// blocking for the full 30s check_timeout. Before the fix the check ran under
+// context.Background(), so canceling ctx had no effect and dispatch blocked for
+// the whole deadline.
+func TestOrderDispatchCancelsConditionCheckOnContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	startedPath := filepath.Join(dir, "check-started")
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "slow-check",
+			Trigger:      "condition",
+			Check:        fmt.Sprintf("touch %q; sleep 60", startedPath),
+			CheckTimeout: "30s",
+			Exec:         "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(context.Context, string, string, []string) ([]byte, error) {
+			t.Error("exec ran; a condition check canceled mid-flight must not dispatch")
+			return nil, nil
+		},
+		rec:    events.Discard,
+		stderr: stderr,
+		cfg:    &config.City{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel once the check is observably running so this exercises the
+		// running-check cancel path, not a pre-canceled gate skip. Poll with a
+		// ticker (no direct time.Sleep) and cancel unconditionally after a
+		// generous deadline so the goroutine can never leak.
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		limit := time.After(10 * time.Second)
+		for {
+			select {
+			case <-limit:
+				cancel()
+				return
+			case <-tick.C:
+				if _, err := os.Stat(startedPath); err == nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		m.dispatch(ctx, dir, time.Now())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("dispatch did not return within 20s of ctx cancel; want prompt return well under the 30s check_timeout")
+	}
+}
+
 // TestOrderDispatchConditionFalseStaysQuiet is the negative half: a normal
 // "condition false" tick must not emit the timeout diagnostic, or every idle
 // condition order would spam the dispatch log every tick.

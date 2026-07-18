@@ -2,6 +2,7 @@ package orders
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -176,6 +177,39 @@ func TestCheckTriggerConditionHonorsOrderCheckTimeoutWithoutOptions(t *testing.T
 	}
 	if !strings.Contains(result.Reason, ConditionCheckTimedOutMarker) {
 		t.Fatalf("Reason = %q, want it to contain %q", result.Reason, ConditionCheckTimedOutMarker)
+	}
+}
+
+func TestCheckTriggerConditionHonorsParentContextCancel(t *testing.T) {
+	// Regression (PR #4190 major finding): a condition check must derive its
+	// process deadline from the caller's context, not context.Background(). Now
+	// that check_timeout is operator-configurable well above the old fixed 10s, a
+	// canceled dispatch tick / controller shutdown / config reload must abort the
+	// check promptly instead of blocking for the full configured deadline. Before
+	// the fix opts.ConditionCtx was ignored: the check ran under a fresh 30s
+	// timeout and canceling the parent had no effect, so this call blocked for
+	// the whole deadline. The cancel is issued before the check can finish; the
+	// select proves prompt return without depending on wall-clock sleeps.
+	a := Order{Name: "check", Trigger: "condition", Check: "sleep 30"}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan TriggerResult, 1)
+	go func() {
+		done <- CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+			ConditionCtx:     ctx,
+			ConditionTimeout: 30 * time.Second,
+		})
+	}()
+	cancel()
+
+	select {
+	case result := <-done:
+		if result.Due {
+			t.Fatalf("Due = true, want false after parent context cancel: %s", result.Reason)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkCondition did not return within 10s of parent cancel; want prompt abort well under the 30s check_timeout")
 	}
 }
 
