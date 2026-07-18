@@ -126,7 +126,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   439,
+			BaselineCalls:   440,
 			BaselineFiles:   157,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -154,7 +154,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   285,
+			BaselineCalls:   286,
 			BaselineFiles:   112,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -167,7 +167,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4354,
+			BaselineCalls:   4348,
 			BaselineFiles:   203,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -351,7 +351,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   285,
+			BaselineCalls:   286,
 			BaselineFiles:   112,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
@@ -364,10 +364,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4348,
+			BaselineCalls:   4342,
 			BaselineFiles:   203,
-			ReportedCalls:   4339,
-			ReportedFiles:   199,
+			ReportedCalls:   4348,
+			ReportedFiles:   200,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners restore or eliminate every process-environment mutation",

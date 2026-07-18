@@ -29,6 +29,14 @@ const (
 	corpusWorkBeadID   = corpus.WorkBeadID
 	corpusWorkBeadName = corpus.WorkBeadTitle
 	corpusMailSubject  = corpus.MailSubject
+
+	anchorStepTitle       = corpus.AnchorStepTitle
+	anchorReviewStepID    = corpus.AnchorReviewStepID
+	corpusAgentSlug       = corpus.AgentSessionSlug
+	corpusAgentTemplate   = corpus.AgentSessionTemplate
+	corpusOperatorSubject = corpus.OperatorMailSubject
+	corpusOperatorBody    = corpus.OperatorMailBody
+	corpusAgentReplyBody  = corpus.AgentReplyBody
 )
 
 // loadFixtures seeds a city from testdata/dashport via the shared corpus loader

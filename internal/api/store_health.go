@@ -11,40 +11,63 @@ import (
 )
 
 // storeHealthCacheTTL is the refresh interval for the /v0/status
-// StoreHealth block. The underlying inputs (directory size walk,
-// maintenance-log read) are cheap enough to run every minute but
-// running them on every dashboard poll is wasteful.
-const storeHealthCacheTTL = 30 * time.Second
+// StoreHealth block. Its inputs include a full closed-history row scan
+// whose cost grows with store history and can exceed a minute on a
+// long-lived city, so keep the interval above the worst observed scan.
+const storeHealthCacheTTL = 3 * time.Minute
 
 // cachedStoreHealth returns the memoized StoreHealth block, refreshing
-// when the TTL has elapsed. Failed refreshes are returned to the caller and
-// are not cached. Safe for concurrent callers.
+// when the TTL has elapsed. Concurrent refreshes are coalesced through a
+// singleflight group so a single scan serves every waiting caller. Failed
+// refreshes are returned to the caller and are not cached. Safe for
+// concurrent callers.
 func (s *Server) cachedStoreHealth(ctx context.Context, now time.Time) (*StatusStoreHealth, error) {
-	s.storeHealthMu.Lock()
-	if s.storeHealthEntry != nil && now.Before(s.storeHealthExpires) {
-		entry := s.storeHealthEntry
-		s.storeHealthMu.Unlock()
+	if entry := s.cachedStoreHealthEntry(now); entry != nil {
 		return entry, nil
 	}
-	compute := s.storeHealthComputer
-	if compute == nil {
-		compute = s.computeStoreHealth
-	}
-	s.storeHealthMu.Unlock()
 
-	h, err := compute(ctx)
+	value, err, _ := s.storeHealthFlight.Do("refresh", func() (any, error) {
+		// Another refresh may have completed between this caller's initial
+		// miss and its election into the singleflight group.
+		if entry := s.cachedStoreHealthEntry(time.Now()); entry != nil {
+			return entry, nil
+		}
+
+		s.storeHealthMu.Lock()
+		compute := s.storeHealthComputer
+		if compute == nil {
+			compute = s.computeStoreHealth
+		}
+		s.storeHealthMu.Unlock()
+
+		// The refresh is shared by every concurrent status request, so its
+		// lifetime must not depend on whichever request won the flight. The
+		// store read applies its own bounded timeout downstream.
+		health, err := compute(context.WithoutCancel(ctx))
+		if err != nil {
+			return nil, err
+		}
+		completedAt := time.Now()
+
+		s.storeHealthMu.Lock()
+		s.storeHealthEntry = health
+		s.storeHealthExpires = completedAt.Add(storeHealthCacheTTL)
+		s.storeHealthMu.Unlock()
+		return health, nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	return value.(*StatusStoreHealth), nil
+}
 
+func (s *Server) cachedStoreHealthEntry(now time.Time) *StatusStoreHealth {
 	s.storeHealthMu.Lock()
 	defer s.storeHealthMu.Unlock()
 	if s.storeHealthEntry != nil && now.Before(s.storeHealthExpires) {
-		return s.storeHealthEntry, nil
+		return s.storeHealthEntry
 	}
-	s.storeHealthEntry = h
-	s.storeHealthExpires = now.Add(storeHealthCacheTTL)
-	return h, nil
+	return nil
 }
 
 // computeStoreHealth measures the Dolt store on disk and the latest

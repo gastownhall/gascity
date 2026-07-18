@@ -570,6 +570,44 @@ func TestCatalogBindsFakeAndSubprocessWithDirAndDefersDefaultConstructor(t *test
 	}
 }
 
+func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
+	var withDirProof *ProofRef
+	var defaultWaiver *Waiver
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.acp" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"):
+				if claim.Disposition != DispositionProved {
+					t.Errorf("ACP WithDir disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				withDirProof = claim.Proof
+			case repoSymbol("internal/runtime/acp", "NewSeamBacked"):
+				if claim.Disposition != DispositionWaived {
+					t.Errorf("ACP default disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				}
+				defaultWaiver = claim.Waiver
+			}
+		}
+	}
+
+	if withDirProof == nil {
+		t.Fatal("acp.NewSeamBackedWithDir proof is missing")
+	}
+	if withDirProof.File != "internal/runtime/acp/conformance_test.go" || withDirProof.Test != "TestACPConformance" {
+		t.Errorf("ACP WithDir proof = %s#%s, want ACP conformance entrypoint", withDirProof.File, withDirProof.Test)
+	}
+	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
+		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
+	}
+	if defaultWaiver == nil || defaultWaiver.Owner != "ga-80po0c.3" {
+		t.Errorf("ACP default waiver = %+v, want ga-80po0c.3 ownership", defaultWaiver)
+	}
+}
+
 func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
 	dir := writeRuntimeDoubleFixture(t, map[string]string{
 		"runtime.go": `package runtime

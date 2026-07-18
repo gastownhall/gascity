@@ -79,6 +79,36 @@ func TestReadRecentFactsDeduplicatesWithinTheObservedWindow(t *testing.T) {
 	}
 }
 
+func TestReadRecentFactsKeepsTheFirstDurableOccurrenceOfAnIdempotencyKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	first := factLine(t, Fact{
+		Kind:           KindCompute,
+		At:             100,
+		WallSeconds:    10,
+		IdempotencyKey: "same",
+	})
+	retry := factLine(t, Fact{
+		Kind:           KindCompute,
+		At:             200,
+		WallSeconds:    1_000,
+		IdempotencyKey: "same",
+	})
+	if err := os.WriteFile(path, []byte(first+"\n"+retry+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	facts, _, err := ReadRecentFacts(path, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("facts = %+v, want one deduplicated fact", facts)
+	}
+	if facts[0].At != 100 || facts[0].WallSeconds != 10 {
+		t.Fatalf("fact = %+v, want the first durable occurrence", facts[0])
+	}
+}
+
 func TestReadRecentFactsSkipsAnOversizedRecordAndContinues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.jsonl")
 	valid := factLine(t, Fact{Kind: KindModel, InputTokens: 7, IdempotencyKey: "valid"})

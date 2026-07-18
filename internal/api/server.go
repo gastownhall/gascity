@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
+	"golang.org/x/sync/singleflight"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -99,6 +100,7 @@ type Server struct {
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
 	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
+	storeHealthFlight   singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for

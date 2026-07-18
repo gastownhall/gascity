@@ -8994,6 +8994,185 @@ func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testin
 	}
 }
 
+// TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout guards the
+// session_reconciler.go wake/drain block against the `gc runtime heartbeat`
+// regression (PR #3994). Heartbeat sets held_until only — no sleep_intent and
+// no suspended state — to keep a live session alive through a long, silent
+// operation. Before the fix, ComputeAwakeSet's hold suppression drove the live
+// session into a "no-wake-reason" drain that force-stopped it after
+// defaultDrainTimeout: the exact opposite of the heartbeat's purpose. The
+// session must survive past the drain deadline, and a suspend (which sets
+// sleep_intent) must still drain — see
+// TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain.
+func TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	heldUntil := env.clk.Now().Add(45 * time.Minute).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"held_until": heldUntil,
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	rec := events.NewFake()
+	env.rec = rec
+
+	runTick := func() {
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{got}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	// Tick 1: a heartbeat hold must not begin a no-wake-reason drain on a live
+	// session — that drain would force-stop it once the deadline elapses.
+	runTick()
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("heartbeat hold must not begin a drain, got reason=%q", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("heartbeat-held worker must stay running on the first tick")
+	}
+
+	// Tick 2: cross the drain deadline. The regression force-stopped the
+	// session here; the fix keeps it alive because the idle/max-age timers are
+	// deferred by the same hold and no drain was ever started.
+	env.clk.Time = env.clk.Now().Add(defaultDrainTimeout + time.Minute)
+	runTick()
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("heartbeat-held worker must survive past defaultDrainTimeout")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("heartbeat hold must not leave a drain pending, got reason=%q", ds.reason)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Errorf("heartbeat hold must not set GC_DRAIN_ACK, got %q", ack)
+	}
+	if got := env.sessionInfo(session.ID); got.HeldUntil != heldUntil {
+		t.Errorf("held_until = %q, want preserved %q", got.HeldUntil, heldUntil)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			t.Error("SessionIdleKilled must not fire for a heartbeat hold")
+		}
+	}
+}
+
+// TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns guards the
+// heartbeat crash-recovery gap surfaced in PR #3994 review iteration 2. A
+// heartbeat hold (held_until only, no sleep_intent) defers idle/max-age timers
+// for a LIVE session, but must not blind crash recovery: when a heartbeat-held
+// session's runtime dies while it still has assigned work, ComputeAwakeSet's
+// hold suppression drives ShouldWake=false, so before the fix the respawn arm
+// (shouldWake && !alive) was skipped and the session stayed down for the whole
+// agent-chosen, unbounded hold — precisely the long unattended operation the
+// heartbeat exists to protect. The reconciler must respawn it during the hold
+// window and preserve the hold so it stays protected until held_until expires.
+// A suspend hold (sleep_intent="user-hold") is the intentional-park case and
+// must stay down.
+func TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns(t *testing.T) {
+	// buildDeadHeldSessionWithWork creates a desired "worker" whose runtime has
+	// died (state=active, not running in the provider) while holding a future
+	// held_until plus an in_progress work bead assigned to it. sleepIntent
+	// selects heartbeat ("") vs suspend ("user-hold").
+	buildDeadHeldSessionWithWork := func(sleepIntent string) (*reconcilerTestEnv, beads.Bead, []beads.Bead) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		env.addDesired("worker", "worker", false) // desired, but NOT started: the runtime is dead
+		session := env.createSessionBead("worker", "worker")
+		env.markSessionActive(&session) // it was alive before it crashed mid-hold
+		meta := map[string]string{
+			"held_until": env.clk.Now().Add(45 * time.Minute).UTC().Format(time.RFC3339),
+			// Woke well before this tick (mid-hold death), so the session is past
+			// the rapid-crash (30s) and churn-productivity (5m) windows and reaches
+			// the wake/respawn loop as a plain dead-but-desired session rather than
+			// a crash-loop capture.
+			"last_woke_at": env.clk.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+		}
+		if sleepIntent != "" {
+			meta["sleep_intent"] = sleepIntent
+		}
+		env.setSessionMetadata(&session, meta)
+
+		task, err := env.store.Create(beads.Bead{Title: "assigned task", Type: "task"})
+		if err != nil {
+			t.Fatalf("Create(task): %v", err)
+		}
+		status := "in_progress"
+		assignee := session.ID
+		if err := env.store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatalf("Update(task): %v", err)
+		}
+		task, err = env.store.Get(task.ID)
+		if err != nil {
+			t.Fatalf("Get(task): %v", err)
+		}
+		return env, session, []beads.Bead{task}
+	}
+
+	runTick := func(env *reconcilerTestEnv, session beads.Bead, work []beads.Bead) int {
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		return reconcileSessionBeads(
+			context.Background(), []beads.Bead{got}, env.desiredState,
+			configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+			nil, work, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+			nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...,
+		)
+	}
+
+	t.Run("heartbeat hold respawns dead session with work", func(t *testing.T) {
+		env, session, work := buildDeadHeldSessionWithWork("")
+		heldUntil := env.sessionInfo(session.ID).HeldUntil
+		if woken := runTick(env, session, work); woken != 1 {
+			t.Fatalf("woken = %d, want 1 (heartbeat-held dead session with work must respawn); stderr=%s", woken, env.stderr.String())
+		}
+		if !env.sp.IsRunning("worker") {
+			t.Fatal("heartbeat-held dead worker with assigned work must be respawned within the hold window")
+		}
+		// The hold is preserved, so the recovered session stays protected until
+		// held_until expires; the fix only restores respawn eligibility, it does
+		// not tear down the ongoing heartbeat.
+		if got := env.sessionInfo(session.ID).HeldUntil; got != heldUntil {
+			t.Errorf("held_until = %q, want preserved %q across the respawn", got, heldUntil)
+		}
+		// Second tick: the respawned session is now alive, so the crash-recovery
+		// arm must NOT fire again (its !alive guard) — no respawn storm — while
+		// the live keep-alive guard holds it up.
+		if woken := runTick(env, session, work); woken != 0 {
+			t.Fatalf("second tick woken = %d, want 0 (an already-alive held session must not respawn again); stderr=%s", woken, env.stderr.String())
+		}
+		if !env.sp.IsRunning("worker") {
+			t.Fatal("respawned heartbeat-held worker must stay running on the next tick")
+		}
+	})
+
+	t.Run("suspend hold keeps dead session down", func(t *testing.T) {
+		env, session, work := buildDeadHeldSessionWithWork("user-hold")
+		woken := runTick(env, session, work)
+		if woken != 0 {
+			t.Fatalf("woken = %d, want 0 (a suspend hold must not be crash-recovered); stderr=%s", woken, env.stderr.String())
+		}
+		if env.sp.IsRunning("worker") {
+			t.Error("a suspended (sleep_intent=user-hold) dead session must stay down, not respawn")
+		}
+	})
+}
+
 func TestReconcileSessionBeads_IdleTimeoutRespectsQuarantineBlocker(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
