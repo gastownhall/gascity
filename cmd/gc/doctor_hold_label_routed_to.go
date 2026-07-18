@@ -84,8 +84,11 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 		}
 		// hold:<value> carries a dynamic value suffix, so no targeted
 		// label/metadata query is possible; AllowScan is required for a
-		// broad filter (internal/beads/query.go).
-		items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true})
+		// broad filter (internal/beads/query.go). Status is left unset so the
+		// scan matches every non-closed bead (open, in_progress, blocked,
+		// deferred, ...), not just "open" — an exact Status match would
+		// silently hide hold:<value> drift on any other status (ga-fm2vgd.2).
+		items, err := store.List(beads.ListQuery{AllowScan: true})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
 			continue
