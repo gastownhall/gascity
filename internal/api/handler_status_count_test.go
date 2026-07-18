@@ -167,6 +167,7 @@ func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
 		listForbidden: true,
 	}
 	state.stores["myrig"] = counter
+	state.cityBeadStore = store
 
 	resp := getStatus(t, state)
 
@@ -195,6 +196,7 @@ func TestHandleStatusCounterUnsupportedFallsBackToList(t *testing.T) {
 		t:        t,
 		countErr: beads.ErrCountUnsupported,
 	}
+	state.cityBeadStore = mem
 
 	resp := getStatus(t, state)
 

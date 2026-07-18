@@ -2632,13 +2632,15 @@ type OrderListBody struct {
 
 // OrderResponse defines model for OrderResponse.
 type OrderResponse struct {
-	CaptureOutput bool               `json:"capture_output"`
-	Check         *string            `json:"check,omitempty"`
-	Description   *string            `json:"description,omitempty"`
-	Enabled       bool               `json:"enabled"`
-	Env           *map[string]string `json:"env,omitempty"`
-	Exec          *string            `json:"exec,omitempty"`
-	Formula       *string            `json:"formula,omitempty"`
+	CaptureOutput  bool               `json:"capture_output"`
+	Check          *string            `json:"check,omitempty"`
+	CheckTimeout   *string            `json:"check_timeout,omitempty"`
+	CheckTimeoutMs *int64             `json:"check_timeout_ms,omitempty"`
+	Description    *string            `json:"description,omitempty"`
+	Enabled        bool               `json:"enabled"`
+	Env            *map[string]string `json:"env,omitempty"`
+	Exec           *string            `json:"exec,omitempty"`
+	Formula        *string            `json:"formula,omitempty"`
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Gate       *string `json:"gate,omitempty"`
 	Interval   *string `json:"interval,omitempty"`
@@ -4637,6 +4639,21 @@ type SlingInputBody struct {
 	// Formula Formula name for workflow launch.
 	Formula *string `json:"formula,omitempty"`
 
+	// Merge Merge strategy: direct, mr, or local.
+	Merge *string `json:"merge,omitempty"`
+
+	// NoConvoy Do not create an auto-convoy for the routed bead.
+	NoConvoy *bool `json:"no_convoy,omitempty"`
+
+	// NoFormula Suppress the target's default_sling_formula even when configured.
+	NoFormula *bool `json:"no_formula,omitempty"`
+
+	// Owned Mark the routed bead as owned by the target.
+	Owned *bool `json:"owned,omitempty"`
+
+	// Reassign Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.
+	Reassign *bool `json:"reassign,omitempty"`
+
 	// Rig Rig name.
 	Rig *string `json:"rig,omitempty"`
 
@@ -4930,13 +4947,13 @@ type StatusStoreHealth struct {
 	// LastGcStatus Status of last maintenance run ('success' or 'failed').
 	LastGcStatus *string `json:"last_gc_status,omitempty"`
 
-	// LiveRows Live bead row count.
+	// LiveRows Retained bead row count used as the denominator, including open and closed beads.
 	LiveRows int64 `json:"live_rows"`
 
 	// Path On-disk path of the Dolt store.
 	Path string `json:"path"`
 
-	// RatioMbPerRow Derived megabytes per row.
+	// RatioMbPerRow Derived megabytes per retained row, including open and closed beads.
 	RatioMbPerRow float64 `json:"ratio_mb_per_row"`
 
 	// SizeBytes Total bytes of the store directory.
@@ -8124,10 +8141,10 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Status Filter by bead status.
@@ -8199,10 +8216,10 @@ type GetV0CityByCityNameConvoysParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -8223,10 +8240,10 @@ type GetV0CityByCityNameEventsParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Type Filter by event type.
@@ -8475,10 +8492,10 @@ type GetV0CityByCityNameMailParams struct {
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Agent Filter by agent name.
@@ -8772,7 +8789,7 @@ type CreateRigParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
 
-	// IdempotencyKey Idempotency key for safe retries.
+	// IdempotencyKey Idempotency key for safe retries (synchronous create).
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
@@ -8913,10 +8930,10 @@ type PostV0CityByCityNameSessionByIdWakeParams struct {
 
 // GetV0CityByCityNameSessionsParams defines parameters for GetV0CityByCityNameSessions.
 type GetV0CityByCityNameSessionsParams struct {
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// State Filter by session state (e.g. active, closed).
@@ -34711,6 +34728,7 @@ type SendSessionMessageResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -34908,6 +34926,7 @@ type SubmitSessionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -45804,6 +45823,13 @@ func ParseSendSessionMessageResponse(rsp *http.Response) (*SendSessionMessageRes
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -46286,6 +46312,13 @@ func ParseSubmitSessionResponse(rsp *http.Response) (*SubmitSessionResponse, err
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

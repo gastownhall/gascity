@@ -150,7 +150,7 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitLoadCityConfigWarnings(stderr, prov)
+	emitLoadCityConfigWarnings(configWarnWriter(jsonOut, stderr), prov)
 
 	issueIDs := []string(nil)
 	if len(args) > 1 {
@@ -306,16 +306,9 @@ child issues.`,
 
 // cmdConvoyList is the CLI entry point for listing convoys.
 func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeConvoyList("", remoteC, "", jsonOut, stdout, stderr)
-	}
-	c, reason := convoyListAPIClient(cityPath)
-	return routeConvoyList(cityPath, c, reason, jsonOut, stdout, stderr)
+	return routeReadCmd("convoy list", stderr, convoyListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeConvoyList(cityPath, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // convoyListAPIClient returns (client, "") when the API path is available,
@@ -338,33 +331,20 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // fallbackable error, the whole operation falls back to local reads so
 // output is consistent (partial failure would produce surprising gaps).
 func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "convoy list"
-	if c != nil {
-		cr, err := c.ListConvoys()
-		switch {
-		case err == nil:
-			progress, progErr := fetchConvoyProgress(c, cr.Body)
-			if progErr == nil {
-				logRoute(stderr, cmdName, "api", "")
-				return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr)
+	var cr api.CachedRead[[]beads.Bead]
+	var progress []api.ConvoyCheckView
+	return routeRead(c, "convoy list", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.ListConvoys(); err != nil {
+				return err
 			}
-			if !api.ShouldFallbackForRead(c, progErr) {
-				logRoute(stderr, cmdName, "api", "error")
-				fmt.Fprintf(stderr, "gc convoy list: %v\n", progErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, progErr))
-		case !api.ShouldFallbackForRead(c, err):
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		default:
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-		}
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doConvoyListFallback(cityPath, jsonOut, stdout, stderr)
+			progress, err = fetchConvoyProgress(c, cr.Body)
+			return err
+		},
+		func() int { return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr) },
+		func() int { return doConvoyListFallback(cityPath, jsonOut, stdout, stderr) },
+	)
 }
 
 // fetchConvoyProgress calls /convoy/{id}/check for each convoy in list and
@@ -858,16 +838,9 @@ func cmdConvoyStatus(args []string, jsonOut bool, stdout, stderr io.Writer) int 
 		return doConvoyStatusWithJSON(nil, args, jsonOut, stdout, stderr)
 	}
 	convoyID := args[0]
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeConvoyStatus("", convoyID, remoteC, "", jsonOut, stdout, stderr)
-	}
-	c, reason := convoyStatusAPIClient(cityPath)
-	return routeConvoyStatus(cityPath, convoyID, c, reason, jsonOut, stdout, stderr)
+	return routeReadCmd("convoy status", stderr, convoyStatusAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeConvoyStatus(cityPath, convoyID, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // convoyStatusAPIClient returns (client, "") when the API path is available,
@@ -883,30 +856,23 @@ var convoyStatusAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local store resolver.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "convoy status"
-	if c != nil {
-		cr, err := c.GetConvoy(convoyID)
-		if err == nil {
-			// Graph/workflow convoys return an empty Convoy.ID — treat as
-			// "not a simple convoy" and fall back so the workflow-aware
-			// local path can render it.
-			if cr.Body.Convoy.ID == "" {
-				logRoute(stderr, cmdName, "fallback", "workflow-convoy")
-				return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr)
+	var cr api.CachedRead[api.ConvoyStatusView]
+	return routeRead(c, "convoy status", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.GetConvoy(convoyID); err != nil {
+				return err
 			}
-			logRoute(stderr, cmdName, "api", "")
-			return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr)
+			// Graph/workflow convoys return an empty Convoy.ID — force a fallback
+			// so the workflow-aware local path can render it.
+			if cr.Body.Convoy.ID == "" {
+				return fallbackAfterFetch{Reason: "workflow-convoy"}
+			}
+			return nil
+		},
+		func() int { return renderConvoyStatusFromAPI(cr, jsonOut, stdout, stderr) },
+		func() int { return doConvoyStatusFallback(cityPath, convoyID, jsonOut, stdout, stderr) },
+	)
 }
 
 // renderConvoyStatusFromAPI formats the API-sourced convoy detail to match

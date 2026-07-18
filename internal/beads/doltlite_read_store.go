@@ -120,10 +120,16 @@ func doltliteIssueTypeNotInPredicate(alias string) (string, []any) {
 	return "COALESCE(" + alias + ".issue_type, '') NOT IN (" + placeholders + ")", args
 }
 
-func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, error) {
+// doltliteDBPath resolves the physical SQLite database file for the DoltLite
+// store rooted at dir. It is the single source of truth for the
+// .beads/doltlite/<db>.db path so the read path and the maintenance reindex
+// path always target the same file. The database name comes from
+// .beads/metadata.json (dolt_database, then database), falling back to the "hq"
+// default bd uses when neither pins a concrete name.
+func doltliteDBPath(dir string) (string, error) {
 	meta, err := readDoltliteMetadata(dir)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	dbName := strings.TrimSpace(meta.DoltDatabase)
 	if dbName == "" || dbName == "doltlite" {
@@ -132,7 +138,14 @@ func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, err
 	if dbName == "" || dbName == "doltlite" {
 		dbName = "hq"
 	}
-	dbPath := filepath.Join(dir, ".beads", "doltlite", dbName+".db")
+	return filepath.Join(dir, ".beads", "doltlite", dbName+".db"), nil
+}
+
+func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, error) {
+	dbPath, err := doltliteDBPath(dir)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, err
 	}
@@ -147,6 +160,38 @@ func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, err
 		return nil, err
 	}
 	return &DoltliteReadStore{BdStore: backing, db: db}, nil
+}
+
+// ReindexDoltliteStore rebuilds the DoltLite store's SQLite secondary indexes.
+// `bd flatten`/`bd gc` rewrite the underlying store and can leave the physical
+// .db's secondary indexes stale, so index-path reads (count/status/list)
+// silently return wrong results until the indexes are rebuilt (ga-7hei).
+// REINDEX is SQLite-specific DDL, so it runs against the physical
+// .beads/doltlite/<db>.db file through the same SQLite engine the read path
+// uses (modernc.org/sqlite) — not `bd sql`, which speaks Dolt/MySQL and cannot
+// execute it. The store is opened read-write only for the duration of the
+// rebuild.
+func ReindexDoltliteStore(dir string) error {
+	dbPath, err := doltliteDBPath(dir)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("doltlite store %q: %w", dbPath, err)
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+	if err != nil {
+		return fmt.Errorf("opening doltlite store %q: %w", dbPath, err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("REINDEX"); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("reindexing doltlite store %q: %w", dbPath, err)
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("closing doltlite store %q after reindex: %w", dbPath, err)
+	}
+	return nil
 }
 
 func readDoltliteMetadata(dir string) (doltliteMetadata, error) {

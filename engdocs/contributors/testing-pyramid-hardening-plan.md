@@ -919,6 +919,86 @@ the reference runner.
 
 **Dependencies:** P0.2 timing output. **Estimate:** medium.
 
+#### P0.6 — Scope ordinary-PR static work without weakening full runs
+
+**Change:** Let only a validated effective `pull_request` synthetic merge run
+impact-scoped lint and formatting. Validate the default `GITHUB_SHA` checkout
+against the event's exact base SHA with both merge parents present; never infer
+the base from a mutable ref or a merge-base calculation. Every effective
+non-PR or unknown event, invalid checkout/base, and protected static-policy
+change fails safe to full lint, full formatting, and standalone vet. Reusable
+workflows inherit the caller event and receive no exemption of their own: an
+effective `pull_request` may qualify only after the same validation, while the
+current RC `workflow_dispatch` remains full.
+
+The changed lint scope contains packages affected by added, modified, deleted,
+or moved Go-tool build inputs and packages owning changed embedded files, plus
+all transitive reverse dependents. Build inputs include Go, assembly,
+cgo/C/C++/Objective-C, header, Fortran, SWIG, and syso files. Embed ownership
+comes from the canonical package records and their production, internal-test,
+and external-test resolved embed inventories in one `go list -test -json ./...`
+graph. Multiple owners are retained. The reverse-dependency closure preserves
+analyzer-fact consumers that did not change textually, including test-only
+importers. An incomplete package graph, a deleted required embed input, or a
+deletion beneath a package with neither a current embed owner nor a current
+direct package owner fails safe to full-repository lint before native-input
+shortcuts. Changed formatting receives only
+exact existing regular, non-symlink `.go` paths, with NUL-safe handling for
+spaces and no empty formatter invocation. Keep `lint-changed` as the smaller
+local/pre-commit target; the PR workflow uses the distinct conservative
+`lint-affected` target. That target runs configured golangci, including its
+`govet` copy, and the Go tool's exact vet over the same closure. The bounded
+duplicate preserves both diagnostic surfaces without repeating either across
+the whole repository. Any selection failure runs both configured lint and
+standalone vet over `./...`; fallback never disables a configured linter.
+Native include and linker inputs can have recognized or arbitrary names and may
+live outside the consuming package, so every changed path selects every package
+with native Go-tool sources plus its reverse dependents.
+
+Protected full-scope paths are the Go module/workspace files,
+every root `.golangci.*` configuration, `Makefile`, workflow/action definitions,
+hooks, vendored code,
+`scripts/cipolicy/**`, `scripts/ci-static-scope`, and
+`scripts/ci-static-select`. Pushes to `main`, schedules, dispatches (including
+the current reusable RC caller), and any unrecognized event also stay full.
+
+**Acceptance:** The workflow runs `lint-affected` and
+`fmt-check-changed` only when the classifier emits `changed`. It uses
+`scope != 'changed'`, rather than equality with a second expected value, for
+full lint, full format, and standalone vet so a missing output cannot skip
+them. Golangci enables `govet` explicitly in both scopes, and affected lint
+invokes standalone vet over the identical package arguments. Every selection
+fallback and full-scope run retains configured golangci plus standalone
+full-repository vet.
+
+**Verification:** Synthetic-repository contracts cover a valid PR merge,
+wrong/missing base, non-merge checkout, every non-PR/unknown event, protected
+paths, changed/deleted/moved Go files, assembly and other recognized Go-tool
+build inputs, arbitrary native include fragments, recognized shared headers,
+and a deleted recognized glob member before native fallback,
+production/internal-test/external-test embedded assets, multiple
+embed owners, a deleted required input and deleted glob member's full-scope
+fallback, unrelated non-build/non-embedded no-op diffs, filenames containing
+spaces, transitive and test-only reverse dependents, a generated
+reverse-dependent diagnostic, and a broken package graph's full-lint fallback.
+Workflow policy tests bind the classifier inputs, exact conditions, checkout
+depth, commands, and explicit `govet` configuration. `make test-ci-policy`
+always runs the four focused static-policy Go contracts, and a self-binding
+contract proves that the Make target cannot silently drop that suite.
+
+**Owner/status:** `ga-80po0c.21`; active implementation slice. The measured
+baseline is PR #4336 Actions run
+[29483623514](https://github.com/gastownhall/gascity/actions/runs/29483623514):
+the static job took 257 seconds, including 120 seconds of full lint, 19 seconds
+of full formatting, and 13 seconds of standalone vet. Qualifying ordinary PRs
+therefore remove 152 seconds of broad static work from the critical path before
+paying the smaller affected-lint/affected-vet/changed-format replacement cost.
+The 61-second native-dependency guard and all other static guards remain. These
+are a current implementation baseline and expected gross saving; they do not
+rewrite the historical #4193 measurements above.
+
+**Dependencies:** P0.1. **Estimate:** small-medium.
+
 #### E1 — Make the E2E/provider manifest executable
 
 **Change:** Encode J1-J4 and provider proofs with owner, system promise,
@@ -1696,7 +1776,7 @@ With P0.1 merged, start four bounded workstreams:
 | Contract truth | H1, H2, H3, H4 | Prevents false confidence before consolidation. |
 | Architectural extraction | D8 and D9, then D4 and D5/D6 | Removes duplicated route policy, makes split-store dispatch testable, then attacks the API and `cmd/gc` compile/global-state centers. |
 | Lifecycle signals | W1 and W3 | Replaces representative process and API polling with reusable patterns. |
-| Measurement/policy | P0.2-P0.5 and E1 | Makes runtime, size, race, skip, and E2E ownership enforceable. |
+| Measurement/policy | P0.2-P0.6 and E1 | Makes runtime, size, race, static scope, skip, and E2E ownership enforceable. |
 
 Start D8 and D9 immediately as bounded high-ROI extractions; add D9's real-
 store composition proof after H3 truth is established. H5 follows the runtime

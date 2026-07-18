@@ -48,9 +48,11 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
-	// Pagination support. The session default page is the server cap, not the
-	// 50-row default other lists use — preserved from the offset-cursor era.
-	limit := maxPaginationLimit
+	// Unified page contract (S4): default 100 like every other keyset list.
+	// The offset-cursor era defaulted sessions to the 1000-row server cap;
+	// truncated responses now always mint next_cursor, so a default-size
+	// fetch of a large fleet is walkable instead of silently oversized.
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
 		limit = input.Limit
 		if limit > maxPaginationLimit {

@@ -412,8 +412,16 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if _, err := runner(cmd, dir, env); err != nil {
+		out, err := runner(cmd, dir, env)
+		if err != nil {
 			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+		}
+		// Surface only the DEFAULT hook's gc-recovery diagnostic — a bd release
+		// the loop could not complete, which exits 0 (so err is nil and the
+		// diagnostic rides stdout). A user on_boot override is passed through
+		// verbatim and carries no marker, so its arbitrary stdout is left alone.
+		if strings.Contains(out, config.RecoveryHookMarker) {
+			fmt.Fprintf(stderr, "on_boot %s: %s\n", a.QualifiedName(), strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
 		}
 	}
 }

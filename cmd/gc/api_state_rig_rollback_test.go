@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/ssrf"
 )
@@ -176,7 +177,7 @@ func TestProvisionRigFromGitRejectsPreexistingPath(t *testing.T) {
 		config.Rig{Name: "taken", Path: existing},
 		"https://example.com/r.git",
 		nil,
-		func(api.RigProvisionManifest) { manifested = true },
+		func(api.RigProvisionManifest) error { manifested = true; return nil },
 	)
 	if err == nil || !errors.Is(err, configedit.ErrValidation) {
 		t.Fatalf("ProvisionRigFromGit preexisting = %v, want a validation error", err)
@@ -202,7 +203,7 @@ func TestProvisionRigFromGitManifestsThenWrapsCloneError(t *testing.T) {
 		config.Rig{Name: "httpfail"},
 		"http://myhost.example/repo.git", // scheme-rejected by git.Clone, no network
 		nil,
-		func(m api.RigProvisionManifest) { manifests = append(manifests, m) },
+		func(m api.RigProvisionManifest) error { manifests = append(manifests, m); return nil },
 	)
 	if err == nil || !errors.Is(err, rig.ErrCloneFailed) {
 		t.Fatalf("ProvisionRigFromGit clone-fail = %v, want wrapped rig.ErrCloneFailed", err)
@@ -210,6 +211,43 @@ func TestProvisionRigFromGitManifestsThenWrapsCloneError(t *testing.T) {
 	// The dir was manifested (record-then-create) before the clone failure.
 	if len(manifests) != 1 || manifests[0].CreatedDir == "" || manifests[0].RigName != "httpfail" {
 		t.Fatalf("manifests = %+v, want one created_dir entry before the clone", manifests)
+	}
+}
+
+// TestProvisionRigFromGitAbortsWhenPreCloneManifestPersistFails locks the C4c
+// fail-closed contract for record-then-create: if durably persisting the
+// created_dir manifest fails BEFORE the clone, ProvisionRigFromGit must abort
+// without cloning. The pre-fix behavior logged the persist error and cloned
+// anyway, creating an un-manifested rig directory that neither the boot sweep
+// nor a re-clone pre-drop could discover — wedging the request_id/name on every
+// retry. The clone is stubbed so no network is touched and the assertion is
+// purely "did we reach the clone".
+func TestProvisionRigFromGitAbortsWhenPreCloneManifestPersistFails(t *testing.T) {
+	origResolver := ssrf.HostResolver
+	ssrf.HostResolver = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("140.82.112.3")}, nil }
+	defer func() { ssrf.HostResolver = origResolver }()
+
+	cloneCalled := false
+	origClone := rigCloneGit
+	rigCloneGit = func(context.Context, string, string, git.CloneOptions) error {
+		cloneCalled = true
+		return nil
+	}
+	defer func() { rigCloneGit = origClone }()
+
+	cs := &controllerState{cityPath: t.TempDir()}
+	persistErr := errors.New("SetMetadataBatch failed")
+	_, err := cs.ProvisionRigFromGit(context.Background(),
+		config.Rig{Name: "wedge"},
+		"https://example.com/repo.git",
+		nil,
+		func(api.RigProvisionManifest) error { return persistErr },
+	)
+	if err == nil || !errors.Is(err, persistErr) {
+		t.Fatalf("ProvisionRigFromGit with a failing pre-clone manifest = %v, want the persist error", err)
+	}
+	if cloneCalled {
+		t.Fatal("clone ran after the pre-clone manifest persist failed (an un-manifested dir could wedge the name)")
 	}
 }
 
@@ -268,7 +306,7 @@ func TestProvisionRigFromGitRejectsEscapingRelativePath(t *testing.T) {
 		config.Rig{Name: "evil", Path: "../../etc/evil"},
 		"https://example.com/r.git",
 		nil,
-		func(api.RigProvisionManifest) { manifested = true },
+		func(api.RigProvisionManifest) error { manifested = true; return nil },
 	)
 	if err == nil || !errors.Is(err, configedit.ErrValidation) {
 		t.Fatalf("escaping relative path = %v, want a validation error", err)
@@ -310,7 +348,7 @@ func TestProvisionRigFromGitRejectsSymlinkedParent(t *testing.T) {
 		config.Rig{Name: "rig", Path: "link/rig"},
 		"https://example.com/r.git",
 		nil,
-		func(api.RigProvisionManifest) { manifested = true },
+		func(api.RigProvisionManifest) error { manifested = true; return nil },
 	)
 	if err == nil || !errors.Is(err, configedit.ErrValidation) {
 		t.Fatalf("symlinked-parent path = %v, want a validation error", err)

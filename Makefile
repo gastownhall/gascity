@@ -94,7 +94,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -259,6 +259,8 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
+CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
+CI_STATIC_GO ?= go
 
 ## lint: run full-repo golangci-lint
 lint: lint-full
@@ -307,9 +309,17 @@ lint-changed: $(GOLANGCI_LINT)
 	echo "lint-changed: $$(printf '%s\n' "$$pkgs" | tr '\n' ' ')"; \
 	$(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
+## lint-affected: lint packages affected by changed Go build inputs or embedded files
+lint-affected: $(GOLANGCI_LINT)
+	@"$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) fmt --diff ./...
+
+## fmt-check-changed: fail if formatting would change a regular changed Go file
+fmt-check-changed: $(GOLANGCI_LINT)
+	@"$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
@@ -344,7 +354,7 @@ TEST_ENV = env -i \
 	LOGNAME="$$LOGNAME" \
 	SHELL="$$SHELL" \
 	LANG="$$LANG" \
-	TMPDIR="$${TMPDIR:-/tmp}" \
+	TMPDIR="$${TMPDIR:-/var/tmp}" \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
 	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
 	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
@@ -385,6 +395,7 @@ test-ci-policy:
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_runner_policy.py'
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
@@ -802,9 +813,10 @@ dashboard-build:
 dashboard-dev:
 	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend dev
 
-## dashboard-check: typecheck (src + test files) + build the SPA, then go test the embedded handler + BFF
+## dashboard-check: typecheck (src + test + e2e specs) + build the SPA, then go test the embedded handler + BFF
 dashboard-check: dashboard-build
 	cd internal/api/dashboardspa/web && npm run typecheck && npm run --workspace gas-city-dashboard-frontend typecheck:test
+	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend typecheck:e2e
 	$(TEST_ENV) go test ./internal/api/dashboardspa/... ./internal/api/dashboardbff/...
 
 ## dashboard-smoke: serve the built SPA bundle via Vite preview and verify it responds
@@ -832,14 +844,20 @@ dashboard-smoke: dashboard-build
 dashboard-e2e-go:
 	$(TEST_ENV) go test -tags integration -timeout 10m ./test/dashport/...
 
-## dashboard-e2e-play: drive the real embedded SPA in Chromium against the
-## existing dashport httptest listener. The Go test owns server cleanup and the
-## one ServeSeededCity harness; Playwright verifies DOM, transcript mutation,
-## SSE resume/upsert/reset semantics, and clean console/network behavior.
+## dashboard-e2e-play: Layer B of the dashboard e2e — the Playwright render smoke.
+## Builds the SPA bundle (so the embedded dist/ the fakesupervisor serves is
+## current), builds the seeded fakesupervisor binary with -tags integration,
+## installs Chromium, and runs the render specs, which assert each view renders
+## its seeded content with no React error boundary and no client-error POST. The
+## Go webServer in playwright.config.ts launches the seeded fakesupervisor.
 dashboard-e2e-play: dashboard-build
-	$(TEST_ENV) GC_DASHPORT_BROWSER_E2E=1 PLAYWRIGHT_BROWSERS_PATH="$${PLAYWRIGHT_BROWSERS_PATH}" PLAYWRIGHT_CHROMIUM_EXECUTABLE="$${PLAYWRIGHT_CHROMIUM_EXECUTABLE}" go test -tags integration -timeout 10m -count=1 -run '^TestStructuredTranscriptBrowser$$' -v ./test/dashport
+	cd test/dashport/cmd/fakesupervisor && go build -tags integration -o fakesupervisor .
+	cd internal/api/dashboardspa/web && npm ci --silent
+	cd internal/api/dashboardspa/web/frontend && npm run test:e2e:install
+	cd internal/api/dashboardspa/web/frontend && npm run test:e2e
 
-## dashboard-e2e: run both the Go wire-level and real-browser dashboard layers.
+## dashboard-e2e: run both dashboard e2e layers — the Go serve-level projection
+## test (Layer A) and the Playwright browser render smoke (Layer B).
 dashboard-e2e: dashboard-e2e-go dashboard-e2e-play
 
 ## dashboard-ci: regenerate the typed API client + rebuild the SPA bundle, and

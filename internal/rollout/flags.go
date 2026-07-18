@@ -20,6 +20,7 @@ type resolved[T any] struct {
 // zero Flags never resolved. Build defaults with ForTest or Resolve, never Flags{}.
 type Flags struct {
 	beadsConditionalWrites resolved[Mode]
+	beadsGuardedRelease    resolved[Mode]
 	formulaV2              resolved[bool]
 	notices                []Notice
 }
@@ -31,6 +32,8 @@ func (f Flags) OriginOf(key string) Origin {
 	switch key {
 	case keyBeadsConditionalWrites:
 		return f.beadsConditionalWrites.origin
+	case keyBeadsGuardedRelease:
+		return f.beadsGuardedRelease.origin
 	case keyDaemonFormulaV2:
 		return f.formulaV2.origin
 	default:
@@ -45,6 +48,8 @@ func (f Flags) ValueOf(key string) string {
 	switch key {
 	case keyBeadsConditionalWrites:
 		return string(f.beadsConditionalWrites.value)
+	case keyBeadsGuardedRelease:
+		return string(f.beadsGuardedRelease.value)
 	case keyDaemonFormulaV2:
 		return strconv.FormatBool(f.formulaV2.value)
 	default:

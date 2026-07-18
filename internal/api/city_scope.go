@@ -137,6 +137,21 @@ func errorStatuses(codes ...int) func(o *huma.Operation) {
 	}
 }
 
+// listOrder documents a list endpoint's total order and cursor contract in
+// its operation description. Every keyset list declares its order here so
+// consumers never have to reverse-engineer it from behavior (the pre-S4
+// audit found five endpoints with three different undocumented orders).
+func listOrder(order string) func(o *huma.Operation) {
+	return func(o *huma.Operation) {
+		text := "Results are ordered " + order + ". A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor)."
+		if o.Description == "" {
+			o.Description = text
+			return
+		}
+		o.Description += "\n\n" + text
+	}
+}
+
 // cityGet registers a per-city GET op at /v0/city/{cityName}+tail.
 // The tail starts with "/" (e.g. "/agents") or is "" for the
 // city-detail base path. Optional opts (e.g. errorStatuses) customize the

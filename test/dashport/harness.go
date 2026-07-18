@@ -19,10 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/testutil"
+	"time"
 )
 
 // harness is a running seeded-city server plus the collaborators a test asserts
@@ -34,11 +31,6 @@ type harness struct {
 	cityName string
 	cityPath string
 	client   *http.Client
-
-	sessionID       string
-	transcriptPath  string
-	sessionProvider *runtime.Fake
-	sessionManager  *session.Manager
 }
 
 // newHarness seeds a city from testdata/dashport and serves the full supervisor
@@ -76,11 +68,6 @@ func newHarness(t *testing.T) *harness {
 		cityName: fx.CityName,
 		cityPath: fx.CityPath,
 		client:   srv.Client(),
-
-		sessionID:       fx.sessionID,
-		transcriptPath:  fx.transcriptPath,
-		sessionProvider: fx.sessionProvider,
-		sessionManager:  fx.sessionManager,
 	}
 }
 
@@ -139,13 +126,12 @@ func (h *harness) getRaw(url string) (int, []byte) {
 
 // streamStatus opens an SSE endpoint, reads at most one frame, and returns the
 // response status. The stream stays open by design (it long-polls for new
-// events), so the read is bounded by the repository's goroutine-race deadline;
-// a deadline hit after a 200 is success — it means the stream was serving. This
-// mirrors the way the in-package SSE handler tests bound the read with a
-// cancelable context.
+// events), so the read is bounded by a short context deadline; a deadline hit
+// after a 200 is success — it means the stream was serving. This mirrors the way
+// the in-package SSE handler tests bound the read with a cancelable context.
 func (h *harness) streamStatus(url string) int {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

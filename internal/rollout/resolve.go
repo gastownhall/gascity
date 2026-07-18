@@ -37,7 +37,16 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 	f := defaultFlags()
 
 	// beads.conditional_writes — Mode gate, EnvOverrides semantics.
-	if err := resolveBeadsConditionalWrites(cfg, lookup, &f); err != nil {
+	if err := resolveModeGate(cfg, lookup, &f, beadsConditionalWritesSpec(),
+		readBeadsConditionalWrites,
+		func(f *Flags, r resolved[Mode]) { f.beadsConditionalWrites = r }); err != nil {
+		return Flags{}, err
+	}
+
+	// beads.guarded_release — Mode gate, EnvOverrides semantics.
+	if err := resolveModeGate(cfg, lookup, &f, beadsGuardedReleaseSpec(),
+		readBeadsGuardedRelease,
+		func(f *Flags, r resolved[Mode]) { f.beadsGuardedRelease = r }); err != nil {
 		return Flags{}, err
 	}
 
@@ -49,19 +58,31 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 	return f, nil
 }
 
-func resolveBeadsConditionalWrites(cfg *config.City, lookup func(string) (string, bool), f *Flags) error {
-	// The env var NAME and precedence semantics come from the registry Spec, so
-	// the CODEOWNERS-reviewed registry is the single source of truth — renaming
-	// Spec.EnvOverride or flipping EnvSemantics changes behavior here, and the
-	// registry↔resolver binding test proves it.
-	spec := beadsConditionalWritesSpec()
+// resolveModeGate resolves one Off/Auto/Require gate from config plus its
+// registry-declared env override, recording a typed Origin and the precedence
+// Notices on f. It is the shared body for every Mode gate, so all of them obey
+// identical precedence and notice semantics; only the per-gate wiring — which
+// config field to read and which Flags slot to write — is injected via
+// read/set. The env var NAME and precedence semantics come from the passed
+// Spec, so the CODEOWNERS-reviewed registry is the single source of truth:
+// renaming Spec.EnvOverride or flipping EnvSemantics changes behavior here, and
+// the registry↔resolver binding test proves it.
+func resolveModeGate(
+	cfg *config.City,
+	lookup func(string) (string, bool),
+	f *Flags,
+	spec Spec,
+	read func(*config.City) (raw string, defined bool),
+	set func(*Flags, resolved[Mode]),
+) error {
+	key := spec.Key
 
-	raw, defined := readBeadsConditionalWrites(cfg)
+	raw, defined := read(cfg)
 	mode, origin := Off, OriginBuiltin
 	if defined {
 		m, err := ParseMode(raw)
 		if err != nil {
-			return fmt.Errorf("rollout: config %s: %w", keyBeadsConditionalWrites, err)
+			return fmt.Errorf("rollout: config %s: %w", key, err)
 		}
 		mode, origin = m, OriginConfig
 	}
@@ -74,19 +95,19 @@ func resolveBeadsConditionalWrites(cfg *config.City, lookup func(string) (string
 				// Malformed value: warn and keep the config-resolved value. Never
 				// refuse-to-start, never a silent fallback.
 				f.notices = append(f.notices, Notice{
-					Kind: NoticeInvalidEnvIgnored, FlagKey: keyBeadsConditionalWrites,
+					Kind: NoticeInvalidEnvIgnored, FlagKey: key,
 					EnvVar: spec.EnvOverride, ConfigValue: raw, EnvValue: envRaw,
 					Message: fmt.Sprintf("%s=%q is not off|auto|require; ignored, keeping %s=%q (%s)",
-						spec.EnvOverride, envRaw, keyBeadsConditionalWrites, string(mode), origin),
+						spec.EnvOverride, envRaw, key, string(mode), origin),
 				})
 			case spec.EnvSemantics == EnvFillsNil && defined:
 				// fills-nil: config already set, so the env value does not apply.
 				// No override, no misleading notice.
 			case defined && m != mode:
 				f.notices = append(f.notices, Notice{
-					Kind: NoticeEnvOverridesConfig, FlagKey: keyBeadsConditionalWrites,
+					Kind: NoticeEnvOverridesConfig, FlagKey: key,
 					EnvVar: spec.EnvOverride, ConfigValue: raw, EnvValue: envRaw,
-					Message: fmt.Sprintf("%s=%q overrides config %s=%q", spec.EnvOverride, string(m), keyBeadsConditionalWrites, raw),
+					Message: fmt.Sprintf("%s=%q overrides config %s=%q", spec.EnvOverride, string(m), key, raw),
 				})
 				mode, origin = m, OriginEnv
 			case defined && m == mode:
@@ -94,7 +115,7 @@ func resolveBeadsConditionalWrites(cfg *config.City, lookup func(string) (string
 				// config origin and emit no (misleading "config unset") notice.
 			default: // !defined: env supplies the value.
 				f.notices = append(f.notices, Notice{
-					Kind: NoticeEnvOverrideActive, FlagKey: keyBeadsConditionalWrites,
+					Kind: NoticeEnvOverrideActive, FlagKey: key,
 					EnvVar: spec.EnvOverride, ConfigValue: raw, EnvValue: envRaw,
 					Message: fmt.Sprintf("%s=%q applied (config unset)", spec.EnvOverride, string(m)),
 				})
@@ -103,6 +124,6 @@ func resolveBeadsConditionalWrites(cfg *config.City, lookup func(string) (string
 		}
 	}
 
-	f.beadsConditionalWrites = resolved[Mode]{value: mode, origin: origin}
+	set(f, resolved[Mode]{value: mode, origin: origin})
 	return nil
 }

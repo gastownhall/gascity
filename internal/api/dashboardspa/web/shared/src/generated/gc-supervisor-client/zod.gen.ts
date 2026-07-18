@@ -886,6 +886,8 @@ export const zOrderHistoryListBody = z.object({
 export const zOrderResponse = z.object({
     capture_output: z.boolean(),
     check: z.string().optional(),
+    check_timeout: z.string().optional(),
+    check_timeout_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     description: z.string().optional(),
     enabled: z.boolean(),
     env: z.record(z.string(), z.string()).optional(),
@@ -2679,6 +2681,11 @@ export const zSlingInputBody = z.object({
     bead: z.string().optional(),
     force: z.boolean().optional(),
     formula: z.string().optional(),
+    merge: z.string().optional(),
+    no_convoy: z.boolean().optional(),
+    no_formula: z.boolean().optional(),
+    owned: z.boolean().optional(),
+    reassign: z.boolean().optional(),
     rig: z.string().optional(),
     scope_kind: z.string().optional(),
     scope_ref: z.string().optional(),
@@ -6670,7 +6677,7 @@ export const zGetV0CityByCityNameBeadsQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
     cursor: z.string().optional(),
-    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     status: z.string().optional(),
     type: z.string().optional(),
     label: z.string().optional(),
@@ -6848,7 +6855,7 @@ export const zGetV0CityByCityNameConvoysQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
     cursor: z.string().optional(),
-    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100))
 });
 
 /**
@@ -6880,7 +6887,7 @@ export const zGetV0CityByCityNameEventsQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
     cursor: z.string().optional(),
-    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     type: z.string().optional(),
     actor: z.string().optional(),
     since: z.string().optional()
@@ -7330,7 +7337,7 @@ export const zGetV0CityByCityNameMailQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
     cursor: z.string().optional(),
-    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     agent: z.string().optional(),
     status: z.string().optional(),
     rig: z.string().optional()
@@ -8454,7 +8461,7 @@ export const zGetV0CityByCityNameSessionsPath = z.object({
 
 export const zGetV0CityByCityNameSessionsQuery = z.object({
     cursor: z.string().optional(),
-    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     state: z.string().optional(),
     template: z.string().optional(),
     peek: z.boolean().optional()

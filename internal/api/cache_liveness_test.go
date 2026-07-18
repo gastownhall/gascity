@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // fakeLivenessStore satisfies beads.Store by embedding a MemStore. Tests
@@ -70,33 +71,83 @@ func TestCacheLiveOr503_NotLiveReturns503(t *testing.T) {
 }
 
 func TestCacheAgeSeconds(t *testing.T) {
+	// Deterministic against a real CachingStore: freeze the clock a fixed
+	// interval past the primed LastFreshAt and assert the exact age. (Before
+	// clock injection this test could only assert monotonicity.)
 	mem := beads.NewMemStore()
 	cache := beads.NewCachingStoreForTest(mem, nil)
 	if err := cache.Prime(t.Context()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
-
-	// Immediately after prime, age should be ~0s.
-	age := cacheAgeSeconds(cache)
-	if age < 0 || age > 5 {
-		t.Errorf("post-prime age = %.3fs, want 0..5", age)
+	lastFresh := cache.Stats().LastFreshAt
+	if lastFresh.IsZero() {
+		t.Fatal("expected non-zero LastFreshAt after Prime")
 	}
-
-	// Simulate time passing by manipulating via public Stats surface.
-	// We can't inject a clock, so assert monotonicity.
-	time.Sleep(20 * time.Millisecond)
-	age2 := cacheAgeSeconds(cache)
-	if age2 < age {
-		t.Errorf("age decreased over time: %.6f → %.6f", age, age2)
+	restore := SetLivenessClockForTest(&clock.Fake{Time: lastFresh.Add(12 * time.Second)})
+	defer restore()
+	if got := cacheAgeSeconds(cache); got != 12 {
+		t.Errorf("cacheAgeSeconds = %v, want exactly 12", got)
 	}
 }
 
-func TestCacheAgeSeconds_NonCachingStoreReturnsZero(t *testing.T) {
-	mem := beads.NewMemStore()
-	if got := cacheAgeSeconds(mem); got != 0 {
-		t.Errorf("cacheAgeSeconds(non-caching) = %v, want 0", got)
+// stubLivenessReporter is a fully controllable livenessReporter for the
+// cache-age conformance lane. It embeds a nil beads.Store so it satisfies the
+// Store type cacheAgeSeconds/cacheLiveOr503 accept; only the two liveness
+// methods those helpers actually call are implemented.
+type stubLivenessReporter struct {
+	beads.Store
+	live      bool
+	lastFresh time.Time
+}
+
+func (s stubLivenessReporter) IsLive() bool { return s.live }
+func (s stubLivenessReporter) Stats() beads.CacheStats {
+	return beads.CacheStats{LastFreshAt: s.lastFresh}
+}
+
+func TestCacheAgeSeconds_ClockInjectedStates(t *testing.T) {
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
+	defer restore()
+
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+		want  float64
+	}{
+		{"live-2s", stubLivenessReporter{live: true, lastFresh: base.Add(-2 * time.Second)}, 2},
+		{"lagging-35s-past-banner", stubLivenessReporter{live: true, lastFresh: base.Add(-35 * time.Second)}, 35},
+		{"priming-never-fresh", stubLivenessReporter{live: false, lastFresh: time.Time{}}, 0},
+		{"clock-skew-negative-clamped", stubLivenessReporter{live: true, lastFresh: base.Add(5 * time.Second)}, 0},
+		{"non-caching", beads.NewMemStore(), 0},
+		{"nil-store", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cacheAgeSeconds(tc.store); got != tc.want {
+				t.Errorf("cacheAgeSeconds(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
-	if got := cacheAgeSeconds(nil); got != 0 {
-		t.Errorf("cacheAgeSeconds(nil) = %v, want 0", got)
+}
+
+func TestCacheLiveOr503_StubStates(t *testing.T) {
+	if err := cacheLiveOr503(stubLivenessReporter{live: true}); err != nil {
+		t.Errorf("live stub = %v, want nil", err)
+	}
+	err := cacheLiveOr503(stubLivenessReporter{live: false})
+	if err == nil || !strings.Contains(err.Error(), "cache_not_live") {
+		t.Errorf("not-live stub = %v, want cache_not_live 503", err)
+	}
+}
+
+func TestSetLivenessClockForTest_Restores(t *testing.T) {
+	before := livenessClock
+	restore := SetLivenessClockForTest(&clock.Fake{Time: time.Unix(0, 0)})
+	if livenessClock == before {
+		t.Fatal("SetLivenessClockForTest did not swap the clock")
+	}
+	restore()
+	if livenessClock != before {
+		t.Fatal("restore did not put the original clock back")
 	}
 }

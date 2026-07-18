@@ -10,10 +10,10 @@
 #
 # Architecture:
 #   docker run -d --init $image sleep infinity     # container stays alive
-#   docker exec tmux new-session -d -s agent ...   # agent runs inside tmux
+#   docker exec tmux new-session -d -s main ...    # agent runs inside tmux
 #
 # Process tree: tini → sleep infinity (PID 1) + tmux-server → agent
-# One tmux session per container, always named "agent".
+# One tmux session per container, always named "main".
 #
 # Requirements: docker, jq
 # Container requirement: tmux (hard error if missing)
@@ -38,6 +38,15 @@ TMUX_SESSION="main"
 # tmpfs, so sockets are isolated even when /tmp is volume-mounted from
 # the host.
 TMUX_SOCK_DIR="/run/gc-tmux"
+
+# Match the native tmux provider's prompt observation depth. Full-screen UIs
+# can leave enough footer rows to push a visible prompt above a 10-line tail.
+PROMPT_OBSERVATION_LINES=120
+
+# Bash 3.2-compatible UTF-8 bytes for U+00A0. Keep this outside the line loop:
+# command substitution per captured line would turn a timeout into thousands
+# of avoidable subshells.
+PROMPT_NBSP=$'\302\240'
 
 # Controller-only env vars stripped from containers. These reference
 # controller-side resources (Unix sockets, localhost ports) that aren't
@@ -189,14 +198,79 @@ wait_for_prompt() {
     local cname="$1" prefix="$2" timeout_sec="$3"
     local deadline=$((SECONDS + timeout_sec))
     while [ $SECONDS -lt $deadline ]; do
-        if dtmux "$cname" capture-pane -p \
-            -t "$TMUX_SESSION" -S -10 2>/dev/null | grep -qF "$prefix"; then
-            return 0
-        fi
+        local pane_output line
+        pane_output=$(dtmux "$cname" capture-pane -p \
+            -t "$TMUX_SESSION" -S "-$PROMPT_OBSERVATION_LINES" 2>/dev/null) || pane_output=""
+        while IFS= read -r line; do
+            if matches_prompt_prefix "$line" "$prefix"; then
+                return 0
+            fi
+        done <<< "$pane_output"
         sleep 0.2
     done
     # Best-effort: non-fatal timeout.
     return 0
+}
+
+# Match the native tmux provider's prompt semantics. Tmux capture trims a
+# prompt's trailing spaces, so a configured prefix such as "> " must also
+# match the captured bare prompt ">".
+matches_prompt_prefix() {
+    local line="$1" prefix="$2"
+
+    line="${line//$PROMPT_NBSP/ }"
+    prefix="${prefix//$PROMPT_NBSP/ }"
+
+    local trimmed_line="$line" trimmed_prefix="$prefix"
+    trimmed_line="${trimmed_line#"${trimmed_line%%[![:space:]]*}"}"
+    trimmed_line="${trimmed_line%"${trimmed_line##*[![:space:]]}"}"
+    trimmed_prefix="${trimmed_prefix#"${trimmed_prefix%%[![:space:]]*}"}"
+    trimmed_prefix="${trimmed_prefix%"${trimmed_prefix##*[![:space:]]}"}"
+
+    local border_stripped="$trimmed_line"
+    case "$border_stripped" in
+        │*)
+            border_stripped="${border_stripped#│}"
+            border_stripped="${border_stripped#"${border_stripped%%[![:space:]]*}"}"
+            ;;
+        ┃*)
+            border_stripped="${border_stripped#┃}"
+            border_stripped="${border_stripped#"${border_stripped%%[![:space:]]*}"}"
+            ;;
+    esac
+
+    local candidate
+    for candidate in "$trimmed_line" "$border_stripped"; do
+        if [[ "$candidate" == "$prefix"* || \
+            ( -n "$trimmed_prefix" && "$candidate" == "$trimmed_prefix" ) ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Script-lifetime ownership for a container whose start has not completed.
+# EXIT runs after do_start may have unwound, so it cannot rely on do_start's
+# local variables still being in scope.
+FAILED_START_CONTAINER_ID=""
+FAILED_START_CONTAINER_NAME=""
+
+cleanup_failed_start() {
+    local status=$?
+    local container_id="$FAILED_START_CONTAINER_ID"
+    local container_name="$FAILED_START_CONTAINER_NAME" cleanup_output
+    trap - EXIT INT TERM HUP
+    # Roll back with a single force-remove instead of a graceful "stop -t 10"
+    # followed by "rm -f". A failed start has no live session worth draining,
+    # and cooperative cancellation gives this cleanup only a short grace window:
+    # the exec provider force-kills the adapter ~2s after signaling interrupt.
+    # A graceful stop that waited out its timeout would be killed before "rm -f"
+    # ran, leaking the container. "docker rm -f" sends SIGKILL and removes in one
+    # bounded step, so rollback completes inside the grace window.
+    if ! cleanup_output=$(docker rm -f "$container_id" 2>&1); then
+        echo "gc: warning: failed to remove container '$container_name' ($container_id) after startup error${cleanup_output:+: $cleanup_output}" >&2
+    fi
+    exit "$status"
 }
 
 # --- Operations ---
@@ -296,7 +370,8 @@ do_start() {
 
     # Start container with sleep infinity (PID 1 keepalive).
     # TERM is set as a default; config env can override (last -e wins).
-    docker run -d \
+    local created_id
+    created_id=$(docker run -d \
         --name "$cname" \
         --init \
         ${docker_user:+--user "$docker_user"} \
@@ -309,8 +384,17 @@ do_start() {
         "${extra_args[@]+"${extra_args[@]}"}" \
         -w "$work_dir" \
         "$image" \
-        sleep infinity \
-        >/dev/null
+        sleep infinity)
+
+    # A successful docker run transfers ownership of the new container to
+    # this script. Until startup completes, roll it back on every failure
+    # by immutable ID while preserving the original status and diagnostic.
+    FAILED_START_CONTAINER_ID="$created_id"
+    FAILED_START_CONTAINER_NAME="$cname"
+    trap cleanup_failed_start EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
 
     # --- Tmux requirement check ---
     docker exec "$cname" which tmux >/dev/null 2>&1 ||
@@ -329,7 +413,7 @@ do_start() {
     done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
 
     # Tell the agent which tmux session to target for metadata (drain,
-    # restart). The controller uses TMUX_SESSION ("agent") when proxying
+    # restart). The controller uses TMUX_SESSION ("main") when proxying
     # set-meta/get-meta; this env var makes the agent's Go tmux provider
     # resolve to the same session name.
     tmux_env_args+=(-e "GC_TMUX_SESSION=$TMUX_SESSION")
@@ -430,7 +514,7 @@ do_start() {
     # Step 5: Run session_setup commands inside the container.
     # Commands run via docker exec with tmux targets rewritten from
     # the expanded session name (e.g., "gastown-mayor") to the
-    # in-container tmux session name ("agent"). This lets the same
+    # in-container tmux session name ("main"). This lets the same
     # city.toml work with both tmux and Docker providers.
     local setup_cmds
     setup_cmds=$(field_array "$config" '.session_setup')
@@ -489,6 +573,10 @@ do_start() {
         dtmux "$cname" send-keys -t "$TMUX_SESSION" Enter 2>/dev/null || true
         wake_pane "$cname"
     fi
+
+    trap - EXIT INT TERM HUP
+    FAILED_START_CONTAINER_ID=""
+    FAILED_START_CONTAINER_NAME=""
 }
 
 do_stop() {
