@@ -128,6 +128,30 @@ echo "otel=$OTEL_SERVICE_NAME"
 	}
 }
 
+func TestPinInvokingGCBinary_ReplacesAmbientValue(t *testing.T) {
+	env := []string{"PATH=/bin", "GC_BIN=/tmp/stale-installed-gc", "HOME=/tmp/home"}
+	got := pinInvokingGCBinary(env, "/tmp/current-gc")
+
+	values := make(map[string][]string)
+	for _, entry := range got {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = append(values[key], value)
+		}
+	}
+	if values := values["GC_BIN"]; len(values) != 1 || values[0] != "/tmp/current-gc" {
+		t.Fatalf("GC_BIN values = %q, want [%q]", values, "/tmp/current-gc")
+	}
+	if values := values["PATH"]; len(values) != 1 || values[0] != "/bin" {
+		t.Fatalf("PATH values = %q, want [%q]", values, "/bin")
+	}
+	for _, entry := range pinInvokingGCBinary(env, "") {
+		if strings.HasPrefix(entry, "GC_BIN=") {
+			t.Fatalf("empty executable retained ambient GC_BIN in %q", entry)
+		}
+	}
+}
+
 const packCommandProcessHelperArg = "pack-command-process-helper"
 
 type packCommandProcessInvocation struct {
