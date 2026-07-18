@@ -5,6 +5,10 @@ import {
   ANCHOR_RUN_ID,
   CITY_BASE,
   CITY_NAME,
+  COMPLETED_FORMULA,
+  COMPLETED_PHASE_LABEL,
+  COMPLETED_RUN_ID,
+  COMPLETED_STEP_APPROVE,
   MAIL_SUBJECT,
   WORK_BEAD_ID,
 } from './fixtures/expected';
@@ -116,8 +120,75 @@ test.describe('dashboard render smoke over the seeded corpus', () => {
     // it proves the health read wired through — a static header would not carry
     // it. The "Tool versions" section is a real widget the local-tools plane
     // fills, confirming the BFF health plane rendered too.
-    await expect(page.getByText(`Supervisor healthy on ${CITY_NAME}`, { exact: false })).toBeVisible();
+    await expect(
+      page.getByText(`Supervisor healthy on ${CITY_NAME}`, { exact: false }),
+    ).toBeVisible();
     await expect(page.getByText('Tool versions', { exact: false }).first()).toBeVisible();
+    await assertHealthy(page, watch);
+  });
+
+  // Close-side scenario (the completed run "run-done"): the corpus seeds a
+  // SECOND run whose root and both steps are all closed, capped by a
+  // molecule.resolved event. These four specs assert the close-side data renders
+  // populated on every surface it reaches — the historical runs list, the
+  // terminal run detail, the closed beads view, and the close-edge activity feed
+  // — the render-truth half of Layer A's TestCompletedRunProjection.
+
+  test('runs list history reveals the completed run as terminal', async ({ page }) => {
+    const watch = watchClientErrors(page);
+    // history=1 reveals the historical section directly; completed runs are
+    // hidden from the default active view by design (routes/Runs.tsx).
+    await gotoCityRoute(page, CITY_BASE, '/runs?history=1');
+    await expect(page.getByRole('heading', { name: 'Runs', level: 1 })).toBeVisible();
+    // The completed run lives ONLY in the Historical region — scope every
+    // assertion to it so a leak into the active lanes cannot satisfy the spec.
+    const history = page.getByRole('region', { name: 'Historical runs' });
+    // The lane renders the run root id, its formula title, and a terminal phase
+    // label ("complete"); the active anchor run carries none of these here.
+    await expect(history.getByText(COMPLETED_RUN_ID).first()).toBeVisible();
+    await expect(history.getByText(COMPLETED_FORMULA).first()).toBeVisible();
+    await expect(history.getByText(COMPLETED_PHASE_LABEL, { exact: true }).first()).toBeVisible();
+    await assertHealthy(page, watch);
+  });
+
+  test('completed run detail renders terminal lanes/nodes', async ({ page }) => {
+    const watch = watchClientErrors(page);
+    await gotoCityRoute(page, CITY_BASE, `/runs/${COMPLETED_RUN_ID}`);
+    // The detail h1 is the completed run's formula name — distinct from the
+    // active run's, so this addresses the completed run unambiguously.
+    await expect(page.getByRole('heading', { name: COMPLETED_FORMULA, level: 1 })).toBeVisible();
+    // Its closed step nodes render with a terminal "done" status: the step node
+    // title proves the lanes/nodes projected (not a skeleton/empty state) and the
+    // "done" status label proves they read terminal, not in-progress.
+    await expect(page.getByText('approve').first()).toBeVisible();
+    await expect(page.getByText('done').first()).toBeVisible();
+    await assertHealthy(page, watch);
+  });
+
+  test('beads reveals the completed run closed step', async ({ page }) => {
+    const watch = watchClientErrors(page);
+    await gotoCityRoute(page, CITY_BASE, '/beads');
+    await expect(page.getByRole('heading', { name: 'Beads', level: 1 })).toBeVisible();
+    // Closed beads are hidden by default; the "closed" status chip widens the
+    // fetch (all=true) and narrows the board to closed rows. The completed run
+    // surfaces via its closed TASK step — its molecule root is filtered out of
+    // the engineering-types board (routes/Beads.tsx, supervisor/beadReads.ts).
+    await page.getByRole('button', { name: 'closed' }).click();
+    await expect(page.getByText(COMPLETED_STEP_APPROVE).first()).toBeVisible();
+    await assertHealthy(page, watch);
+  });
+
+  test('activity renders the completed run close edges', async ({ page }) => {
+    const watch = watchClientErrors(page);
+    await gotoCityRoute(page, CITY_BASE, '/activity');
+    await expect(page.getByRole('heading', { name: 'Activity', level: 1 })).toBeVisible();
+    // The completed run's close-side events project as raw rows in the events
+    // table (routes/Activity.tsx renders event.type verbatim): a bead.closed
+    // close edge and the molecule.resolved resolution, both keyed to run-done.
+    const eventsTable = page.getByRole('table').first();
+    await expect(eventsTable.getByText('bead.closed').first()).toBeVisible();
+    await expect(eventsTable.getByText('molecule.resolved').first()).toBeVisible();
+    await expect(eventsTable.getByText(COMPLETED_RUN_ID).first()).toBeVisible();
     await assertHealthy(page, watch);
   });
 });

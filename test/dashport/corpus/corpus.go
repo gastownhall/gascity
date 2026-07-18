@@ -55,6 +55,33 @@ const (
 	// title the run view renders.
 	AnchorFormula = "mol-adopt-pr-v2"
 
+	// CompletedRunID is the SECOND seeded run root's bead id and workflow id: a
+	// fully closed molecule (root + both steps closed, no failing gc.outcome)
+	// that projects as a terminal "completed" run. It is seeded two ways from one
+	// corpus — as a store-resident closed molecule AND as a bead.created →
+	// bead.updated → bead.closed lifecycle in the event log capped by a
+	// molecule.resolved event — so every dashboard surface renders its close-side
+	// data (a historical/completed lane in the census+summary, a terminal run
+	// detail, close-edge rows in the activity feed, closed rows in the beads
+	// view). It is the counterpart to the happy-path in-progress AnchorRunID.
+	CompletedRunID = "run-done"
+
+	// CompletedFormula is the completed run's formula name; it is the completed
+	// run's detail title and its run-list label. It is deliberately DISTINCT from
+	// AnchorFormula so the open and completed runs are individually assertable in
+	// the runs list (which labels each lane by formula name).
+	CompletedFormula = "mol-review-pr-v2"
+
+	// CompletedStepAnalyzeID and CompletedStepApproveID are the completed run's
+	// two closed step beads (both status closed, closed via a bead.closed event).
+	CompletedStepAnalyzeID = "run-done.analyze"
+	CompletedStepApproveID = "run-done.approve"
+
+	// SourceBeadID is the closed source task the completed run was created from;
+	// the completed root carries gc.source_bead_id -> this id. It projects as a
+	// closed standalone bead in the beads view.
+	SourceBeadID = "src-review-1"
+
 	// AgentName is the seeded pool agent's name; it renders in the agents view
 	// as the pool members "<RigName>/<AgentName>-N".
 	AgentName = "builder"

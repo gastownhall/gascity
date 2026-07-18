@@ -21,6 +21,11 @@ const (
 	anchorRunID        = corpus.AnchorRunID
 	anchorStepID       = corpus.AnchorStepID
 	anchorFormula      = corpus.AnchorFormula
+	completedRunID     = corpus.CompletedRunID
+	completedFormula   = corpus.CompletedFormula
+	completedStepA     = corpus.CompletedStepAnalyzeID
+	completedStepB     = corpus.CompletedStepApproveID
+	corpusSourceBeadID = corpus.SourceBeadID
 	corpusWorkBeadID   = corpus.WorkBeadID
 	corpusWorkBeadName = corpus.WorkBeadTitle
 	corpusMailSubject  = corpus.MailSubject
