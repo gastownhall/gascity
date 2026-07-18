@@ -9,10 +9,12 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "typecheck:e2e": "tsc --noEmit -p e2e/tsconfig.json",
     "pretest": "npm --workspace gas-city-dashboard-shared run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e:install": "playwright install --with-deps chromium",
+    "test:e2e:install": "playwright install chromium",
+    "test:e2e:install:ci": "playwright install --with-deps chromium",
     "test:e2e:build": "cd ../../../../../test/dashport/cmd/fakesupervisor && go build -tags integration -o fakesupervisor .",
     "test:e2e": "playwright test",
     "e2e": "playwright test"

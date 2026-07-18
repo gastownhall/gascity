@@ -64,6 +64,13 @@ const (
 	// data (a historical/completed lane in the census+summary, a terminal run
 	// detail, close-edge rows in the activity feed, closed rows in the beads
 	// view). It is the counterpart to the happy-path in-progress AnchorRunID.
+	//
+	// The completed root in beads.json also carries the
+	// gc.molecule_lifecycle_completed marker: a 32-hex intent id mirroring the
+	// shape minted by cmd/gc/molecule_lifecycle_recovery.go on the unmerged PR
+	// #4397 (not on this base branch). It is inert here — no code on this branch
+	// reads it — and is seeded only so the fixture matches a real post-#4397
+	// completed root. Revisit the value/shape when #4397 merges.
 	CompletedRunID = "run-done"
 
 	// CompletedFormula is the completed run's formula name; it is the completed
@@ -225,14 +232,26 @@ func seedEventLog(dataDir, cityPath string) (events.Provider, func() error, erro
 			_ = rec.Close()
 			return nil, nil, fmt.Errorf("decode event %q: %w", truncate(line), err)
 		}
-		// Let the recorder assign seq AND ts in append order: the corpus seqs are
-		// documentation of intended order (not authoritative), and zeroing Ts makes
-		// the FileRecorder stamp time.Now() (recorder.go). Recent timestamps are
-		// what let the Activity view — whose default window is the last 24h — render
-		// the seeded event rows; the fixed 2026-06-01 corpus dates would otherwise
-		// fall outside every selectable window. The runproj/workflow projections
-		// Layer A asserts are recency-agnostic (they key on presence + status), so
-		// this does not perturb the Go serve-level assertions.
+		// Let the recorder assign seq AND envelope Ts in append order: the corpus
+		// seqs are documentation of intended order (not authoritative), and zeroing
+		// the ENVELOPE Ts makes the FileRecorder stamp time.Now() (recorder.go).
+		// Recent envelope timestamps are what let the Activity view — whose default
+		// window is the last 24h — render the seeded event rows; the fixed
+		// 2026-06-01 corpus dates would otherwise fall outside every selectable
+		// window. The runproj/workflow projections Layer A asserts are
+		// recency-agnostic (they key on presence + status), so this does not perturb
+		// the Go serve-level assertions.
+		//
+		// Only the ENVELOPE Ts is re-stamped. Timestamps embedded in the payload —
+		// each bead snapshot's created_at/updated_at and the molecule.resolved
+		// payload's own ts — are left as the fixed scenario values on purpose: they
+		// stay mutually consistent (the completed run's created_at→updated_at span,
+		// and its molecule.resolved ts == the root's close updated_at), so any
+		// duration/close-time derived from the payload is coherent while the
+		// activity-window filter keys off the re-stamped envelope Ts. The events are
+		// ordered in true scenario chronology (the earlier completed run first, then
+		// the later in-progress run) so the appended seq order matches the payload
+		// timeline.
 		e.Seq = 0
 		e.Ts = time.Time{}
 		rec.Record(e)

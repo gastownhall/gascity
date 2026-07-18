@@ -89,7 +89,9 @@
         "gc.scope_kind": "city",
         "gc.scope_ref": "dashport-city",
         "gc.source_bead_id": "src-review-1",
-        "gc.molecule_lifecycle_completed": "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        "gc.molecule_lifecycle_completed": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "gc.session_name": "reviewer",
+        "gc.session_id": "reviewer"
       }
     },
     {
@@ -108,7 +110,9 @@
         "gc.root_bead_id": "run-done",
         "gc.step_id": "analyze",
         "gc.step_ref": "mol-review-pr-v2.analyze",
-        "gc.scope_ref": "dashport-city"
+        "gc.scope_ref": "dashport-city",
+        "gc.session_name": "reviewer",
+        "gc.session_id": "reviewer"
       }
     },
     {
@@ -127,7 +131,9 @@
         "gc.root_bead_id": "run-done",
         "gc.step_id": "approve",
         "gc.step_ref": "mol-review-pr-v2.approve",
-        "gc.scope_ref": "dashport-city"
+        "gc.scope_ref": "dashport-city",
+        "gc.session_name": "reviewer",
+        "gc.session_id": "reviewer"
       }
     }
   ]
