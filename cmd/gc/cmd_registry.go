@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/credentialprovider"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/spf13/cobra"
 )
@@ -24,9 +25,82 @@ import (
 const (
 	defaultRegistryPublishURL     = "https://registry.gascity.com"
 	registryGitHubActionsAudience = "gascity-registry"
+	registryCredentialProviderEnv = "GC_CREDENTIAL_PROVIDER"
+	registryCredentialAudience    = "registry"
+	registryPublishScope          = "registry:publish"
 )
 
-var registryPublishHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var (
+	registryPublishHTTPClient     = &http.Client{Timeout: 30 * time.Second}
+	registryCredentialCache       = credentialprovider.NewCache()
+	errRegistryCredentialRedirect = errors.New("registry credential requests do not follow redirects")
+)
+
+type registryCredentialSource func(context.Context, bool) (string, error)
+
+var registryNewCredentialSource = func(argv []string, request credentialprovider.Request) (registryCredentialSource, error) {
+	provider, err := credentialprovider.New(argv)
+	if err != nil {
+		return nil, err
+	}
+	request.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+	return func(ctx context.Context, forceRefresh bool) (string, error) {
+		mintRequest := request
+		mintRequest.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+		mintRequest.ForceRefresh = forceRefresh
+		credential, err := registryCredentialCache.Mint(ctx, provider, mintRequest)
+		if err != nil {
+			return "", err
+		}
+		return credential.AccessToken, nil
+	}, nil
+}
+
+func registryCredentialProviderArgv() ([]string, error) {
+	raw, configured := os.LookupEnv(registryCredentialProviderEnv)
+	return parseRegistryCredentialProviderArgv(raw, configured)
+}
+
+func parseRegistryCredentialProviderArgv(raw string, configured bool) ([]string, error) {
+	if !configured {
+		return []string{"gasworks", "credential-provider"}, nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("%s must be a non-empty JSON argv array", registryCredentialProviderEnv)
+	}
+	var argv []string
+	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON argv array: %w", registryCredentialProviderEnv, err)
+	}
+	if _, err := credentialprovider.New(argv); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", registryCredentialProviderEnv, err)
+	}
+	return append([]string(nil), argv...), nil
+}
+
+func registryGasworksCredentialOriginAllowed(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Path != "" ||
+		u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, "registry.gascity.com") ||
+		strings.EqualFold(u.Host, "registry.gascity.com:443")
+}
+
+func newRegistryGasworksCredentialSource(baseURL string) (registryCredentialSource, error) {
+	if !registryGasworksCredentialOriginAllowed(baseURL) {
+		return nil, fmt.Errorf("gasworks credentials are sent only to %s; configure a native registry credential for any other registry", defaultRegistryPublishURL)
+	}
+	argv, err := registryCredentialProviderArgv()
+	if err != nil {
+		return nil, err
+	}
+	return registryNewCredentialSource(argv, credentialprovider.Request{
+		Audience:       registryCredentialAudience,
+		RequiredScopes: []string{registryPublishScope},
+	})
+}
 
 type registryPublishOptions struct {
 	RegistryURL   string
@@ -55,7 +129,14 @@ func newRegistryPublishCmd(stdout, stderr io.Writer) *cobra.Command {
 
 The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
-path, pack name, and version to the registry API.`,
+path, pack name, and version to the registry API.
+
+--dev-auth (localhost only) replaces all other credentials. Otherwise,
+authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
+cookie and CSRF-token pair from flags or the environment, a stored native
+Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
+canonical hosted Registry. Run "gasworks login" once before using the provider,
+or use "gc pack registry login" to create a separate native Registry token.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if doRegistryPublish(cmd.Context(), args[0], opts, stdout, stderr) != 0 {
@@ -129,6 +210,7 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
+	var providerSource registryCredentialSource
 	if opts.DevAuth {
 		var err error
 		auth, err = registryPublishDevAuth(ctx, registryPublishHTTPClient, baseURL, opts.DevAuthHandle)
@@ -151,11 +233,28 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 		auth.Token = publishToken
 	}
 	if !auth.hasCredentials() {
-		fmt.Fprintln(stderr, "gc pack registry publish: authentication required; run `gc pack registry login`, set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
+		providerSource, err = newRegistryGasworksCredentialSource(baseURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: configuring credential provider: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		token, err := providerSource(ctx, false)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: minting credential: %v; run `gasworks login` or `gc pack registry login`\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = token
+	}
+	if !auth.hasCredentials() {
+		fmt.Fprintln(stderr, "gc pack registry publish: authentication required; run `gc pack registry login`, set GC_REGISTRY_TOKEN, pass --token, or run `gasworks login`") //nolint:errcheck
 		return 1
 	}
 
-	submitted, err := submitRegistryPublishRequest(ctx, registryPublishHTTPClient, baseURL, request, auth, opts.Validate)
+	submitClient := registryPublishHTTPClient
+	if providerSource != nil {
+		submitClient = registryHTTPClientWithCredentialRefresh(submitClient, providerSource)
+	}
+	submitted, err := submitRegistryPublishRequest(ctx, submitClient, baseURL, request, auth, opts.Validate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 		return 1
@@ -501,6 +600,63 @@ type registryPublishAuth struct {
 	Token         string
 	SessionCookie string
 	CSRFToken     string
+}
+
+func registryHTTPClientWithCredentialRefresh(client *http.Client, refresh registryCredentialSource) *http.Client {
+	copyClient := *client
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errRegistryCredentialRedirect
+	}
+	base := copyClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	copyClient.Transport = &registryProviderReauthRoundTripper{base: base, refresh: refresh}
+	return &copyClient
+}
+
+type registryProviderReauthRoundTripper struct {
+	base    http.RoundTripper
+	refresh registryCredentialSource
+}
+
+func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
+		return resp, err
+	}
+	if !registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
+		(req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
+		return resp, nil
+	}
+
+	token, err := rt.refresh(req.Context(), true)
+	if err != nil {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("refreshing registry credential after 401: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		_ = resp.Body.Close()
+		return nil, errors.New("refreshing registry credential after 401: credential provider returned an empty token")
+	}
+
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		retry.Body, err = req.GetBody()
+		if err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("replaying registry request after credential refresh: %w", err)
+		}
+	}
+	retry.Header.Set("Authorization", "Bearer "+token)
+	_ = resp.Body.Close()
+	return rt.base.RoundTrip(retry)
+}
+
+func registryHasBearerAuthorization(value string) bool {
+	fields := strings.Fields(value)
+	return len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") && fields[1] != ""
 }
 
 func (a registryPublishAuth) hasCredentials() bool {

@@ -100,7 +100,7 @@ type Server struct {
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
-	storeHealthComputer func(ctx context.Context) *StatusStoreHealth
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
 	storeHealthFlight   singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the

@@ -56,6 +56,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "pi trust dialog",
+			content: "Trust project folder?\n/home/user/project\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.\n\n\u2192 Trust\n  Trust parent folder (/home/user)\n  Trust (this session only)\n  Do not trust\n  Do not trust (this session only)",
+			want:    true,
+		},
+		{
 			name:    "normal prompt text",
 			content: "> waiting for input",
 			want:    false,
@@ -112,6 +117,32 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 				return "Do you trust the files in this folder?\n● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust", nil
 			}
 			return "Type your message or @path/to/file", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsPiTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return "Trust project folder?\n/home/user/project\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.\n\n\u2192 Trust\n  Trust parent folder (/home/user)\n  Trust (this session only)\n  Do not trust\n  Do not trust (this session only)", nil
+			}
+			return "\u276f ", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)

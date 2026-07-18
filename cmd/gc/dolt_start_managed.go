@@ -121,7 +121,8 @@ var (
 // invocation ever passes, so its presence is itself the authorization to
 // enter the watchdog. Checking it first means the watchdog works whether
 // the re-exec target is a Go test binary OR a real `gc` binary —
-// integration tests (e.g. TestInheritedExternalBdRigStoreConsistent...,
+// integration tests (e.g.
+// TestManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore and
 // TestCmdSessionWait...) start managed dolt through a real `gc` subprocess
 // that re-execs itself as the watchdog, whose argv[0] does not contain
 // ".test". A prior `isTestBinary()` pre-gate blocked that path: the

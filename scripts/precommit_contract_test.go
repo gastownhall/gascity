@@ -193,6 +193,14 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 	repoRoot := repoRoot(t)
+	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if err := validateNativeDoltliteMakefile(string(makefile)); err != nil {
+		t.Fatalf("test-native-doltlite-beads recipe: %v", err)
+	}
+
 	cmd := exec.Command("make", "-n", "test-native-doltlite-beads")
 	cmd.Dir = repoRoot
 	out, err := cmd.CombinedOutput()
@@ -200,9 +208,13 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)
 	}
 	command := string(out)
+	if err := validateNativeDoltliteDryRun(command); err != nil {
+		t.Fatalf("make -n test-native-doltlite-beads output: %v", err)
+	}
 	for _, want := range []string{
 		"CGO_ENABLED=0",
 		"-tags gascity_native_beads",
+		"-run '^TestDoltlite'",
 		"./internal/beads",
 	} {
 		if !strings.Contains(command, want) {
@@ -217,6 +229,7 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 			t.Fatalf("test-native-doltlite-beads recipe must not contain %q (doltlite store now uses pure-Go modernc):\n%s", banned, command)
 		}
 	}
+	assertNativeDoltliteBeadsSelectionMatchesTaggedOwners(t, repoRoot)
 }
 
 func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {

@@ -259,8 +259,48 @@ describe('supervisor client wrapper', () => {
       total: 1,
     });
     expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/sessions',
+      'http://gc-supervisor.test/v0/city/test-city/sessions?limit=1000',
     );
+  });
+
+  it('walks session pages via next_cursor and merges them', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      // Second page: the client carries the first page's next_cursor forward.
+      if (requestedUrl(input).includes('cursor=page2')) {
+        return new Response(
+          JSON.stringify({
+            items: [{ id: 'gc-session-2', session_name: 'polecat' }],
+            total: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      // First page: mint a next_cursor so the client keeps walking instead of
+      // truncating at one server-cap page.
+      return new Response(
+        JSON.stringify({
+          items: [{ id: 'gc-session-1', session_name: 'mayor' }],
+          next_cursor: 'page2',
+          total: 2,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.listSessions('test-city')).resolves.toMatchObject({
+      items: [{ id: 'gc-session-1' }, { id: 'gc-session-2' }],
+      total: 2,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const urls = fetchSpy.mock.calls.map((call) => requestedUrl(call[0]));
+    expect(urls[0]).toBe('http://gc-supervisor.test/v0/city/test-city/sessions?limit=1000');
+    expect(urls[1]).toContain('limit=1000');
+    expect(urls[1]).toContain('cursor=page2');
   });
 
   it('calls supervisor session pending interaction through the generated SDK', async () => {

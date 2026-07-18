@@ -515,3 +515,220 @@ func TestMaxSeqFromLabelsEmpty(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Cron time-zone handling (fix/cron-catchup-single-location; follow-up to the
+// #2721 catch-up scan).
+//
+// checkCron used to mix two time domains: the live match (a) evaluated cron
+// fields in `now`'s location, while the catch-up scan (b) walked minutes in
+// the last-run bead's location — which the doltlite store ALWAYS returns
+// UTC-located (parseTimeString). On a non-UTC box a zone-anchored order fired
+// at the UTC reading of its slot ("30 19 * * *" fired at 19:30Z == 15:30 ET)
+// and then AGAIN at the real local slot: two fires per day. These tests pin
+// the fix: one explicit location (order tz → city default → process-local),
+// with both `now` and lastRun normalized into it. All orders here set tz so
+// the tests are independent of the test box's TZ.
+// ---------------------------------------------------------------------------
+
+func etCronOrder(t *testing.T, schedule string) (Order, *time.Location) {
+	t.Helper()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("load America/New_York: %v", err)
+	}
+	return Order{Name: "et-order", Trigger: "cron", Schedule: schedule, TZ: "America/New_York"}, loc
+}
+
+func fixedLastRun(last time.Time) LastRunFunc {
+	return func(string) (time.Time, error) { return last, nil }
+}
+
+// Regression: PM early fire at the UTC reading. Schedule "30 19 * * *" means
+// 19:30 ET (23:30Z during EDT). Last correct fire Jul 6 23:30Z (store-shaped:
+// UTC-located). Tick at Jul 7 19:30:30Z == 15:30:30 ET must NOT fire.
+// Pre-fix: due=true "cron: caught up missed occurrence" — the catch-up scan
+// matched hour 19 on the UTC wall clock.
+func TestCheckTriggerCronCatchupDoesNotFireAtUTCReadingPM(t *testing.T) {
+	a, loc := etCronOrder(t, "30 19 * * *")
+	last := time.Date(2026, 7, 6, 23, 30, 0, 0, time.UTC) // == Jul 6 19:30 ET
+	now := time.Date(2026, 7, 7, 15, 30, 30, 0, loc)      // == 19:30:30Z
+	res := checkCron(a, now, fixedLastRun(last))
+	if res.Due {
+		t.Errorf("due=true reason=%q at %s, want false (next fire is 19:30 ET / 23:30Z)",
+			res.Reason, now.UTC().Format(time.RFC3339))
+	}
+}
+
+// Regression: AM early fire — the exact live signature (dispatch at
+// 07:00:19Z == 03:00:19 ET for a "0 7 * * *" order meant as 07:00 ET).
+func TestCheckTriggerCronCatchupDoesNotFireAtUTCReadingAM(t *testing.T) {
+	a, loc := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC) // == Jul 6 07:00 ET
+	now := time.Date(2026, 7, 7, 3, 0, 19, 0, loc)       // == 07:00:19Z
+	res := checkCron(a, now, fixedLastRun(last))
+	if res.Due {
+		t.Errorf("due=true reason=%q at %s, want false (next fire is 07:00 ET / 11:00Z)",
+			res.Reason, now.UTC().Format(time.RFC3339))
+	}
+}
+
+// Control: at the real zone slot the order fires.
+func TestCheckTriggerCronFiresAtRealZoneSlot(t *testing.T) {
+	a, loc := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 7, 7, 0, 30, 0, loc) // 07:00:30 ET == 11:00:30Z
+	res := checkCron(a, now, fixedLastRun(last))
+	if !res.Due {
+		t.Errorf("due=false reason=%q, want true at the real 07:00 ET slot", res.Reason)
+	}
+}
+
+// The order's tz — not the caller's location and not time.Local — decides
+// the wall clock: with tz=America/New_York and UTC-located nows, 11:00:19Z
+// (07:00 ET) fires and 07:00:19Z (03:00 ET) does not.
+func TestCheckTriggerCronSpecTZIndependentOfCallerLocation(t *testing.T) {
+	a, _ := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC)
+
+	atSlot := time.Date(2026, 7, 7, 11, 0, 19, 0, time.UTC) // == 07:00:19 ET
+	if res := checkCron(a, atSlot, fixedLastRun(last)); !res.Due {
+		t.Errorf("at 11:00:19Z (07:00 ET): due=false reason=%q, want true", res.Reason)
+	}
+
+	offSlot := time.Date(2026, 7, 7, 7, 0, 19, 0, time.UTC) // == 03:00:19 ET
+	if res := checkCron(a, offSlot, fixedLastRun(last)); res.Due {
+		t.Errorf("at 07:00:19Z (03:00 ET): due=true reason=%q, want false", res.Reason)
+	}
+}
+
+// A full simulated day of 30s ticks yields exactly one fire, at the zone
+// slot. Pre-fix this produced two fires: 15:30 ET (the UTC reading, via
+// catch-up) and 19:30 ET (the live match). The store round-trips lastRun
+// UTC-located, as doltlite does; the caller's tick location must not matter.
+func TestCheckTriggerCronExactlyOneFirePerSlot(t *testing.T) {
+	_, et := etCronOrder(t, "30 19 * * *")
+	for name, callerLoc := range map[string]*time.Location{"utc-caller": time.UTC, "et-caller": et} {
+		t.Run(name, func(t *testing.T) {
+			a, _ := etCronOrder(t, "30 19 * * *")
+			last := time.Date(2026, 7, 6, 23, 30, 5, 0, time.UTC) // yesterday's correct fire
+			lastRunFn := func(string) (time.Time, error) { return last, nil }
+
+			start := time.Date(2026, 7, 7, 0, 0, 0, 0, et).In(callerLoc)
+			var fires []string
+			for tick := start; tick.Before(start.Add(24 * time.Hour)); tick = tick.Add(30 * time.Second) {
+				if res := checkCron(a, tick, lastRunFn); res.Due {
+					fires = append(fires, tick.In(et).Format(time.RFC3339)+" ("+res.Reason+")")
+					last = tick.UTC() // store round-trip: doltlite returns UTC-located
+				}
+			}
+			if len(fires) != 1 || !strings.HasPrefix(fires[0], "2026-07-07T19:30:00-04:00") {
+				t.Errorf("fires = %v, want exactly one at 2026-07-07T19:30 ET", fires)
+			}
+		})
+	}
+}
+
+// Catch-up still works in-zone across a multi-day gap: a missed occurrence
+// between lastRun and now fires with the catch-up reason.
+func TestCheckTriggerCronCatchupAcrossMultiDayGapInZone(t *testing.T) {
+	a, loc := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 4, 11, 0, 0, 0, time.UTC) // Jul 4 07:00 ET
+	now := time.Date(2026, 7, 7, 3, 0, 0, 0, loc)        // off-slot eval, two slots missed
+	res := checkCron(a, now, fixedLastRun(last))
+	if !res.Due || res.Reason != "cron: caught up missed occurrence" {
+		t.Errorf("due=%v reason=%q, want catch-up fire for the missed Jul 5/6 07:00 ET slots", res.Due, res.Reason)
+	}
+}
+
+// DST fall-back (US 2026-11-01: 02:00 EDT → 01:00 EST): the 01:xx hour
+// repeats. Policy: at most one fire per wall-clock slot — the repeated
+// reading is deduped against lastRun by wall-clock date+HH:MM.
+func TestCheckTriggerCronDSTFallBackFiresOncePerWallClockSlot(t *testing.T) {
+	t.Run("live repeat deduped", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 1 * * *")
+		// Fired at 01:30 EDT (05:30Z); store hands it back UTC-located.
+		last := time.Date(2026, 11, 1, 5, 30, 10, 0, time.UTC)
+		now := time.Date(2026, 11, 1, 6, 30, 20, 0, time.UTC).In(loc) // second 01:30 (EST)
+		res := checkCron(a, now, fixedLastRun(last))
+		if res.Due {
+			t.Errorf("due=true reason=%q, want false (01:30 already fired this wall-clock day)", res.Reason)
+		}
+	})
+	t.Run("catch-up repeat deduped", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 1 * * *")
+		last := time.Date(2026, 11, 1, 5, 30, 10, 0, time.UTC)       // 01:30:10 EDT
+		now := time.Date(2026, 11, 1, 6, 45, 0, 0, time.UTC).In(loc) // 01:45 EST; scan crosses 01:30 EST
+		res := checkCron(a, now, fixedLastRun(last))
+		if res.Due {
+			t.Errorf("due=true reason=%q, want false (catch-up must not re-fire the repeated 01:30)", res.Reason)
+		}
+	})
+	t.Run("one fire across the transition night", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 1 * * *")
+		last := time.Date(2026, 10, 31, 5, 30, 0, 0, time.UTC) // yesterday's 01:30 EDT
+		lastRunFn := func(string) (time.Time, error) { return last, nil }
+		start := time.Date(2026, 11, 1, 0, 0, 0, 0, loc) // 00:00 EDT
+		var fires []string
+		for tick := start; tick.Before(start.Add(5 * time.Hour)); tick = tick.Add(30 * time.Second) {
+			if res := checkCron(a, tick, lastRunFn); res.Due {
+				fires = append(fires, tick.Format(time.RFC3339)+" ("+res.Reason+")")
+				last = tick.UTC()
+			}
+		}
+		if len(fires) != 1 || !strings.HasPrefix(fires[0], "2026-11-01T01:30:00-04:00") {
+			t.Errorf("fires = %v, want exactly one at the first (EDT) 01:30", fires)
+		}
+	})
+}
+
+// DST spring-forward (US 2027-03-14: 02:00 EST → 03:00 EDT): the 02:xx hour
+// does not exist. Policy: a schedule inside the gap fires once at the first
+// real minute after the jump (03:00), via the catch-up scan's gap detection.
+func TestCheckTriggerCronDSTSpringForwardGapFiresAtNextRealMinute(t *testing.T) {
+	t.Run("gap schedule fires at 03:00", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 2 * * *")
+		last := time.Date(2027, 3, 13, 7, 30, 0, 0, time.UTC) // yesterday's 02:30 EST
+		now := time.Date(2027, 3, 14, 3, 0, 10, 0, loc)       // first real minute after the gap
+		res := checkCron(a, now, fixedLastRun(last))
+		if !res.Due || res.Reason != "cron: caught up occurrence skipped by DST spring-forward" {
+			t.Errorf("due=%v reason=%q, want spring-forward gap fire at 03:00 EDT", res.Due, res.Reason)
+		}
+	})
+	t.Run("no second fire after the gap fire", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 2 * * *")
+		last := time.Date(2027, 3, 14, 7, 0, 10, 0, time.UTC) // the 03:00:10 EDT gap fire, store-shaped
+		now := time.Date(2027, 3, 14, 3, 5, 0, 0, loc)
+		res := checkCron(a, now, fixedLastRun(last))
+		if res.Due {
+			t.Errorf("due=true reason=%q, want false (gap already caught up)", res.Reason)
+		}
+	})
+	t.Run("one fire across the transition night", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 2 * * *")
+		last := time.Date(2027, 3, 13, 7, 30, 0, 0, time.UTC)
+		lastRunFn := func(string) (time.Time, error) { return last, nil }
+		start := time.Date(2027, 3, 14, 0, 0, 0, 0, loc)
+		var fires []string
+		for tick := start; tick.Before(start.Add(5 * time.Hour)); tick = tick.Add(30 * time.Second) {
+			if res := checkCron(a, tick, lastRunFn); res.Due {
+				fires = append(fires, tick.Format(time.RFC3339)+" ("+res.Reason+")")
+				last = tick.UTC()
+			}
+		}
+		if len(fires) != 1 || !strings.HasPrefix(fires[0], "2027-03-14T03:00:00-04:00") {
+			t.Errorf("fires = %v, want exactly one at 03:00 EDT (the minute after the skipped 02:30)", fires)
+		}
+	})
+}
+
+// A bad tz never silently falls back: checkCron refuses to evaluate.
+// (Order load rejects it earlier — see TestValidateCronBadTZ.)
+func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
+	a := Order{Name: "bad-tz", Trigger: "cron", Schedule: "0 7 * * *", TZ: "America/New_Yrok"}
+	now := time.Date(2026, 7, 7, 11, 0, 19, 0, time.UTC)
+	res := CheckTrigger(a, now, neverRan, nil, nil)
+	if res.Due || !strings.Contains(res.Reason, "bad tz") {
+		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
+	}
+}

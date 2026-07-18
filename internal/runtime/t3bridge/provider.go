@@ -1398,6 +1398,15 @@ func buildThreadEnv(env map[string]string) map[string]string {
 			threadEnv[key] = value
 		}
 	}
+	// Realign BEADS_HOLDER_TOKEN to the surviving GC_INSTANCE_TOKEN. The GC_
+	// allowlist above strips the BEADS_-prefixed holder token that RuntimeEnv
+	// wired in, which would leave the visible T3 thread carrying an instance
+	// token but no matching holder token — the silent actor-only downgrade the
+	// tmux backstop also guards against. Placed before the doltlite branch so it
+	// applies to both return paths.
+	if tok := threadEnv["GC_INSTANCE_TOKEN"]; tok != "" {
+		threadEnv["BEADS_HOLDER_TOKEN"] = tok
+	}
 	if strings.EqualFold(threadEnv["GC_BEADS_BACKEND"], "doltlite") || strings.EqualFold(env["BEADS_BACKEND"], "doltlite") {
 		for _, key := range []string{
 			"GC_DOLT_HOST",

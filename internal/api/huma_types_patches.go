@@ -261,8 +261,8 @@ type StatusSessionCountsDetail struct {
 type StatusStoreHealth struct {
 	Path         string  `json:"path" doc:"On-disk path of the Dolt store."`
 	SizeBytes    int64   `json:"size_bytes" doc:"Total bytes of the store directory."`
-	LiveRows     int     `json:"live_rows" doc:"Live bead row count."`
-	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per row."`
+	LiveRows     int     `json:"live_rows" doc:"Retained bead row count used as the denominator, including open and closed beads."`
+	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads."`
 	Warning      bool    `json:"warning" doc:"True when maintenance is overdue."`
 	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
 	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`

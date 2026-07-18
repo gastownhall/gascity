@@ -156,7 +156,9 @@ func graphSinkStepIDs(steps []*Step) []string {
 		return nil
 	}
 	referenced := make(map[string]struct{}, len(allSteps))
+	stepByID := make(map[string]*Step, len(allSteps))
 	for _, step := range allSteps {
+		stepByID[step.ID] = step
 		for _, id := range step.DependsOn {
 			referenced[id] = struct{}{}
 		}
@@ -166,6 +168,14 @@ func graphSinkStepIDs(steps []*Step) []string {
 	}
 
 	sinks := make([]string, 0)
+	sinkSet := make(map[string]struct{}, len(allSteps))
+	appendSink := func(id string) {
+		if _, exists := sinkSet[id]; exists {
+			return
+		}
+		sinkSet[id] = struct{}{}
+		sinks = append(sinks, id)
+	}
 	for _, step := range allSteps {
 		if step == nil {
 			continue
@@ -174,15 +184,40 @@ func graphSinkStepIDs(steps []*Step) []string {
 		case "workflow-finalize", "spec":
 			continue
 		case "scope":
+			// A retry-managed scope is a physical attempt, not an
+			// authoritative workflow result. Substitute its logical control as a
+			// mandatory sink so a failed loop cannot be hidden by passing
+			// downstream work, and so iteration 1 cannot remain as a stale failed
+			// blocker after a later attempt passes.
+			control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
+			attemptStepID := step.Metadata[beadmeta.StepIDMetadataKey]
+			if step.Metadata[beadmeta.AttemptMetadataKey] != "" && control != nil &&
+				attemptStepID != "" && attemptStepID == control.Metadata[beadmeta.StepIDMetadataKey] &&
+				(control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry ||
+					control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph) {
+				// Nested attempt scopes roll up through their enclosing scope. Only
+				// an outermost attempt contributes its logical control directly;
+				// otherwise an inner control from an old outer attempt would become
+				// another stale workflow blocker.
+				scopeRef := step.Metadata[beadmeta.ScopeRefMetadataKey]
+				if scopeRef == "" {
+					appendSink(control.ID)
+					continue
+				}
+				enclosing := stepByID[scopeRef]
+				if enclosing != nil && enclosing.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope {
+					continue
+				}
+			}
 			// Scope bodies are terminal latches even when referenced by teardown
 			// steps. Workflow finalization must see their pass/fail outcome.
-			sinks = append(sinks, step.ID)
+			appendSink(step.ID)
 			continue
 		}
 		if _, ok := referenced[step.ID]; ok {
 			continue
 		}
-		sinks = append(sinks, step.ID)
+		appendSink(step.ID)
 	}
 	return sinks
 }

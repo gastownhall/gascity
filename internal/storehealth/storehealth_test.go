@@ -65,16 +65,12 @@ func TestComputeNoWarningLowRatio(t *testing.T) {
 	}
 }
 
-func TestComputeZeroRowsNonZeroBytesWarns(t *testing.T) {
-	// Degenerate case: bytes on disk with zero live rows. The literal
-	// threshold expression (size > 1M * rows) warns; the ratio is left
-	// at its zero value since dividing by zero is meaningless.
-	h := Compute("/c", 1_000_001, 0, time.Time{}, "")
-	if !h.Warning {
-		t.Fatalf("Warning = false, want true when bytes > 0 and rows = 0")
-	}
-	if h.RatioMB != 0 {
-		t.Fatalf("RatioMB = %v, want 0 when rows = 0", h.RatioMB)
+func TestComputeZeroRetainedRowsDoesNotWarnForBookkeepingBytes(t *testing.T) {
+	// The denominator is retained rows (open and closed). A genuinely empty
+	// store can still contain bookkeeping files, which alone are not unhealthy.
+	h := Compute("/c", 1, 0, time.Time{}, "")
+	if h.Warning {
+		t.Fatalf("Warning = true, want false for bookkeeping bytes with zero retained rows")
 	}
 }
 
