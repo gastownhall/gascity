@@ -50,6 +50,22 @@ func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
 
 type preserveExistingFunc func(relPath string) bool
 
+// skipRuntimeMirror reports whether relPath is the runtime `.gc` mirror (the
+// entry itself or anything beneath it) at the root of a copy operation, so it is
+// never staged into an overlay destination. It is intentionally placed in the
+// shared copyDirRecursive walk, so it applies to every copyDir caller —
+// CopyDir, StageDir, stageDirStrict, CopyFileOrDir, and the provider-aware
+// CopyDirForProvider(s) — not only the provider-specific staging paths. That is
+// correct for today's callers, which are all overlay-to-workdir staging paths
+// where a top-level `.gc/` mirror must never be copied; a future caller that
+// legitimately needs to copy a tree containing a top-level `.gc/` would need a
+// variant that does not carry this guard. Names merely prefixed with ".gc"
+// (e.g. ".gcignore") are not matched.
+func skipRuntimeMirror(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
+}
+
 func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
@@ -80,6 +96,10 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		entryRel := entry.Name()
 		if rel != "" {
 			entryRel = filepath.Join(rel, entry.Name())
+		}
+
+		if skipRuntimeMirror(entryRel) {
+			continue
 		}
 
 		if entry.IsDir() {
@@ -216,6 +236,9 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 
 	// Step 1: copy universal files (skip per-provider/).
 	skip := func(relPath string, _ bool) bool {
+		if skipRuntimeMirror(relPath) {
+			return true
+		}
 		// Skip the per-provider directory itself and all its contents.
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
@@ -260,6 +283,9 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 
 	// Step 1: copy universal files (skip per-provider/).
 	skip := func(relPath string, _ bool) bool {
+		if skipRuntimeMirror(relPath) {
+			return true
+		}
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
 	}

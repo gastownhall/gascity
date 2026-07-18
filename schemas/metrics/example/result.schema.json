@@ -204,7 +204,8 @@
               "context-use",
               "login",
               "logout",
-              "whoami"
+              "whoami",
+              "runtime-heartbeat"
             ]
           },
           "event_id": {

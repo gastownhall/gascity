@@ -3394,6 +3394,26 @@ export type SlingInputBody = {
      */
     formula?: string;
     /**
+     * Merge strategy: direct, mr, or local.
+     */
+    merge?: string;
+    /**
+     * Do not create an auto-convoy for the routed bead.
+     */
+    no_convoy?: boolean;
+    /**
+     * Suppress the target's default_sling_formula even when configured.
+     */
+    no_formula?: boolean;
+    /**
+     * Mark the routed bead as owned by the target.
+     */
+    owned?: boolean;
+    /**
+     * Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.
+     */
+    reassign?: boolean;
+    /**
      * Rig name.
      */
     rig?: string;
@@ -14553,7 +14573,7 @@ export type CreateRigData = {
          */
         'X-GC-Request': string;
         /**
-         * Idempotency key for safe retries.
+         * Idempotency key for safe retries (synchronous create).
          */
         'Idempotency-Key'?: string;
     };
@@ -15362,6 +15382,10 @@ export type SendSessionMessageErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -15854,6 +15878,10 @@ export type SubmitSessionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

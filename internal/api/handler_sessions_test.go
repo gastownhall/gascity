@@ -5852,14 +5852,12 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/sky/messages"), strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
-	}
-
-	accepted := decodeAsyncAccepted(t, rec.Body)
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil {
-		t.Fatalf("expected session message to fail for closed session, got success")
+	// The deliverability gate rejects undeliverable targets synchronously
+	// now: a closed, non-configured session can never receive the message,
+	// so the caller gets 404 instead of a 202 whose failure surfaces only
+	// as an async event (the black-holed-delivery bug, 2026-07-18).
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
@@ -7522,5 +7520,65 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 	success, failure := waitForSessionMessageResult(t, fs.eventProv, body.RequestID)
 	if success == nil {
 		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+}
+
+// The async command surfaces must refuse targets that can never deliver —
+// BEFORE returning 202. A typo'd session name used to be accepted with a
+// request_id while the message silently black-holed (the failure surfaced
+// only as an event nobody correlated; 2026-07-18: drifted Slack bindings
+// dropped cross-city wakes for days on exactly this).
+func TestSessionMessageAndSubmitRejectNonexistentTargetSynchronously(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	for _, path := range []string{"/session/no-such-session-xyz/messages", "/session/no-such-session-xyz/submit"} {
+		rec := httptest.NewRecorder()
+		req := newPostRequest(cityURL(fs, path), strings.NewReader(`{"message":"hello"}`))
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404; body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A real live session still gets the async 202 accept.
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Live")
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("live session message status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSessionMessageAndSubmitRejectAmbiguousTargetWith409 pins the error
+// contract of the deliverability gate: an ambiguous bare target (one that
+// matches multiple live sessions) is a deterministic client addressing error,
+// so the async message/submit surfaces must reject it synchronously with 409 --
+// matching /stop, /respond, and the synchronous message twin -- not the 500
+// that humaStoreError produced before the gate routed through humaResolveError.
+func TestSessionMessageAndSubmitRejectAmbiguousTargetWith409(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	// Two open live sessions share the bare alias "dup-target", so resolving it
+	// yields session.ErrAmbiguous rather than not-found.
+	for _, name := range []string{"s-dup-a", "s-dup-b"} {
+		createTestSessionBead(t, fs.cityBeadStore, map[string]string{
+			"session_name": name,
+			"alias":        "dup-target",
+			"state":        "active",
+		}, "")
+	}
+
+	for _, path := range []string{"/session/dup-target/messages", "/session/dup-target/submit"} {
+		rec := httptest.NewRecorder()
+		req := newPostRequest(cityURL(fs, path), strings.NewReader(`{"message":"hello"}`))
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d, want %d (409 for ambiguous target); body=%s", path, rec.Code, http.StatusConflict, rec.Body.String())
+		}
 	}
 }

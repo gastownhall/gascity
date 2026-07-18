@@ -73,6 +73,58 @@ export const MAIL_SUBJECT = 'seeded handoff';
 /** The seeded agent name (from the corpus config). */
 export const AGENT_NAME = 'builder';
 
+/**
+ * The seeded live agent's slug — the {slug} segment on /agents/:slug. It equals
+ * AGENT_NAME (the session's alias === session_name === agent name), so the agent
+ * detail route resolves the seeded session bead. Mirrors corpus.AgentSessionSlug.
+ */
+export const AGENT_SESSION_SLUG = AGENT_NAME;
+
+/**
+ * The runtime state the seeded (non-live) session projects — the StatusBadge label
+ * on the agent-detail header. The corpus persists state "active", but the fake
+ * runtime provider backs no live process, so the sessions read overlays it to
+ * "asleep"; that is the deterministic rendered badge.
+ */
+export const AGENT_SESSION_STATE = 'asleep';
+
+/**
+ * The seeded session's template ("<rig>/<agent>"). The agent-detail AgentMetadata
+ * rig is parsed from it, and it renders verbatim as the header template code.
+ * Mirrors corpus.AgentSessionTemplate.
+ */
+export const AGENT_SESSION_TEMPLATE = 'demo/builder';
+
+/**
+ * The in-progress bead assigned to the seeded agent (assignee === AGENT_NAME). It
+ * is the real in-flight assignment the agent-detail AgentBeadsAssigned panel
+ * renders. Its id is the run anchor's preflight step; its title is the button
+ * label. Mirrors corpus.AnchorStepID / corpus.AnchorStepTitle.
+ */
+export const AGENT_ASSIGNED_BEAD_ID = 'run-anchor.preflight';
+export const AGENT_ASSIGNED_BEAD_TITLE = 'preflight';
+
+/**
+ * The two-message operator↔agent thread. It backs BOTH the mail thread-detail
+ * render (both bodies in one thread) and the agent-detail Chat pane (messages
+ * between the operator alias and the seeded agent). Mirror corpus.OperatorMailSubject
+ * / corpus.OperatorMailBody / corpus.AgentReplyBody.
+ */
+export const OPERATOR_MAIL_SUBJECT = 'adopt PR #42';
+export const OPERATOR_MAIL_BODY =
+  'Please take the seeded adopt-pr run to completion and report back here.';
+export const AGENT_REPLY_BODY =
+  'On it. The preflight step is running now; I will report when the review step opens.';
+
+/**
+ * The seeded bead whose detail modal shows a populated BeadDependencies section:
+ * REVIEW_BEAD_ID "needs" REVIEW_DEP_TARGET_ID, so the modal renders a single
+ * upstream dependency line. Mirror corpus.AnchorReviewStepID / corpus.AnchorStepID.
+ */
+export const REVIEW_BEAD_ID = 'run-anchor.review';
+export const REVIEW_BEAD_TITLE = 'review';
+export const REVIEW_DEP_TARGET_ID = 'run-anchor.preflight';
+
 /** Base path for the seeded city's client routes (BrowserRouter basename). */
 export const CITY_BASE = `/city/${CITY_NAME}`;
 

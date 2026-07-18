@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
@@ -279,13 +278,7 @@ func newServer(state State, readOnly bool) *Server {
 // feature flags based on the city's daemon config. Called from New
 // and NewReadOnly so both modes observe the same flag state.
 func syncFeatureFlags(cfg *config.City) {
-	enabled := cfg != nil && cfg.Daemon.FormulaV2Enabled()
-	if formula.IsFormulaV2Enabled() != enabled {
-		formula.SetFormulaV2Enabled(enabled)
-	}
-	if molecule.IsGraphApplyEnabled() != enabled {
-		molecule.SetGraphApplyEnabled(enabled)
-	}
+	featureflags.Apply(featureflags.FromConfig(cfg))
 }
 
 type singleStateResolver struct {

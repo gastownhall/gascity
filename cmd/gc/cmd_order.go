@@ -1282,34 +1282,28 @@ var orderHistoryAPIClient = func(cityPath string) (*api.Client, string) {
 // back to the local iterator. Emits exactly one route=... log line per exit
 // path (gated on GC_DEBUG).
 func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa []orders.Order, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "order history"
 	// Multi-order mode (no name provided) has no single scoped_name to
 	// request against /orders/history; stay on the local iterator so we
 	// produce the same aggregated output. The log line documents the
 	// deliberate fallback reason so operators aren't surprised by a
 	// missing route=api.
 	if name == "" {
-		logRoute(stderr, cmdName, "fallback", "multi-order")
+		logRoute(stderr, "order history", "fallback", "multi-order")
 		return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
 	}
 
-	if c != nil {
-		scopedName := orderScopedName(name, rig, aa)
-		cr, err := c.GetOrderHistory(scopedName, 0, "")
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderOrderHistoryFromAPI(cr, name, rig, jsonOutput, stdout, stderr)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]api.OrderHistoryView]
+	return routeRead(c, "order history", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetOrderHistory(orderScopedName(name, rig, aa), 0, "")
+			return err
+		},
+		func() int { return renderOrderHistoryFromAPI(cr, name, rig, jsonOutput, stdout, stderr) },
+		func() int {
+			return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
+		},
+	)
 }
 
 // orderScopedName returns the rig-qualified key for the server's

@@ -7808,6 +7808,26 @@
             "description": "Formula name for workflow launch.",
             "type": "string"
           },
+          "merge": {
+            "description": "Merge strategy: direct, mr, or local.",
+            "type": "string"
+          },
+          "no_convoy": {
+            "description": "Do not create an auto-convoy for the routed bead.",
+            "type": "boolean"
+          },
+          "no_formula": {
+            "description": "Suppress the target's default_sling_formula even when configured.",
+            "type": "boolean"
+          },
+          "owned": {
+            "description": "Mark the routed bead as owned by the target.",
+            "type": "boolean"
+          },
+          "reassign": {
+            "description": "Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.",
+            "type": "boolean"
+          },
           "rig": {
             "description": "Rig name.",
             "type": "string"
@@ -36790,11 +36810,11 @@
             }
           },
           {
-            "description": "Idempotency key for safe retries.",
+            "description": "Idempotency key for safe retries (synchronous create).",
             "in": "header",
             "name": "Idempotency-Key",
             "schema": {
-              "description": "Idempotency key for safe retries.",
+              "description": "Idempotency key for safe retries (synchronous create).",
               "type": "string"
             }
           }
@@ -38845,6 +38865,21 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
           "422": {
             "content": {
               "application/problem+json": {
@@ -40128,6 +40163,21 @@
               }
             },
             "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

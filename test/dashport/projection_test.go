@@ -303,6 +303,148 @@ func TestMailView(t *testing.T) {
 	}
 }
 
+// TestMailThreadProjection is the wire-level guard for the mail thread-detail
+// render: the seeded operator↔agent thread must project TWO messages (an
+// operator handoff and the agent's reply) with their real bodies through the
+// /mail/thread/{id} read the SPA opens a thread with. A regression that collapses
+// a thread to one message or drops a body fails here even though /mail still 200s.
+func TestMailThreadProjection(t *testing.T) {
+	h := newHarness(t)
+
+	var list genclient.MailListBody
+	h.getJSON(h.cityURL("/mail"), &list)
+	if list.Items == nil {
+		t.Fatal("mail list empty; operator thread not projected")
+	}
+	threadID := ""
+	for _, m := range *list.Items {
+		if m.Subject == corpusOperatorSubject && m.ThreadId != nil {
+			threadID = *m.ThreadId
+			break
+		}
+	}
+	if threadID == "" {
+		t.Fatalf("no seeded operator thread with subject %q carried a thread_id", corpusOperatorSubject)
+	}
+
+	var thread genclient.MailListBody
+	h.getJSON(h.cityURL("/mail/thread/"+threadID), &thread)
+	if thread.Items == nil || len(*thread.Items) != 2 {
+		got := 0
+		if thread.Items != nil {
+			got = len(*thread.Items)
+		}
+		t.Fatalf("thread %q projected %d messages, want 2 (handoff + reply)", threadID, got)
+	}
+	gotHandoff, gotReply := false, false
+	for _, m := range *thread.Items {
+		switch m.Body {
+		case corpusOperatorBody:
+			gotHandoff = true
+		case corpusAgentReplyBody:
+			gotReply = true
+		}
+	}
+	if !gotHandoff || !gotReply {
+		t.Errorf("thread bodies incomplete: handoff=%v reply=%v", gotHandoff, gotReply)
+	}
+}
+
+// TestAgentSessionProjection guards the data the agent-detail view (/agents/{slug})
+// resolves against: the seeded session must project into the sessions list with
+// its alias/rig/template, and the in-progress AnchorStepID bead must project as
+// assigned to that agent's alias — the assignment the AgentBeadsAssigned panel
+// renders. Without the session the detail page has only its not-found shell, and
+// without the assignment its beads panel is empty; both are load-bearing.
+func TestAgentSessionProjection(t *testing.T) {
+	h := newHarness(t)
+
+	var sessions genclient.ListBodySessionResponse
+	h.getJSON(h.cityURL("/sessions"), &sessions)
+	if sessions.Items == nil || len(*sessions.Items) == 0 {
+		t.Fatal("sessions list empty; seeded session not projected")
+	}
+	var seeded *genclient.SessionResponse
+	for i := range *sessions.Items {
+		s := &(*sessions.Items)[i]
+		if s.Alias != nil && *s.Alias == corpusAgentSlug {
+			seeded = s
+			break
+		}
+	}
+	if seeded == nil {
+		t.Fatalf("sessions list missing seeded session with alias %q", corpusAgentSlug)
+	}
+	if seeded.Rig == nil || *seeded.Rig != corpusRigName {
+		t.Errorf("seeded session rig = %v, want %q", seeded.Rig, corpusRigName)
+	}
+	if seeded.Template != corpusAgentTemplate {
+		t.Errorf("seeded session template = %q, want %q", seeded.Template, corpusAgentTemplate)
+	}
+	if seeded.State == "" {
+		t.Error("seeded session projected an empty state; agent-detail StatusBadge would be blank")
+	}
+
+	var assigned genclient.ListBodyBead
+	h.getJSON(h.cityURL("/beads?assignee="+corpusAgentSlug+"&all=true&limit=200"), &assigned)
+	if !beadWithStatus(assigned, anchorStepID, "in_progress") {
+		t.Errorf("assigned-beads read missing in-progress %q for agent %q", anchorStepID, corpusAgentSlug)
+	}
+}
+
+// TestBeadDependencyProjection guards the edge the bead-detail modal renders as
+// its populated BeadDependencies branch: AnchorReviewStepID must project a "needs"
+// edge onto AnchorStepID. The dashboard builds the dependency graph client-side
+// from the bead's needs field, so a projection that drops needs leaves the modal
+// showing "No dependencies." even though the beads list still 200s.
+func TestBeadDependencyProjection(t *testing.T) {
+	h := newHarness(t)
+
+	var list genclient.ListBodyBead
+	h.getJSON(h.cityURL("/beads?all=true"), &list)
+	if list.Items == nil {
+		t.Fatal("beads list empty; dependency edge not projected")
+	}
+	var review *genclient.Bead
+	for i := range *list.Items {
+		b := &(*list.Items)[i]
+		if b.Id == anchorReviewStepID {
+			review = b
+			break
+		}
+	}
+	if review == nil {
+		t.Fatalf("beads list missing %q", anchorReviewStepID)
+	}
+	if review.Needs == nil || !contains(*review.Needs, anchorStepID) {
+		t.Errorf("%q needs = %v, want to include %q", anchorReviewStepID, review.Needs, anchorStepID)
+	}
+}
+
+// beadWithStatus reports whether the list contains a bead with the given id AND
+// status, proving a real row (not merely a matching id at some other status).
+func beadWithStatus(list genclient.ListBodyBead, id, status string) bool {
+	if list.Items == nil {
+		return false
+	}
+	for _, b := range *list.Items {
+		if b.Id == id {
+			return b.Status == status
+		}
+	}
+	return false
+}
+
+// contains reports whether s is in xs.
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAgentsRigsStatusView asserts the config-projection views surface the
 // seeded agent, rig, and city status.
 func TestAgentsRigsStatusView(t *testing.T) {

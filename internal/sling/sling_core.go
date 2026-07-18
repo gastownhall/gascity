@@ -135,7 +135,7 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	// claim filter even after sling sets gc.routed_to: clearing the assignee
 	// alone is not enough because IsReadyCandidate requires status=open. See
 	// gastownhall/gascity#1007 (assignee) and #3231 (status).
-	if opts.Reassign && !opts.DryRun {
+	if shouldReopenForReassign(opts) {
 		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
 			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
 		}
@@ -291,6 +291,17 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
 	return deps.Router != nil && !opts.IsFormula && !opts.DryRun
+}
+
+// shouldReopenForReassign reports whether the pre-flight reassign reopen should
+// run. Reassign reopens opts.BeadOrFormula, so it is only meaningful when that
+// value is a real bead ID: a plain-bead route or an --on-formula attach, both
+// !IsFormula. A standalone formula launch sets BeadOrFormula to the formula
+// NAME, so reopening it would clear/reopen an unrelated bead that happens to
+// share the name, or fail the launch on a formula-name store lookup — hence the
+// !IsFormula guard, mirroring the auto-convoy block. Dry-run never mutates.
+func shouldReopenForReassign(opts SlingOpts) bool {
+	return opts.Reassign && !opts.IsFormula && !opts.DryRun
 }
 
 func validateExistingBead(beadID string, deps SlingDeps) error {

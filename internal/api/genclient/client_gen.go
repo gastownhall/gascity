@@ -3499,6 +3499,21 @@ type SlingInputBody struct {
 	// Formula Formula name for workflow launch.
 	Formula *string `json:"formula,omitempty"`
 
+	// Merge Merge strategy: direct, mr, or local.
+	Merge *string `json:"merge,omitempty"`
+
+	// NoConvoy Do not create an auto-convoy for the routed bead.
+	NoConvoy *bool `json:"no_convoy,omitempty"`
+
+	// NoFormula Suppress the target's default_sling_formula even when configured.
+	NoFormula *bool `json:"no_formula,omitempty"`
+
+	// Owned Mark the routed bead as owned by the target.
+	Owned *bool `json:"owned,omitempty"`
+
+	// Reassign Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.
+	Reassign *bool `json:"reassign,omitempty"`
+
 	// Rig Rig name.
 	Rig *string `json:"rig,omitempty"`
 
@@ -7634,7 +7649,7 @@ type CreateRigParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
 
-	// IdempotencyKey Idempotency key for safe retries.
+	// IdempotencyKey Idempotency key for safe retries (synchronous create).
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
@@ -31915,6 +31930,7 @@ type SendSessionMessageResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -32112,6 +32128,7 @@ type SubmitSessionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -43008,6 +43025,13 @@ func ParseSendSessionMessageResponse(rsp *http.Response) (*SendSessionMessageRes
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -43490,6 +43514,13 @@ func ParseSubmitSessionResponse(rsp *http.Response) (*SubmitSessionResponse, err
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

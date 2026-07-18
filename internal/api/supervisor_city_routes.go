@@ -379,7 +379,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/submit",
 		Summary:       "Submit a message to a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionSubmit)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-session-message",
@@ -387,7 +387,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/messages",
 		Summary:       "Send a message to a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
