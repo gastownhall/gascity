@@ -1923,12 +1923,12 @@ func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
 	}
 }
 
-// TestReindexDoltliteStore is the behavioral proof for ga-7hei: the reindex
+// TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
 // mechanism must execute a real SQLite REINDEX against the physical
 // .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not
 // satisfy, since it speaks Dolt/MySQL). After the rebuild the store stays a
 // valid SQLite database whose secondary index returns correct results.
-func TestReindexDoltliteStore(t *testing.T) {
+func TestDoltliteReindexStore(t *testing.T) {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
@@ -1990,7 +1990,7 @@ func TestReindexDoltliteStore(t *testing.T) {
 // into the next, making the fixture non-deterministic under -count>1.
 var reindexStaleCollSeq atomic.Int64
 
-// TestReindexDoltliteStoreHealsStaleIndex is the regression proof ga-7hei
+// TestDoltliteReindexStoreHealsStaleIndex is the regression proof ga-7hei
 // actually needs: it fails unless ReindexDoltliteStore executes a real SQLite
 // REINDEX. It builds a genuinely stale secondary index — the exact condition
 // REINDEX exists to repair, per SQLite's docs: an index built under one
@@ -2002,7 +2002,7 @@ var reindexStaleCollSeq atomic.Int64
 // skipped db.Exec("REINDEX"), the corruption would survive and the final
 // assertion would fail — the gap the previous healthy-fixture test could not
 // catch.
-func TestReindexDoltliteStoreHealsStaleIndex(t *testing.T) {
+func TestDoltliteReindexStoreHealsStaleIndex(t *testing.T) {
 	collName := fmt.Sprintf("gasstalecoll%d", reindexStaleCollSeq.Add(1))
 	var reversed atomic.Bool
 	if err := sqlite.RegisterCollationUtf8(collName, func(a, b string) int {
@@ -2079,10 +2079,10 @@ func TestReindexDoltliteStoreHealsStaleIndex(t *testing.T) {
 	}
 }
 
-// TestReindexDoltliteStoreRejectsNonDoltlite proves the reindex path refuses a
+// TestDoltliteReindexStoreRejectsNonDoltlite proves the reindex path refuses a
 // store that metadata.json does not identify as DoltLite, rather than silently
 // operating on the wrong backend.
-func TestReindexDoltliteStoreRejectsNonDoltlite(t *testing.T) {
+func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
 		t.Fatalf("mkdir beads dir: %v", err)
