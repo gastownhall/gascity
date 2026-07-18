@@ -3786,7 +3786,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Live bead row count.
+     * Retained bead row count used as the denominator, including open and closed beads.
      */
     live_rows: number;
     /**
@@ -3794,7 +3794,7 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per row.
+     * Derived megabytes per retained row, including open and closed beads.
      */
     ratio_mb_per_row: number;
     /**
@@ -9135,11 +9135,11 @@ export type GetV0CityByCityNameBeadsData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**
@@ -9867,11 +9867,11 @@ export type GetV0CityByCityNameConvoysData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
     };
@@ -9994,11 +9994,11 @@ export type GetV0CityByCityNameEventsData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**
@@ -11727,11 +11727,11 @@ export type GetV0CityByCityNameMailData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**
@@ -16108,11 +16108,11 @@ export type GetV0CityByCityNameSessionsData = {
     };
     query?: {
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// unknownRunWarmingGrace is how long the run-detail endpoints keep answering
+// unknownRunWarmingGrace is how long run point-read endpoints keep answering
 // the retryable 503 "run view is warming" — instead of 404 — for a runId the
 // WARM projection does not know, measured from the FIRST request for that
 // runId. A run slung from the CLI is invisible to this projection until the
@@ -21,8 +21,8 @@ const unknownRunWarmingGrace = 180 * time.Second
 
 // unknownRunGraceMaxIDLen bounds the runId length inGrace will track. The
 // entry cap (unknownRunGraceCap) bounds ENTRIES, not bytes: the map stores
-// each runId verbatim, and the id arrives straight from the request path on
-// the unauthenticated /api plane, so without a length bound a scanner
+// each runId verbatim, and the id arrives straight from an HTTP request path,
+// so without a length bound a scanner
 // spraying maximum-length URIs could pin ~cap x URI-length bytes of
 // attacker-chosen data per city (~1 GiB with 1 MiB URIs). Real run roots are
 // short bead IDs (tens of bytes), so 128 is generous headroom, never a
@@ -37,7 +37,7 @@ const unknownRunGraceMaxIDLen = 128
 const unknownRunGraceCap = 1024
 
 // unknownRunGrace tracks the first time each truly-unknown runId was requested
-// so the run-detail endpoints can serve the retryable warming 503 for a grace
+// so run point-read endpoints can serve the retryable warming 503 for a grace
 // window before falling back to the terminal 404. It is concurrency-safe (the
 // BFF serves concurrent requests) and bounded (unknownRunGraceCap). The clock
 // is injectable for tests.
@@ -68,7 +68,7 @@ func newUnknownRunGrace() *unknownRunGrace {
 func (g *unknownRunGrace) inGrace(runID string) bool {
 	// Refuse to track oversized runIds at all: an id longer than any real run
 	// root is never a legitimate just-slung run, and inserting it verbatim
-	// would let the unauthenticated /api plane fill the map with megabytes of
+	// would let a request flood fill the map with megabytes of
 	// attacker-chosen bytes per entry (see unknownRunGraceMaxIDLen). It
 	// degrades to the immediate 404.
 	if len(runID) > unknownRunGraceMaxIDLen {

@@ -1,8 +1,8 @@
 // Package storehealth computes the Dolt bead store health summary used
 // by gc status and the /v0/status API. The summary is: store path on
-// disk, raw size in bytes, the live row count of the city store, a
-// derived MB-per-row ratio, and a warning flag when the ratio exceeds
-// the configured threshold.
+// disk, raw size in bytes, the retained row count of the city store
+// (including open and closed beads), a derived MB-per-row ratio, and a
+// warning flag when the ratio exceeds the configured threshold.
 //
 // Design: ADR 0002 (docs/adr/0002-dolt-store-maintenance-runbook.md)
 // and bead ga-d5y design D9.
@@ -53,19 +53,19 @@ func StorePath(cityPath string) string {
 
 // Compute builds a Health from measured inputs. Pure function — all
 // I/O is performed by the caller via WalkSize and LastMaintenance.
-func Compute(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) Health {
+func Compute(cityPath string, sizeBytes int64, retainedRows int, lastGCAt time.Time, lastGCStatus string) Health {
 	h := Health{
 		Path:         StorePath(cityPath),
 		SizeBytes:    sizeBytes,
-		LiveRows:     liveRows,
+		LiveRows:     retainedRows,
 		ThresholdMB:  DefaultThresholdMB,
 		LastGCAt:     lastGCAt,
 		LastGCStatus: lastGCStatus,
 	}
-	if liveRows > 0 {
-		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(liveRows))
+	if retainedRows > 0 {
+		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(retainedRows))
+		h.Warning = sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(retainedRows)
 	}
-	h.Warning = sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(liveRows)
 	return h
 }
 

@@ -302,8 +302,11 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 	return sm
 }
 
-// WithRunCensusSource supplies the incremental projection used by the typed
-// row-free run census endpoint. It must be called before Serve.
+// WithRunCensusSource supplies the incremental projection used by typed run
+// reads. The required contract serves the row-free census; a source that also
+// implements RunProjectionSource and RunProjectionGraceSource supplies the
+// warm list/detail/steps snapshots and point-read warming grace. It must be
+// called before Serve.
 func (sm *SupervisorMux) WithRunCensusSource(source RunCensusSource) *SupervisorMux {
 	sm.runCensusSource = source
 	return sm

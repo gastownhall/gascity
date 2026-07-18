@@ -812,29 +812,63 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]SessionView]{}, err
 	}
-	params := &genclient.GetV0CityByCityNameSessionsParams{}
-	if stateFilter != "" {
-		params.State = &stateFilter
+	// gc session list means "all sessions". Walk the keyset pages until the
+	// server stops minting next_cursor and merge them, so a fleet larger than
+	// one server-cap page is fully listed instead of silently truncated at the
+	// first page. Each page requests the 1000-row server cap to minimize round
+	// trips; the cache age is taken from the first page.
+	capLimit := int64(maxPaginationLimit)
+	var (
+		all        []SessionView
+		ageSeconds float64
+		cursor     string
+	)
+	for page := 0; ; page++ {
+		params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &capLimit}
+		if stateFilter != "" {
+			params.State = &stateFilter
+		}
+		if templateFilter != "" {
+			params.Template = &templateFilter
+		}
+		if peek {
+			params.Peek = &peek
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
+		if err != nil {
+			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		}
+		if resp == nil {
+			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+		}
+		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+			return CachedRead[[]SessionView]{}, err
+		}
+		all = append(all, sessionsFromGenList(resp.JSON200)...)
+		if page == 0 {
+			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
+		}
+		next := ""
+		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
+			next = *resp.JSON200.NextCursor
+		}
+		// Stop at the last page. The equal-cursor guard is a safety net against
+		// a server that fails to advance the cursor, so the walk can never spin
+		// forever on a degenerate response.
+		if next == "" || next == cursor {
+			break
+		}
+		cursor = next
 	}
-	if templateFilter != "" {
-		params.Template = &templateFilter
-	}
-	if peek {
-		params.Peek = &peek
-	}
-	resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
-	if err != nil {
-		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	if resp == nil {
-		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-		return CachedRead[[]SessionView]{}, err
+	if all == nil {
+		all = []SessionView{}
 	}
 	return CachedRead[[]SessionView]{
-		Body:       sessionsFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+		Body:       all,
+		AgeSeconds: ageSeconds,
 	}, nil
 }
 

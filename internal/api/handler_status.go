@@ -285,7 +285,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
 	if !lite {
-		storeHealth = s.cachedStoreHealth(ctx, time.Now())
+		var err error
+		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
+		if err != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("store health: %v", err))
+		}
 	}
 
 	return StatusBody{

@@ -8457,7 +8457,7 @@
             "type": "string"
           },
           "live_rows": {
-            "description": "Live bead row count.",
+            "description": "Retained bead row count used as the denominator, including open and closed beads.",
             "format": "int64",
             "type": "integer"
           },
@@ -8466,7 +8466,7 @@
             "type": "string"
           },
           "ratio_mb_per_row": {
-            "description": "Derived megabytes per row.",
+            "description": "Derived megabytes per retained row, including open and closed beads.",
             "format": "double",
             "type": "number"
           },
@@ -22861,6 +22861,7 @@
     },
     "/v0/city/{cityName}/beads": {
       "get": {
+        "description": "Results are ordered (created_at DESC, id DESC) — newest beads first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).",
         "operationId": "get-v0-city-by-city-name-beads",
         "parameters": [
           {
@@ -22896,23 +22897,25 @@
             }
           },
           {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
             "explode": false,
             "in": "query",
             "name": "cursor",
             "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
               "type": "string"
             }
           },
           {
-            "description": "Maximum number of results to return. 0 = server default.",
+            "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return. 0 = server default.",
+              "default": 100,
+              "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
               "format": "int64",
+              "maximum": 1000,
               "minimum": 0,
               "type": "integer"
             }
@@ -24756,6 +24759,7 @@
     },
     "/v0/city/{cityName}/convoys": {
       "get": {
+        "description": "Results are ordered (created_at DESC, id DESC) — newest convoys first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).",
         "operationId": "get-v0-city-by-city-name-convoys",
         "parameters": [
           {
@@ -24791,23 +24795,25 @@
             }
           },
           {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
             "explode": false,
             "in": "query",
             "name": "cursor",
             "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
               "type": "string"
             }
           },
           {
-            "description": "Maximum number of results to return. 0 = server default.",
+            "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return. 0 = server default.",
+              "default": 100,
+              "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
               "format": "int64",
+              "maximum": 1000,
               "minimum": 0,
               "type": "integer"
             }
@@ -25110,6 +25116,7 @@
     },
     "/v0/city/{cityName}/events": {
       "get": {
+        "description": "Results are ordered seq DESC — newest events first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).",
         "operationId": "get-v0-city-by-city-name-events",
         "parameters": [
           {
@@ -25145,23 +25152,25 @@
             }
           },
           {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
             "explode": false,
             "in": "query",
             "name": "cursor",
             "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
               "type": "string"
             }
           },
           {
-            "description": "Maximum number of results to return. 0 = server default.",
+            "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return. 0 = server default.",
+              "default": 100,
+              "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
               "format": "int64",
+              "maximum": 1000,
               "minimum": 0,
               "type": "integer"
             }
@@ -29534,6 +29543,7 @@
     },
     "/v0/city/{cityName}/mail": {
       "get": {
+        "description": "Results are ordered (created_at DESC, id DESC) — newest messages first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).",
         "operationId": "get-v0-city-by-city-name-mail",
         "parameters": [
           {
@@ -29569,23 +29579,25 @@
             }
           },
           {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
             "explode": false,
             "in": "query",
             "name": "cursor",
             "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
               "type": "string"
             }
           },
           {
-            "description": "Maximum number of results to return. 0 = server default.",
+            "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return. 0 = server default.",
+              "default": 100,
+              "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
               "format": "int64",
+              "maximum": 1000,
               "minimum": 0,
               "type": "integer"
             }
@@ -40711,6 +40723,7 @@
     },
     "/v0/city/{cityName}/sessions": {
       "get": {
+        "description": "Results are ordered (created_at DESC, id DESC) — newest sessions first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).",
         "operationId": "get-v0-city-by-city-name-sessions",
         "parameters": [
           {
@@ -40726,23 +40739,25 @@
             }
           },
           {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
             "explode": false,
             "in": "query",
             "name": "cursor",
             "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
               "type": "string"
             }
           },
           {
-            "description": "Maximum number of results to return. 0 = server default.",
+            "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return. 0 = server default.",
+              "default": 100,
+              "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
               "format": "int64",
+              "maximum": 1000,
               "minimum": 0,
               "type": "integer"
             }

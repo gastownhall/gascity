@@ -528,6 +528,35 @@ REST/formula shards — no dedicated shard registration is needed. The
 structured-transcript view is not covered here; it lands with its serving path
 (PR #3931) and is asserted then.
 
+#### Dashboard Playwright render smoke (`internal/api/dashboardspa/web/frontend/e2e`)
+
+Layer B is a Chromium render smoke over the **same** `testdata/dashport/` corpus,
+loaded through the same importable loader (`test/dashport/corpus`) that Layer A
+uses — one fixture source of truth. A small `//go:build integration` binary,
+`test/dashport/cmd/fakesupervisor`, serves the seeded stack via
+`api.ServeSeededCity` on a loopback listener; the Playwright `webServer` launches
+it and points `baseURL` at it, so the SPA and its same-origin `/v0` + `/api`
+surfaces are hosted by one handler (no CORS or base-URL override). Each spec
+drives a route (Home, Runs, the seeded run detail — the regression view —,
+Agents, Beads, Mail, Activity, Health) and asserts three things: the seeded
+content renders, **no** React error boundary
+(`components/ErrorBoundary.tsx`) is shown, and **no** client-error POST
+(`/api/client-errors`) fires. It removes all vitest mocks — the built bundle runs
+in a real browser against a real HTTP supervisor, so it exercises the full
+fetch → generated client → projection helper → render path.
+
+It is a **Tier 3** browser tier — it needs a built SPA bundle + Chromium, so it
+is NOT in the Go integration shard set. Run it with `make dashboard-e2e-play`
+(builds the SPA, builds the fakesupervisor with `-tags integration`, installs
+Chromium via `npx playwright install --with-deps chromium`, then runs the specs);
+`make dashboard-e2e` runs both layers. In CI it runs as appended steps in the
+existing **`dashboard`** job (`.github/workflows/ci.yml`), which already has Go +
+Node provisioned; a `playwright-report` artifact is uploaded on failure. Add new
+routes/assertions by editing `e2e/render-smoke.spec.ts`; keep
+`e2e/fixtures/expected.ts` aligned **manually** with the exported constants in
+`test/dashport/corpus/corpus.go` (there is no automated parity check — the two
+are kept in sync by convention).
+
 #### Live worker inference tests (`//go:build acceptance_c`)
 
 `test/acceptance/worker_inference` runs live Claude/Codex/Gemini/OpenCode CLI

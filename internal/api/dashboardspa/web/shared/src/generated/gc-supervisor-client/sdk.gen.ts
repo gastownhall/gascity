@@ -218,6 +218,8 @@ export const postV0CityByCityNameBeadByIdUpdate = <ThrowOnError extends boolean 
 
 /**
  * Get v0 city by city name beads
+ *
+ * Results are ordered (created_at DESC, id DESC) — newest beads first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).
  */
 export const getV0CityByCityNameBeads = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameBeadsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameBeadsResponses, GetV0CityByCityNameBeadsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/beads', ...options });
 
@@ -309,6 +311,8 @@ export const postV0CityByCityNameConvoyByIdRemove = <ThrowOnError extends boolea
 
 /**
  * Get v0 city by city name convoys
+ *
+ * Results are ordered (created_at DESC, id DESC) — newest convoys first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).
  */
 export const getV0CityByCityNameConvoys = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameConvoysData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameConvoysResponses, GetV0CityByCityNameConvoysErrors, ThrowOnError>({ url: '/v0/city/{cityName}/convoys', ...options });
 
@@ -326,6 +330,8 @@ export const createConvoy = <ThrowOnError extends boolean = false>(options: Opti
 
 /**
  * Get v0 city by city name events
+ *
+ * Results are ordered seq DESC — newest events first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).
  */
 export const getV0CityByCityNameEvents = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameEventsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameEventsResponses, GetV0CityByCityNameEventsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/events', ...options });
 
@@ -573,6 +579,8 @@ export const getV0CityByCityNameHealth = <ThrowOnError extends boolean = false>(
 
 /**
  * Get v0 city by city name mail
+ *
+ * Results are ordered (created_at DESC, id DESC) — newest messages first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).
  */
 export const getV0CityByCityNameMail = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameMailData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameMailResponses, GetV0CityByCityNameMailErrors, ThrowOnError>({ url: '/v0/city/{cityName}/mail', ...options });
 
@@ -1090,6 +1098,8 @@ export const postV0CityByCityNameSessionByIdWake = <ThrowOnError extends boolean
 
 /**
  * Get v0 city by city name sessions
+ *
+ * Results are ordered (created_at DESC, id DESC) — newest sessions first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).
  */
 export const getV0CityByCityNameSessions = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameSessionsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameSessionsResponses, GetV0CityByCityNameSessionsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/sessions', ...options });
 

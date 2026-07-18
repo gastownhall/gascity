@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,17 +15,32 @@ import (
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
+type storeHealthListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s *storeHealthListErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.AllowScan && query.IncludeClosed {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
 func TestCachedStoreHealthServesMemoized(t *testing.T) {
 	var calls int
 	want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
 	s := &Server{}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
 		calls++
-		return want
+		return want, nil
 	}
 
 	now := time.Unix(1_000_000, 0)
-	got := s.cachedStoreHealth(context.Background(), now)
+	got, err := s.cachedStoreHealth(context.Background(), now)
+	if err != nil {
+		t.Fatalf("cachedStoreHealth: %v", err)
+	}
 	if got != want {
 		t.Fatalf("cachedStoreHealth = %+v, want %+v", got, want)
 	}
@@ -33,7 +49,10 @@ func TestCachedStoreHealthServesMemoized(t *testing.T) {
 	}
 
 	// Within TTL: no recomputation.
-	got2 := s.cachedStoreHealth(context.Background(), now.Add(storeHealthCacheTTL-time.Second))
+	got2, err := s.cachedStoreHealth(context.Background(), now.Add(storeHealthCacheTTL-time.Second))
+	if err != nil {
+		t.Fatalf("second cachedStoreHealth: %v", err)
+	}
 	if got2 != want {
 		t.Fatalf("second cachedStoreHealth = %+v, want %+v", got2, want)
 	}
@@ -45,15 +64,20 @@ func TestCachedStoreHealthServesMemoized(t *testing.T) {
 func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
 	var calls int
 	s := &Server{}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
 		calls++
-		return &StatusStoreHealth{SizeBytes: int64(calls)}
+		return &StatusStoreHealth{SizeBytes: int64(calls)}, nil
 	}
 
 	now := time.Unix(1_000_000, 0)
-	_ = s.cachedStoreHealth(context.Background(), now)
+	if _, err := s.cachedStoreHealth(context.Background(), now); err != nil {
+		t.Fatalf("initial cachedStoreHealth: %v", err)
+	}
 	later := now.Add(storeHealthCacheTTL + time.Second)
-	got := s.cachedStoreHealth(context.Background(), later)
+	got, err := s.cachedStoreHealth(context.Background(), later)
+	if err != nil {
+		t.Fatalf("refreshed cachedStoreHealth: %v", err)
+	}
 	if calls != 2 {
 		t.Fatalf("computer calls = %d, want 2", calls)
 	}
@@ -65,7 +89,7 @@ func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
 func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
 	s := &Server{}
 	canLockDuringCompute := make(chan bool, 1)
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
 		locked := make(chan struct{})
 		go func() {
 			s.storeHealthMu.Lock()
@@ -78,10 +102,12 @@ func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 			canLockDuringCompute <- false
 		}
-		return &StatusStoreHealth{SizeBytes: 1}
+		return &StatusStoreHealth{SizeBytes: 1}, nil
 	}
 
-	_ = s.cachedStoreHealth(context.Background(), time.Unix(1_000_000, 0))
+	if _, err := s.cachedStoreHealth(context.Background(), time.Unix(1_000_000, 0)); err != nil {
+		t.Fatalf("cachedStoreHealth: %v", err)
+	}
 	if !<-canLockDuringCompute {
 		t.Fatal("cachedStoreHealth held storeHealthMu while running the refresh computer")
 	}
@@ -137,7 +163,10 @@ func TestComputeStoreHealthServerIntegration(t *testing.T) {
 		cityBeadStore: store,
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth(context.Background())
+	got, err := s.computeStoreHealth(context.Background())
+	if err != nil {
+		t.Fatalf("computeStoreHealth: %v", err)
+	}
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
@@ -168,7 +197,10 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 		cityBeadStore: beads.NewMemStore(),
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth(context.Background())
+	got, err := s.computeStoreHealth(context.Background())
+	if err != nil {
+		t.Fatalf("computeStoreHealth: %v", err)
+	}
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
@@ -180,14 +212,35 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 	state := &fakeState{cityPath: ""}
 	s := &Server{state: state}
-	if got := s.computeStoreHealth(context.Background()); got != nil {
+	got, err := s.computeStoreHealth(context.Background())
+	if err != nil {
+		t.Fatalf("computeStoreHealth: %v", err)
+	}
+	if got != nil {
 		t.Fatalf("computeStoreHealth = %+v, want nil for empty city path", got)
 	}
 }
 
-func TestCountBeadStoreRowsNil(t *testing.T) {
-	if got := countBeadStoreRows(context.Background(), newFakeState(t), nil); got != 0 {
-		t.Fatalf("countBeadStoreRows(nil) = %d, want 0", got)
+func TestCountBeadStoreRowsReturnsUnavailableForNilStore(t *testing.T) {
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), nil)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows(nil) = %d, want zero value when unavailable", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("countBeadStoreRows(nil) error = %v, want unavailable error", err)
+	}
+}
+
+func TestCountBeadStoreRowsReturnsScanError(t *testing.T) {
+	wantErr := errors.New("store health row scan failed")
+	store := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: wantErr}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows rows = %d, want zero value when unavailable", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("countBeadStoreRows error = %v, want %v", err, wantErr)
 	}
 }
 
@@ -204,13 +257,33 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := countBeadStoreRows(context.Background(), newFakeState(t), store); got != 2 {
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows: %v", err)
+	}
+	if got != 2 {
 		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+}
+
+func TestComputeStoreHealthReturnsRowCountError(t *testing.T) {
+	wantErr := errors.New("store health row scan failed")
+	state := newFakeState(t)
+	state.cityBeadStore = &storeHealthListErrorStore{Store: beads.NewMemStore(), err: wantErr}
+	s := &Server{state: state}
+
+	got, err := s.computeStoreHealth(context.Background())
+	if got != nil {
+		t.Errorf("computeStoreHealth = %+v, want nil when row count is unavailable", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("computeStoreHealth error = %v, want %v", err, wantErr)
 	}
 }
 
 func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
 	s := &Server{state: state}
 
 	body := s.buildStatusBody(context.Background(), false)
@@ -222,6 +295,27 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	}
 	if !strings.HasSuffix(body.StoreHealth.Path, "/.beads/dolt") {
 		t.Errorf("Path = %q, want .beads/dolt suffix", body.StoreHealth.Path)
+	}
+}
+
+func TestBuildStatusBodyOmitsUnavailableStoreHealthAndReportsPartialError(t *testing.T) {
+	wantErr := errors.New("store health row scan failed")
+	state := newFakeState(t)
+	s := &Server{state: state}
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+		return nil, wantErr
+	}
+
+	body := s.buildStatusBody(context.Background(), false)
+	if body.StoreHealth != nil {
+		t.Errorf("StoreHealth = %+v, want omitted when unavailable", body.StoreHealth)
+	}
+	if !body.Partial {
+		t.Error("Partial = false, want true when store health is unavailable")
+	}
+	wantPartialError := "store health: " + wantErr.Error()
+	if len(body.PartialErrors) != 1 || body.PartialErrors[0] != wantPartialError {
+		t.Fatalf("PartialErrors = %q, want [%q]", body.PartialErrors, wantPartialError)
 	}
 }
 

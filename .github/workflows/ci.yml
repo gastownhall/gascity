@@ -1189,12 +1189,52 @@ jobs:
       - name: Typecheck test files (tsc -p tsconfig.test.json)
         run: npm run --workspace gas-city-dashboard-frontend typecheck:test
         working-directory: internal/api/dashboardspa/web
+      - name: Typecheck e2e specs (tsc -p e2e/tsconfig.json)
+        run: npm run --workspace gas-city-dashboard-frontend typecheck:e2e
+        working-directory: internal/api/dashboardspa/web
       - name: Vitest
         run: npm run --workspace gas-city-dashboard-frontend test
         working-directory: internal/api/dashboardspa/web
       - name: Build
         run: npm run build --silent
         working-directory: internal/api/dashboardspa/web
+      # Sync the freshly built bundle into the embedded dist/ the fakesupervisor
+      # serves, so the Playwright render smoke (Layer B) runs against the SPA
+      # this job just built, not a stale committed embed.
+      - name: Sync embedded SPA bundle
+        run: rm -rf internal/api/dashboardspa/dist && cp -rf internal/api/dashboardspa/web/frontend/dist internal/api/dashboardspa/dist
+      - name: Build seeded fakesupervisor (Layer B server)
+        run: go build -tags integration -o fakesupervisor .
+        working-directory: test/dashport/cmd/fakesupervisor
+      - name: Resolve Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        working-directory: internal/api/dashboardspa/web
+      # Cache the downloaded browser binaries keyed on the resolved
+      # @playwright/test version (from the lockfile-pinned install above). A cache
+      # hit skips the ~150 MB Chromium download; --with-deps in the install step
+      # below still runs (system libs aren't cached), so a hit is safe.
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright Chromium
+        run: npm run test:e2e:install:ci
+        working-directory: internal/api/dashboardspa/web/frontend
+        timeout-minutes: 5
+      - name: Playwright render smoke (Layer B)
+        run: npm run test:e2e
+        working-directory: internal/api/dashboardspa/web/frontend
+        timeout-minutes: 10
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: internal/api/dashboardspa/web/frontend/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # openclaw-bridge Node test suite. The bridge ships its own npm tests
   # (inbound at-least-once redelivery + gc client wire shapes); without this
