@@ -96,6 +96,22 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 	return nil
 }
 
+// emitInboundDropped records that an accepted inbound message resolved to no
+// delivery target and is being dropped. Both inbound entry points call this on
+// their unrouted early-return so the drop is observable in the event log
+// rather than silent (hq-ar4: 200-accepted messages vanished without a trace).
+func emitInboundDropped(deps InboundDeps, msg ExternalInboundMessage) {
+	if deps.EmitEvent == nil {
+		return
+	}
+	deps.EmitEvent(events.ExtMsgInboundDropped, msg.Conversation.Provider+"/"+msg.Conversation.ConversationID, InboundDroppedEventPayload{
+		Provider:       msg.Conversation.Provider,
+		ConversationID: msg.Conversation.ConversationID,
+		Actor:          msg.Actor.DisplayName,
+		ExplicitTarget: msg.ExplicitTarget,
+	})
+}
+
 // resolveInboundTarget resolves the delivery target for an inbound message and
 // records it on result: an existing binding first, then a group route, then the
 // configured default route. result is left unrouted when nothing matches. Both
@@ -180,7 +196,9 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 		return nil, err
 	}
 	if !result.routed() {
-		// No binding, no group route, no default route — empty target.
+		// No binding, no group route, no default route — empty target. The
+		// message is acknowledged but delivered nowhere; make that observable.
+		emitInboundDropped(deps, *msg)
 		return result, nil
 	}
 
@@ -248,7 +266,9 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 		return nil, err
 	}
 	if !result.routed() {
-		// No binding, no group route, no default route — empty target.
+		// No binding, no group route, no default route — empty target. The
+		// message is acknowledged but delivered nowhere; make that observable.
+		emitInboundDropped(deps, msg)
 		return result, nil
 	}
 

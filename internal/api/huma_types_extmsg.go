@@ -195,6 +195,13 @@ type ExtMsgAdapterRegisterInput struct {
 		Name         string                     `json:"name,omitempty" doc:"Adapter display name."`
 		CallbackURL  string                     `json:"callback_url,omitempty" doc:"Callback URL for outbound messages."`
 		Capabilities extmsg.AdapterCapabilities `json:"capabilities,omitempty" doc:"Adapter capabilities."`
+		// ReplyInstructions is the adapter-supplied reply-instruction
+		// template rendered into inbound-message nudges in place of the
+		// generic "gc <provider> reply-current ..." fallback. Placeholders:
+		// {conversation_id}, {message_ts}, {thread_ts}, {handle};
+		// [bracketed segments] are dropped when a placeholder inside
+		// resolves empty. See extmsg.ReplyInstructionsProvider.
+		ReplyInstructions string `json:"reply_instructions,omitempty" doc:"Reply-instruction template for inbound nudges (placeholders: {conversation_id}, {message_ts}, {thread_ts}, {handle})."`
 	}
 }
 

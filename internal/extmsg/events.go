@@ -23,6 +23,23 @@ type InboundEventPayload struct {
 // IsEventPayload marks InboundEventPayload as an events.Payload variant.
 func (InboundEventPayload) IsEventPayload() {}
 
+// InboundDroppedEventPayload is emitted on events.ExtMsgInboundDropped when
+// an accepted inbound message resolves to no binding, no group route, and no
+// default route. The message is acknowledged to the adapter but delivered
+// nowhere — this payload makes the drop observable rather than silent
+// (RCA hq-ar4). ExplicitTarget carries the adapter-supplied address-by-handle
+// target, when any; the usual fix is binding the conversation or configuring
+// an [[extmsg.default_route]] for the provider.
+type InboundDroppedEventPayload struct {
+	Provider       string `json:"provider"`
+	ConversationID string `json:"conversation_id"`
+	Actor          string `json:"actor"`
+	ExplicitTarget string `json:"explicit_target,omitempty"`
+}
+
+// IsEventPayload marks InboundDroppedEventPayload as an events.Payload variant.
+func (InboundDroppedEventPayload) IsEventPayload() {}
+
 // OutboundEventPayload is emitted on "extmsg.outbound" events.
 type OutboundEventPayload struct {
 	Provider       string `json:"provider"`
@@ -99,6 +116,7 @@ func init() {
 	events.RegisterPayload(events.ExtMsgAdapterAdded, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgAdapterRemoved, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgInbound, InboundEventPayload{})
+	events.RegisterPayload(events.ExtMsgInboundDropped, InboundDroppedEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutbound, OutboundEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutboundChannelMismatch, OutboundChannelMismatchPayload{})
 }

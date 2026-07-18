@@ -605,3 +605,18 @@ type TransportAdapter interface {
 	Publish(ctx context.Context, req PublishRequest) (*PublishReceipt, error)
 	EnsureChildConversation(ctx context.Context, ref ConversationRef, label string) (*ConversationRef, error)
 }
+
+// ReplyInstructionsProvider is an optional interface a TransportAdapter
+// implements to supply provider-specific reply instructions for the
+// inbound-message <system-reminder> nudge. The returned template replaces
+// the generic "gc <provider> reply-current ..." fallback, which not every
+// pack tier ships (e.g. Tier 1 slack-mini exposes only `gc slack-mini
+// post-message`). Placeholders — {conversation_id}, {message_ts},
+// {thread_ts}, {handle} — are substituted at nudge time; segments wrapped
+// in square brackets are dropped when any placeholder inside them resolves
+// empty, so templates can mark optional flags like
+// "[--thread-ts {thread_ts}]". An empty return means "no instructions
+// registered" and selects the generic fallback.
+type ReplyInstructionsProvider interface {
+	ReplyInstructions() string
+}

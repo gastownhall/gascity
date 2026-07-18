@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -117,30 +118,43 @@ func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) s
 	return extmsgHandleLabel(source)
 }
 
-// extmsgNotifyMembers sends a peer-publication reminder to transcript members
-// via the session message API. This treats membership as the routing truth and
-// lets session resolution materialize or wake named sessions on first receive.
+// extmsgNotifyBroadcast carries one conversation event through the member
+// fan-out in extmsgNotifyMembers.
 //
-// explicitTarget, when non-empty, carries the address-by-handle target so
+// ExplicitTarget, when non-empty, carries the address-by-handle target so
 // peer members can self-silence on off-target messages (see #2484). Outbound
 // reply broadcasts and self-update notifications pass "" because they are
 // not addressed to a specific agent.
-func (s *Server) extmsgNotifyMembers(
-	ctx context.Context,
-	conv extmsg.ConversationRef,
-	actorDisplayName string,
-	actorKind string,
-	text string,
-	excludeSelector string,
-	explicitTarget string,
-) {
+//
+// ProviderMessageID and ReplyToMessageID surface the provider-side message
+// id and its thread id so the injected reminder can tell agents where a
+// threaded reply must go. On the inbound path they come from the inbound
+// message; on the outbound broadcast path from the publish receipt and the
+// publish request's reply target.
+type extmsgNotifyBroadcast struct {
+	Conversation      extmsg.ConversationRef
+	ActorDisplay      string
+	ActorKind         string
+	Text              string
+	ExcludeSelector   string
+	ExplicitTarget    string
+	ProviderMessageID string
+	ReplyToMessageID  string
+}
+
+// extmsgNotifyMembers sends a peer-publication reminder to transcript members
+// via the session message API. This treats membership as the routing truth and
+// lets session resolution materialize or wake named sessions on first receive.
+func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcast) {
 	svc := s.state.ExtMsgServices()
 	store := s.state.CityBeadStore()
 	if svc == nil || store == nil {
 		return
 	}
+	conv := b.Conversation
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
-	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
+	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, b.ExplicitTarget)
+	replyInstructions := s.extmsgReplyInstructionsForConversation(conv)
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -148,8 +162,8 @@ func (s *Server) extmsgNotifyMembers(
 	}
 
 	excludedResolvedID := ""
-	excludedSelector := apiNormalizeSessionTarget(excludeSelector)
-	if selector := strings.TrimSpace(excludeSelector); selector != "" {
+	excludedSelector := apiNormalizeSessionTarget(b.ExcludeSelector)
+	if selector := strings.TrimSpace(b.ExcludeSelector); selector != "" {
 		resolvedID, err := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
 		if err != nil {
 			log.Printf("extmsg: resolve sender %s failed: %v", selector, err)
@@ -163,14 +177,17 @@ func (s *Server) extmsgNotifyMembers(
 		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
 			Provider:                conv.Provider,
 			ConversationID:          conv.ConversationID,
-			ActorDisplay:            actorDisplayName,
-			ActorKind:               actorKind,
-			Text:                    text,
+			ActorDisplay:            b.ActorDisplay,
+			ActorKind:               b.ActorKind,
+			Text:                    b.Text,
 			RecipientSelector:       sessionSelector,
 			RecipientSessionID:      resolvedID,
 			Handle:                  handle,
-			ExplicitTarget:          explicitTarget,
+			ExplicitTarget:          b.ExplicitTarget,
 			ExplicitTargetSessionID: explicitTargetSessionID,
+			ProviderMessageID:       b.ProviderMessageID,
+			ReplyToMessageID:        b.ReplyToMessageID,
+			ReplyInstructions:       replyInstructions,
 		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
@@ -210,6 +227,26 @@ func (s *Server) extmsgNotifyMembers(
 	wg.Wait()
 }
 
+// extmsgReplyInstructionsForConversation returns the reply-instruction
+// template the conversation's adapter registered, or "" when the registry
+// or adapter is missing or the adapter does not provide one — the reminder
+// then falls back to the generic reply-current text.
+func (s *Server) extmsgReplyInstructionsForConversation(conv extmsg.ConversationRef) string {
+	reg := s.state.AdapterRegistry()
+	if reg == nil {
+		return ""
+	}
+	adapter := reg.LookupByConversation(conv)
+	if adapter == nil {
+		return ""
+	}
+	provider, ok := adapter.(extmsg.ReplyInstructionsProvider)
+	if !ok {
+		return ""
+	}
+	return provider.ReplyInstructions()
+}
+
 func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
 	if strings.TrimSpace(explicitTarget) == "" || svc == nil || svc.Groups == nil {
 		return ""
@@ -233,7 +270,15 @@ func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.Exte
 	if !msg.Actor.IsBot {
 		actorKind = "human"
 	}
-	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "", msg.ExplicitTarget)
+	s.extmsgNotifyMembers(ctx, extmsgNotifyBroadcast{
+		Conversation:      msg.Conversation,
+		ActorDisplay:      msg.Actor.DisplayName,
+		ActorKind:         actorKind,
+		Text:              msg.Text,
+		ExplicitTarget:    msg.ExplicitTarget,
+		ProviderMessageID: msg.ProviderMessageID,
+		ReplyToMessageID:  msg.ReplyToMessageID,
+	})
 }
 
 // titleCaseProvider uppercases the first ASCII byte of a provider name.
@@ -274,6 +319,16 @@ type extmsgNotifyReminder struct {
 	Handle                  string
 	ExplicitTarget          string
 	ExplicitTargetSessionID string
+	// ProviderMessageID/ReplyToMessageID carry the provider-side message
+	// id and thread id (empty when the notifying path has none, e.g. an
+	// outbound broadcast with no receipt). They surface threading context
+	// in the reminder and feed the {message_ts}/{thread_ts} placeholders.
+	ProviderMessageID string
+	ReplyToMessageID  string
+	// ReplyInstructions is the adapter-registered reply-instruction
+	// template (see extmsg.ReplyInstructionsProvider); empty selects the
+	// generic reply-current fallback text.
+	ReplyInstructions string
 }
 
 // formatExtmsgNotifyReminder builds the inbound-message reminder body.
@@ -300,6 +355,13 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 		r.Provider, r.ConversationID,
 		safeActor, r.ActorKind, safeText,
 	)
+	if messageID := strings.TrimSpace(r.ProviderMessageID); messageID != "" {
+		fmt.Fprintf(&b, "Message id: %s", extmsg.SanitizeForSystemReminder(messageID))
+		if threadID := strings.TrimSpace(r.ReplyToMessageID); threadID != "" {
+			fmt.Fprintf(&b, " (in thread %s)", extmsg.SanitizeForSystemReminder(threadID))
+		}
+		b.WriteString("\n\n")
+	}
 	if target := strings.TrimSpace(r.ExplicitTarget); target != "" && !extmsgNotifyReminderTargetsRecipient(r, target) {
 		safeTarget := extmsg.SanitizeForSystemReminder(target)
 		fmt.Fprintf(&b,
@@ -307,16 +369,89 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 			safeTarget,
 		)
 	}
+	if instructions := renderExtmsgReplyInstructions(r); instructions != "" {
+		// Defense-in-depth: the adapter-registered template text is trusted
+		// control-plane content, but strip any literal <system-reminder>
+		// breakout sequences before embedding it so a compromised or
+		// mistaken registration cannot break out of the reminder block. No
+		// legitimate template contains these tags, so this is safe.
+		instructions = extmsg.SanitizeForSystemReminder(instructions)
+		b.WriteString(instructions)
+		if !strings.HasSuffix(instructions, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("</system-reminder>")
+		return b.String()
+	}
 	fmt.Fprintf(&b,
 		"To reply in %s, write your response to a file and run:\n"+
 			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
-			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
 			"</system-reminder>",
 		providerDisplay,
 		providerCLI, r.ConversationID,
-		r.Handle,
 	)
 	return b.String()
+}
+
+var (
+	// extmsgOptionalSegmentRE matches [bracketed segments] in an
+	// adapter-registered reply-instruction template; a segment is dropped
+	// when any placeholder inside it resolves empty.
+	extmsgOptionalSegmentRE = regexp.MustCompile(`\[[^\[\]]*\]`)
+	// extmsgPlaceholderRE matches {placeholder} tokens.
+	extmsgPlaceholderRE = regexp.MustCompile(`\{[a-z_]+\}`)
+)
+
+// renderExtmsgReplyInstructions renders the adapter-registered
+// reply-instruction template with the reminder's values. The effective
+// {thread_ts} is the inbound message's thread id, falling back to the
+// message's own id — replying to a top-level message starts its thread.
+// Substituted values are attacker-influenced (provider-supplied ids), so
+// they are sanitized like every other interpolated reminder field; the
+// template itself comes from the local adapter registration.
+func renderExtmsgReplyInstructions(r extmsgNotifyReminder) string {
+	template := strings.TrimSpace(r.ReplyInstructions)
+	if template == "" {
+		return ""
+	}
+	threadTS := strings.TrimSpace(r.ReplyToMessageID)
+	if threadTS == "" {
+		threadTS = strings.TrimSpace(r.ProviderMessageID)
+	}
+	values := map[string]string{
+		"conversation_id": strings.TrimSpace(r.ConversationID),
+		"message_ts":      strings.TrimSpace(r.ProviderMessageID),
+		"thread_ts":       threadTS,
+		"handle":          strings.TrimSpace(r.Handle),
+	}
+	rendered := extmsgOptionalSegmentRE.ReplaceAllStringFunc(template, func(segment string) string {
+		expanded, allSet := substituteExtmsgPlaceholders(segment[1:len(segment)-1], values)
+		if !allSet {
+			return ""
+		}
+		return expanded
+	})
+	rendered, _ = substituteExtmsgPlaceholders(rendered, values)
+	return rendered
+}
+
+// substituteExtmsgPlaceholders replaces known {placeholder} tokens with
+// their sanitized values, leaving unknown tokens literal. The bool reports
+// whether every known placeholder in s resolved non-empty.
+func substituteExtmsgPlaceholders(s string, values map[string]string) (string, bool) {
+	allSet := true
+	out := extmsgPlaceholderRE.ReplaceAllStringFunc(s, func(token string) string {
+		value, known := values[token[1:len(token)-1]]
+		if !known {
+			return token
+		}
+		if value == "" {
+			allSet = false
+			return ""
+		}
+		return extmsg.SanitizeForSystemReminder(value)
+	})
+	return out, allSet
 }
 
 func extmsgNotifyReminderTargetsRecipient(r extmsgNotifyReminder, target string) bool {
