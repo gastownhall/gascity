@@ -3766,7 +3766,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Live bead row count.
+     * Retained bead row count used as the denominator, including open and closed beads.
      */
     live_rows: number;
     /**
@@ -3774,7 +3774,7 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per row.
+     * Derived megabytes per retained row, including open and closed beads.
      */
     ratio_mb_per_row: number;
     /**

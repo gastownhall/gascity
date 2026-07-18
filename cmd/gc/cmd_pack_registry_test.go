@@ -519,7 +519,7 @@ func TestPackRegistrySearchWarnsOnStaleCache(t *testing.T) {
 	}
 }
 
-func TestPackCommandTreeKeepsRegistryAndLegacySurfacesSeparate(t *testing.T) {
+func TestRegistryCommandTreeUsesPackNamespace(t *testing.T) {
 	cmd := newPackCmd(&bytes.Buffer{}, &bytes.Buffer{})
 	for _, args := range [][]string{{"registry", "list"}, {"fetch"}, {"list"}} {
 		found, remaining, err := cmd.Find(args)
@@ -541,8 +541,10 @@ func TestPackCommandTreeKeepsRegistryAndLegacySurfacesSeparate(t *testing.T) {
 	}
 
 	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
-	if found, _, err := root.Find([]string{"registry"}); err == nil && found != root {
-		t.Fatalf("gc registry should not be a root command; found=%s", found.CommandPath())
+	for _, child := range root.Commands() {
+		if child.Name() == "registry" {
+			t.Fatal("unexpected top-level gc registry command; use gc pack registry")
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 const hookClaimCommandName = "hook"
 
 var hookClaimMutationTimeout = 10 * time.Second
+
+var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
 
 type hookClaimOptions struct {
 	Assignee           string
@@ -483,12 +486,53 @@ func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops 
 	}
 }
 
-func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error {
-	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
+func hookRecordSessionPointersWithBdStore(ctx context.Context, _ string, env []string, assignee, sessionBeadID, runID, stepID string) error {
+	cityDir, cityEnv, err := hookClaimSessionStoreContext(ctx, env)
+	if err != nil {
+		return err
+	}
+	store := hookClaimBdStoreContext(ctx, cityDir, cityEnv, assignee)
 	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{
 		beadmeta.CurrentRunIDMetadataKey:   runID,
 		beadmeta.ActiveWorkBeadMetadataKey: stepID,
 	}})
+}
+
+// hookClaimSessionStoreContext rebuilds the store environment for the city
+// scope. Claim and continuation mutations use the selected work store, but
+// session beads always live in the city store, including when work was claimed
+// through cross-store federation from a rig.
+func hookClaimSessionStoreContext(ctx context.Context, env []string) (string, []string, error) {
+	cityPath := ""
+	for _, key := range []string{"GC_CITY_PATH", "GC_CITY"} {
+		for _, entry := range env {
+			k, value, ok := strings.Cut(entry, "=")
+			if !ok || k != key {
+				continue
+			}
+			value = strings.TrimSpace(value)
+			if value != "" && filepath.IsAbs(value) {
+				cityPath = filepath.Clean(value)
+				break
+			}
+		}
+		if cityPath != "" {
+			break
+		}
+	}
+	if cityPath == "" {
+		return "", nil, errors.New("resolving city store for session pointers: missing absolute GC_CITY_PATH or GC_CITY")
+	}
+
+	overrides, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolving city store for session pointers: %w", err)
+	}
+	overrides["GC_STORE_ROOT"] = cityPath
+	overrides["GC_STORE_SCOPE"] = "city"
+	overrides["GC_RIG"] = ""
+	overrides["GC_RIG_ROOT"] = ""
+	return cityPath, mergeRuntimeEnv(env, overrides), nil
 }
 
 // hookClaimSessionID returns the session bead id (GC_SESSION_ID) from the claim
@@ -576,7 +620,7 @@ func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
 // so a best-effort claim-time write cannot outlast the caller's deadline even if
 // the underlying bd update stalls.
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
-	return beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
+	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
 }
 
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {

@@ -8437,7 +8437,7 @@
             "type": "string"
           },
           "live_rows": {
-            "description": "Live bead row count.",
+            "description": "Retained bead row count used as the denominator, including open and closed beads.",
             "format": "int64",
             "type": "integer"
           },
@@ -8446,7 +8446,7 @@
             "type": "string"
           },
           "ratio_mb_per_row": {
-            "description": "Derived megabytes per row.",
+            "description": "Derived megabytes per retained row, including open and closed beads.",
             "format": "double",
             "type": "number"
           },

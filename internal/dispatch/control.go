@@ -556,7 +556,14 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	routeCfg, err := opts.routeConfig()
 	if err != nil {
-		return fmt.Errorf("loading attempt route config: %w", err)
+		// A route-config load/parse failure is environmental and transient (a
+		// momentary city.toml read or include-resolution blip), not a permanent
+		// defect in this molecule. Classify it as a transient controller-boundary
+		// error so the spawn boundary retries it as pending instead of
+		// quarantining an in-flight molecule. Terminal fail-closed stays reserved
+		// for a config that loads successfully but lacks the required
+		// store-scoped dispatcher (controlDispatcherTargetForExecutionTarget).
+		return markTransientControllerBoundaryError(fmt.Errorf("loading attempt route config: %w", err))
 	}
 	rootStoreRef := strings.TrimSpace(control.Metadata[beadmeta.RootStoreRefMetadataKey])
 	for i := range recipe.Steps {

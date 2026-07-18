@@ -1394,6 +1394,12 @@ type BeadsConfig struct {
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
 	// defaults to "off". Any other value fails config load.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// GuardedRelease selects the ownership-release discipline for work beads:
+	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
+	// release verbs where the bd binary is capable, loud degrade otherwise), or
+	// "require" (guarded release or a typed refusal). Empty defaults to "off".
+	// Any other value fails config load.
+	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1440,6 +1446,18 @@ func (b BeadsConfig) NormalizedConditionalWrites() string {
 		return "off"
 	}
 	return b.ConditionalWrites
+}
+
+// NormalizedGuardedRelease returns the configured guarded-release value,
+// mapping ONLY the empty string to the built-in default "off". Like
+// NormalizedConditionalWrites, an unknown non-empty value passes through
+// verbatim rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+func (b BeadsConfig) NormalizedGuardedRelease() string {
+	if b.GuardedRelease == "" {
+		return "off"
+	}
+	return b.GuardedRelease
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -4404,6 +4422,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
 		return nil, err
 	}
+	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -4418,6 +4439,22 @@ func validateConditionalWrites(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
+}
+
+// validateGuardedRelease rejects an out-of-enum beads.guarded_release value at
+// load time. Like conditional_writes, this gate selects a correctness
+// discipline: a typo silently meaning "off" would leave an operator believing
+// ownership-fenced release is enforced while every release runs owner-blind, so
+// the config fails to load instead. The empty string (unset) is valid and
+// defaults to off.
+func validateGuardedRelease(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.guarded_release: %w", err)
 	}
 	return nil
 }
