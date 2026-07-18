@@ -1555,6 +1555,12 @@ type SessionConfig struct {
 	// NudgeRetryInterval is the retry interval between nudge readiness polls.
 	// Duration string. Defaults to "500ms".
 	NudgeRetryInterval string `toml:"nudge_retry_interval,omitempty" jsonschema:"default=500ms"`
+	// NudgePollInterval is the cycle interval for the per-session nudge
+	// poller sidecar (`gc nudge poll`). Each cycle observes the session and
+	// checks the queued-nudge state, so on hosts running many sessions a
+	// longer interval trades nudge-delivery latency for less standing load.
+	// Duration string. Unset means the poller's built-in default (2s).
+	NudgePollInterval string `toml:"nudge_poll_interval,omitempty" jsonschema:"default=2s"`
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
@@ -1635,6 +1641,20 @@ func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
 	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
+}
+
+// NudgePollIntervalDuration returns the configured nudge poller cycle
+// interval, or 0 when unset, unparseable, or non-positive — 0 means "not
+// configured" and callers fall back to their built-in default.
+func (s *SessionConfig) NudgePollIntervalDuration() time.Duration {
+	if s.NudgePollInterval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.NudgePollInterval)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // NudgeLockTimeoutDuration returns the nudge lock timeout as a time.Duration.

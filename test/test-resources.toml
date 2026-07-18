@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 532
-baseline_files = 157
+baseline_calls = 533
+baseline_files = 158
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 404
-baseline_files = 110
+baseline_calls = 405
+baseline_files = 111
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -189,6 +189,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "cmd/gc TestMain is the checked package-level Medium owner"
 resource_owner = "only environment calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestDockerSessionProtocol"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.23.1"
+invariant = "Docker session adapter protocol proof is a checked Medium owner"
+resource_owner = "the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake"
+migration_target = "W6"
 expires = "2026-10-01"
 
 [[medium]]

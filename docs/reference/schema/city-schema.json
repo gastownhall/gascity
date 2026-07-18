@@ -2748,6 +2748,11 @@
           "description": "NudgeRetryInterval is the retry interval between nudge readiness polls.\nDuration string. Defaults to \"500ms\".",
           "default": "500ms"
         },
+        "nudge_poll_interval": {
+          "type": "string",
+          "description": "NudgePollInterval is the cycle interval for the per-session nudge\npoller sidecar (`gc nudge poll`). Each cycle observes the session and\nchecks the queued-nudge state, so on hosts running many sessions a\nlonger interval trades nudge-delivery latency for less standing load.\nDuration string. Unset means the poller's built-in default (2s).",
+          "default": "2s"
+        },
         "nudge_lock_timeout": {
           "type": "string",
           "description": "NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.\nDuration string. Defaults to \"30s\".",

@@ -798,6 +798,7 @@ SessionConfig holds session provider settings.
 | `setup_timeout` | string |  | `10s` | SetupTimeout is the per-command/script timeout for session setup and pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s". |
 | `nudge_ready_timeout` | string |  | `10s` | NudgeReadyTimeout is how long to wait for the agent to be ready before sending nudge text. Duration string. Defaults to "10s". |
 | `nudge_retry_interval` | string |  | `500ms` | NudgeRetryInterval is the retry interval between nudge readiness polls. Duration string. Defaults to "500ms". |
+| `nudge_poll_interval` | string |  | `2s` | NudgePollInterval is the cycle interval for the per-session nudge poller sidecar (`gc nudge poll`). Each cycle observes the session and checks the queued-nudge state, so on hosts running many sessions a longer interval trades nudge-delivery latency for less standing load. Duration string. Unset means the poller's built-in default (2s). |
 | `nudge_lock_timeout` | string |  | `30s` | NudgeLockTimeout is how long to wait to acquire the per-session nudge lock. Duration string. Defaults to "30s". |
 | `debounce_ms` | integer |  | `500` | DebounceMs is the default debounce interval in milliseconds for send-keys. Defaults to 500. |
 | `display_ms` | integer |  | `5000` | DisplayMs is the default display duration in milliseconds for status messages. Defaults to 5000. |
