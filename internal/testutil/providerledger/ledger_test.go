@@ -635,6 +635,12 @@ func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
 		t.Errorf("auto.New allowed calls = %q, want %q", got, want)
 	}
+	// The conformance factory constructs auto.New without RouteACP, so the
+	// shared contract only runs the default route; the scope keeps the rendered
+	// ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "default-route conformance; ACP route covered by focused auto routing tests"; got != want {
+		t.Errorf("auto.New proof scope = %q, want %q", got, want)
+	}
 }
 
 func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
