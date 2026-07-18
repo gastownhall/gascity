@@ -43,6 +43,10 @@ func TestHoldLabelRoutedToCheck(t *testing.T) {
 		// Generic over label value — must not require any special-casing of
 		// "mayor" specifically; an arbitrary hold value must be caught too.
 		{ID: "H-5", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa-lead"}},
+		// Mismatch on a non-open bead: the scan must not filter to
+		// Status=="open" only, or in_progress/blocked/deferred hold-labeled
+		// beads silently escape it (ga-fm2vgd.2).
+		{ID: "H-6", Title: "held", Type: "task", Status: "in_progress", Labels: []string{"hold:mayor"}},
 	}, nil)
 	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "RH-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
@@ -63,7 +67,7 @@ func TestHoldLabelRoutedToCheck(t *testing.T) {
 		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
 	}
 	details := strings.Join(res.Details, "\n")
-	for _, want := range []string{"H-1", "H-2", "H-5", "RH-1"} {
+	for _, want := range []string{"H-1", "H-2", "H-5", "H-6", "RH-1"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
@@ -103,6 +107,13 @@ func TestHoldLabelRoutedToCheck(t *testing.T) {
 	}
 	if got := h5.Metadata["gc.routed_to"]; got != "qa-lead" {
 		t.Errorf("H-5 gc.routed_to = %q, want qa-lead (arbitrary hold value, not special-cased)", got)
+	}
+	h6, err := cityStore.Get("H-6")
+	if err != nil {
+		t.Fatalf("get H-6: %v", err)
+	}
+	if got := h6.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("H-6 gc.routed_to = %q, want mayor (backfilled despite in_progress status)", got)
 	}
 	h4, err := cityStore.Get("H-4")
 	if err != nil {
