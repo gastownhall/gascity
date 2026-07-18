@@ -7,6 +7,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/timingsummary"
 )
 
 const (
@@ -25,6 +27,9 @@ const (
 
 	hazardP95CapExceeded      = "p95-cap-exceeded"
 	hazardShardP95CapExceeded = "shard-p95-cap-exceeded"
+
+	historyProfileMatched = "matched"
+	historyProfileMissing = "profile-missing"
 )
 
 // InventoryUnit identifies one currently runnable unit. Inventory, rather
@@ -59,6 +64,40 @@ type Input struct {
 	Shards        int             `json:"shards"`
 	Defaults      StaticTiming    `json:"defaults"`
 	P95CapSeconds float64         `json:"p95_cap_seconds"`
+}
+
+// ProfileRunner identifies the stable runner properties of one comparable
+// timing profile. Ephemeral runner names are intentionally excluded.
+type ProfileRunner struct {
+	Label    string `json:"label"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	CPUCount int    `json:"cpu_count"`
+}
+
+// ProfileSelector identifies one exact comparable timing profile.
+type ProfileSelector struct {
+	Job     string        `json:"job"`
+	Variant string        `json:"variant"`
+	Runner  ProfileRunner `json:"runner"`
+}
+
+// SnapshotPlanInput adapts one canonical timing snapshot and exact profile to
+// the pure planner. Inventory remains authoritative for runnable membership.
+type SnapshotPlanInput struct {
+	Inventory     []InventoryUnit        `json:"inventory"`
+	History       timingsummary.Snapshot `json:"history"`
+	Profile       ProfileSelector        `json:"profile"`
+	Shards        int                    `json:"shards"`
+	Defaults      StaticTiming           `json:"defaults"`
+	P95CapSeconds float64                `json:"p95_cap_seconds"`
+}
+
+// SnapshotPlanResult records whether the exact history profile was present and
+// contains the deterministic plan. A missing profile uses static fallbacks.
+type SnapshotPlanResult struct {
+	HistoryProfileStatus string `json:"history_profile_status"`
+	Plan                 Result `json:"plan"`
 }
 
 // Result is a canonical shard plan ordered by shard index.
@@ -177,6 +216,226 @@ func Plan(input Input) (Result, error) {
 		shards[shardIndex].P95Seconds = nextP95
 	}
 	return Result{Shards: shards}, nil
+}
+
+// PlanSnapshot validates a canonical timing snapshot, selects one exact
+// comparable profile, and plans the caller-supplied inventory. It never merges
+// profiles or treats timing history as runnable membership.
+func PlanSnapshot(input SnapshotPlanInput) (SnapshotPlanResult, error) {
+	if input.History.Schema != timingsummary.SnapshotSchema {
+		return SnapshotPlanResult{}, fmt.Errorf("unsupported timing snapshot schema %d", input.History.Schema)
+	}
+	if input.History.UniqueArtifactCount < 0 {
+		return SnapshotPlanResult{}, fmt.Errorf("history.unique_artifact_count must not be negative")
+	}
+	if input.History.DuplicateArtifactCount < 0 {
+		return SnapshotPlanResult{}, fmt.Errorf("history.duplicate_artifact_count must not be negative")
+	}
+	if err := validateProfileSelector("profile", input.Profile); err != nil {
+		return SnapshotPlanResult{}, err
+	}
+
+	profileKeys := make(map[ProfileSelector]struct{}, len(input.History.Profiles))
+	identities := make(map[string]snapshotUnitIdentity)
+	var selectedHistory []HistoryUnit
+	matched := false
+	for profileIndex, profile := range input.History.Profiles {
+		selector := profileSelectorFromSnapshot(profile)
+		if err := validateProfileSelector(fmt.Sprintf("history.profiles[%d]", profileIndex), selector); err != nil {
+			return SnapshotPlanResult{}, err
+		}
+		if _, duplicate := profileKeys[selector]; duplicate {
+			return SnapshotPlanResult{}, fmt.Errorf("history.profiles[%d]: duplicate timing profile", profileIndex)
+		}
+		profileKeys[selector] = struct{}{}
+		if profile.Units == nil {
+			return SnapshotPlanResult{}, fmt.Errorf("history.profiles[%d].units must be an array", profileIndex)
+		}
+
+		unitIDs := make(map[string]struct{}, len(profile.Units))
+		converted := make([]HistoryUnit, 0, len(profile.Units))
+		for unitIndex, unit := range profile.Units {
+			path := fmt.Sprintf("history.profiles[%d].units[%d]", profileIndex, unitIndex)
+			history, identity, err := convertSnapshotUnit(path, unitIndex, selector, unit)
+			if err != nil {
+				return SnapshotPlanResult{}, err
+			}
+			if _, duplicate := unitIDs[unit.UnitID]; duplicate {
+				return SnapshotPlanResult{}, fmt.Errorf("%s: duplicate unit_id %q", path, unit.UnitID)
+			}
+			unitIDs[unit.UnitID] = struct{}{}
+			if previous, ok := identities[unit.UnitID]; ok && previous != identity {
+				return SnapshotPlanResult{}, fmt.Errorf("%s: conflicting identity for unit_id %q", path, unit.UnitID)
+			}
+			identities[unit.UnitID] = identity
+			converted = append(converted, history)
+		}
+		if selector == input.Profile {
+			selectedHistory = converted
+			matched = true
+		}
+	}
+
+	status := historyProfileMissing
+	if matched {
+		status = historyProfileMatched
+	}
+	plan, err := Plan(Input{
+		Inventory:     input.Inventory,
+		History:       selectedHistory,
+		Shards:        input.Shards,
+		Defaults:      input.Defaults,
+		P95CapSeconds: input.P95CapSeconds,
+	})
+	if err != nil {
+		return SnapshotPlanResult{}, err
+	}
+	return SnapshotPlanResult{HistoryProfileStatus: status, Plan: plan}, nil
+}
+
+type snapshotUnitIdentity struct {
+	Package string
+	Test    string
+	Subtest string
+}
+
+func profileSelectorFromSnapshot(profile timingsummary.Profile) ProfileSelector {
+	return ProfileSelector{
+		Job: profile.Job, Variant: profile.Variant,
+		Runner: ProfileRunner{
+			Label: profile.Runner.Label, OS: profile.Runner.OS,
+			Arch: profile.Runner.Arch, CPUCount: profile.Runner.CPUCount,
+		},
+	}
+}
+
+func validateProfileSelector(name string, selector ProfileSelector) error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "job", value: selector.Job},
+		{name: "variant", value: selector.Variant},
+		{name: "runner.label", value: selector.Runner.Label},
+		{name: "runner.os", value: selector.Runner.OS},
+		{name: "runner.arch", value: selector.Runner.Arch},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("%s.%s is required", name, field.name)
+		}
+	}
+	if selector.Runner.CPUCount < 0 {
+		return fmt.Errorf("%s.runner.cpu_count must not be negative", name)
+	}
+	return nil
+}
+
+func convertSnapshotUnit(path string, unitIndex int, selector ProfileSelector, unit timingsummary.UnitHistory) (HistoryUnit, snapshotUnitIdentity, error) {
+	identity := snapshotUnitIdentity{Package: unit.Package, Test: unit.Test, Subtest: unit.Subtest}
+	if strings.TrimSpace(unit.UnitID) == "" {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: unit_id is required", path)
+	}
+	if strings.TrimSpace(unit.Package) == "" {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: package is required", path)
+	}
+	if strings.TrimSpace(unit.Test) == "" {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: test is required", path)
+	}
+	if unit.Subtest != "" {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: subtest must be empty for a top-level planner unit", path)
+	}
+	for _, count := range []struct {
+		name  string
+		value int
+	}{
+		{name: "passes", value: unit.Passes},
+		{name: "failures", value: unit.Failures},
+		{name: "skips", value: unit.Skips},
+	} {
+		if count.value < 0 {
+			return HistoryUnit{}, identity, fmt.Errorf("%s.%s must not be negative", path, count.name)
+		}
+	}
+	if unit.SuccessfulObservations == nil {
+		return HistoryUnit{}, identity, fmt.Errorf("%s.successful_observations must be an array", path)
+	}
+	if len(unit.SuccessfulObservations) != unit.Passes {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: successful observations = %d, want passes %d", path, len(unit.SuccessfulObservations), unit.Passes)
+	}
+	if unit.P75Authoritative != (unit.Passes >= p75AuthoritativeSamples) {
+		return HistoryUnit{}, identity, fmt.Errorf("%s.p75_authoritative contradicts %d successful samples", path, unit.Passes)
+	}
+	if unit.P95Authoritative != (unit.Passes >= p95AuthoritativeSamples) {
+		return HistoryUnit{}, identity, fmt.Errorf("%s.p95_authoritative contradicts %d successful samples", path, unit.Passes)
+	}
+	for observationIndex, observation := range unit.SuccessfulObservations {
+		observationPath := fmt.Sprintf("%s.successful_observations[%d]", path, observationIndex)
+		if err := validateNonNegativeFinite(observationPath+".duration_seconds", observation.DurationSeconds); err != nil {
+			return HistoryUnit{}, identity, err
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{name: "workflow", value: observation.ArtifactIdentity.Workflow},
+			{name: "run_id", value: observation.ArtifactIdentity.RunID},
+			{name: "run_attempt", value: observation.ArtifactIdentity.RunAttempt},
+			{name: "job", value: observation.ArtifactIdentity.Job},
+			{name: "shard_id", value: observation.ArtifactIdentity.ShardID},
+			{name: "variant", value: observation.ArtifactIdentity.Variant},
+		} {
+			if strings.TrimSpace(field.value) == "" {
+				return HistoryUnit{}, identity, fmt.Errorf("%s.artifact_identity.%s is required", observationPath, field.name)
+			}
+		}
+		if observation.ArtifactIdentity.Job != selector.Job || observation.ArtifactIdentity.Variant != selector.Variant {
+			return HistoryUnit{}, identity, fmt.Errorf("%s: job/variant do not match enclosing timing profile", observationPath)
+		}
+		if strings.TrimSpace(observation.TestedSHA) == "" {
+			return HistoryUnit{}, identity, fmt.Errorf("%s.tested_sha is required", observationPath)
+		}
+	}
+
+	statistics := []*float64{
+		unit.DurationSecondsP50,
+		unit.DurationSecondsP75,
+		unit.DurationSecondsP95,
+		unit.DurationSecondsPopulationVariance,
+	}
+	if unit.Passes == 0 {
+		for _, statistic := range statistics {
+			if statistic != nil {
+				return HistoryUnit{}, identity, fmt.Errorf("%s: zero-pass unit requires null timing statistics", path)
+			}
+		}
+		if unit.LastSuccessSHA != nil {
+			return HistoryUnit{}, identity, fmt.Errorf("%s: zero-pass unit requires null last_success_sha", path)
+		}
+		return HistoryUnit{UnitID: unit.UnitID}, identity, nil
+	}
+	for _, statistic := range statistics {
+		if statistic == nil {
+			return HistoryUnit{}, identity, fmt.Errorf("%s: successful unit requires non-null timing statistics", path)
+		}
+	}
+	if unit.LastSuccessSHA == nil || strings.TrimSpace(*unit.LastSuccessSHA) == "" {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: successful unit requires non-empty last_success_sha", path)
+	}
+	if *unit.LastSuccessSHA != unit.SuccessfulObservations[len(unit.SuccessfulObservations)-1].TestedSHA {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: last_success_sha does not match the final canonical successful observation", path)
+	}
+
+	history := HistoryUnit{
+		UnitID: unit.UnitID, SuccessfulSamples: unit.Passes,
+		P50Seconds: *unit.DurationSecondsP50,
+		P75Seconds: *unit.DurationSecondsP75,
+		P95Seconds: *unit.DurationSecondsP95,
+		Variance:   *unit.DurationSecondsPopulationVariance,
+	}
+	if err := validateHistory(unitIndex, history); err != nil {
+		return HistoryUnit{}, identity, fmt.Errorf("%s: %w", path, err)
+	}
+	return history, identity, nil
 }
 
 func validateInput(input Input) error {

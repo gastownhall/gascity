@@ -353,6 +353,60 @@ result planner-authoritative. Those are responsibilities of the later trusted
 default-branch workflow. Until that workflow lands, use the database as
 deterministic storage-boundary evidence only.
 
+#### Local timing-plan dry runs
+
+The local planner consumes the current runnable inventory, the canonical
+schema-v1 timing snapshot above, and planner configuration without changing
+the active shard topology:
+
+```bash
+go run ./scripts/test-timing-plan.go \
+  --inventory runnable-inventory-v1.json \
+  --history timing-history-v1.json \
+  --config timing-plan-config-v1.json \
+  > timing-plan-v1.json
+```
+
+Inventory and configuration are independently versioned. The minimal inventory
+is `{"schema":1,"units":[{"unit_id":"package:TestName"}]}`. Configuration
+schema v1 supplies one exact comparable profile, a shard count, a p95 cap, and
+shared conservative fallback estimates for that suite/profile invocation. The
+profile key is the complete `(job, variant, runner label, OS, architecture,
+CPU count)` tuple; profiles are never merged or selected by a nearest-runner
+heuristic. All three inputs reject missing or unsupported schemas, unknown
+fields, trailing JSON values, and `null` where a contractual array is required.
+
+The current inventory is the only authority for runnable membership. Every
+inventory unit is assigned exactly once, and stale timing rows cannot add work.
+An exact profile match contributes history. If the requested profile is absent,
+the command still produces a complete static plan and records
+`history_profile_status: "profile-missing"`; multiple copies of one comparable
+profile are malformed and fail. Snapshot counts, identities, nullable
+statistics, observations, and authority flags are validated before planning,
+including rows for units no longer in the inventory.
+
+History becomes planner-usable in two stages:
+
+- Before five successful samples, p50, p75, and variance use the configured
+  static fallback. At five samples, the empirical values become usable.
+- Before twenty successful samples, p95 is
+  `max(static_p95, 1.5 * selected_p75)`. At twenty samples, empirical p95
+  becomes usable.
+
+Units are sorted deterministically by descending p75, p95, variance, and p50,
+then stable unit ID, and placed in the shortest p75 shard that remains within
+the aggregate p95 cap. No unit is dropped: an individually oversized unit is
+marked `p95-cap-exceeded`, while unavoidable aggregate overflow is marked
+`shard-p95-cap-exceeded`. Equivalent shuffled inputs therefore emit identical
+canonical JSON.
+
+The output is explicitly marked `authority: "dry-run"`. This command reads only
+the three named files and writes the plan to stdout. It does not read GitHub
+state, authenticate protected provenance, write timing history, publish
+`ci-metrics`, perform path gating or hysteresis, decide required lanes, or
+activate workflow/shard execution. Those remain deferred to the trusted
+control-plane workflow.
+
 In timing artifact schema v1, `commit_sha` is the exact Git revision checked out and tested
 (`GITHUB_SHA`). On `pull_request` runs, GitHub sets it to the synthetic merge
 commit, not the contributor branch head. Consumers must not interpret it as

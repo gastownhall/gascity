@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/timingsummary"
 )
 
 func TestPlanInventoryIsAuthoritative(t *testing.T) {
@@ -383,6 +385,231 @@ func TestPlanShardCountBounds(t *testing.T) {
 	}
 }
 
+func TestPlanSnapshotSelectsExactProfileAndKeepsInventoryAuthoritative(t *testing.T) {
+	selector := testProfileSelector()
+	target := testTimingProfile(selector, []timingsummary.UnitHistory{
+		testSnapshotUnit(selector, "current/warm", "pkg/current", "TestWarm", 20, 7, 8, 9, 1),
+		testSnapshotUnit(selector, "current/zero-pass", "pkg/current", "TestZeroPass", 0, 0, 0, 0, 0),
+		testSnapshotUnit(selector, "deleted/stale", "pkg/deleted", "TestStale", 20, 400, 500, 600, 4),
+	})
+	otherSelector := selector
+	otherSelector.Runner.CPUCount = 16
+	other := testTimingProfile(otherSelector, []timingsummary.UnitHistory{
+		testSnapshotUnit(otherSelector, "current/warm", "pkg/current", "TestWarm", 20, 70, 80, 90, 10),
+	})
+
+	input := SnapshotPlanInput{
+		Inventory: []InventoryUnit{
+			{UnitID: "current/zero-pass"},
+			{UnitID: "current/missing"},
+			{UnitID: "current/warm"},
+		},
+		History: timingsummary.Snapshot{
+			Schema:                 timingsummary.SnapshotSchema,
+			UniqueArtifactCount:    20,
+			DuplicateArtifactCount: 0,
+			Profiles:               []timingsummary.Profile{other, target},
+		},
+		Profile:       selector,
+		Shards:        2,
+		Defaults:      StaticTiming{P50Seconds: 4, P75Seconds: 10, P95Seconds: 20},
+		P95CapSeconds: 90,
+	}
+	result, err := PlanSnapshot(input)
+	if err != nil {
+		t.Fatalf("PlanSnapshot: %v", err)
+	}
+	if result.HistoryProfileStatus != "matched" {
+		t.Fatalf("history profile status = %q, want matched", result.HistoryProfileStatus)
+	}
+	assignments := assignmentsByUnitID(t, result.Plan)
+	if got := sortedKeys(assignments); !reflect.DeepEqual(got, []string{"current/missing", "current/warm", "current/zero-pass"}) {
+		t.Fatalf("assigned units = %v, want exact current inventory", got)
+	}
+	if got := assignments["current/warm"].P75Seconds; got != 8 {
+		t.Fatalf("warm p75 = %v, want exact-profile history 8", got)
+	}
+	if got := assignments["current/zero-pass"].Reason; got != "p75-insufficient-samples" {
+		t.Fatalf("zero-pass reason = %q, want p75-insufficient-samples", got)
+	}
+	if got := assignments["current/missing"].Reason; got != "history-missing" {
+		t.Fatalf("missing reason = %q, want history-missing", got)
+	}
+
+	shuffled := input
+	shuffled.Inventory = []InventoryUnit{
+		{UnitID: "current/warm"},
+		{UnitID: "current/missing"},
+		{UnitID: "current/zero-pass"},
+	}
+	shuffledTarget := target
+	shuffledTarget.Units = slices.Clone(target.Units)
+	slices.Reverse(shuffledTarget.Units)
+	shuffled.History.Profiles = []timingsummary.Profile{shuffledTarget, other}
+	shuffledResult, err := PlanSnapshot(shuffled)
+	if err != nil {
+		t.Fatalf("PlanSnapshot(shuffled): %v", err)
+	}
+	firstJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal first snapshot plan: %v", err)
+	}
+	shuffledJSON, err := json.Marshal(shuffledResult)
+	if err != nil {
+		t.Fatalf("marshal shuffled snapshot plan: %v", err)
+	}
+	if string(firstJSON) != string(shuffledJSON) {
+		t.Fatalf("shuffled snapshot inputs changed output\nfirst:    %s\nshuffled: %s", firstJSON, shuffledJSON)
+	}
+}
+
+func TestPlanSnapshotMissingProfileUsesStaticFallback(t *testing.T) {
+	input := validSnapshotPlanInput()
+	input.Profile.Runner.CPUCount++
+
+	result, err := PlanSnapshot(input)
+	if err != nil {
+		t.Fatalf("PlanSnapshot: %v", err)
+	}
+	if result.HistoryProfileStatus != "profile-missing" {
+		t.Fatalf("history profile status = %q, want profile-missing", result.HistoryProfileStatus)
+	}
+	assignment := assignmentsByUnitID(t, result.Plan)["current/warm"]
+	if assignment.P75Source != "static" || assignment.Reason != "history-missing" {
+		t.Fatalf("missing-profile assignment = %+v, want explicit static history-missing fallback", assignment)
+	}
+}
+
+func TestPlanSnapshotRejectsMalformedHistory(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*SnapshotPlanInput)
+		wantError string
+	}{
+		{
+			name: "unsupported snapshot schema",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Schema++
+			},
+			wantError: "unsupported timing snapshot schema",
+		},
+		{
+			name: "duplicate comparable profile",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Profiles = append(input.History.Profiles, input.History.Profiles[0])
+			},
+			wantError: "duplicate timing profile",
+		},
+		{
+			name: "duplicate unit in profile",
+			mutate: func(input *SnapshotPlanInput) {
+				profile := &input.History.Profiles[0]
+				profile.Units = append(profile.Units, profile.Units[0])
+			},
+			wantError: "duplicate unit_id",
+		},
+		{
+			name: "profile units must be an array",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Profiles[0].Units = nil
+			},
+			wantError: "units must be an array",
+		},
+		{
+			name: "conflicting identity across profiles",
+			mutate: func(input *SnapshotPlanInput) {
+				otherSelector := input.Profile
+				otherSelector.Runner.CPUCount++
+				conflict := testSnapshotUnit(otherSelector, "current/warm", "pkg/other", "TestOther", 5, 1, 2, 3, 0)
+				input.History.Profiles = append(input.History.Profiles, testTimingProfile(otherSelector, []timingsummary.UnitHistory{conflict}))
+			},
+			wantError: "conflicting identity",
+		},
+		{
+			name: "passes and observations disagree",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Profiles[0].Units[0].SuccessfulObservations = make([]timingsummary.SuccessfulObservation, 0)
+			},
+			wantError: "successful observations",
+		},
+		{
+			name: "nonzero passes require statistics",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Profiles[0].Units[0].DurationSecondsP95 = nil
+			},
+			wantError: "non-null timing statistics",
+		},
+		{
+			name: "zero passes require null statistics",
+			mutate: func(input *SnapshotPlanInput) {
+				unit := &input.History.Profiles[0].Units[0]
+				unit.Passes = 0
+				unit.SuccessfulObservations = make([]timingsummary.SuccessfulObservation, 0)
+				unit.P75Authoritative = false
+				unit.P95Authoritative = false
+			},
+			wantError: "null timing statistics",
+		},
+		{
+			name: "successful observations must be an array",
+			mutate: func(input *SnapshotPlanInput) {
+				unit := testSnapshotUnit(input.Profile, "current/warm", "pkg/current", "TestWarm", 0, 0, 0, 0, 0)
+				unit.SuccessfulObservations = nil
+				input.History.Profiles[0].Units[0] = unit
+			},
+			wantError: "successful_observations must be an array",
+		},
+		{
+			name: "authority flag contradicts samples",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Profiles[0].Units[0].P75Authoritative = false
+			},
+			wantError: "p75_authoritative",
+		},
+		{
+			name: "observation identity is incomplete",
+			mutate: func(input *SnapshotPlanInput) {
+				input.History.Profiles[0].Units[0].SuccessfulObservations[0].ArtifactIdentity.Workflow = ""
+			},
+			wantError: "artifact_identity.workflow is required",
+		},
+		{
+			name: "last success SHA contradicts observations",
+			mutate: func(input *SnapshotPlanInput) {
+				sha := "different-sha"
+				input.History.Profiles[0].Units[0].LastSuccessSHA = &sha
+			},
+			wantError: "last_success_sha",
+		},
+		{
+			name: "malformed stale row is still rejected",
+			mutate: func(input *SnapshotPlanInput) {
+				stale := testSnapshotUnit(input.Profile, "deleted/stale", "pkg/deleted", "TestStale", 20, 10, 9, 8, 0)
+				input.History.Profiles[0].Units = append(input.History.Profiles[0].Units, stale)
+			},
+			wantError: "duration_seconds_p50 must not exceed duration_seconds_p75",
+		},
+		{
+			name: "invalid requested profile",
+			mutate: func(input *SnapshotPlanInput) {
+				input.Profile.Job = " "
+			},
+			wantError: "profile.job is required",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := validSnapshotPlanInput()
+			test.mutate(&input)
+			_, err := PlanSnapshot(input)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("PlanSnapshot error = %v, want error containing %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestPlanNeverSkipsColdOrOversizedUnits(t *testing.T) {
 	result := mustPlan(t, Input{
 		Inventory: []InventoryUnit{{UnitID: "missing"}, {UnitID: "cold"}, {UnitID: "oversized"}},
@@ -485,4 +712,75 @@ func sortedKeys(values map[string]Assignment) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+func validSnapshotPlanInput() SnapshotPlanInput {
+	selector := testProfileSelector()
+	return SnapshotPlanInput{
+		Inventory: []InventoryUnit{{UnitID: "current/warm"}},
+		History: timingsummary.Snapshot{
+			Schema:              timingsummary.SnapshotSchema,
+			UniqueArtifactCount: 5,
+			Profiles: []timingsummary.Profile{testTimingProfile(selector, []timingsummary.UnitHistory{
+				testSnapshotUnit(selector, "current/warm", "pkg/current", "TestWarm", 5, 7, 8, 9, 1),
+			})},
+		},
+		Profile:       selector,
+		Shards:        1,
+		Defaults:      StaticTiming{P50Seconds: 4, P75Seconds: 10, P95Seconds: 20},
+		P95CapSeconds: 90,
+	}
+}
+
+func testProfileSelector() ProfileSelector {
+	return ProfileSelector{
+		Job:     "cmd-gc-process",
+		Variant: "linux-default",
+		Runner: ProfileRunner{
+			Label: "blacksmith-32vcpu-ubuntu-2404",
+			OS:    "Linux", Arch: "X64", CPUCount: 32,
+		},
+	}
+}
+
+func testTimingProfile(selector ProfileSelector, units []timingsummary.UnitHistory) timingsummary.Profile {
+	return timingsummary.Profile{
+		Job: selector.Job, Variant: selector.Variant,
+		Runner: timingsummary.RunnerProfile{
+			Label: selector.Runner.Label, OS: selector.Runner.OS,
+			Arch: selector.Runner.Arch, CPUCount: selector.Runner.CPUCount,
+		},
+		Units: units,
+	}
+}
+
+func testSnapshotUnit(selector ProfileSelector, unitID, packageName, testName string, passes int, p50, p75, p95, variance float64) timingsummary.UnitHistory {
+	unit := timingsummary.UnitHistory{
+		UnitID: unitID, Package: packageName, Test: testName,
+		Passes: passes, P75Authoritative: passes >= 5, P95Authoritative: passes >= 20,
+		SuccessfulObservations: make([]timingsummary.SuccessfulObservation, passes),
+	}
+	if passes == 0 {
+		return unit
+	}
+	unit.DurationSecondsP50 = floatPointerForTest(p50)
+	unit.DurationSecondsP75 = floatPointerForTest(p75)
+	unit.DurationSecondsP95 = floatPointerForTest(p95)
+	unit.DurationSecondsPopulationVariance = floatPointerForTest(variance)
+	lastSHA := "tested-sha"
+	unit.LastSuccessSHA = &lastSHA
+	for index := range unit.SuccessfulObservations {
+		unit.SuccessfulObservations[index] = timingsummary.SuccessfulObservation{
+			ArtifactIdentity: timingsummary.ArtifactIdentity{
+				Workflow: "CI", RunID: "run", RunAttempt: "1",
+				Job: selector.Job, ShardID: "shard", Variant: selector.Variant,
+			},
+			TestedSHA: "tested-sha", DurationSeconds: p50,
+		}
+	}
+	return unit
+}
+
+func floatPointerForTest(value float64) *float64 {
+	return &value
 }
