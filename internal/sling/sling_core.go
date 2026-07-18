@@ -723,8 +723,22 @@ func listSourceWorkflowRoots(deps SlingDeps, sourceBeadID string) ([]sourceWorkf
 	if err != nil {
 		return nil, err
 	}
+	if sourceStoreRef != "" {
+		selectedPresent := slices.ContainsFunc(stores, func(info SourceWorkflowStore) bool {
+			return info.Store != nil &&
+				sourceworkflow.NormalizeSourceStoreRef(info.StoreRef) == sourceworkflow.NormalizeSourceStoreRef(sourceStoreRef)
+		})
+		if !selectedPresent {
+			if deps.Store == nil {
+				return nil, fmt.Errorf("source workflow store %s is unavailable to scan", sourceStoreRef)
+			}
+			stores = append([]SourceWorkflowStore{{Store: deps.Store, StoreRef: sourceStoreRef}}, stores...)
+		}
+	}
 	roots := make([]sourceWorkflowRoot, 0)
 	seen := make(map[string]struct{}, len(stores))
+	scanned := 0
+	var firstScanErr error
 	for i, info := range stores {
 		if info.Store == nil {
 			continue
@@ -732,8 +746,24 @@ func listSourceWorkflowRoots(deps SlingDeps, sourceBeadID string) ([]sourceWorkf
 		rootStoreRef := strings.TrimSpace(info.StoreRef)
 		matches, err := sourceworkflow.ListLiveRoots(info.Store, sourceBeadID, sourceStoreRef, rootStoreRef)
 		if err != nil {
-			return nil, err
+			storeLabel := rootStoreRef
+			if storeLabel == "" {
+				storeLabel = fmt.Sprintf("store#%d", i)
+			}
+			wrapped := fmt.Errorf("listing live workflows in %s: %w", storeLabel, err)
+			if firstScanErr == nil {
+				firstScanErr = wrapped
+			}
+			selectedStore := sourceStoreRef != "" &&
+				rootStoreRef != "" &&
+				sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) == sourceworkflow.NormalizeSourceStoreRef(sourceStoreRef)
+			if deps.SourceWorkflowStoreScanWarning == nil || sourceStoreRef == "" || rootStoreRef == "" || selectedStore {
+				return nil, wrapped
+			}
+			deps.SourceWorkflowStoreScanWarning(rootStoreRef, err)
+			continue
 		}
+		scanned++
 		for _, root := range matches {
 			keyScope := rootStoreRef
 			if keyScope == "" {
@@ -750,6 +780,12 @@ func listSourceWorkflowRoots(deps SlingDeps, sourceBeadID string) ([]sourceWorkf
 				storeRef: rootStoreRef,
 			})
 		}
+	}
+	if scanned == 0 {
+		if firstScanErr != nil {
+			return nil, firstScanErr
+		}
+		return nil, fmt.Errorf("no source workflow stores were available to scan")
 	}
 	slices.SortFunc(roots, func(a, b sourceWorkflowRoot) int {
 		if cmp := strings.Compare(a.storeRef, b.storeRef); cmp != 0 {
