@@ -888,9 +888,13 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	// cook does not route the workflow root to an agent, but rig-scoped step
 	// targets still need the invocation's rig context to resolve — the same
-	// context sling derives from its entry agent's qualified name. Thread it in
-	// via a rig-context-only default binding (empty QualifiedName so the root
-	// stays unrouted; MetadataOnly mirrors the no-session default binding).
+	// context sling derives from its entry agent's qualified name. A rig-scoped
+	// rootStoreRef already supplies that context through the store-scope
+	// fallback in DecorateGraphWorkflowRecipeWithDefaultBinding (#4175); thread
+	// the already-resolved formulaScope.rig in explicitly as well so the cook
+	// call site states the rig context directly instead of relying solely on the
+	// store-ref encoding (empty QualifiedName so the root stays unrouted;
+	// MetadataOnly mirrors the no-session default binding).
 	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
