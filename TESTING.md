@@ -813,21 +813,24 @@ construction boundary because that is the wrapper returned directly by the
 runtime registry. This ledger does not recursively claim the wrapper's internal
 tmux, K8s, or hybrid constructors.
 
-`runtime.NewFake`, `auto.New`, `subprocess.NewSeamBackedWithDir`, and
-`acp.NewSeamBackedWithDir` are source-bound to the shared runtime contract
-below. The auto proof runs the exact production composition once with two
-fresh in-memory fakes and owns no subprocess or listener; focused auto tests
-retain base-versus-ACP routing and optional-capability coverage instead of
-duplicating the full suite for each route. The seam-backed proofs are the only
-full subprocess and ACP runtime contracts: the duplicate raw subprocess
-invocation is removed, and the existing ACP owner is converted in place so its
-fake server is still built once. Focused raw provider and seam tests remain for
-both packages, including legacy overlap that later consolidation may remove
-case by case. The default subprocess constructor remains a separate H5-owned
-gap because its reachable empty-city-path branch uses shared temporary state.
-The default ACP constructor is also an H5-owned gap because it always uses shared
-`os.TempDir()/gc-acp` state. E1 (`ga-80po0c.6`) owns the Large provider/E2E
-manifest and required lane/cadence execution; it does not own
+`runtime.NewFake`, `auto.New`, `exec.NewSeamBacked`,
+`subprocess.NewSeamBackedWithDir`, and `acp.NewSeamBackedWithDir` are
+source-bound to the shared runtime contract below. The auto proof runs the
+exact production composition once with two fresh in-memory fakes and owns no
+subprocess or listener; focused auto tests retain base-versus-ACP routing and
+optional-capability coverage instead of duplicating the full suite for each
+route. The seam-backed proofs are the only full exec, subprocess, and ACP
+runtime contracts: duplicate raw contracts are avoided, and parent-owned
+fixtures are reused while each contract case receives a fresh production
+wrapper. `TestSeamBackedCapabilitiesParity` separately guards exec's
+handshake-derived stream and TTY flags because the shared contract does not
+assert optional capability fidelity. Focused raw provider and seam tests remain
+for these packages, including legacy overlap that later consolidation may
+remove case by case. The default subprocess constructor remains a separate
+H5-owned gap because its reachable empty-city-path branch uses shared temporary
+state. The default ACP constructor is also an H5-owned gap because it always
+uses shared `os.TempDir()/gc-acp` state. E1 (`ga-80po0c.6`) owns the Large
+provider/E2E manifest and required lane/cadence execution; it does not own
 constructor-to-contract source binding.
 
 <!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->
@@ -837,7 +840,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 |---|---|---|---|---|---|---|---|
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: full conformance covers the raw exec provider, not the production seam-backed prefix composition |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
