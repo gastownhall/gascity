@@ -3302,6 +3302,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		tick.set(target.info.ID, persistSleepPolicyMetadataInfo(info, sessFront, eval.Policy, eval.ConfigSuppressed))
 		info = infoByID[target.info.ID]
 
+		// Heartbeat crash recovery (#3994): a heartbeat-only hold (future
+		// held_until with no sleep_intent) defers idle/max-age/no-wake-reason
+		// timers for a LIVE session via the keep-alive guard below, but must not
+		// blind crash recovery. When such a held session's runtime has died while
+		// it still has assigned work, ComputeAwakeSet's hold suppression has
+		// already forced ShouldWake=false, so the respawn arm (shouldWake &&
+		// !alive) is skipped and the session stays down for the remainder of the
+		// agent-chosen, unbounded hold — exactly the long unattended operation the
+		// heartbeat exists to protect. Restore respawn eligibility for this case so
+		// held_until defers timers, not crash recovery. The hold itself is left in
+		// place: the recovered session stays protected until held_until expires,
+		// and once it is alive again the live keep-alive guard below holds it up,
+		// so this arm cannot re-fire (its !alive precondition). Suspend holds
+		// (sleep_intent="user-hold") and config-suppressed sessions are excluded,
+		// and the respawn arm's own quarantine/circuit-breaker/provider-health
+		// gates still apply. See TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns.
+		if !shouldWake && !target.alive && !eval.ConfigSuppressed &&
+			decision.HasAssignedWork && info.SleepIntent == "" &&
+			lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
+			shouldWake = true
+		}
+
 		// Clear-on-recovery: a live tick ends any stranding episode. Drop the
 		// stranded confirmation marker so stranded_event_emitted_at tracks
 		// CONTINUOUS non-liveness, not a one-shot flag — a worker that stranded,
@@ -3446,6 +3468,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if !shouldWake && target.alive {
 			// No reason to be awake — begin drain.
 			intent := info.SleepIntent
+			// Keep-alive hold: a live session held only by `held_until` in the
+			// future with no sleep_intent is running `gc runtime heartbeat` to
+			// suppress its idle-timeout / max-session-age timers during a long,
+			// silent operation. Unlike `gc session suspend` (which pairs the
+			// hold with sleep_intent="user-hold" + state="suspended" precisely
+			// so the reconciler drains it), a heartbeat hold must keep the
+			// session running: entering the no-wake-reason drain below would
+			// force-stop the very session the heartbeat is meant to protect once
+			// defaultDrainTimeout elapses. The idle/max-age ladders already
+			// defer on this same "user_hold" blocker, so leave the session alone
+			// and cancel any idle/no-wake-reason drain that began before the
+			// hold landed — making held_until a genuine keep-alive without
+			// touching suspend, config-drift, or orphan drains. See #3994 and
+			// TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout.
+			if intent == "" && lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
+				cancelSessionDrainInfo(info, sp, dt)
+				continue
+			}
 			var reason string
 			switch {
 			case intent == "idle-stop-pending":

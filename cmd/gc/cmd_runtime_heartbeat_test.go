@@ -116,6 +116,52 @@ func TestDoRuntimeHeartbeatJSONOutput(t *testing.T) {
 	}
 }
 
+func TestValidateHeartbeatDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		d       time.Duration
+		wantErr string
+	}{
+		{"below floor", minimumHeartbeatDuration - time.Second, "at least"},
+		{"at floor", minimumHeartbeatDuration, ""},
+		{"default", defaultHeartbeatDuration, ""},
+		{"at ceiling", maximumHeartbeatDuration, ""},
+		{"above ceiling", maximumHeartbeatDuration + time.Second, "at most"},
+		{"absurdly large", 8760 * time.Hour, "at most"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateHeartbeatDuration(tc.d)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateHeartbeatDuration(%s) = %v, want nil", tc.d, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateHeartbeatDuration(%s) = %v, want error containing %q", tc.d, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRuntimeHeartbeatCmdRejectsOversizedDuration exercises the command's flag
+// validation: an over-ceiling --duration must fail with the friendly bound
+// message before any session resolution is attempted.
+func TestRuntimeHeartbeatCmdRejectsOversizedDuration(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeHeartbeatCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--duration", "1000h"})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for an over-ceiling --duration, got nil")
+	}
+	if !strings.Contains(stderr.String(), "must be at most") {
+		t.Errorf("expected stderr to mention the ceiling, got %q", stderr.String())
+	}
+}
+
 func TestDoRuntimeHeartbeatSessionNotFound(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, nil, nil)
 

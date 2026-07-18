@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 195,
+  "next_id": 196,
   "permanent_ids": [
     {
       "name": "help",
@@ -3336,6 +3336,21 @@
       "classification": "runtime-drain-check",
       "owner": "immediate",
       "id": 134
+    },
+    {
+      "path": "gc runtime heartbeat",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "runtime-heartbeat",
+      "owner": "immediate",
+      "id": 195
     },
     {
       "path": "gc runtime request-restart",

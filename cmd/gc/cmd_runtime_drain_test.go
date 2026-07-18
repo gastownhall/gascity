@@ -1122,7 +1122,16 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	}
 }
 
-func TestDoRuntimeRequestRestartNamedOnDemandRequestsRestart(t *testing.T) {
+// TestDoRuntimeRequestRestartProceedsAndPendsOnCancel pins the restart-request
+// helper flow that every session — including named on-demand sessions — now
+// takes. PR #3994 removed the early "restart skipped for named session" gate
+// from cmdRuntimeRequestRestart, so doRuntimeRequestRestart is always reached:
+// it sets the restart flag, persists it through the worker boundary, and on a
+// context cancel exits 0 while leaving the request pending (never reporting a
+// skipped restart). The on-demand session's reconciler-side restart handling is
+// covered by session_reconciler_restart_request_test.go; this test exercises
+// the generic helper, not a configured named on-demand session fixture.
+func TestDoRuntimeRequestRestartProceedsAndPendsOnCancel(t *testing.T) {
 	dops := newFakeDrainOps()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

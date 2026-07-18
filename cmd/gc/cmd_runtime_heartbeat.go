@@ -19,7 +19,29 @@ const (
 	// minimumHeartbeatDuration prevents agents from setting arbitrarily short
 	// holds that would expire before the next reconciler tick.
 	minimumHeartbeatDuration = 1 * time.Minute
+
+	// maximumHeartbeatDuration bounds how long a single heartbeat may suppress
+	// the idle-timeout and max-session-age timers. A heartbeat is meant to be
+	// refreshed by re-calling this command during a long operation, so no single
+	// call needs an unbounded hold; the ceiling comfortably exceeds any realistic
+	// silent operation while stopping an oversized --duration (e.g. 8760h) from
+	// pinning a session's timers for an effectively unbounded window.
+	maximumHeartbeatDuration = 12 * time.Hour
 )
+
+// validateHeartbeatDuration bounds a requested hold against the floor and
+// ceiling. The floor keeps a hold from expiring before the next reconciler
+// tick; the ceiling keeps an oversized --duration from pinning a session's
+// idle-timeout / max-session-age timers for an unbounded window.
+func validateHeartbeatDuration(d time.Duration) error {
+	if d < minimumHeartbeatDuration {
+		return fmt.Errorf("--duration must be at least %s", minimumHeartbeatDuration)
+	}
+	if d > maximumHeartbeatDuration {
+		return fmt.Errorf("--duration must be at most %s", maximumHeartbeatDuration)
+	}
+	return nil
+}
 
 // newRuntimeHeartbeatCmd creates the "gc runtime heartbeat" command.
 //
@@ -59,8 +81,8 @@ Pass --duration to override.`,
 					fmt.Fprintf(stderr, "gc runtime heartbeat: invalid --duration: %v\n", err) //nolint:errcheck
 					return errExit
 				}
-				if d < minimumHeartbeatDuration {
-					fmt.Fprintf(stderr, "gc runtime heartbeat: --duration must be at least %s\n", minimumHeartbeatDuration) //nolint:errcheck
+				if err := validateHeartbeatDuration(d); err != nil {
+					fmt.Fprintf(stderr, "gc runtime heartbeat: %v\n", err) //nolint:errcheck
 					return errExit
 				}
 			}
@@ -97,7 +119,16 @@ func cmdRuntimeHeartbeat(duration time.Duration, jsonOutput bool, stdout, stderr
 		return 1
 	}
 
-	return doRuntimeHeartbeat(store, duration, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	// Route the SESSION-class access (held_until resolve + write) to the session
+	// coordination-class store so a [beads.classes.sessions] relocation reaches
+	// gc runtime heartbeat the same way it reaches gc runtime request-restart.
+	// The routing cfg loads refresh-free; it is identity to the input store at
+	// the default single-store backend, so this is byte-identical until a
+	// session relocation is configured.
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+	sessStore := cliSessionStore(store, routeCfg, current.cityPath)
+
+	return doRuntimeHeartbeat(sessStore, duration, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
 
 // doRuntimeHeartbeat sets held_until on the session bead to suppress
