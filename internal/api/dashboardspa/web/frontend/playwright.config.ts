@@ -23,12 +23,15 @@ import { defineConfig, devices } from '@playwright/test';
 // listens on PORT, so a fixed port shared across checkouts would let one
 // worktree's server serve another worktree's specs against a stale bundle/corpus.
 // Derive it from this config file's absolute path (unique per checkout) into the
-// registered-ephemeral 20000–38999 range; override with FAKESUPERVISOR_PORT.
+// 20000–31999 range, kept below the 32768 Linux ephemeral floor
+// (ip_local_port_range) so a port the OS has transiently handed to an outbound
+// socket can't collide with the fake supervisor's listen and hard-fail the run;
+// override with FAKESUPERVISOR_PORT.
 const checkoutSalt = createHash('sha1')
   .update(import.meta.url)
   .digest()
   .readUInt16BE(0);
-const DEFAULT_PORT = 20000 + (checkoutSalt % 19000);
+const DEFAULT_PORT = 20000 + (checkoutSalt % 12000);
 const PORT = Number(process.env.FAKESUPERVISOR_PORT ?? DEFAULT_PORT);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
