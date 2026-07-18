@@ -1,19 +1,16 @@
 package dashboardbff
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // seedRunLog writes a minimal one-run event log under dir/.gc/events.jsonl and
@@ -32,7 +29,7 @@ func waitReady(t *testing.T, tl *cityRunTailer) {
 	t.Helper()
 	select {
 	case <-tl.readyCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatalf("cold replay for %q did not complete within deadline", tl.name)
 	}
 }
@@ -111,22 +108,46 @@ func TestPlaneStartEagerEmptyCitiesNoop(t *testing.T) {
 	}
 }
 
-// TestPlaneStartDoesNotBlockOnColdLoad proves Start stays non-blocking: a city
-// whose event log is large enough that its cold replay takes hundreds of
-// milliseconds must not delay Start, which only spawns the fold goroutine. It
-// asserts the causal property (Start returns before the fold finishes) rather
-// than a wall-clock ceiling, so it cannot flake under scheduler contention.
+// TestPlaneStartDoesNotBlockOnColdLoad proves Start stays non-blocking while a
+// cold replay is deterministically held in flight.
 func TestPlaneStartDoesNotBlockOnColdLoad(t *testing.T) {
 	dir := t.TempDir()
-	writeLargeRunLog(t, cityEventsPath(dir), 20000)
+	writeEventLog(t, cityEventsPath(dir), runMoleculeEvent(1, "run-one", "test-formula", ""))
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	previousLoad := readRunColdLoad
+	readRunColdLoad = func(projector *runproj.Projector, path string) error {
+		close(started)
+		<-release
+		return previousLoad(projector, path)
+	}
+	t.Cleanup(func() { readRunColdLoad = previousLoad })
 
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"big": dir}}})
+	startReturned := make(chan struct{})
+	go func() {
+		p.Start(t.Context())
+		close(startReturned)
+	}()
+	t.Cleanup(func() {
+		unblock()
+		p.Stop()
+	})
 
-	p.Start(t.Context())
-	t.Cleanup(p.Stop)
+	select {
+	case <-started:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("background cold replay did not start")
+	}
+	select {
+	case <-startReturned:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("Plane.Start blocked on the held cold replay")
+	}
 
-	// eagerWarmTailers runs synchronously inside Start, so the tailer is in the map
-	// the moment Start returns.
 	p.runTailers.mu.Lock()
 	tl := p.runTailers.cities["big"]
 	p.runTailers.mu.Unlock()
@@ -134,19 +155,13 @@ func TestPlaneStartDoesNotBlockOnColdLoad(t *testing.T) {
 		t.Fatal("big city was not eager-started")
 	}
 
-	// Causal non-blocking proof: Start only spawns the fold goroutine, so the cold
-	// replay of 20k events (measured ~290ms) is still running when Start returns —
-	// readyCh must not be closed yet. Asserting this instead of a wall-clock
-	// ceiling proves exactly the same thing (Start did not wait on the cold load)
-	// without depending on scheduler timing under the fleet's heavy parallelism.
 	select {
 	case <-tl.readyCh:
 		t.Fatal("Plane.Start returned only after the cold replay completed; it must not block on the fold")
 	default:
 	}
 
-	// And the fold still completes in the background — Start being fast did not
-	// skip the warm-up.
+	unblock()
 	select {
 	case <-tl.readyCh:
 	case <-time.After(5 * time.Second):
@@ -290,41 +305,4 @@ func TestPlaneStopDoesNotBlockOnWedgedSessionsPrime(t *testing.T) {
 	// supervisor.Close() blocks for the full HTTP client timeout draining it,
 	// adding ~10s of pure teardown plus an alarming httptest blocked-close warning.
 	unblock()
-}
-
-// writeLargeRunLog writes n run-molecule events to path so a cold replay is
-// measurably slow (for the non-blocking-Start proof).
-func writeLargeRunLog(t *testing.T, path string, n int) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatalf("create log: %v", err)
-	}
-	defer f.Close() //nolint:errcheck
-	var b strings.Builder
-	for i := 0; i < n; i++ {
-		bead := beads.Bead{
-			ID:     "run1",
-			Title:  "mol-adopt-pr-v2",
-			Status: "open",
-			Type:   "molecule",
-			Metadata: map[string]string{
-				"gc.formula_contract": "graph.v2",
-				"gc.kind":             "run",
-				"gc.formula":          "mol-adopt-pr-v2",
-			},
-		}
-		payload, _ := json.Marshal(struct {
-			Bead beads.Bead `json:"bead"`
-		}{bead})
-		line, _ := json.Marshal(events.Event{Seq: uint64(i + 1), Type: events.BeadCreated, Payload: payload})
-		b.Write(line)
-		b.WriteByte('\n')
-	}
-	if _, err := f.WriteString(b.String()); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
 }

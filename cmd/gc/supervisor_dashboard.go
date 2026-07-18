@@ -16,6 +16,14 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
+// Keep the production plane's optional warm-row capabilities compile-time bound
+// to the API contracts; losing one must not silently restore disk replay or
+// false-404 a newly-slung run during the projection visibility gap.
+var (
+	_ api.RunProjectionSource      = (*dashboardbff.Plane)(nil)
+	_ api.RunProjectionGraceSource = (*dashboardbff.Plane)(nil)
+)
+
 // dashboardCityResolver adapts the supervisor city registry to the dashboard
 // /api plane's CityResolver. It resolves a city name to the host root path the
 // registry already tracks, so the plane never joins an untrusted name onto a
