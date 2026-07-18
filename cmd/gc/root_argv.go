@@ -13,11 +13,26 @@ type rootCommandOptions struct {
 
 func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	command, ok := firstRootCommand(args)
-	discoverPackCommands := !ok || command != "metrics"
+	discoverPackCommands := !ok || !rootCommandSkipsPackDiscovery(command)
 	return rootCommandOptions{
 		invocationArgs:            append([]string(nil), args...),
 		discoverPackCommands:      discoverPackCommands,
 		eagerPackCommandDiscovery: discoverPackCommands,
+	}
+}
+
+// rootCommandSkipsPackDiscovery identifies built-in helper surfaces that must
+// stay independent of pack config loading. The Beads provider calls the Dolt
+// helpers while a controller reload is itself refreshing and composing packs;
+// rediscovering pack commands there contends on the same cache and can turn a
+// small scope initialization into a minutes-long reload. These commands are
+// native-only and can never resolve to a pack binding.
+func rootCommandSkipsPackDiscovery(command string) bool {
+	switch command {
+	case "metrics", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+		return true
+	default:
+		return false
 	}
 }
 
