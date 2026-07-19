@@ -234,7 +234,7 @@ func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, d
 		if !rigStatusAgentBelongsToRig(a, rig.Name) {
 			continue
 		}
-		status := agentStatusLine(a.Running, dops, a.SessionName, a.Suspended)
+		status := agentStatusLineWithPartial(a.Running, dops, a.SessionName, a.Suspended, cr.Body.Partial)
 		fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName, status) //nolint:errcheck // best-effort stdout
 	}
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
