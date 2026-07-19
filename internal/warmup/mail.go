@@ -57,7 +57,20 @@ func tryCustomSoleFailureMail(report WarmupReport, checks []doctor.Check) (subje
 		if !implementsCustom {
 			return "", "", false
 		}
-		subject, body = custom.SoleFailureMail(report)
+		// Honor the documented defensive-copy guarantee: implementers
+		// receive a copy whose slices do not alias the runner's backing
+		// arrays, so they cannot mutate runner-owned report state.
+		// WarmupCheckResult is all scalar fields, so copying the slices
+		// fully isolates it.
+		failures := append([]WarmupCheckResult(nil), report.Failures...)
+		scopes := append([]ScopeWarmupResult(nil), report.ScopeResults...)
+		for i := range scopes {
+			scopes[i].CheckResults = append([]WarmupCheckResult(nil), scopes[i].CheckResults...)
+		}
+		reportCopy := report
+		reportCopy.Failures = failures
+		reportCopy.ScopeResults = scopes
+		subject, body = custom.SoleFailureMail(reportCopy)
 		return subject, truncateWarmupMailBody(body), true
 	}
 	return "", "", false

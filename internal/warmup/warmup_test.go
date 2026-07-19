@@ -527,4 +527,131 @@ func TestRunWarmupChecks_ContextCancellation(t *testing.T) {
 	}
 }
 
+// customMailWarmupCheck is a warm-up-eligible check that implements
+// CustomWarmupMail, used to exercise the sole-failure mail override path.
+type customMailWarmupCheck struct {
+	name    string
+	status  doctor.CheckStatus
+	message string
+	subject string
+	body    string
+	mutate  bool
+}
+
+func (c customMailWarmupCheck) Name() string { return c.name }
+
+func (c customMailWarmupCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	return &doctor.CheckResult{Name: c.name, Status: c.status, Message: c.message}
+}
+
+func (c customMailWarmupCheck) CanFix() bool                     { return false }
+func (c customMailWarmupCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (c customMailWarmupCheck) WarmupEligible() bool             { return true }
+
+// SoleFailureMail returns the configured override subject/body. When mutate
+// is set, it also attempts to corrupt runner-owned report state to verify the
+// defensive-copy guarantee.
+func (c customMailWarmupCheck) SoleFailureMail(report WarmupReport) (string, string) {
+	if c.mutate && len(report.Failures) > 0 {
+		report.Failures[0].Message = "MUTATED-BY-IMPLEMENTER"
+	}
+	return c.subject, c.body
+}
+
+func TestRunWarmupChecks_CustomSoleFailureMail_Override(t *testing.T) {
+	checks := []doctor.Check{
+		customMailWarmupCheck{
+			name:    "custom",
+			status:  doctor.StatusError,
+			message: "bad",
+			subject: "custom subject verbatim",
+			body:    "custom body verbatim\n",
+		},
+	}
+
+	_, mailer, _ := runWarmupTest(t, checks, WarmupOpts{})
+
+	if len(mailer.sent) != 1 {
+		t.Fatalf("sent mail count = %d, want 1", len(mailer.sent))
+	}
+	if got, want := mailer.sent[0].Subject, "custom subject verbatim"; got != want {
+		t.Fatalf("subject = %q, want %q", got, want)
+	}
+	if got, want := mailer.sent[0].Body, "custom body verbatim\n"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestRunWarmupChecks_CustomSoleFailureMail_FallbackOnMultipleCheckNames(t *testing.T) {
+	checks := []doctor.Check{
+		customMailWarmupCheck{
+			name:    "custom",
+			status:  doctor.StatusError,
+			message: "bad",
+			subject: "custom subject verbatim",
+			body:    "custom body verbatim\n",
+		},
+		stubWarmupCheck{name: "other", warmup: true, returnedStatus: doctor.StatusError, returnedMessage: "bad"},
+	}
+
+	_, mailer, _ := runWarmupTest(t, checks, WarmupOpts{})
+
+	if len(mailer.sent) != 1 {
+		t.Fatalf("sent mail count = %d, want 1", len(mailer.sent))
+	}
+	if got, want := mailer.sent[0].Subject, "city warm-up: 2 doctor check(s) failed"; got != want {
+		t.Fatalf("subject = %q, want generic %q", got, want)
+	}
+	if strings.Contains(mailer.sent[0].Body, "custom body verbatim") {
+		t.Fatalf("body = %q, want generic fallback, not custom override", mailer.sent[0].Body)
+	}
+}
+
+func TestRunWarmupChecks_CustomSoleFailureMail_BodyTruncated(t *testing.T) {
+	checks := []doctor.Check{
+		customMailWarmupCheck{
+			name:    "custom",
+			status:  doctor.StatusError,
+			message: "bad",
+			subject: "custom subject",
+			body:    strings.Repeat("x", 8*1024),
+		},
+	}
+
+	_, mailer, _ := runWarmupTest(t, checks, WarmupOpts{})
+
+	if len(mailer.sent) != 1 {
+		t.Fatalf("sent mail count = %d, want 1", len(mailer.sent))
+	}
+	body := mailer.sent[0].Body
+	if len(body) > 4096 {
+		t.Fatalf("body length = %d, want <=4096", len(body))
+	}
+	if !strings.HasSuffix(body, "(truncated, see gc doctor for full output)\n") {
+		t.Fatalf("body suffix = %q, want truncation marker", body[len(body)-80:])
+	}
+}
+
+func TestRunWarmupChecks_CustomSoleFailureMail_MutationIsolation(t *testing.T) {
+	checks := []doctor.Check{
+		customMailWarmupCheck{
+			name:    "custom",
+			status:  doctor.StatusError,
+			message: "original message",
+			subject: "custom subject",
+			body:    "custom body\n",
+			mutate:  true,
+		},
+	}
+
+	report, _, _ := runWarmupTest(t, checks, WarmupOpts{})
+
+	if len(report.Failures) != 1 {
+		t.Fatalf("failures = %d, want 1", len(report.Failures))
+	}
+	if got := report.Failures[0].Message; got != "original message" {
+		t.Fatalf("Failures[0].Message = %q, want %q (runner state must not be mutated by implementer)", got, "original message")
+	}
+}
+
 var _ io.Writer = (*bytes.Buffer)(nil)
