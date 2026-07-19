@@ -515,6 +515,7 @@ source = ".gc/system/packs/gastown"
 func TestDoDoctorRegistersImportStateCheck(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -566,6 +567,7 @@ version = "^1.0"
 func TestDoDoctorRunsImportStateCheckWhenImportInstallStateBroken(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -609,6 +611,7 @@ version = "^1.0"
 func TestDoDoctorSkipsImportStateCheckWhenCityConfigInvalid(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
