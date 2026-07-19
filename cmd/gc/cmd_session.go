@@ -176,7 +176,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath, stderr)
+	cfg, err := loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -731,23 +731,16 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local iterator. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "session list"
-	if c != nil {
-		cr, err := c.ListSessions(stateFilter, templateFilter, false)
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderSessionListFromAPI(cr, jsonOutput, stdout)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]api.SessionView]
+	return routeRead(c, "session list", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListSessions(stateFilter, templateFilter, false)
+			return err
+		},
+		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
+		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
+	)
 }
 
 // sessionListJSONEnvelope is the API-path --json output shape for
@@ -873,16 +866,9 @@ func sessionViewLastActive(lastActive string) string {
 // through the supervisor API when a controller is up and falls back to the
 // local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeSessionList("", stateFilter, templateFilter, remoteC, "", jsonOutput, stdout, stderr)
-	}
-	c, reason := sessionListAPIClient(cityPath)
-	return routeSessionList(cityPath, stateFilter, templateFilter, c, reason, jsonOutput, stdout, stderr)
+	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)
+	})
 }
 
 // sortSessionsCreatedDesc orders a session listing newest-first, in place. It is
@@ -1661,7 +1647,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, held_until
 	// suspend patch, session worker handle), so route the whole flow through the
@@ -1774,7 +1760,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
@@ -1877,7 +1863,7 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...boo
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
 	// Both store consumers here are session-class (session-ID resolution + session
 	// worker handle), so route the whole flow through the session coordination-class
@@ -2196,16 +2182,9 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 // through the supervisor API when a controller is up and falls back to the
 // local runtime provider otherwise.
 func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if isRemote {
-		return routeSessionPeek("", args[0], lines, remoteC, "", jsonOutput, stdout, stderr)
-	}
-	c, reason := sessionPeekAPIClient(cityPath)
-	return routeSessionPeek(cityPath, args[0], lines, c, reason, jsonOutput, stdout, stderr)
+	return routeReadCmd("session peek", stderr, sessionPeekAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeSessionPeek(cityPath, args[0], lines, c, nilReason, jsonOutput, stdout, stderr)
+	})
 }
 
 // doSessionPeekFallback is the direct runtime-provider path for
@@ -2219,7 +2198,7 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
 	}
 	// Both store consumers here are session-class (session-ID resolution + session
 	// worker handle), so route the whole flow through the session coordination-class
@@ -2322,7 +2301,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
@@ -2537,7 +2516,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		}
 	}
 
-	cfg, err := loadCityConfig(cityPath, stderr)
+	cfg, err := loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

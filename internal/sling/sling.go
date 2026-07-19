@@ -235,6 +235,11 @@ type RouteOpts struct {
 	Merge    string // "", "direct", "mr", "local"
 	NoConvoy bool
 	Owned    bool
+	// Reassign clears any existing human assignee on the bead before routing,
+	// so a sling can hand a bead claimed via `bd update --claim` to a new
+	// target's pool. Mapped straight to SlingOpts.Reassign; without it neither
+	// RouteBead nor the API sling path can express --reassign. See #1007.
+	Reassign bool
 	Nudge    bool
 	Force    bool
 	DryRun   bool
@@ -250,11 +255,24 @@ type RouteOpts struct {
 
 // FormulaOpts holds options for formula-based operations.
 type FormulaOpts struct {
-	Title     string
-	Vars      []string
-	Merge     string
-	Nudge     bool
-	Force     bool
+	Title string
+	Vars  []string
+	Merge string
+	Nudge bool
+	Force bool
+	// NoConvoy and Owned mirror RouteOpts. Meaningful on AttachFormula (attached
+	// routes are !IsFormula so auto-convoy applies); a no-op on a fresh
+	// LaunchFormula, matching the Reassign precedent below. Kept here so the API
+	// formula paths honor the wire no_convoy/owned fields.
+	NoConvoy bool
+	Owned    bool
+	// Reassign clears any existing human assignee before routing. Meaningful
+	// on AttachFormula (an existing bead may be claimed, and the attach route
+	// is !IsFormula); a guaranteed no-op on a fresh LaunchFormula, whose
+	// IsFormula route is skipped by shouldReopenForReassign so the formula name
+	// is never mistaken for a bead ID. Kept here so the API formula paths honor
+	// the wire reassign field, matching RouteOpts.
+	Reassign  bool
 	DryRun    bool
 	SkipPoke  bool
 	ScopeKind string
@@ -269,11 +287,13 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		Merge:         opts.Merge,
 		NoConvoy:      opts.NoConvoy,
 		Owned:         opts.Owned,
+		Reassign:      opts.Reassign,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
+		NoFormula:     opts.NoFormula,
 	}, s.deps, s.deps.Store)
 }
 
@@ -286,8 +306,11 @@ func (s *Sling) LaunchFormula(_ context.Context, formulaName string, target conf
 		Title:         opts.Title,
 		Vars:          opts.Vars,
 		Merge:         opts.Merge,
+		NoConvoy:      opts.NoConvoy,
+		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
+		Reassign:      opts.Reassign,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
@@ -304,8 +327,11 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		Title:         opts.Title,
 		Vars:          opts.Vars,
 		Merge:         opts.Merge,
+		NoConvoy:      opts.NoConvoy,
+		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
+		Reassign:      opts.Reassign,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
@@ -321,6 +347,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		Merge:         opts.Merge,
 		NoConvoy:      opts.NoConvoy,
 		Owned:         opts.Owned,
+		Reassign:      opts.Reassign,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,

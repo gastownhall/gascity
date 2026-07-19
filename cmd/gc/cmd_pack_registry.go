@@ -20,8 +20,16 @@ func newPackRegistryCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "registry",
 		Short: "Manage pack registries",
-		Long:  "Manage configured Gas City pack registries and inspect cached catalog entries.",
-		Args:  cobra.NoArgs,
+		Long: `Manage configured Gas City pack registries, inspect cached catalog entries,
+authenticate to the hosted Registry, and publish packs.
+
+Native Registry login stores a per-registry API token. When no explicit,
+environment, stored native, development, or GitHub Actions credential applies,
+the canonical hosted Registry uses the existing Gasworks login through
+"gasworks credential-provider". Set GC_CREDENTIAL_PROVIDER to a JSON argv array
+to configure that command without invoking a shell. Gasworks credentials are
+never persisted by gc and are never sent to custom Registry origins.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},

@@ -79,6 +79,17 @@ var loadCityConfigDefaultWarningWriter = func() io.Writer {
 	return os.Stderr
 }
 
+// configWarnWriter routes advisory config-load warnings to io.Discard in JSON
+// mode and to stderr otherwise, so `--json` output stays clean for scripting on
+// every command (extending c806e54a3's rig-list fix uniformly). Hard load errors
+// are unaffected — they always go to stderr with a non-zero exit.
+func configWarnWriter(jsonOut bool, stderr io.Writer) io.Writer {
+	if jsonOut {
+		return io.Discard
+	}
+	return stderr
+}
+
 func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
 	for _, w := range warningWriter {
 		if w != nil {

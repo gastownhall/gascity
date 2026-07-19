@@ -837,6 +837,63 @@ func assertSpawnedSpecClosedAndUnrouted(t *testing.T, store beads.Store, rootID,
 	t.Fatalf("missing spec bead for %q under root %s", specFor, rootID)
 }
 
+// TestSpawnNextAttemptRouteConfigLoadFailureIsTransient is the post-merge
+// remediation of PR #4175 on the attempt-spawn path: a route-config load/parse
+// failure must be classified as a transient controller-boundary error (retried
+// as pending by markControllerSpawnError), not a hard failure that quarantines
+// the in-flight molecule. It complements the fanout-path coverage in
+// attempt_control_routing_test.go.
+func TestSpawnNextAttemptRouteConfigLoadFailureIsTransient(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("this = = not valid toml ["), 0o644); err != nil {
+		t.Fatalf("write malformed city.toml: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review / fix loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{{
+			ID:       "review-claude",
+			Title:    "Code review: Claude",
+			Type:     "task",
+			Metadata: map[string]string{"gc.run_target": "gascity/claude"},
+		}},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":                "ralph",
+			"gc.root_bead_id":        root.ID,
+			"gc.step_ref":            "mol-adopt-pr-v2.review-loop",
+			"gc.step_id":             "review-loop",
+			"gc.source_step_spec":    string(specJSON),
+			"gc.control_epoch":       "1",
+			"gc.execution_routed_to": "gascity/claude",
+		},
+	})
+
+	err = spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath})
+	if err == nil {
+		t.Fatal("spawnNextAttempt: want error on malformed route config, got nil")
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("route-config load failure classified hard (%v); want transient so the molecule retries as pending", err)
+	}
+}
+
 func TestSpawnNextAttemptRoutesDirectSessionRetryControlViaDispatcher(t *testing.T) {
 	t.Parallel()
 

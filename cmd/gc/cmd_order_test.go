@@ -214,6 +214,48 @@ func TestOrderShowJSONIncludesEnv(t *testing.T) {
 	}
 }
 
+func TestOrderShowJSONSurfacesCheckTimeout(t *testing.T) {
+	// Regression (PR #4190 iter-4): check_timeout must be visible on
+	// `gc order show --json`, matching how the sibling `timeout` is projected,
+	// so an operator can confirm the configured condition-check deadline.
+	aa := []orders.Order{{
+		Name:         "merge-queue",
+		Exec:         "true",
+		Trigger:      "condition",
+		Check:        "queue-pending",
+		CheckTimeout: "120s",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderShowJSON("/city", nil, aa, "merge-queue", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderShowJSON = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got struct {
+		Order struct {
+			CheckTimeout string `json:"check_timeout"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if got.Order.CheckTimeout != "120s" {
+		t.Fatalf("check_timeout = %q, want %q", got.Order.CheckTimeout, "120s")
+	}
+
+	// An unset check_timeout stays off the wire (omitempty), matching timeout.
+	unset := []orders.Order{{Name: "poll", Exec: "true", Trigger: "condition", Check: "true"}}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doOrderShowJSON("/city", nil, unset, "poll", "", &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderShowJSON(unset) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "check_timeout") {
+		t.Fatalf("unset check_timeout should be omitted, got %s", stdout.String())
+	}
+}
+
 func TestOrderShowJSONMissingOrderKeepsHumanError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doOrderShowJSON("/city", nil, nil, "missing", "", &stdout, &stderr)

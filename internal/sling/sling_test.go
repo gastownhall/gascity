@@ -2852,6 +2852,42 @@ func TestSlingExpandConvoy(t *testing.T) {
 	}
 }
 
+// TestExpandConvoyReassignClearsAssignee is a regression test for the
+// local/remote inversion a Fable red-team caught (2026-07-08): the local
+// plain-bead-no-formula sling path routes through ExpandConvoy, which dropped
+// RouteOpts.Reassign, so `gc sling <bead> --reassign` silently kept a human
+// assignee locally while the remote path (RouteBead->DoSling) honored it. A
+// plain (non-container) bead in ExpandConvoy delegates to DoSling
+// (sling_core.go:1163-1168), which clears the assignee only if Reassign
+// threaded through. (Convoy-container children route via DoSlingBatch's own
+// per-child loop, which does not clear assignees — a separate, unrelated path.)
+func TestExpandConvoyReassignClearsAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	store := deps.Store
+	bead, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open", Assignee: "human-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	if _, err := s.ExpandConvoy(context.Background(), bead.ID, a, RouteOpts{Reassign: true}, store); err != nil {
+		t.Fatalf("ExpandConvoy: %v", err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want cleared — Reassign must thread through ExpandConvoy->DoSling", got.Assignee)
+	}
+}
+
 // TestExpandConvoyNoFormulaSuppressesDefaultFormula is a regression test for
 // the bug where ExpandConvoy did not propagate NoFormula into DoSlingBatch,
 // causing the default_sling_formula to fire even when --no-formula was set.

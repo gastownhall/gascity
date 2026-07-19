@@ -132,13 +132,16 @@ func (t *TailParam) Compactions() (n int, provided bool) {
 }
 
 // PaginationParam is an embeddable input mixin for paginated list endpoints.
-// Limit carries a minimum: validation tag so malformed requests (e.g.
-// limit=-1) fail Huma validation with 422 instead of silently defaulting
-// or — under older paginate() behavior — panicking with a slice-bounds
-// error.
+// Limit carries minimum/maximum validation tags so malformed requests (e.g.
+// limit=-1 or limit=5000) fail Huma validation with 422 instead of silently
+// defaulting or clamping, and a default so the spec documents the unified
+// page contract (default 100, maximum 1000 — pinned by the pagination
+// dialect guard). Huma injects the default when the param is omitted, so
+// handlers see Limit=100 for a bare request; an explicit limit=0 still
+// reaches the handler as 0 and means "server default" there.
 type PaginationParam struct {
-	Cursor string `query:"cursor" doc:"Pagination cursor from a previous response's next_cursor field." required:"false"`
-	Limit  int    `query:"limit" minimum:"0" doc:"Maximum number of results to return. 0 = server default." required:"false"`
+	Cursor string `query:"cursor" doc:"Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page." required:"false"`
+	Limit  int    `query:"limit" minimum:"0" maximum:"1000" default:"100" doc:"Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected." required:"false"`
 }
 
 // --- Shared output types ---

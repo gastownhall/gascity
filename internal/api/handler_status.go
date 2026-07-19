@@ -45,6 +45,15 @@ var statusResponseTTLFloor = 3 * time.Second
 // work, by the status endpoint's work-count buckets.
 var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
 
+type statusPartialReporter interface {
+	StatusPartial() bool
+}
+
+func statusProviderPartial(sp any) bool {
+	reporter, ok := sp.(statusPartialReporter)
+	return ok && reporter.StatusPartial()
+}
+
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
@@ -208,6 +217,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		}
 	}
 
+	if statusProviderPartial(sp) {
+		partialErrors = append(partialErrors, "runtime status probe incomplete; non-running agent rows are unknown")
+	}
+
 	// Count rigs by state + collect per-rig detail rows.
 	rc := rigCounts{Total: len(cfg.Rigs)}
 	rigDetails := make([]StatusRigDetail, 0, len(cfg.Rigs))
@@ -281,11 +294,15 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 	versions := s.resolveComponentVersions()
 
-	// StoreHealth carries a full closed-history Dolt row scan (behind a 30s
+	// StoreHealth carries a full closed-history Dolt row scan (behind its
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
 	if !lite {
-		storeHealth = s.cachedStoreHealth(ctx, time.Now())
+		var err error
+		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
+		if err != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("store health: %v", err))
+		}
 	}
 
 	return StatusBody{

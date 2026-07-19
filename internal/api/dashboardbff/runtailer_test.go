@@ -1,10 +1,12 @@
 package dashboardbff
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type fakeResolver struct {
@@ -143,7 +146,7 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 
 	select {
 	case <-tl.readyCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("cold replay did not complete")
 	}
 	waitForLanes(t, tl, 1)
@@ -154,6 +157,93 @@ func TestRunTailerColdLoadAndLiveTail(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
+	firstDir := t.TempDir()
+	firstPath := filepath.Join(firstDir, ".gc", "events.jsonl")
+	writeEventLog(t, firstPath, runMoleculeEvent(1, "run-first", "test-formula", ""))
+	secondDir := t.TempDir()
+	secondPath := filepath.Join(secondDir, ".gc", "events.jsonl")
+	writeEventLog(t, secondPath, runMoleculeEvent(1, "run-second", "test-formula", ""))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	m := newRunTailerManager(Deps{})
+	m.enable(ctx, &wg)
+	first := m.ensure("alpha", firstPath)
+	select {
+	case <-first.readyCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first cold replay did not complete")
+	}
+	waitForLanes(t, first, 1)
+
+	replacement := m.ensure("alpha", secondPath)
+	if replacement == first {
+		t.Fatal("changed events path reused the old city tailer")
+	}
+	if got := m.ensure("alpha", secondPath); got != replacement {
+		t.Fatal("unchanged replacement path did not reuse the new tailer")
+	}
+	select {
+	case <-first.doneCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("replaced path-bound tailer did not stop")
+	}
+	select {
+	case <-replacement.readyCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("replacement cold replay did not complete")
+	}
+	waitForLanes(t, replacement, 1)
+	replacement.mu.RLock()
+	hasSecond := lanePresent(replacement, "run-second")
+	hasFirst := lanePresent(replacement, "run-first")
+	ids := laneIDsOf(replacement.summary.Lanes)
+	replacement.mu.RUnlock()
+	if !hasSecond || hasFirst {
+		t.Fatalf("replacement lanes = %v, want only run-second", ids)
+	}
+}
+
+func TestRunTailerLogsColdLoadFailureOnce(t *testing.T) {
+	previousLoad := readRunColdLoad
+	readRunColdLoad = func(*runproj.Projector, string) error {
+		return errors.New("cold disk unavailable")
+	}
+	t.Cleanup(func() { readRunColdLoad = previousLoad })
+
+	var logs bytes.Buffer
+	previousLog := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLog) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	m := newRunTailerManager(Deps{})
+	m.enable(ctx, &wg)
+	tailer := m.ensure("alpha", filepath.Join(t.TempDir(), ".gc", "events.jsonl"))
+	select {
+	case <-tailer.readyCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		cancel()
+		wg.Wait()
+		t.Fatal("cold replay attempt did not complete")
+	}
+
+	cancel()
+	wg.Wait()
+	if got := strings.Count(logs.String(), "cold replay failed"); got != 1 {
+		t.Fatalf("cold replay failure log count = %d, want 1; logs=%q", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "cold disk unavailable") {
+		t.Fatalf("cold replay log omitted raw cause: %q", logs.String())
+	}
 }
 
 // TestRunTailerPrimeDoesNotBlockLiveTail is the regression guard for the
@@ -445,6 +535,60 @@ func TestRunTailerStartupCursorRotationRaceDoesNotSkip(t *testing.T) {
 	}
 }
 
+func TestRunTailerRotationDuringActiveReadDoesNotCommitUnverifiedCursor(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "test-formula", ""))
+
+	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	projector := runproj.NewProjector()
+	if err := projector.ColdLoad(logPath); err != nil {
+		t.Fatalf("cold load: %v", err)
+	}
+	state := captureTailCursor(logPath)
+	state.marks = tailer.build(projector, nil, nil)
+	oldOffset := state.offset
+	appendEvents(t, logPath, runMoleculeEvent(2, "run2", "test-formula", ""))
+
+	previous := readTailEvents
+	t.Cleanup(func() { readTailEvents = previous })
+	rotated := false
+	readTailEvents = func(path string, offset int64) ([]events.Event, int64, error) {
+		evts, nextOffset, err := previous(path, offset)
+		if err == nil && !rotated {
+			rotated = true
+			rotating := filepath.Join(filepath.Dir(path), "events.jsonl.rotating-20260601T120000Z-seq-1-2")
+			if err := os.Rename(path, rotating); err != nil {
+				t.Fatalf("rotate after active read: %v", err)
+			}
+			writeEventLog(t, path, runMoleculeEvent(3, "run3", "test-formula", ""))
+		}
+		return evts, nextOffset, err
+	}
+
+	tailer.foldNext(projector, state)
+	if got := projector.LastSeq(); got != 1 {
+		t.Fatalf("projector cursor = %d, want 1 until active read identity is verified", got)
+	}
+	if state.offset != oldOffset {
+		t.Fatalf("byte cursor = %d, want preserved %d after unverified active read", state.offset, oldOffset)
+	}
+	if !tailer.summary.LanesPartial {
+		t.Fatal("rotation during active read did not mark projection partial")
+	}
+
+	readTailEvents = previous
+	tailer.foldNext(projector, state)
+	for _, want := range []string{"run1", "run2", "run3"} {
+		if !lanePresent(tailer, want) {
+			t.Errorf("lane %q missing after verified rotation recovery; lanes=%v", want, laneIDsOf(tailer.summary.Lanes))
+		}
+	}
+	if tailer.summary.LanesPartial {
+		t.Fatal("verified rotation recovery did not clear recoverable incompleteness")
+	}
+}
+
 // TestRunTailerRotationCatchUpErrorRetriesNextPoll is the regression guard for
 // the rotation catch-up state-commit gap: on a detected rotation the tailer must
 // catch up the just-rotated events (now only in the archive) BEFORE advancing its
@@ -485,10 +629,15 @@ func TestRunTailerRotationCatchUpErrorRetriesNextPoll(t *testing.T) {
 	// Fail the first catch-up read, then fall through to the real reader.
 	defer func(prev func(string, events.Filter) ([]events.Event, error)) { readRotationCatchUp = prev }(readRotationCatchUp)
 	realCatchUp := events.ReadFilteredWithInFlight
+	var logs bytes.Buffer
+	previousLog := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLog) })
+
 	calls := 0
 	readRotationCatchUp = func(path string, f events.Filter) ([]events.Event, error) {
 		calls++
-		if calls == 1 {
+		if calls <= 2 {
 			return nil, errors.New("transient catch-up read error")
 		}
 		return realCatchUp(path, f)
@@ -496,6 +645,8 @@ func TestRunTailerRotationCatchUpErrorRetriesNextPoll(t *testing.T) {
 
 	// First poll: catch-up errors. Nothing folds, and the tailer must not advance
 	// its active identity or the next poll can no longer re-detect the rotation.
+	// It must also publish the projection as incomplete until a cursor-preserving
+	// retry proves that the failed rotation window was recovered.
 	tl.foldNext(proj, st)
 	if lanePresent(tl, "run2") || lanePresent(tl, "run3") || lanePresent(tl, "run4") {
 		t.Fatalf("events folded despite a catch-up error; lanes=%v", laneIDsOf(tl.summary.Lanes))
@@ -503,13 +654,158 @@ func TestRunTailerRotationCatchUpErrorRetriesNextPoll(t *testing.T) {
 	if !os.SameFile(preRotationInfo, st.activeInfo) {
 		t.Fatalf("active identity advanced on a catch-up error; the next poll can no longer re-detect the rotation")
 	}
+	if !tl.summary.LanesPartial {
+		t.Fatal("rotation catch-up error did not mark the published projection partial")
+	}
 
-	// Second poll: catch-up succeeds and recovers the whole rotation window.
+	// The active path can be briefly absent while a rotation is between rename
+	// and recreation. ReadFrom treats ENOENT as an empty successful read, but that
+	// must not clear the still-latched catch-up failure before the archived window
+	// is recovered.
+	gapPath := logPath + ".rotation-gap"
+	if err := os.Rename(logPath, gapPath); err != nil {
+		t.Fatalf("stage active-path rotation gap: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := os.Stat(gapPath); err == nil {
+			_ = os.Rename(gapPath, logPath)
+		}
+	})
+	tl.foldNext(proj, st)
+	if !tl.summary.LanesPartial {
+		t.Fatal("ENOENT rotation gap cleared an unresolved catch-up failure")
+	}
+	if err := os.Rename(gapPath, logPath); err != nil {
+		t.Fatalf("restore active path after rotation gap: %v", err)
+	}
+
+	// A repeated poll in the same failed episode remains partial but does not
+	// flood the log at the tailer's one-second production cadence.
+	tl.foldNext(proj, st)
+	if got := strings.Count(logs.String(), "rotation catch-up failed"); got != 1 {
+		t.Fatalf("catch-up failure log count = %d, want 1 for one failure transition; logs=%q", got, logs.String())
+	}
+
+	// Third poll: catch-up succeeds and recovers the whole rotation window.
 	tl.foldNext(proj, st)
 	for _, want := range []string{"run1", "run2", "run3", "run4"} {
 		if !lanePresent(tl, want) {
 			t.Errorf("lane %q missing after catch-up retry; lanes=%v", want, laneIDsOf(tl.summary.Lanes))
 		}
+	}
+	if tl.summary.LanesPartial {
+		t.Fatal("successful cursor-preserving catch-up retry did not clear recoverable incompleteness")
+	}
+}
+
+func TestRunTailerReadErrorPreservesCursorAndMarksProjectionIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
+
+	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	proj := runproj.NewProjector()
+	if err := proj.ColdLoad(logPath); err != nil {
+		t.Fatalf("cold load: %v", err)
+	}
+	st := captureTailCursor(logPath)
+	st.marks = tl.build(proj, nil, nil)
+	appendEvents(t, logPath, runMoleculeEvent(2, "run2", "mol-design-review-v2", "worker-2"))
+	oldOffset := st.offset
+
+	var logs bytes.Buffer
+	previousLog := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLog) })
+
+	previous := readTailEvents
+	t.Cleanup(func() { readTailEvents = previous })
+	failRead := true
+	readTailEvents = func(path string, offset int64) ([]events.Event, int64, error) {
+		if failRead {
+			return nil, 0, errors.New("transient active-log read error")
+		}
+		return previous(path, offset)
+	}
+	tl.foldNext(proj, st)
+	tl.foldNext(proj, st)
+
+	if st.offset != oldOffset {
+		t.Fatalf("offset advanced on read error: got %d, want %d", st.offset, oldOffset)
+	}
+	if !tl.summary.LanesPartial {
+		t.Fatal("active-log read error did not mark the projection partial")
+	}
+	if got := strings.Count(logs.String(), "active-log tail failed"); got != 1 {
+		t.Fatalf("active-tail failure log count = %d, want 1 for one failure transition; logs=%q", got, logs.String())
+	}
+
+	failRead = false
+	gapPath := logPath + ".active-gap"
+	if err := os.Rename(logPath, gapPath); err != nil {
+		t.Fatalf("stage active-path gap: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := os.Stat(gapPath); err == nil {
+			_ = os.Rename(gapPath, logPath)
+		}
+	})
+	tl.foldNext(proj, st)
+	if !tl.summary.LanesPartial {
+		t.Fatal("ENOENT active-path gap cleared an unresolved tail-read failure")
+	}
+	if err := os.Rename(gapPath, logPath); err != nil {
+		t.Fatalf("restore active path after gap: %v", err)
+	}
+
+	tl.foldNext(proj, st)
+	if !lanePresent(tl, "run2") {
+		t.Fatalf("retry from preserved cursor did not recover run2; lanes=%v", laneIDsOf(tl.summary.Lanes))
+	}
+	if tl.summary.LanesPartial {
+		t.Fatal("successful active-log retry did not clear recoverable incompleteness")
+	}
+
+	appendEvents(t, logPath, runMoleculeEvent(3, "run3", "mol-bugflow-v1", "worker-3"))
+	failRead = true
+	tl.foldNext(proj, st)
+	if got := strings.Count(logs.String(), "active-log tail failed"); got != 2 {
+		t.Fatalf("active-tail failure log count after recovery = %d, want 2 transitions; logs=%q", got, logs.String())
+	}
+	failRead = false
+	tl.foldNext(proj, st)
+	if !lanePresent(tl, "run3") || tl.summary.LanesPartial {
+		t.Fatalf("second retry did not recover a complete run3 projection; lanes=%v partial=%v", laneIDsOf(tl.summary.Lanes), tl.summary.LanesPartial)
+	}
+}
+
+func TestRunTailerSuccessfulEmptyRetryClearsIncrementalFailure(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "test-formula", ""))
+
+	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	projector := runproj.NewProjector()
+	if err := projector.ColdLoad(logPath); err != nil {
+		t.Fatalf("cold load: %v", err)
+	}
+	state := captureTailCursor(logPath)
+	state.marks = tailer.build(projector, nil, nil)
+
+	previous := readTailEvents
+	t.Cleanup(func() { readTailEvents = previous })
+	readTailEvents = func(string, int64) ([]events.Event, int64, error) {
+		return nil, 0, errors.New("transient empty-tail failure")
+	}
+	tailer.foldNext(projector, state)
+	if !tailer.summary.LanesPartial {
+		t.Fatal("read failure did not mark projection partial")
+	}
+
+	readTailEvents = previous
+	tailer.foldNext(projector, state)
+	if tailer.summary.LanesPartial {
+		t.Fatal("successful retry with no new events did not clear recoverable incompleteness")
 	}
 }
 

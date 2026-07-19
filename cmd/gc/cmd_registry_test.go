@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/credentialprovider"
 )
 
 func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
@@ -322,8 +325,8 @@ func TestRegistryLoginStoresVerifiedToken(t *testing.T) {
 func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	configPath := filepath.Join(t.TempDir(), "registry.json")
-	t.Setenv(registryCLIConfigEnv, configPath)
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, configPath)
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
@@ -361,6 +364,512 @@ func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
 	}
 }
 
+func TestDoRegistryPublishUsesGasworksProviderWithoutPersistingEIA(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+	clearRegistryEnv(t)
+	const baseURL = defaultRegistryPublishURL
+	if token, err := readRegistryConfiguredToken(baseURL); err != nil || token != "" {
+		t.Fatalf("pre-existing test registry token = %q, err=%v", token, err)
+	}
+
+	oldClient := registryPublishHTTPClient
+	oldFactory := registryNewCredentialSource
+	t.Cleanup(func() {
+		registryPublishHTTPClient = oldClient
+		registryNewCredentialSource = oldFactory
+	})
+
+	var gotArgv []string
+	var gotRequest credentialprovider.Request
+	var forceRefresh []bool
+	registryNewCredentialSource = func(argv []string, request credentialprovider.Request) (registryCredentialSource, error) {
+		gotArgv = append([]string(nil), argv...)
+		gotRequest = request
+		return func(_ context.Context, force bool) (string, error) {
+			forceRefresh = append(forceRefresh, force)
+			return "sts-registry-eia", nil
+		}, nil
+	}
+
+	registryPublishHTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Authorization"); got != "Bearer sts-registry-eia" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+			"publishRequest": {
+				"id": "prq_provider",
+				"status": "pending_review",
+				"requestedName": "demo-pack",
+				"requestedVersion": "0.2.0",
+				"repository": {"fullName": "gastownhall/demo-packs"}
+			}
+		}`)),
+			Request: r,
+		}, nil
+	})}
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL: baseURL,
+		Validate:    true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	}
+	if strings.Join(gotArgv, "\x00") != strings.Join([]string{"gasworks", "credential-provider"}, "\x00") {
+		t.Fatalf("provider argv = %q", gotArgv)
+	}
+	if gotRequest.Audience != "registry" || gotRequest.Org != "" || gotRequest.ForceRefresh ||
+		len(gotRequest.RequiredScopes) != 1 || gotRequest.RequiredScopes[0] != "registry:publish" {
+		t.Fatalf("provider request = %+v", gotRequest)
+	}
+	if len(forceRefresh) != 1 || forceRefresh[0] {
+		t.Fatalf("force refresh calls = %v, want [false]", forceRefresh)
+	}
+	if !strings.Contains(stdout.String(), "prq_provider") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if token, err := readRegistryConfiguredToken(baseURL); err != nil || token != "" {
+		t.Fatalf("provider EIA persisted as registry token = %q, err=%v", token, err)
+	}
+}
+
+func TestDoRegistryPublishDoesNotMintGasworksCredentialForCustomRegistry(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T)
+		opts  registryPublishOptions
+	}{
+		{
+			name:  "flag",
+			setup: func(t *testing.T) { clearRegistryEnv(t) },
+			opts:  registryPublishOptions{RegistryURL: "https://registry.attacker.test"},
+		},
+		{
+			name: "environment",
+			setup: func(t *testing.T) {
+				clearRegistryEnv(t, registryTestEnv{
+					name:  "GC_REGISTRY_URL",
+					value: "https://registry.attacker.test",
+				})
+			},
+		},
+		{
+			name: "stored default",
+			setup: func(t *testing.T) {
+				clearRegistryEnv(t)
+				if err := saveRegistryCLIConfig(registryCLIConfigPath(), registryCLIConfig{
+					DefaultRegistryURL: "https://registry.attacker.test",
+					Registries:         map[string]registryCLIConfigEntry{},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			oldFactory := registryNewCredentialSource
+			t.Cleanup(func() { registryNewCredentialSource = oldFactory })
+			registryNewCredentialSource = func([]string, credentialprovider.Request) (registryCredentialSource, error) {
+				t.Fatal("custom registry invoked the Gasworks credential provider")
+				return nil, nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doRegistryPublish(t.Context(), packDir, tc.opts, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("doRegistryPublish succeeded, stdout=%q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), defaultRegistryPublishURL) ||
+				!strings.Contains(stderr.String(), "native registry credential") {
+				t.Fatalf("stderr = %q, want canonical-origin remediation", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRegistryGasworksCredentialOriginAllowsOnlyCanonicalProductionOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		baseURL string
+		want    bool
+	}{
+		{baseURL: defaultRegistryPublishURL, want: true},
+		{baseURL: "https://REGISTRY.GASCITY.COM", want: true},
+		{baseURL: "https://registry.gascity.com:443", want: true},
+		{baseURL: "http://registry.gascity.com"},
+		{baseURL: "https://registry.gascity.com:444"},
+		{baseURL: "https://user@registry.gascity.com"},
+		{baseURL: "https://registry.gascity.com.attacker.test"},
+		{baseURL: "https://registry.gascity.com/api"},
+		{baseURL: "https://localhost:8443"},
+		{baseURL: "https://registry.attacker.test"},
+	} {
+		t.Run(tc.baseURL, func(t *testing.T) {
+			if got := registryGasworksCredentialOriginAllowed(tc.baseURL); got != tc.want {
+				t.Fatalf("registryGasworksCredentialOriginAllowed(%q) = %v, want %v", tc.baseURL, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+	clearRegistryEnv(t)
+	const baseURL = defaultRegistryPublishURL
+
+	oldClient := registryPublishHTTPClient
+	oldFactory := registryNewCredentialSource
+	t.Cleanup(func() {
+		registryPublishHTTPClient = oldClient
+		registryNewCredentialSource = oldFactory
+	})
+
+	var forceRefresh []bool
+	registryNewCredentialSource = func(_ []string, _ credentialprovider.Request) (registryCredentialSource, error) {
+		return func(_ context.Context, force bool) (string, error) {
+			forceRefresh = append(forceRefresh, force)
+			if force {
+				return "sts-refreshed", nil
+			}
+			return "sts-initial", nil
+		}, nil
+	}
+
+	requests := 0
+	registryPublishHTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			if got := r.Header.Get("Authorization"); got != "Bearer sts-initial" {
+				t.Fatalf("first Authorization = %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
+				Request:    r,
+			}, nil
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sts-refreshed" {
+			t.Fatalf("retry Authorization = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"publishRequest": {
+					"id": "prq_refreshed",
+					"status": "pending_review",
+					"requestedName": "demo-pack",
+					"requestedVersion": "0.2.0"
+				}
+			}`)),
+			Request: r,
+		}, nil
+	})}
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL: baseURL,
+		Validate:    true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	}
+	if requests != 2 {
+		t.Fatalf("publish requests = %d, want 2", requests)
+	}
+	if len(forceRefresh) != 2 || forceRefresh[0] || !forceRefresh[1] {
+		t.Fatalf("force refresh calls = %v, want [false true]", forceRefresh)
+	}
+	if !strings.Contains(stdout.String(), "prq_refreshed") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) {
+	t.Run("repeated 401 refreshes once", func(t *testing.T) {
+		requests := 0
+		refreshes := 0
+		rt := &registryProviderReauthRoundTripper{
+			base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				requests++
+				want := "Bearer initial"
+				if requests == 2 {
+					want = "Bearer refreshed"
+				}
+				if got := r.Header.Get("Authorization"); got != want {
+					t.Fatalf("request %d Authorization = %q, want %q", requests, got, want)
+				}
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)),
+					Request:    r,
+				}, nil
+			}),
+			refresh: func(_ context.Context, force bool) (string, error) {
+				refreshes++
+				if !force {
+					t.Fatal("401 refresh was not forced")
+				}
+				return "refreshed", nil
+			},
+		}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer initial")
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized || requests != 2 || refreshes != 1 {
+			t.Fatalf("status=%d requests=%d refreshes=%d", resp.StatusCode, requests, refreshes)
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		status     int
+		bearer     string
+		replayable bool
+	}{
+		{name: "403", status: http.StatusForbidden, bearer: "Bearer initial", replayable: true},
+		{name: "unauthenticated 401", status: http.StatusUnauthorized, replayable: true},
+		{name: "non-bearer 401", status: http.StatusUnauthorized, bearer: "Basic abc", replayable: true},
+		{name: "non-replayable 401", status: http.StatusUnauthorized, bearer: "Bearer initial", replayable: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			refreshes := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{
+						StatusCode: tc.status,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(context.Context, bool) (string, error) {
+					refreshes++
+					return "refreshed", nil
+				},
+			}
+			var req *http.Request
+			var err error
+			if tc.replayable {
+				req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			} else {
+				req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", io.NopCloser(strings.NewReader("payload")))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", tc.bearer)
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if requests != 1 || refreshes != 0 {
+				t.Fatalf("requests=%d refreshes=%d, want 1/0", requests, refreshes)
+			}
+		})
+	}
+}
+
+func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.T) {
+	requests := 0
+	rt := &registryProviderReauthRoundTripper{
+		base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests++
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Request:    r,
+			}, nil
+		}),
+		refresh: func(ctx context.Context, force bool) (string, error) {
+			if !force {
+				t.Fatal("401 refresh was not forced")
+			}
+			return "", ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer initial")
+	cancel()
+
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		t.Fatalf("response = %v, want nil after refresh cancellation", resp)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want no replay after cancellation", requests)
+	}
+}
+
+func TestRegistryCredentialClientRefusesEveryRedirect(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			requests := 0
+			refreshes := 0
+			client := registryHTTPClientWithCredentialRefresh(&http.Client{
+				Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if requests > 1 {
+						t.Fatalf("redirect target reached with Authorization %q", r.Header.Get("Authorization"))
+					}
+					return &http.Response{
+						StatusCode: status,
+						Header:     http.Header{"Location": []string{"https://capture.attacker.test/token"}},
+						Body:       io.NopCloser(strings.NewReader("redirect")),
+						Request:    r,
+					}, nil
+				}),
+			}, func(context.Context, bool) (string, error) {
+				refreshes++
+				return "must-not-refresh", nil
+			})
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, defaultRegistryPublishURL+"/api/me", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+			resp, err := client.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if !errors.Is(err, errRegistryCredentialRedirect) {
+				t.Fatalf("client.Do error = %v, want %v", err, errRegistryCredentialRedirect)
+			}
+			if requests != 1 || refreshes != 0 {
+				t.Fatalf("requests=%d refreshes=%d, want 1/0", requests, refreshes)
+			}
+		})
+	}
+}
+
+func TestRegistryCredentialClientAllowsOneDirect401ReplayBeforeRefusingRedirect(t *testing.T) {
+	requests := 0
+	refreshes := 0
+	client := registryHTTPClientWithCredentialRefresh(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests++
+			switch requests {
+			case 1:
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":"expired"}`)),
+					Request:    r,
+				}, nil
+			case 2:
+				if got := r.Header.Get("Authorization"); got != "Bearer refreshed" {
+					t.Fatalf("replay Authorization = %q", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusTemporaryRedirect,
+					Header:     http.Header{"Location": []string{"https://capture.attacker.test/token"}},
+					Body:       io.NopCloser(strings.NewReader("redirect")),
+					Request:    r,
+				}, nil
+			default:
+				t.Fatalf("unexpected transport attempt %d", requests)
+				return nil, nil
+			}
+		}),
+	}, func(_ context.Context, force bool) (string, error) {
+		refreshes++
+		if !force {
+			t.Fatal("401 refresh was not forced")
+		}
+		return "refreshed", nil
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, defaultRegistryPublishURL+"/api/me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer initial")
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, errRegistryCredentialRedirect) {
+		t.Fatalf("client.Do error = %v, want %v", err, errRegistryCredentialRedirect)
+	}
+	if requests != 2 || refreshes != 1 {
+		t.Fatalf("requests=%d refreshes=%d, want 2/1", requests, refreshes)
+	}
+}
+
+func TestDoRegistryPublishExplicitNativeTokenDoesNotRefreshAfter401(t *testing.T) {
+	_, packDir := setupRegistryPublishRepo(t)
+	clearRegistryEnv(t)
+
+	oldClient := registryPublishHTTPClient
+	oldFactory := registryNewCredentialSource
+	t.Cleanup(func() {
+		registryPublishHTTPClient = oldClient
+		registryNewCredentialSource = oldFactory
+	})
+	registryNewCredentialSource = func([]string, credentialprovider.Request) (registryCredentialSource, error) {
+		t.Fatal("native token path invoked the Gasworks credential provider")
+		return nil, nil
+	}
+
+	requests := 0
+	registryPublishHTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer gcr_explicit" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL: "https://registry-native.test",
+		Token:       "gcr_explicit",
+		Validate:    true,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doRegistryPublish succeeded, stdout=%q", stdout.String())
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want exactly one native-token attempt", requests)
+	}
+}
+
 // TestDoRegistryPublishValidateFailsOnValidationError covers the registry
 // returning a 2xx publish response that nonetheless reports a validation
 // rejection. With --validate, that must exit non-zero so CI cannot treat a
@@ -369,8 +878,8 @@ func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
 func TestDoRegistryPublishValidateFailsOnValidationError(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	configPath := filepath.Join(t.TempDir(), "registry.json")
-	t.Setenv(registryCLIConfigEnv, configPath)
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, configPath)
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
@@ -412,8 +921,8 @@ func TestDoRegistryPublishValidateFailsOnValidationError(t *testing.T) {
 func TestDoRegistryPublishValidateFailsOnRejectedStatus(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	configPath := filepath.Join(t.TempDir(), "registry.json")
-	t.Setenv(registryCLIConfigEnv, configPath)
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, configPath)
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
@@ -456,8 +965,8 @@ func TestDoRegistryPublishValidateFailsOnRejectedStatus(t *testing.T) {
 func TestDoRegistryPublishStoredTokenSurvivesPartialCookieEnv(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	configPath := filepath.Join(t.TempDir(), "registry.json")
-	t.Setenv(registryCLIConfigEnv, configPath)
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, configPath)
 	t.Setenv("GC_REGISTRY_SESSION", "stale-session-cookie")
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
@@ -497,11 +1006,19 @@ func TestDoRegistryPublishStoredTokenSurvivesPartialCookieEnv(t *testing.T) {
 
 func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "actions-request-token")
 	oldClient := registryPublishHTTPClient
-	defer func() { registryPublishHTTPClient = oldClient }()
+	oldFactory := registryNewCredentialSource
+	t.Cleanup(func() {
+		registryPublishHTTPClient = oldClient
+		registryNewCredentialSource = oldFactory
+	})
+	registryNewCredentialSource = func([]string, credentialprovider.Request) (registryCredentialSource, error) {
+		t.Fatal("GitHub OIDC path invoked the Gasworks credential provider")
+		return nil, nil
+	}
 
 	var sawMint bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -572,8 +1089,8 @@ func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
 
 func TestDoRegistryPublishUsesGitHubActionsOIDCWithoutUpstream(t *testing.T) {
 	packDir, headSHA := setupRegistryPublishRepoDetached(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	// A detached actions/checkout has no `@{u}`; the runner metadata is the
 	// authoritative repository and ref source for the publish request.
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "actions-request-token")
@@ -650,8 +1167,8 @@ func TestDoRegistryPublishUsesGitHubActionsOIDCWithoutUpstream(t *testing.T) {
 
 func TestDoRegistryPublishWithoutUpstreamOrActionsFails(t *testing.T) {
 	packDir, _ := setupRegistryPublishRepoDetached(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	// No GitHub Actions OIDC environment: a detached checkout must still report
 	// the upstream requirement rather than silently deriving a repository.
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
@@ -741,8 +1258,8 @@ func TestBuildRegistryPublishRequestDetachedRequiresUpstreamWithoutOIDCMint(t *t
 // upstream requirement locally rather than trusting spoofable runner metadata.
 func TestDoRegistryPublishDetachedWithExplicitTokenRequiresUpstream(t *testing.T) {
 	packDir, headSHA := setupRegistryPublishRepoDetached(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	setSpoofedGitHubActionsEnv(t, headSHA)
 	failingRegistryHTTPClient(t)
 
@@ -766,8 +1283,8 @@ func TestDoRegistryPublishDetachedWithExplicitTokenRequiresUpstream(t *testing.T
 // by spoofable GitHub Actions runner metadata.
 func TestDoRegistryPublishDetachedWithStoredTokenRequiresUpstream(t *testing.T) {
 	packDir, headSHA := setupRegistryPublishRepoDetached(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	setSpoofedGitHubActionsEnv(t, headSHA)
 	failingRegistryHTTPClient(t)
 	if err := writeRegistryConfiguredToken("https://registry.example.com", "gcr_stored_token"); err != nil {
@@ -898,8 +1415,8 @@ func TestRegistryPublishDevAuthFetchesLocalSession(t *testing.T) {
 
 func TestDoRegistryPublishDryRunPrintsRequest(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	var stdout, stderr bytes.Buffer
 	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
 		RegistryURL: "http://127.0.0.1:8080",
@@ -941,10 +1458,83 @@ func TestRegistryHelpDoesNotLeakEnvironmentSecrets(t *testing.T) {
 	}
 }
 
+func TestRegistryCommandErrorsUsePackNamespace(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(io.Writer) int
+	}{
+		{
+			name: "login",
+			run: func(stderr io.Writer) int {
+				return doRegistryLogin(t.Context(), registryLoginOptions{RegistryURL: "http://registry.example"}, io.Discard, stderr)
+			},
+		},
+		{
+			name: "publish",
+			run: func(stderr io.Writer) int {
+				return doRegistryPublish(t.Context(), "", registryPublishOptions{RegistryURL: "http://registry.example"}, io.Discard, stderr)
+			},
+		},
+		{
+			name: "whoami",
+			run: func(stderr io.Writer) int {
+				return doRegistryWhoami(t.Context(), registryLoginOptions{RegistryURL: "http://registry.example"}, io.Discard, stderr)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if code := test.run(&stderr); code == 0 {
+				t.Fatalf("%s unexpectedly succeeded", test.name)
+			}
+			want := "gc pack registry " + test.name + ":"
+			if !strings.HasPrefix(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func TestRegistryCredentialProviderArgvDefaultsToGasworks(t *testing.T) {
+	argv, err := parseRegistryCredentialProviderArgv("", false)
+	if err != nil {
+		t.Fatalf("parseRegistryCredentialProviderArgv: %v", err)
+	}
+	want := []string{"gasworks", "credential-provider"}
+	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv = %q, want %q", argv, want)
+	}
+}
+
+func TestRegistryCredentialProviderArgvUsesExactJSONOverride(t *testing.T) {
+	argv, err := parseRegistryCredentialProviderArgv(
+		`["/opt/Gas Works/gasworks","credential-provider","--profile","team one"]`, true,
+	)
+	if err != nil {
+		t.Fatalf("parseRegistryCredentialProviderArgv: %v", err)
+	}
+	want := []string{"/opt/Gas Works/gasworks", "credential-provider", "--profile", "team one"}
+	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv = %q, want exact direct-exec argv %q", argv, want)
+	}
+}
+
+func TestRegistryCredentialProviderArgvRejectsMalformedOrEmptyOverride(t *testing.T) {
+	for _, raw := range []string{"", `{`, `null`, `[]`, `[""]`, `["gasworks",7]`} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseRegistryCredentialProviderArgv(raw, true); err == nil {
+				t.Fatalf("parseRegistryCredentialProviderArgv accepted %q", raw)
+			}
+		})
+	}
+}
+
 func TestDoRegistryPublishUsesEnvironmentToken(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	t.Setenv("GC_REGISTRY_TOKEN", "gcr_env_token")
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
@@ -981,10 +1571,18 @@ func TestDoRegistryPublishUsesEnvironmentToken(t *testing.T) {
 }
 
 func TestDoRegistryWhoamiUsesStoredDefaultRegistryURL(t *testing.T) {
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 	oldClient := registryPublishHTTPClient
-	defer func() { registryPublishHTTPClient = oldClient }()
+	oldFactory := registryNewCredentialSource
+	t.Cleanup(func() {
+		registryPublishHTTPClient = oldClient
+		registryNewCredentialSource = oldFactory
+	})
+	registryNewCredentialSource = func([]string, credentialprovider.Request) (registryCredentialSource, error) {
+		t.Fatal("stored native token invoked the Gasworks credential provider")
+		return nil, nil
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/me" {
@@ -1012,9 +1610,83 @@ func TestDoRegistryWhoamiUsesStoredDefaultRegistryURL(t *testing.T) {
 	}
 }
 
-func TestDoRegistryWhoamiRejectsNonLocalHTTPRegistry(t *testing.T) {
-	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
+func TestDoRegistryWhoamiUsesGasworksProviderAndRefreshesWithoutPersistingEIA(t *testing.T) {
 	clearRegistryEnv(t)
+	oldClient := registryPublishHTTPClient
+	oldFactory := registryNewCredentialSource
+	t.Cleanup(func() {
+		registryPublishHTTPClient = oldClient
+		registryNewCredentialSource = oldFactory
+	})
+
+	var gotArgv []string
+	var gotRequest credentialprovider.Request
+	var forceRefresh []bool
+	registryNewCredentialSource = func(argv []string, request credentialprovider.Request) (registryCredentialSource, error) {
+		gotArgv = append([]string(nil), argv...)
+		gotRequest = request
+		return func(_ context.Context, force bool) (string, error) {
+			forceRefresh = append(forceRefresh, force)
+			if force {
+				return "sts-refreshed", nil
+			}
+			return "sts-initial", nil
+		}, nil
+	}
+	requests := 0
+	registryPublishHTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			if got := r.Header.Get("Authorization"); got != "Bearer sts-initial" {
+				t.Fatalf("first Authorization = %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
+				Request:    r,
+			}, nil
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sts-refreshed" {
+			t.Fatalf("retry Authorization = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"user":{"id":"usr_provider","handle":"provider-user"}}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryWhoami(t.Context(), registryLoginOptions{
+		RegistryURL: defaultRegistryPublishURL,
+		Timeout:     time.Second,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryWhoami = %d, stderr=%q", code, stderr.String())
+	}
+	if strings.Join(gotArgv, "\x00") != strings.Join([]string{"gasworks", "credential-provider"}, "\x00") {
+		t.Fatalf("provider argv = %q", gotArgv)
+	}
+	if gotRequest.Audience != registryCredentialAudience ||
+		len(gotRequest.RequiredScopes) != 1 || gotRequest.RequiredScopes[0] != registryPublishScope {
+		t.Fatalf("provider request = %+v", gotRequest)
+	}
+	if len(forceRefresh) != 2 || forceRefresh[0] || !forceRefresh[1] {
+		t.Fatalf("force refresh calls = %v, want [false true]", forceRefresh)
+	}
+	if got := stdout.String(); !strings.Contains(got, "@provider-user (usr_provider)") {
+		t.Fatalf("stdout = %q", got)
+	}
+	if token, err := readRegistryConfiguredToken(defaultRegistryPublishURL); err != nil || token != "" {
+		t.Fatalf("provider EIA persisted as registry token = %q, err=%v", token, err)
+	}
+}
+
+func TestDoRegistryWhoamiRejectsNonLocalHTTPRegistry(t *testing.T) {
+	clearRegistryEnv(t)
+	t.Setenv(registryCLIConfigEnv, filepath.Join(t.TempDir(), "registry.json"))
 
 	var stdout, stderr bytes.Buffer
 	code := doRegistryWhoami(t.Context(), registryLoginOptions{
@@ -1688,12 +2360,35 @@ func waitForRegistryCallbackTokenURL(t *testing.T, out *registrySyncBuffer) (tok
 	return "", ""
 }
 
+type registryTestEnv struct {
+	name  string
+	value string
+}
+
 // clearRegistryEnv neutralizes ambient registry credentials so direct
 // do-function calls resolve exactly what each test configures.
-func clearRegistryEnv(t *testing.T) {
+func clearRegistryEnv(t *testing.T, overrides ...registryTestEnv) {
 	t.Helper()
-	for _, key := range []string{"GC_REGISTRY_URL", "GC_REGISTRY_TOKEN", "GC_REGISTRY_SESSION", "GC_REGISTRY_CSRF_TOKEN"} {
-		t.Setenv(key, "")
+	variables := []registryTestEnv{
+		{name: "GC_REGISTRY_URL"},
+		{name: "GC_REGISTRY_TOKEN"},
+		{name: "GC_REGISTRY_SESSION"},
+		{name: "GC_REGISTRY_CSRF_TOKEN"},
+		{name: "ACTIONS_ID_TOKEN_REQUEST_TOKEN"},
+		{name: "ACTIONS_ID_TOKEN_REQUEST_URL"},
+		{name: registryCredentialProviderEnv, value: `["gasworks","credential-provider"]`},
+		{name: registryCLIConfigEnv, value: filepath.Join(t.TempDir(), "registry.json")},
+	}
+	for _, override := range overrides {
+		for i := range variables {
+			if variables[i].name == override.name {
+				variables[i].value = override.value
+				break
+			}
+		}
+	}
+	for _, variable := range variables {
+		t.Setenv(variable.name, variable.value)
 	}
 }
 

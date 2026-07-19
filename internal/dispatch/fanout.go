@@ -290,7 +290,12 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 	executionRigContext := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRigContextMetadataKey])
 	routeCfg, err := opts.routeConfig()
 	if err != nil {
-		return fmt.Errorf("loading fanout route config: %w", err)
+		// See spawnNextAttempt: a route-config load/parse failure is transient,
+		// so classify it as a transient controller-boundary error and let the
+		// caller retry it as pending rather than quarantining the molecule.
+		// Terminal fail-closed stays reserved for a loaded config that lacks the
+		// required store-scoped dispatcher (applyAttemptControlStepRoute below).
+		return markTransientControllerBoundaryError(fmt.Errorf("loading fanout route config: %w", err))
 	}
 	rootStoreRef := strings.TrimSpace(control.Metadata[beadmeta.RootStoreRefMetadataKey])
 	for i := range fragment.Steps {

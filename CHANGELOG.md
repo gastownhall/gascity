@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Attempt/fanout control routing no longer fails closed on a transient
+  route-config load.** The store-scoped dispatcher routing made attempt-spawn
+  (`spawnNextAttempt`) and fanout (`routeFanoutFragmentSteps`) control routing
+  return a hard error when the attempt-time `city.toml` load failed, so a
+  momentary config read or include-resolution blip could permanently quarantine
+  an in-flight molecule. Such load/parse failures are now classified as
+  transient controller-boundary errors and retried as pending, matching the
+  retry/Ralph tolerance. Terminal fail-closed remains reserved for a config that
+  loads successfully but lacks the required `Dir`-matched `control-dispatcher`
+  agent.
 - **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against
   `beads v1.0.5`, which was subsequently withdrawn (demoted to a pre-release;
   `v1.0.4` is the current stable release). v1.3.1 repins the `beads` Go module

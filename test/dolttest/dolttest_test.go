@@ -22,6 +22,26 @@ func TestDoltConfigPath(t *testing.T) {
 	}
 }
 
+func TestDoltDataDirPath(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"space form", "/usr/bin/dolt sql-server --data-dir /tmp/x/data", "/tmp/x/data"},
+		{"equals form", "dolt sql-server --data-dir=/a/b/data", "/a/b/data"},
+		{"missing value", "dolt sql-server --data-dir", ""},
+		{"no data-dir flag", "dolt sql-server --config /a/cfg.yaml", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := doltDataDirPath(tc.cmd); got != tc.want {
+				t.Fatalf("doltDataDirPath(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLooksLikeDoltSQLServer(t *testing.T) {
 	cases := []struct {
 		fields []string

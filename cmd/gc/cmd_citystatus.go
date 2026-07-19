@@ -35,6 +35,8 @@ type StatusJSON struct {
 	Agents            []StatusAgentJSON            `json:"agents"`
 	Rigs              []StatusRigJSON              `json:"rigs"`
 	Summary           StatusSummaryJSON            `json:"summary"`
+	Partial           bool                         `json:"partial,omitempty"`
+	PartialErrors     []string                     `json:"partial_errors,omitempty"`
 }
 
 type WorkspaceJSON struct {
@@ -221,31 +223,26 @@ func routeCityStatus(
 	jsonOutput bool,
 	stdout, stderr io.Writer,
 ) int {
-	const cmdName = "status"
-	if c != nil {
-		cr, err := c.GetStatus()
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout)
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-	if code != 0 {
-		return code
-	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-	if jsonOutput {
-		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-	}
-	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+	var cr api.CachedRead[api.StatusView]
+	return routeRead(c, "status", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetStatus()
+			return err
+		},
+		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
+		func() int {
+			store, diagnostic, code := openCityStatusStore(cityPath, stderr)
+			if code != 0 {
+				return code
+			}
+			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+			if jsonOutput {
+				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+			}
+			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+		},
+	)
 }
 
 // renderCityStatusFromAPI renders the server's StatusView using the same
@@ -284,6 +281,8 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 		Controller:        controllerStatusForCity(cityPath),
 		Beads:             v.Beads,
 		ConditionalWrites: v.ConditionalWrites,
+		Partial:           v.Partial,
+		PartialErrors:     append([]string(nil), v.PartialErrors...),
 		Summary: StatusSummaryJSON{
 			TotalAgents:       v.Summary.TotalAgents,
 			RunningAgents:     v.Summary.RunningAgents,
@@ -381,11 +380,15 @@ func observeSessionTargetWithWarning(
 
 	select {
 	case result := <-done:
-		if result.err != nil && stderr != nil {
-			fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target.runtimeSessionName, result.err) //nolint:errcheck // best-effort stderr
+		if result.err != nil {
+			markStatusProviderPartial(sp)
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target.runtimeSessionName, result.err) //nolint:errcheck // best-effort stderr
+			}
 		}
 		return result.observation
 	case <-time.After(statusObservationTimeout):
+		markStatusProviderPartial(sp)
 		if stderr != nil {
 			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target.runtimeSessionName, statusObservationTimeout) //nolint:errcheck // best-effort stderr
 		}

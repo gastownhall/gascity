@@ -41,6 +41,32 @@ func TestExtractConfigPath_FlagAtEnd(t *testing.T) {
 	}
 }
 
+func TestExtractDataDirPath_SpaceSeparated(t *testing.T) {
+	argv := []string{"dolt", "sql-server", "--data-dir", "/tmp/TestFoo123/dolt"}
+	got := extractDataDirPath(argv)
+	want := "/tmp/TestFoo123/dolt"
+	if got != want {
+		t.Errorf("extractDataDirPath() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractDataDirPath_EqualsForm(t *testing.T) {
+	argv := []string{"dolt", "sql-server", "--data-dir=/tmp/TestFoo/dolt"}
+	got := extractDataDirPath(argv)
+	want := "/tmp/TestFoo/dolt"
+	if got != want {
+		t.Errorf("extractDataDirPath() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractDataDirPath_Missing(t *testing.T) {
+	argv := []string{"dolt", "sql-server", "--config", "/tmp/TestFoo/config.yaml"}
+	got := extractDataDirPath(argv)
+	if got != "" {
+		t.Errorf("extractDataDirPath() = %q, want empty", got)
+	}
+}
+
 func TestIsTestConfigPath_TmpTestPrefix(t *testing.T) {
 	if !isTestConfigPath("/tmp/TestOrchestrator123/config.yaml", "/home/u", "") {
 		t.Error("expected /tmp/Test* to be a test path")
@@ -443,5 +469,145 @@ func TestPlanReap_BuildsOrphanAndProtectedLists(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotProtected, wantProtected) {
 		t.Errorf("Protected PIDs = %v, want %v", gotProtected, wantProtected)
+	}
+}
+
+// TestClassifyDoltProcess_BareServerReapsWhenDataDirOnAllowlist covers
+// ga-ntbpyb.2 acceptance criterion 1's confirmed regression exemplar:
+// examples/gastown's TestReaperWorkflowRootCleanupRealDoltSemantics launches
+// `dolt sql-server --data-dir <t.TempDir()>/dolt` with no --config at all.
+// Before this change, classifyDoltProcess's rule 4 protected every bare
+// server unconditionally; a --data-dir match against the allowlist is now an
+// ownership signal in its own right, mirroring the existing --config
+// allowlist rule.
+func TestClassifyDoltProcess_BareServerReapsWhenDataDirOnAllowlist(t *testing.T) {
+	dataDir := "/tmp/TestReaperWorkflowRootCleanupRealDoltSemantics42/002/dolt"
+	p := DoltProcInfo{
+		PID:  6001,
+		Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33420", "--data-dir", dataDir, "--loglevel", "warning"},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "reap" {
+		t.Fatalf("Action = %q, want reap", got.Action)
+	}
+	if got.DataDir != dataDir {
+		t.Errorf("DataDir = %q, want %q", got.DataDir, dataDir)
+	}
+	if got.ConfigPath != "" {
+		t.Errorf("ConfigPath = %q, want empty (no --config on this cmdline)", got.ConfigPath)
+	}
+}
+
+func TestClassifyDoltProcess_BareServerProtectsWhenDataDirNotOnAllowlist(t *testing.T) {
+	dataDir := "/var/lib/prod-dolt-store"
+	p := DoltProcInfo{
+		PID:  6002,
+		Argv: []string{"dolt", "sql-server", "--data-dir", dataDir},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "protect" {
+		t.Fatalf("Action = %q, want protect (data-dir not test-owned)", got.Action)
+	}
+	if got.DataDir != "" {
+		t.Errorf("DataDir = %q, want empty when protecting", got.DataDir)
+	}
+	if !strings.Contains(got.Reason, dataDir) || !strings.Contains(got.Reason, "allowlist") {
+		t.Errorf("Reason = %q, want allowlist reason containing data-dir path", got.Reason)
+	}
+}
+
+func TestClassifyDoltProcess_BareServerNoConfigNoDataDirPreservesOriginalReason(t *testing.T) {
+	// Byte-for-byte preservation check: a truly bare server (neither --config
+	// nor --data-dir) must still hit the exact original protect message, so
+	// any caller matching on this literal string is unaffected by the
+	// data-dir-driven rule 4 extension.
+	p := DoltProcInfo{
+		PID:  6003,
+		Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1"},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	want := "no --config path detected; refusing to kill an unidentified dolt server"
+	if got.Action != "protect" || got.Reason != want {
+		t.Errorf("got {Action: %q, Reason: %q}, want {protect, %q}", got.Action, got.Reason, want)
+	}
+	if got.DataDir != "" {
+		t.Errorf("DataDir = %q, want empty", got.DataDir)
+	}
+}
+
+func TestClassifyDoltProcess_ConfigAllowlistReapAlsoPopulatesDataDir(t *testing.T) {
+	cfg := "/tmp/TestA/config.yaml"
+	dataDir := "/tmp/TestA/dolt"
+	p := DoltProcInfo{
+		PID:  6004,
+		Argv: []string{"dolt", "sql-server", "--config", cfg, "--data-dir", dataDir},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "reap" {
+		t.Fatalf("Action = %q, want reap", got.Action)
+	}
+	if got.ConfigPath != cfg {
+		t.Errorf("ConfigPath = %q, want %q", got.ConfigPath, cfg)
+	}
+	if got.DataDir != dataDir {
+		t.Errorf("DataDir = %q, want %q", got.DataDir, dataDir)
+	}
+}
+
+// TestClassifyDoltProcess_ConfigAllowlistReapDataDirNotOnAllowlistStaysEmpty
+// is the key safety-gate test: DataDir is never trusted merely because the
+// process as a whole was reaped via its --config allowlist match. The
+// --data-dir value must independently pass the same allowlist, or the
+// process is still reaped but no directory is removed.
+func TestClassifyDoltProcess_ConfigAllowlistReapDataDirNotOnAllowlistStaysEmpty(t *testing.T) {
+	cfg := "/tmp/TestA/config.yaml"
+	unrelatedDataDir := "/var/lib/some-other-store"
+	p := DoltProcInfo{
+		PID:  6005,
+		Argv: []string{"dolt", "sql-server", "--config", cfg, "--data-dir", unrelatedDataDir},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "reap" {
+		t.Fatalf("Action = %q, want reap (config allowlist match)", got.Action)
+	}
+	if got.DataDir != "" {
+		t.Errorf("DataDir = %q, want empty: a non-allowlisted --data-dir must never be trusted for removal, even when the process is reaped on other grounds", got.DataDir)
+	}
+}
+
+func TestClassifyDoltProcess_DeletedCwdReapAlsoPopulatesDataDir(t *testing.T) {
+	dataDir := "/tmp/TestZombie/dolt"
+	p := DoltProcInfo{
+		PID:      6006,
+		Argv:     []string{"dolt", "sql-server", "--data-dir", dataDir},
+		CWDState: procPathStateDeleted,
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "reap" {
+		t.Fatalf("Action = %q, want reap (deleted cwd)", got.Action)
+	}
+	if got.DataDir != dataDir {
+		t.Errorf("DataDir = %q, want %q", got.DataDir, dataDir)
+	}
+}
+
+func TestPlanReap_CarriesDataDirForBareServerWithAllowlistedDataDir(t *testing.T) {
+	dataDir := "/tmp/TestReaperWorkflowRootCleanupRealDoltSemantics42/002/dolt"
+	procs := []DoltProcInfo{
+		{PID: 7002, Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "33421", "--data-dir", dataDir}},
+	}
+	plan := planOrphanReap(procs, nil, "/home/u", "", nil)
+
+	if len(plan.Reap) != 1 {
+		t.Fatalf("Reap len = %d, want 1 (protected: %+v)", len(plan.Reap), plan.Protected)
+	}
+	if plan.Reap[0].DataDir != dataDir {
+		t.Errorf("ReapTarget.DataDir = %q, want %q", plan.Reap[0].DataDir, dataDir)
 	}
 }

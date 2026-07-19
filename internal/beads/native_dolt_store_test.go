@@ -330,7 +330,16 @@ func TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift(t *te
 	}
 }
 
-func TestNativeDoltStoreReadyIncludesOpenNormalizedUpstreamStatuses(t *testing.T) {
+func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *testing.T) {
+	// bd's own status-category table (vendored beads internal/types.
+	// BuiltInStatusCategory) marks blocked/hooked as "wip" and pinned as
+	// "frozen" — both excluded from bd's own ready semantics. Only "open"
+	// (category active) and deferred (once DeferUntil has passed, handled
+	// via IsReadyCandidateForTier's IsDeferred check) belong here. This
+	// issue set intentionally includes a blocked bead whose dependency
+	// graph the spy treats as fully satisfied (it is returned unconditionally
+	// whenever queried by status), to prove Ready() must never surface it
+	// even when GetReadyWork would happily return it if asked.
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: beadslib.TypeTask, Priority: 2},
@@ -361,15 +370,14 @@ func TestNativeDoltStoreReadyIncludesOpenNormalizedUpstreamStatuses(t *testing.T
 	}
 
 	wantIDs := map[string]bool{
-		"gc-open": true, "gc-blocked": true, "gc-deferred": true,
-		"gc-pinned": true, "gc-hooked": true, "gc-review": true,
+		"gc-open": true, "gc-deferred": true,
 	}
 	if len(got) != len(wantIDs) {
 		t.Fatalf("Ready len = %d, want %d; got %+v", len(got), len(wantIDs), got)
 	}
 	for _, bead := range got {
 		if !wantIDs[bead.ID] {
-			t.Fatalf("Ready returned unexpected bead %q from %+v", bead.ID, got)
+			t.Fatalf("Ready returned unexpected bead %q from %+v — blocked/pinned/hooked/review must never surface as ready even when their dependency graph is satisfied", bead.ID, got)
 		}
 		if bead.Status != "open" {
 			t.Fatalf("Ready bead %q status = %q, want normalized open", bead.ID, bead.Status)

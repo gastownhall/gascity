@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -132,204 +133,42 @@ var (
 // contending pools so stable template sort order does not always win.
 var poolSessionCreateFairShareCounter atomic.Uint64
 
-type poolSessionCreateBudget struct {
-	mu                sync.Mutex
-	remaining         int
-	templateRemaining map[string]int
-	spare             int
-}
-
-func newPoolSessionCreateBudget(limit int) *poolSessionCreateBudget {
-	if limit <= 0 {
-		return nil
-	}
-	return &poolSessionCreateBudget{remaining: limit}
-}
-
-func (b *poolSessionCreateBudget) configureFairShare(states []PoolDesiredState, seed uint64) {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	shares, spare := fairPoolSessionCreateShares(states, b.remaining, seed)
-	b.templateRemaining = shares
-	b.spare = spare
-}
-
-func fairPoolSessionCreateShares(states []PoolDesiredState, limit int, seed uint64) (map[string]int, int) {
-	if limit <= 0 {
-		return nil, 0
-	}
-	type demand struct {
-		template string
-		count    int
-		floor    bool
-	}
-	var demands []demand
-	for _, state := range states {
-		count := 0
-		floor := false
-		for _, request := range state.Requests {
-			// Requests with a session bead ID represent in-flight capacity and
-			// should not reserve fresh-create budget for this template.
-			if request.Tier == "new" && request.SessionBeadID == "" {
-				count++
-				if request.FloorGuarantee {
-					floor = true
-				}
-			}
-		}
-		if count > 0 {
-			demands = append(demands, demand{template: state.Template, count: count, floor: floor})
-		}
-	}
-	if len(demands) <= 1 {
-		return nil, 0
-	}
-	shares := make(map[string]int, len(demands))
-	remaining := limit
-	// start rotates the per-tick allocation by seed so neither the floor
-	// reservation (Phase 1) nor the elastic round-robin (Phase 2) deterministically
-	// favors the same (e.g. alphabetically-first) templates every tick. Without
-	// this rotation, when floor-bearing templates exceed the budget the same
-	// late-order floor templates would be starved on every tick and never spawn
-	// their floor (the starvation pattern fixed in fair wake-budget selection).
-	start := int(seed % uint64(len(demands)))
-	// Reserve a slice of the budget for elastic (non-floor) demand so a large
-	// floor set can't consume the whole budget in Phase 1 and starve elastic
-	// pools to zero. Without this, when floor-bearing demand >= the budget, an
-	// elastic pool with real demand (e.g. a high-queue rig executor sitting
-	// behind ~budget floor pools) gets zero create tokens every tick and never
-	// spawns a single session. Floors keep priority (3/4 of the budget) but the
-	// reserve guarantees elastic progress; for tiny budgets (< 4) the reserve is
-	// 0, preserving the original floor-first behavior.
-	elasticDemand := 0
-	for _, d := range demands {
-		if !d.floor {
-			elasticDemand += d.count
-		}
-	}
-	elasticReserve := limit / 4
-	if elasticReserve > elasticDemand {
-		elasticReserve = elasticDemand
-	}
-	floorBudget := limit - elasticReserve
-	// Phase 1: guarantee one create token per floor-bearing template
-	// (min_active_sessions floor) before elastic scale-check demand competes for
-	// the budget. Without this, a cold pool's lone floor request loses the
-	// round-robin to a warm pool's large demand and its floor never spawns.
-	// Reserved in seed-rotated order, capped at floorBudget so floors can't zero
-	// the elastic reserve; if floor-bearing templates exceed floorBudget, a
-	// different subset is prioritized each tick so none is permanently starved.
-	floorUsed := 0
-	for off := 0; off < len(demands); off++ {
-		if floorUsed >= floorBudget {
-			break
-		}
-		d := demands[(start+off)%len(demands)]
-		if d.floor {
-			shares[d.template]++
-			remaining--
-			floorUsed++
-		}
-	}
-	// Phase 2a: hand the reserved elastic slice to elastic (non-floor) demand
-	// before the general round-robin, so floors deferred out of Phase 1 can't
-	// reclaim it. Seed-rotated, capped at each template's request count.
-	elasticGiven := 0
-	for elasticGiven < elasticReserve && remaining > 0 {
-		progressed := false
-		for offset := 0; offset < len(demands) && remaining > 0 && elasticGiven < elasticReserve; offset++ {
-			d := demands[(start+offset)%len(demands)]
-			if d.floor || shares[d.template] >= d.count {
-				continue
-			}
-			shares[d.template]++
-			remaining--
-			elasticGiven++
-			progressed = true
-		}
-		if !progressed {
-			break
-		}
-	}
-	// Phase 2b: round-robin the remaining budget across all demand, capped at
-	// each template's request count (a reserved floor token counts toward that
-	// cap, so a floor-only template is not topped up further here).
-	for remaining > 0 {
-		progressed := false
-		for offset := 0; offset < len(demands) && remaining > 0; offset++ {
-			d := demands[(start+offset)%len(demands)]
-			if shares[d.template] >= d.count {
-				continue
-			}
-			shares[d.template]++
-			remaining--
-			progressed = true
-		}
-		if !progressed {
-			break
-		}
-	}
-	return shares, remaining
-}
-
-func (b *poolSessionCreateBudget) tryClaim(template string) bool {
-	if b == nil {
-		return true
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.remaining <= 0 {
-		return false
-	}
-	if b.templateRemaining != nil {
-		switch {
-		case b.templateRemaining[template] > 0:
-			b.templateRemaining[template]--
-		case b.spare > 0:
-			b.spare--
-		default:
-			return false
-		}
-	}
-	b.remaining--
-	return true
-}
-
-func (b *poolSessionCreateBudget) release() {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.remaining++
-	if b.templateRemaining != nil {
-		b.spare++
-	}
-}
-
 func (bp *agentBuildParams) configurePoolSessionCreateFairShare(states []PoolDesiredState) {
 	if bp == nil || bp.poolSessionCreateBudget == nil {
 		return
 	}
+	demands := make([]poolplan.Demand, 0, len(states))
+	for _, state := range states {
+		demand := poolplan.Demand{Template: state.Template}
+		for _, request := range state.Requests {
+			// Requests with a session bead ID represent in-flight capacity and
+			// must not reserve fresh-create budget for this template.
+			if request.Tier != "new" || request.SessionBeadID != "" {
+				continue
+			}
+			demand.FreshCreates++
+			demand.HasFloor = demand.HasFloor || request.FloorGuarantee
+		}
+		if demand.FreshCreates > 0 {
+			demands = append(demands, demand)
+		}
+	}
 	seed := poolSessionCreateFairShareCounter.Add(1) - 1
-	bp.poolSessionCreateBudget.configureFairShare(states, seed)
+	bp.poolSessionCreateBudget.ConfigureFairShare(demands, seed)
 }
 
 func (bp *agentBuildParams) tryClaimPoolSessionCreate(template string) bool {
 	if bp == nil || bp.poolSessionCreateBudget == nil {
 		return true
 	}
-	return bp.poolSessionCreateBudget.tryClaim(template)
+	return bp.poolSessionCreateBudget.TryClaim(template)
 }
 
 func (bp *agentBuildParams) releasePoolSessionCreate() {
 	if bp == nil || bp.poolSessionCreateBudget == nil {
 		return
 	}
-	bp.poolSessionCreateBudget.release()
+	bp.poolSessionCreateBudget.Release()
 }
 
 func evaluatePendingPools(
@@ -632,14 +471,20 @@ func buildDesiredStateWithSessionBeads(
 					namedOnDemandTemplates[template] = true
 				}
 				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
-				// Cross-store cold-wake for named-backing pools (vp-cl4): mirror the
-				// generic-pool guard (vp-s37 / #3078 line ~598). A cold rig pool that
-				// backs a named session and has no custom scale_check must also probe
-				// the city store so that routed demand delivered there (vp-kvp) can
-				// wake the pool. Same guard conditions apply: healthy own rig store,
-				// not city-aliased, not city-scoped. The named-session target list
+				// Cross-store demand for named-backing pools (vp-cl4): mirror the
+				// generic-pool guard (vp-s37 / #3078 below). A rig pool that backs
+				// a named session and has no custom scale_check must also probe
+				// the city store so that routed demand delivered there (vp-kvp)
+				// counts, warm or cold — like the generic-pool probe below, this
+				// is NOT gated on isCold: a warm named-backing pool that only
+				// probed its rig store would drop to zero demand between city
+				// beads and be orphan-drained, then re-glimpse city demand on the
+				// next cold tick and respawn (the same spawn/drain treadmill,
+				// amplitude clamped to 1 by the namedOnDemandTemplates clamp).
+				// Same guard conditions apply: healthy own rig store, not
+				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
-				if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
@@ -668,17 +513,35 @@ func buildDesiredStateWithSessionBeads(
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
-			// Cross-store cold-wake (FR-S0.1 / vp-s37): a cold rig pool's routed
-			// demand may live in the city store (vp-kvp cross-store delivery),
-			// which the own-rig probe above cannot see while the pool sleeps —
-			// so a sleeping rig pool would never wake to discover it. Add a
-			// city-store probe for cold rig pools so their demand reflects
-			// routed work in either store. No clamp: unlike a custom-scale_check
-			// pool — where the probe is clamped so it cannot override the custom
-			// count (see coldWakeTemplates below) — the default probe IS the
+			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
+			// may live in the city store (vp-kvp cross-store delivery), which
+			// the own-rig probe above cannot see. Add a city-store probe so the
+			// pool's demand reflects routed work in either store — matching the
+			// claim path, where a rig agent's work_query already federates
+			// across stores and claims city-delivered work.
+			//
+			// NOT gated on isCold. This probe began as a cold-wake assist (a
+			// sleeping pool can't discover city-store demand), but gating it on
+			// isCold left a WARM rig pool structurally blind to the same
+			// demand: its count stayed pinned at the rig-store total while
+			// routed beads sat unclaimed in the city store, and a pool at the
+			// warm/cold boundary oscillated pool_desired N↔0 (cold ticks
+			// glimpsed city demand and spawned; warm ticks went blind and the
+			// reconciler orphan-drained the sessions it had just started).
+			// Observed in production: a warm worker pool pinned at
+			// poolDesired=1 against 1 rig-store + 9 city-store routed beads,
+			// serializing every live workflow behind one session and starving
+			// all dep-downstream control beads. Demand a pool can claim is
+			// demand it must be able to count, warm or cold.
+			//
+			// No clamp: unlike a custom-scale_check pool — where the probe is
+			// clamped so it cannot override the custom count (see
+			// coldWakeTemplates below) — the default probe IS the
 			// authoritative count, so it scales to total routed demand (bounded
 			// by max_active and the daemon's max_wakes_per_tick), matching the
-			// retired cold-pool-spawner's scale-to-want. A city-scoped pool's
+			// retired cold-pool-spawner's scale-to-want. Counts sum across
+			// store groups and the beads are distinct per store, so probing
+			// both yields the correct union demand. A city-scoped pool's
 			// own target is already the city store, so it needs no extra probe.
 			//
 			// Gated on a healthy own rig store: when the rig store is missing or
@@ -687,20 +550,32 @@ func buildDesiredStateWithSessionBeads(
 			// unreachable, and the partial flag must keep suppressing drain
 			// decisions rather than be overridden by a spurious city-store wake.
 			//
-			// ownTarget.store != store guards the case where the rig store
-			// aliases the city store (an unbound rig falling back to the city
-			// scope): a separate "city" group over the same store would
-			// double-count the same beads, since defaultScaleCheckCounts dedups
-			// per group, not across groups. Current store-map builders skip
-			// such rigs, so this is defense-in-depth against future callers.
+			// ownTarget.store != store is a same-pointer optimization: it skips
+			// appending a "city" probe when the rig store IS the identical Store
+			// object as the city store (which would re-probe one store, not form
+			// a real cross-store union). It is NOT the alias-safety guard — a rig
+			// store that aliases the city store as a DISTINCT Store value (an
+			// unbound rig falling back to the city scope) passes this inequality,
+			// so the "city" group can still surface the same beads. countedBeads
+			// dedups those per template ACROSS store groups by bead ID (see its
+			// definition below), and is the load-bearing defense now that the
+			// city probe is no longer cold-gated. Current store-map builders skip
+			// such rigs, so today this is defense-in-depth against future callers.
 			// Control dispatchers are deliberately store-scoped: a rig copy cannot
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
-			if isCold && !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue
 		}
+		// Custom-scale_check pools deliberately KEEP the cold-only probe (unlike
+		// the default-probe branches above, which count cross-store demand warm
+		// or cold): the custom check is the authoritative count while the pool
+		// is awake, and this probe is clamped to 1 (coldWakeTemplates) so it can
+		// only wake a sleeping pool, never override the custom count. A custom
+		// scale_check that should scale on cross-store routed demand must count
+		// it itself, or the pool will churn at the warm/cold boundary.
 		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
@@ -1554,6 +1429,16 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 		group.templates[template] = struct{}{}
 	}
 
+	// countedBeads dedups counted bead IDs per template ACROSS store groups.
+	// Bead IDs are unique within a deployment, so a legitimate cross-store
+	// union never collides — but when a rig store aliases the city store as a
+	// distinct Store object (pointer inequality passes: a legacy unscoped
+	// file-store layout, or a rig dir whose missing .beads resolves bd's
+	// walk-up to the city DB), the same beads appear in both the "rig:<name>"
+	// and "city" groups and would double the template's demand. With the city
+	// probe no longer cold-gated, that double-count would be a persistent
+	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
+	countedBeads := make(map[string]map[string]struct{})
 	for key, group := range groups {
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
@@ -1576,6 +1461,15 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
+			seen := countedBeads[template]
+			if seen == nil {
+				seen = make(map[string]struct{})
+				countedBeads[template] = seen
+			}
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
 			counts[template]++
 			entry := demand[template]
 			entry.Count++
