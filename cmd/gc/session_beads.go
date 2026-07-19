@@ -32,6 +32,62 @@ const (
 	poolAliasConflictAtMetadataKey    = "pool_alias_conflict_at"
 )
 
+const (
+	// deferredSingletonAliasRetryBase is the shortest interval between two
+	// deferred-singleton alias re-attempts. The first few retries stay brisk so a
+	// conflict that resolves on its own (the previous holder exiting) is picked up
+	// promptly.
+	deferredSingletonAliasRetryBase = 30 * time.Second
+	// deferredSingletonAliasRetryMax caps the backoff. A conflict that has not
+	// resolved in half an hour is structural -- typically two live sessions of a
+	// max_active_sessions=1 agent -- and re-checking it more often than this buys
+	// nothing while writing to the event log every time.
+	deferredSingletonAliasRetryMax = 30 * time.Minute
+)
+
+// deferredSingletonAliasRetryDue reports whether a deferred-singleton alias
+// re-attempt should run now, given when the last attempt was recorded and how
+// many attempts have already happened.
+//
+// The backoff doubles per attempt and saturates at
+// deferredSingletonAliasRetryMax. An unparseable or missing timestamp returns
+// true: without evidence that an attempt happened recently, the safe answer is
+// to retry rather than to stall a conflict that could have resolved.
+func deferredSingletonAliasRetryDue(lastAttempt string, count int, now time.Time) bool {
+	last := strings.TrimSpace(lastAttempt)
+	if last == "" {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		return true
+	}
+	// A timestamp in the future means a clock change or a bad write; treat it as
+	// due rather than letting it suppress retries until the clock catches up.
+	if at.After(now) {
+		return true
+	}
+	return now.Sub(at) >= deferredSingletonAliasRetryBackoff(count)
+}
+
+// deferredSingletonAliasRetryBackoff returns the interval required before the
+// next re-attempt after count prior attempts. Shifting is bounded explicitly:
+// counts observed in production reach five figures, and shifting by that would
+// overflow rather than saturate.
+func deferredSingletonAliasRetryBackoff(count int) time.Duration {
+	if count <= 1 {
+		return deferredSingletonAliasRetryBase
+	}
+	backoff := deferredSingletonAliasRetryBase
+	for i := 1; i < count; i++ {
+		backoff *= 2
+		if backoff >= deferredSingletonAliasRetryMax {
+			return deferredSingletonAliasRetryMax
+		}
+	}
+	return backoff
+}
+
 // loadSessionBeads returns all open session beads from the store.
 func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
@@ -2019,6 +2075,23 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			count := 0
 			if existing, err := strconv.Atoi(strings.TrimSpace(b.Metadata[poolAliasConflictCountMetadataKey])); err == nil && existing > 0 {
 				count = existing
+			}
+			// A deferred singleton keeps retrying because the alias is expected to
+			// free up when its current holder exits. When that never happens -- two
+			// live sessions of a max_active_sessions=1 agent -- the retry has no
+			// converging condition, and an unthrottled re-attempt rewrites this bead
+			// on EVERY sync tick, forever. Observed in production: one session
+			// reached 15,000+ conflict iterations and became the dominant writer to
+			// the city event log (~68% of events), drowning the events window for
+			// every other reader.
+			//
+			// Back off between attempts so an unresolvable conflict costs a bounded
+			// number of writes instead of one per tick. Recovery is preserved: the
+			// retry still fires, just on a widening interval, so a conflict that CAN
+			// resolve still resolves.
+			if retryDeferredSingleton && !deferredSingletonAliasRetryDue(
+				b.Metadata[poolAliasConflictAtMetadataKey], count, now) {
+				return
 			}
 			// This is a retry counter across build-time normalization and
 			// sync-time alias recovery, not a one-increment-per-tick gauge.
