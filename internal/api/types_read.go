@@ -68,6 +68,8 @@ type StatusView struct {
 	// the wire (the view reuses the wire struct — it is already CLI-shaped).
 	ConditionalWrites *StatusConditionalWrites
 	Summary           StatusSummaryView
+	Partial           bool
+	PartialErrors     []string
 }
 
 // StatusAgentView is the CLI-facing per-agent row.

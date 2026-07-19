@@ -96,6 +96,13 @@ type ProofRef struct {
 	Test         string
 	Runner       SymbolRef
 	AllowedCalls []SymbolRef
+
+	// Scope optionally narrows what a proved claim establishes when a
+	// source-bound constructor is proved on one execution path but not its
+	// whole surface. It is rendered alongside the proved status so the ledger
+	// does not overstate coverage — for example a router composition proved on
+	// its default route while its alternate route is covered by focused tests.
+	Scope string
 }
 
 // Waiver is a temporary, owned exception to an applicable contract.
@@ -246,8 +253,14 @@ func Catalog() []Entry {
 				Function: "resolveSessionTransportProvider",
 				Reason:   "conditional transport composition is outside the runtime registry",
 			},
-			Claims: []ContractClaim{waivedRuntime(autoConstructor,
-				"the production auto base/ACP composition has no full shared runtime contract",
+			Claims: []ContractClaim{provedRuntimeScoped(
+				autoConstructor,
+				"internal/runtime/auto/conformance_test.go",
+				"TestAutoConformance",
+				"default-route conformance; ACP route covered by focused auto routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			)},
 		},
 	}
@@ -295,6 +308,12 @@ func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...Sym
 			AllowedCalls: append([]SymbolRef(nil), allowedCalls...),
 		},
 	}
+}
+
+func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowedCalls ...SymbolRef) ContractClaim {
+	claim := provedRuntime(constructor, file, test, allowedCalls...)
+	claim.Proof.Scope = scope
+	return claim
 }
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
@@ -672,6 +691,9 @@ func renderClaim(claim ContractClaim) string {
 	case DispositionProved:
 		if claim.Proof == nil {
 			return "proved (invalid: no proof)"
+		}
+		if scope := strings.TrimSpace(claim.Proof.Scope); scope != "" {
+			return fmt.Sprintf("proved by %s#%s (%s)", claim.Proof.File, claim.Proof.Test, scope)
 		}
 		return fmt.Sprintf("proved by %s#%s", claim.Proof.File, claim.Proof.Test)
 	case DispositionWaived:

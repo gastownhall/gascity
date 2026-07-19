@@ -60,14 +60,21 @@ func repairIDDefault(db *sql.DB, table string) error {
 
 const nativeDoltStoreActor = "gascity"
 
+// nativeDoltOpenReadyStatuses lists the upstream bd statuses Ready() queries
+// GetReadyWork for. This must match IsReadyCandidateForTier's contract of
+// "open status ... and no future defer_until": only StatusOpen (bd's own
+// status-category table marks it the sole "active" category status) and
+// StatusDeferred (kept only because IsDeferred independently re-checks
+// DeferUntil, so an expired deferral must still resurface) belong here.
+// blocked/hooked are bd's "wip" category and pinned is "frozen" — bd's own
+// ready semantics already exclude them, and Gas City has no analogous
+// re-check for them the way it does for deferred, so querying for them let
+// dependency-blocked beads erase their status to "open" via mapBdStatus and
+// pass IsReadyCandidateForTier's status gate. See ga-3mv5d3 bead notes for
+// the full investigation.
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
-	beadslib.StatusBlocked,
 	beadslib.StatusDeferred,
-	beadslib.Status("pinned"),
-	beadslib.Status("hooked"),
-	beadslib.Status("review"),
-	beadslib.Status("testing"),
 }
 
 var (

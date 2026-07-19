@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Classify static analysis as changed-file or full-repository scope."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+
+PROTECTED_FILES = frozenset(
+    {
+        "go.mod",
+        "go.sum",
+        "go.work",
+        "go.work.sum",
+        "Makefile",
+        "scripts/ci-static-scope",
+        "scripts/ci-static-select",
+    }
+)
+PROTECTED_PREFIXES = (
+    ".golangci.",
+    ".github/workflows/",
+    ".github/actions/",
+    ".githooks/",
+    "vendor/",
+    "scripts/cipolicy/",
+)
+
+
+def git_output(*args: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.stdout
+
+
+def changed_scope_is_safe() -> bool:
+    if os.environ.get("EVENT_NAME") != "pull_request":
+        return False
+
+    requested_base = os.environ.get("PR_BASE_SHA", "")
+    if not requested_base:
+        return False
+
+    resolved_base = git_output(
+        "rev-parse", "--verify", "--end-of-options", f"{requested_base}^{{commit}}"
+    ).decode("ascii").strip()
+    if resolved_base != requested_base:
+        return False
+
+    head_and_parents = git_output("rev-list", "--parents", "-n", "1", "HEAD").decode(
+        "ascii"
+    ).split()
+    if len(head_and_parents) != 3 or head_and_parents[1] != resolved_base:
+        return False
+
+    changed = git_output(
+        "diff", "--name-only", "-z", "--no-renames", resolved_base, "HEAD", "--"
+    )
+    paths = changed.split(b"\0")
+    if paths and paths[-1] == b"":
+        paths.pop()
+    for raw_path in paths:
+        path = os.fsdecode(raw_path)
+        if path in PROTECTED_FILES or path.startswith(PROTECTED_PREFIXES):
+            return False
+    return True
+
+
+def main() -> int:
+    try:
+        scope = "changed" if changed_scope_is_safe() else "full"
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        scope = "full"
+    print(scope)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

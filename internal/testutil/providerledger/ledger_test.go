@@ -608,6 +608,41 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
+	var proof *ProofRef
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.composition.auto" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/auto", "New") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("auto composition disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			proof = claim.Proof
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("auto.New proof is missing")
+	}
+	if proof.File != "internal/runtime/auto/conformance_test.go" || proof.Test != "TestAutoConformance" {
+		t.Errorf("auto.New proof = %s#%s, want auto conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
+		t.Errorf("auto.New allowed calls = %q, want %q", got, want)
+	}
+	// The conformance factory constructs auto.New without RouteACP, so the
+	// shared contract only runs the default route; the scope keeps the rendered
+	// ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "default-route conformance; ACP route covered by focused auto routing tests"; got != want {
+		t.Errorf("auto.New proof scope = %q, want %q", got, want)
+	}
+}
+
 func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
 	dir := writeRuntimeDoubleFixture(t, map[string]string{
 		"runtime.go": `package runtime

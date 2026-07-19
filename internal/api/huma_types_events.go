@@ -99,6 +99,12 @@ type SessionActivityEvent struct {
 	Activity string `json:"activity" doc:"Session activity state: 'idle' or 'in-turn'." example:"idle"`
 }
 
+// SessionPendingClearedEvent reports that a previously pending interaction is
+// no longer awaiting a response.
+type SessionPendingClearedEvent struct {
+	RequestID string `json:"request_id" doc:"Request ID of the interaction that was cleared."`
+}
+
 // resolveAfterSeq returns the reconnect position from Last-Event-ID or after_seq.
 func (e *EventStreamInput) resolveAfterSeq() uint64 {
 	if e.LastEventID != "" {

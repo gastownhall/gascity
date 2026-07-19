@@ -183,11 +183,21 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: CI workflow policy
         run: make test-ci-policy
+      - name: Classify static-analysis scope
+        id: static-scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          scope="$(scripts/ci-static-scope)"
+          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
       - name: go.mod replace guard
         run: make check-gomod-replace
       - name: Native dependency surface guard
@@ -216,13 +226,29 @@ jobs:
           key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
           restore-keys: |
             ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-
-      - name: Lint
+      - name: Lint affected packages
+        if: steps.static-scope.outputs.scope == 'changed'
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
+          LINT_CHANGED_SCOPE: tracked
+          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
+        run: make lint-affected
+      - name: Lint full repository
+        if: steps.static-scope.outputs.scope != 'changed'
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
-      - name: Format
+      - name: Format changed files
+        if: steps.static-scope.outputs.scope == 'changed'
+        env:
+          LINT_CHANGED_SCOPE: tracked
+          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
+        run: make fmt-check-changed
+      - name: Format full repository
+        if: steps.static-scope.outputs.scope != 'changed'
         run: make fmt-check
       - name: Vet
+        if: steps.static-scope.outputs.scope != 'changed'
         run: make vet
       - name: Docs
         run: make check-docs

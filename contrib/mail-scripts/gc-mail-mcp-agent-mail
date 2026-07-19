@@ -309,10 +309,80 @@ msg_status() {
   cat "$CACHE_DIR/msg-read/$msg_id" 2>/dev/null || true
 }
 
+message_not_found() {
+  echo "gc-mail-error:not-found: message $1 not found" >&2
+  exit 1
+}
+
 # get_cached_thread_id returns the cached thread ID for a message, or "".
 get_cached_thread_id() {
   local msg_id="$1"
   cat "$CACHE_DIR/msg-thread/$msg_id" 2>/dev/null || true
+}
+
+# list_messages renders the open messages visible to one recipient. Inbox and
+# check exclude locally-read messages; all includes them but still excludes
+# archived messages from every view.
+list_messages() {
+  local recipient="$1" include_read="$2"
+  local mcp_recipient registration_token result exclude_ids status_map
+  local thread_map reply_map name_map filtered mid local_st tid rt
+
+  ensure_agent "$recipient"
+  mcp_recipient=$(gc_to_mcp_name "$recipient")
+  registration_token=$(require_agent_token "$recipient")
+  result=$(mcp_call "fetch_inbox" "$(jq -n \
+    --arg project "$PROJECT" \
+    --arg name "$mcp_recipient" \
+    --arg registration_token "$registration_token" \
+    '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
+
+  if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "[]" ]; then
+    echo ""
+    return
+  fi
+
+  exclude_ids="[]"
+  status_map="{}"
+  thread_map="{}"
+  reply_map="{}"
+  for mid in $(echo "$result" | jq -r '.[].id'); do
+    cache_recipient "$mid" "$recipient"
+    local_st=$(msg_status "$mid")
+    status_map=$(echo "$status_map" | jq --arg id "$mid" --arg status "$local_st" '. + {($id): $status}')
+    if [ "$local_st" = "archived" ] || { [ "$include_read" != "true" ] && [ -n "$local_st" ]; }; then
+      exclude_ids=$(echo "$exclude_ids" | jq --arg id "$mid" '. + [$id]')
+    fi
+    tid=$(get_cached_thread_id "$mid")
+    if [ -n "$tid" ]; then
+      thread_map=$(echo "$thread_map" | jq --arg id "$mid" --arg thread "$tid" '. + {($id): $thread}')
+    fi
+    rt=$(cat "$CACHE_DIR/msg-reply-to/$mid" 2>/dev/null || true)
+    if [ -n "$rt" ]; then
+      reply_map=$(echo "$reply_map" | jq --arg id "$mid" --arg reply "$rt" '. + {($id): $reply}')
+    fi
+  done
+
+  name_map=$(build_name_map_json)
+  filtered=$(echo "$result" | jq --arg to "$recipient" --argjson nmap "$name_map" \
+    --argjson excl "$exclude_ids" --argjson smap "$status_map" \
+    --argjson tmap "$thread_map" --argjson rmap "$reply_map" \
+    '[.[] | select((.id | tostring) as $mid | $excl | index($mid) | not) | {
+      id: (.id | tostring),
+      from: ($nmap[.from] // .from),
+      to: $to,
+      subject: (.subject // ""),
+      body: (.body_md // .subject // ""),
+      created_at: (.created_ts // (now | strftime("%Y-%m-%dT%H:%M:%SZ"))),
+      read: ($smap[(.id | tostring)] == "read"),
+      thread_id: ($tmap[(.id | tostring)] // ""),
+      reply_to: ($rmap[(.id | tostring)] // "")
+    }]')
+  if [ "$filtered" = "[]" ]; then
+    echo ""
+  else
+    echo "$filtered"
+  fi
 }
 
 # --- Operations ---
@@ -396,126 +466,13 @@ case "$op" in
     }'
     ;;
 
-  inbox)
-    recipient="${1:?usage: gc-mail-mcp-agent-mail inbox <recipient>}"
-    ensure_agent "$recipient"
-    mcp_recipient=$(gc_to_mcp_name "$recipient")
-    registration_token=$(require_agent_token "$recipient")
-
-    result=$(mcp_call "fetch_inbox" "$(jq -n \
-      --arg project "$PROJECT" \
-      --arg name "$mcp_recipient" \
-      --arg registration_token "$registration_token" \
-      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
-
-    if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "[]" ]; then
-      echo ""
-    else
-      # Build list of read/archived IDs to exclude.
-      # mcp_agent_mail's fetch_inbox returns ALL messages; we filter locally.
-      exclude_ids="[]"
-      for mid in $(echo "$result" | jq -r '.[].id'); do
-        cache_recipient "$mid" "$recipient"
-        local_st=$(msg_status "$mid")
-        if [ -n "$local_st" ]; then
-          exclude_ids=$(echo "$exclude_ids" | jq --arg id "$mid" '. + [$id]')
-        fi
-      done
-
-      # Build thread/reply maps from cache for this result set.
-      thread_map="{}"
-      reply_map="{}"
-      for mid in $(echo "$result" | jq -r '.[].id'); do
-        tid=$(get_cached_thread_id "$mid")
-        if [ -n "$tid" ]; then
-          thread_map=$(echo "$thread_map" | jq --arg k "$mid" --arg v "$tid" '. + {($k): $v}')
-        fi
-        rt=$(cat "$CACHE_DIR/msg-reply-to/$mid" 2>/dev/null || true)
-        if [ -n "$rt" ]; then
-          reply_map=$(echo "$reply_map" | jq --arg k "$mid" --arg v "$rt" '. + {($k): $v}')
-        fi
-      done
-
-      # Convert to gc format, excluding read/archived, reverse-mapping names.
-      name_map=$(build_name_map_json)
-      filtered=$(echo "$result" | jq --arg to "$recipient" --argjson nmap "$name_map" \
-        --argjson excl "$exclude_ids" --argjson tmap "$thread_map" --argjson rmap "$reply_map" \
-        '[.[] | select((.id | tostring) as $mid | $excl | index($mid) | not) | {
-          id: (.id | tostring),
-          from: ($nmap[.from] // .from),
-          to: $to,
-          subject: (.subject // ""),
-          body: (.body_md // .subject // ""),
-          created_at: (.created_ts // (now | strftime("%Y-%m-%dT%H:%M:%SZ"))),
-          thread_id: ($tmap[(.id | tostring)] // ""),
-          reply_to: ($rmap[(.id | tostring)] // "")
-        }]')
-      if [ "$filtered" = "[]" ]; then
-        echo ""
-      else
-        echo "$filtered"
-      fi
+  inbox|check|all)
+    recipient="${1:?usage: gc-mail-mcp-agent-mail $op <recipient>}"
+    include_read="false"
+    if [ "$op" = "all" ]; then
+      include_read="true"
     fi
-    ;;
-
-  check)
-    recipient="${1:?usage: gc-mail-mcp-agent-mail check <recipient>}"
-    ensure_agent "$recipient"
-    mcp_recipient=$(gc_to_mcp_name "$recipient")
-    registration_token=$(require_agent_token "$recipient")
-
-    result=$(mcp_call "fetch_inbox" "$(jq -n \
-      --arg project "$PROJECT" \
-      --arg name "$mcp_recipient" \
-      --arg registration_token "$registration_token" \
-      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
-
-    if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "[]" ]; then
-      echo ""
-    else
-      # Build list of read/archived IDs to exclude.
-      exclude_ids="[]"
-      for mid in $(echo "$result" | jq -r '.[].id'); do
-        cache_recipient "$mid" "$recipient"
-        local_st=$(msg_status "$mid")
-        if [ -n "$local_st" ]; then
-          exclude_ids=$(echo "$exclude_ids" | jq --arg id "$mid" '. + [$id]')
-        fi
-      done
-
-      # Build thread/reply maps from cache.
-      thread_map="{}"
-      reply_map="{}"
-      for mid in $(echo "$result" | jq -r '.[].id'); do
-        tid=$(get_cached_thread_id "$mid")
-        if [ -n "$tid" ]; then
-          thread_map=$(echo "$thread_map" | jq --arg k "$mid" --arg v "$tid" '. + {($k): $v}')
-        fi
-        rt=$(cat "$CACHE_DIR/msg-reply-to/$mid" 2>/dev/null || true)
-        if [ -n "$rt" ]; then
-          reply_map=$(echo "$reply_map" | jq --arg k "$mid" --arg v "$rt" '. + {($k): $v}')
-        fi
-      done
-
-      name_map=$(build_name_map_json)
-      filtered=$(echo "$result" | jq --arg to "$recipient" --argjson nmap "$name_map" \
-        --argjson excl "$exclude_ids" --argjson tmap "$thread_map" --argjson rmap "$reply_map" \
-        '[.[] | select((.id | tostring) as $mid | $excl | index($mid) | not) | {
-          id: (.id | tostring),
-          from: ($nmap[.from] // .from),
-          to: $to,
-          subject: (.subject // ""),
-          body: (.body_md // .subject // ""),
-          created_at: (.created_ts // (now | strftime("%Y-%m-%dT%H:%M:%SZ"))),
-          thread_id: ($tmap[(.id | tostring)] // ""),
-          reply_to: ($rmap[(.id | tostring)] // "")
-        }]')
-      if [ "$filtered" = "[]" ]; then
-        echo ""
-      else
-        echo "$filtered"
-      fi
-    fi
+    list_messages "$recipient" "$include_read"
     ;;
 
   read)
@@ -523,6 +480,9 @@ case "$op" in
     if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
       echo "invalid message ID: $id" >&2
       exit 1
+    fi
+    if [ "$(msg_status "$id")" = "archived" ]; then
+      message_not_found "$id"
     fi
 
     # Look up cached recipient (populated by send/inbox/check).
@@ -549,8 +509,7 @@ case "$op" in
     fi
 
     if [ -z "$msg" ] || [ "$msg" = "null" ]; then
-      echo "message $id not found" >&2
-      exit 1
+      message_not_found "$id"
     fi
 
     # Mark as read locally (mcp fetch_inbox doesn't filter by ack status).
@@ -589,6 +548,9 @@ case "$op" in
       echo "invalid message ID: $id" >&2
       exit 1
     fi
+    if [ "$(msg_status "$id")" = "archived" ]; then
+      message_not_found "$id"
+    fi
 
     # Same as read but does NOT mark as read or acknowledge.
     recipient=$(get_cached_recipient "$id")
@@ -612,8 +574,7 @@ case "$op" in
     fi
 
     if [ -z "$msg" ] || [ "$msg" = "null" ]; then
-      echo "message $id not found" >&2
-      exit 1
+      message_not_found "$id"
     fi
 
     mcp_from=$(echo "$msg" | jq -r '.from')
@@ -639,6 +600,9 @@ case "$op" in
       echo "invalid message ID: $id" >&2
       exit 1
     fi
+    if [ "$(msg_status "$id")" = "archived" ]; then
+      message_not_found "$id"
+    fi
     mark_msg_read "$id"
 
     # Also acknowledge server-side.
@@ -662,12 +626,18 @@ case "$op" in
       echo "invalid message ID: $id" >&2
       exit 1
     fi
+    if [ "$(msg_status "$id")" = "archived" ]; then
+      message_not_found "$id"
+    fi
     # Remove local read state. mcp_agent_mail has no un-ack, so this is best-effort local.
     rm -f "$CACHE_DIR/msg-read/$id"
     ;;
 
   reply)
     id="${1:?usage: gc-mail-mcp-agent-mail reply <id>}"
+    if [ "$(msg_status "$id")" = "archived" ]; then
+      message_not_found "$id"
+    fi
     input=$(cat)
     from=$(echo "$input" | jq -r '.from')
     subject=$(echo "$input" | jq -r '.subject // ""')
@@ -750,7 +720,10 @@ case "$op" in
 
   thread)
     id="${1:?usage: gc-mail-mcp-agent-mail thread <id>}"
-    thread_id="$(get_cached_thread_id "$id")"
+    thread_id=""
+    if [ "$(msg_status "$id")" != "archived" ]; then
+      thread_id="$(get_cached_thread_id "$id")"
+    fi
     if [ -z "$thread_id" ]; then
       thread_id="$id"
     fi
@@ -762,6 +735,7 @@ case "$op" in
       cached_tid=$(cat "$f")
       [ "$cached_tid" = "$thread_id" ] || continue
       mid="${f##*/}"
+      [ "$(msg_status "$mid")" != "archived" ] || continue
       # Look up recipient to fetch message details.
       recipient=$(get_cached_recipient "$mid")
       [ -n "$recipient" ] || continue
@@ -779,7 +753,9 @@ case "$op" in
         # Message IDs may be numeric or string; try both.
         msg=$(echo "$inbox_result" | jq --arg tid "$mid" '[.[] | select((.id | tostring) == $tid)] | .[0] // empty')
       fi
-      [ -n "$msg" ] && [ "$msg" != "null" ] || continue
+      if [ -z "$msg" ] || [ "$msg" = "null" ]; then
+        continue
+      fi
       mcp_from=$(echo "$msg" | jq -r '.from')
       gc_from=$(mcp_to_gc_name "$mcp_from")
       reply_to=$(cat "$CACHE_DIR/msg-reply-to/$mid" 2>/dev/null || true)

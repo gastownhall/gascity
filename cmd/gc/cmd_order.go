@@ -428,6 +428,7 @@ type orderJSON struct {
 	On           string            `json:"on,omitempty"`
 	Target       string            `json:"target,omitempty"`
 	Timeout      string            `json:"timeout,omitempty"`
+	CheckTimeout string            `json:"check_timeout,omitempty"`
 	Enabled      bool              `json:"enabled"`
 	Source       string            `json:"source,omitempty"`
 	FormulaLayer string            `json:"formula_layer,omitempty"`
@@ -497,6 +498,7 @@ func orderToJSON(a orders.Order) orderJSON {
 		On:           a.On,
 		Target:       a.Pool,
 		Timeout:      a.Timeout,
+		CheckTimeout: a.CheckTimeout,
 		Enabled:      a.IsEnabled(),
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,

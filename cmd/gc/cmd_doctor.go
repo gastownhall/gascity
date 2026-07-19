@@ -30,6 +30,7 @@ var (
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fix, verbose, jsonOut, explainPostgresAuth bool
+	var checkTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -51,7 +52,7 @@ legacy-to-current pack rewrites that are available on this branch.`,
   gc doctor --explain-postgres-auth`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, explainPostgresAuth, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, jsonOut, explainPostgresAuth, checkTimeout, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -62,6 +63,8 @@ legacy-to-current pack rewrites that are available on this branch.`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
 	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false,
 		"after running checks, print per-scope Postgres credential resolution table (no values printed)")
+	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 60*time.Second,
+		"per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables)")
 	return cmd
 }
 
@@ -307,6 +310,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewBDSplitStoreCheck(cityPath))
 		register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
+		register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 		register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 		register(newBacklogDepthCheck(cityPath, storeFactory))
@@ -358,6 +362,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
+	register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -378,6 +383,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:
@@ -410,14 +416,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
-func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time.Duration, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	d := &doctor.Doctor{}
+	d := &doctor.Doctor{CheckTimeout: checkTimeout}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose, ExplainPostgresAuth: explainPostgresAuth}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
@@ -576,6 +582,10 @@ type doctorJSONResult struct {
 	FixAttempted bool     `json:"fix_attempted,omitempty"`
 	FixError     string   `json:"fix_error,omitempty"`
 	Fixed        bool     `json:"fixed,omitempty"`
+	// TimedOut projects CheckResult.TimedOut so automation can structurally
+	// distinguish an abandoned check (outcome unknown, worth retrying) from a
+	// check that ran and returned an ordinary advisory error.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 type doctorJSONReport struct {
@@ -630,6 +640,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			FixAttempted: r.FixAttempted,
 			FixError:     r.FixError,
 			Fixed:        r.Fixed,
+			TimedOut:     r.TimedOut,
 		})
 	}
 	return writeCLIJSONLine(w, out)

@@ -75,3 +75,26 @@ func TestStatusProviderPreservesNativeLivenessObservation(t *testing.T) {
 		t.Fatalf("ObserveLiveness calls = %d, want 1", calls)
 	}
 }
+
+func TestStatusProviderTimeoutMarksPartial(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	base := newStatusProbeProvider()
+	base.running.Store(true)
+	base.delay.Store(int64(100 * time.Millisecond))
+	wrapped := newBoundedStatusProvider(base)
+
+	if wrapped.IsRunning("worker") {
+		t.Fatal("IsRunning returned true, want timeout fallback false")
+	}
+	if !statusProviderPartial(wrapped) {
+		t.Fatal("statusProviderPartial = false, want true after runtime probe timeout")
+	}
+}

@@ -425,7 +425,13 @@ func doConvoyListFallback(cityPath string, jsonOut bool, stdout, stderr io.Write
 }
 
 func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
-	if rawBeadsProviderForScope(cityPath, cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
+	return convoyStoreCandidatesWithProvider(cfg, cityPath, beadID, func(scopeRoot string) string {
+		return rawBeadsProviderForScope(scopeRoot, cityPath)
+	})
+}
+
+func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string, providerForScope func(string) string) []string {
+	if providerForScope(cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
 		legacyCityOnly := true
 		if cfg != nil {
 			for _, rig := range cfg.Rigs {
@@ -433,7 +439,7 @@ func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
 					continue
 				}
 				scopeRoot := resolveStoreScopeRoot(cityPath, rig.Path)
-				if rawBeadsProviderForScope(scopeRoot, cityPath) != "file" || (!samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot)) {
+				if providerForScope(scopeRoot) != "file" || (!samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot)) {
 					legacyCityOnly = false
 					break
 				}
