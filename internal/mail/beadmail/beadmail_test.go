@@ -1002,8 +1002,15 @@ func TestArchive(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after Archive: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "dismiss me" {
+		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
 	}
 }
 
@@ -1164,13 +1171,18 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 	}
 	store.Close(sent.ID) //nolint:errcheck
 
-	// Archiving already-closed message returns ErrAlreadyArchived.
+	// Archiving an already-closed message returns ErrAlreadyArchived without
+	// deleting the bead (idempotent, body retained).
 	err = p.Archive(sent.ID)
 	if !errors.Is(err, mail.ErrAlreadyArchived) {
 		t.Errorf("Archive already closed: got %v, want ErrAlreadyArchived", err)
 	}
-	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	b, getErr := store.Get(sent.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get(%s) after Archive of closed bead: %v (want bead retained)", sent.ID, getErr)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
 	}
 }
 
@@ -1202,7 +1214,7 @@ func TestArchiveNotFound(t *testing.T) {
 	}
 }
 
-func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
+func TestArchiveRetainsBodyReadableAfterClose(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -1214,12 +1226,16 @@ func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
-		t.Fatalf("Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	msg, err := p.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after Archive: %v (want body retained)", sent.ID, err)
+	}
+	if msg.Body != "dismiss me" {
+		t.Errorf("archived message body = %q, want \"dismiss me\"", msg.Body)
 	}
 }
 
-func TestArchiveManyDeletesImmediately(t *testing.T) {
+func TestArchiveManyClosesAndRetains(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -1242,8 +1258,12 @@ func TestArchiveManyDeletesImmediately(t *testing.T) {
 		}
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after ArchiveMany: %v (want bead retained)", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, bead.Status)
 		}
 	}
 }
@@ -1282,12 +1302,48 @@ func TestArchiveManyReportsPerIDResults(t *testing.T) {
 		t.Errorf("results[2].Err = %v, want nil", results[2].Err)
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after ArchiveMany: %v (want bead retained)", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, bead.Status)
 		}
 	}
 	if _, err := store.Get(task.ID); err != nil {
 		t.Fatalf("task bead should remain after ArchiveMany partial error: %v", err)
+	}
+}
+
+// TestArchiveDoubleArchiveRetainsBody guards the edge case where the same
+// message is archived twice: the second call must NOT delete the bead (which
+// is now "closed" after the first call hits the closed-branch and returns
+// ErrAlreadyArchived without mutating it).
+func TestArchiveDoubleArchiveRetainsBody(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "archive twice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
+	if err := p.Archive(sent.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Fatalf("second Archive: err = %v, want ErrAlreadyArchived", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after double Archive: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status after double Archive = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "archive twice" {
+		t.Errorf("bead body after double Archive = %q, want \"archive twice\"", b.Description)
 	}
 }
 
@@ -1390,8 +1446,12 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after Delete: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
 	}
 }
 

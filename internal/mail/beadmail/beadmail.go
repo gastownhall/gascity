@@ -342,7 +342,10 @@ type ArchiveFilter struct {
 	Limit           int
 }
 
-// Archive deletes a message bead without reading it.
+// Archive closes a message bead, retaining its body for later retrieval via
+// gc mail peek or bd show. A closed message no longer appears in inbox views
+// (all listing paths filter Status != "open"). Archiving an already-closed
+// message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
@@ -355,15 +358,9 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
-		if err := p.store.Delete(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return mail.ErrAlreadyArchived
-			}
-			return fmt.Errorf("beadmail archive: %w", err)
-		}
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Delete(id); err != nil {
+	if err := p.store.Close(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
