@@ -17,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
+const messageNotFoundMarker = "gc-mail-error:not-found"
+
 // Provider implements [mail.Provider] by delegating to a user-supplied script.
 type Provider struct {
 	script  string
@@ -64,7 +66,7 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	p.ensureRunning()
 	out, err := p.run(nil, "get", id)
 	if err != nil {
-		return mail.Message{}, err
+		return mail.Message{}, normalizeMessageError("get", err)
 	}
 	return unmarshalMessage(out)
 }
@@ -74,7 +76,7 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 	p.ensureRunning()
 	out, err := p.run(nil, "read", id)
 	if err != nil {
-		return mail.Message{}, err
+		return mail.Message{}, normalizeMessageError("read", err)
 	}
 	return unmarshalMessage(out)
 }
@@ -83,14 +85,14 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 func (p *Provider) MarkRead(id string) error {
 	p.ensureRunning()
 	_, err := p.run(nil, "mark-read", id)
-	return err
+	return normalizeMessageError("mark-read", err)
 }
 
 // MarkUnread delegates to: script mark-unread <id>
 func (p *Provider) MarkUnread(id string) error {
 	p.ensureRunning()
 	_, err := p.run(nil, "mark-unread", id)
-	return err
+	return normalizeMessageError("mark-unread", err)
 }
 
 // Archive delegates to: script archive <id>
@@ -178,9 +180,16 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	}
 	out, err := p.run(data, "reply", id)
 	if err != nil {
-		return mail.Message{}, err
+		return mail.Message{}, normalizeMessageError("reply", err)
 	}
 	return unmarshalMessage(out)
+}
+
+func normalizeMessageError(operation string, err error) error {
+	if err != nil && strings.Contains(err.Error(), messageNotFoundMarker) {
+		return fmt.Errorf("exec mail %s: %w: %w", operation, mail.ErrNotFound, err)
+	}
+	return err
 }
 
 // Thread delegates to: script thread <id>, where id may be a thread ID or

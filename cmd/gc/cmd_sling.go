@@ -282,7 +282,7 @@ func readSlingStdinBead() (title, description, errCode, errMsg string) {
 // cmdSlingWithJSON. On failure it returns a non-empty (errCode, errMsg) pair.
 func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead existingSlingSourceBead, a config.Agent) (storeDir string, store beads.Store, errCode, errMsg string) {
 	if sourceBead.exists {
-		s, err := openStoreAtForCity(sourceBead.storeDir, cityPath)
+		s, err := openAuthoritativeStoreAtForCity(sourceBead.storeDir, cityPath)
 		if err != nil {
 			return "", nil, "store_open_failed", fmt.Sprintf("gc sling: opening store %s: %v", sourceBead.storeDir, err)
 		}
@@ -499,7 +499,11 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		Store:    store,
 		StoreRef: storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
-			stores, skips, err := openSourceWorkflowStores(cfg, cityPath, "")
+			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
+				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
+			}, func(dir string) (beads.Store, error) {
+				return openAuthoritativeStoreAtForCity(dir, cityPath)
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -530,7 +534,7 @@ func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, err
 
 func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
 	storeEnv := map[string]string{}
-	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
+	switch provider := authoritativeBeadsProviderForScope(storeDir, cityPath); {
 	case provider == "file":
 		// Built-in routing now goes through beads.Store; custom queries own any
 		// provider-specific shell environment when they opt out of that path.
@@ -608,7 +612,7 @@ func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a c
 
 func openSlingStoreForSource(cfg *config.City, cityPath, beadOrFormula string, a config.Agent) (string, beads.Store, error) {
 	storeDir := resolveSlingStoreRoot(cfg, cityPath, beadOrFormula, a)
-	store, err := openStoreAtForCity(storeDir, cityPath)
+	store, err := openAuthoritativeStoreAtForCity(storeDir, cityPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("opening store %s: %w", storeDir, err)
 	}
@@ -627,7 +631,7 @@ func probeExistingSlingSourceBead(cfg *config.City, cityPath, beadID string) (ex
 	if !ok {
 		return existingSlingSourceBead{}, nil
 	}
-	store, err := openStoreAtForCity(storeDir, cityPath)
+	store, err := openAuthoritativeStoreAtForCity(storeDir, cityPath)
 	if err != nil {
 		return existingSlingSourceBead{}, fmt.Errorf("opening store %s: %w", storeDir, err)
 	}

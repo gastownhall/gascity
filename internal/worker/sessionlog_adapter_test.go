@@ -10,6 +10,32 @@ import (
 	"testing"
 )
 
+func TestSessionLogAdapterTailMetaForProviderUsesCodexSchema(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "2026", "04", "16", "rollout-codex-meta.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir codex transcript dir: %v", err)
+	}
+	writeLines(t, path,
+		`{"timestamp":"2026-04-16T21:49:30.901Z","type":"turn_context","payload":{"model":"gpt-5.5"}}`,
+		`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":15562,"cached_input_tokens":10624},"model_context_window":258400}}}`,
+	)
+
+	meta, err := (SessionLogAdapter{SearchPaths: []string{root}}).TailMetaForProvider("codex/tmux-cli", path)
+	if err != nil {
+		t.Fatalf("TailMetaForProvider(codex): %v", err)
+	}
+	if meta == nil || meta.ContextUsage == nil {
+		t.Fatalf("TailMetaForProvider(codex) = %#v, want model and context usage", meta)
+	}
+	if got, want := meta.Model, "gpt-5.5"; got != want {
+		t.Errorf("Model = %q, want %q", got, want)
+	}
+	if got, want := meta.ContextUsage.InputTokens, 15_562; got != want {
+		t.Errorf("InputTokens = %d, want %d", got, want)
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	t.Parallel()
 

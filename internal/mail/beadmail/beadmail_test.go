@@ -1007,6 +1007,105 @@ func TestArchive(t *testing.T) {
 	}
 }
 
+// TestLegacyClosedMessageBeadTreatedAsRemoved covers the upgrade path for a
+// store written by an earlier release that archived a message by closing its
+// bead instead of deleting it. The eager-delete archive contract says an
+// archived message is gone from every view, so a leftover closed
+// Type=="message" bead must not stay readable or mutable through the direct-ID
+// operations or thread lookup, while explicit Archive must still delete it.
+func TestLegacyClosedMessageBeadTreatedAsRemoved(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	legacy, err := p.Send("alice", "bob", "legacy", "closed by an old release")
+	if err != nil {
+		t.Fatalf("Send legacy: %v", err)
+	}
+	reply, err := p.Reply(legacy.ID, "bob", "RE: legacy", "still here")
+	if err != nil {
+		t.Fatalf("Reply before close: %v", err)
+	}
+	survivor, err := p.Send("alice", "bob", "survivor", "keep me")
+	if err != nil {
+		t.Fatalf("Send survivor: %v", err)
+	}
+
+	// Simulate the legacy archive: close the bead in place instead of deleting
+	// it, exactly what a close-on-archive release left behind.
+	if err := store.Close(legacy.ID); err != nil {
+		t.Fatalf("store.Close(legacy): %v", err)
+	}
+
+	// Direct-ID operations must treat the closed legacy bead as removed.
+	if _, err := p.Get(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Read(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Read(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if err := p.MarkRead(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkRead(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if err := p.MarkUnread(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkUnread(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Reply(legacy.ID, "bob", "too late", "must not create"); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Reply(legacy closed) error = %v, want ErrNotFound", err)
+	}
+
+	// List views already gate on open status; assert bob no longer sees the
+	// legacy message, only the survivor.
+	inbox, err := p.Inbox("bob")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if got := messageIDsOf(inbox); len(got) != 1 || got[0] != survivor.ID {
+		t.Errorf("Inbox(bob) = %v, want [%s]", got, survivor.ID)
+	}
+	total, unread, err := p.Count("bob")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Errorf("Count(bob) = (%d, %d), want (1, 1)", total, unread)
+	}
+
+	// Thread lookup must exclude the closed legacy bead but keep the open reply,
+	// whether addressed by the stable thread ID or the removed message's own ID.
+	byThreadID, err := p.Thread(legacy.ThreadID)
+	if err != nil {
+		t.Fatalf("Thread(stable ID): %v", err)
+	}
+	if got := messageIDsOf(byThreadID); len(got) != 1 || got[0] != reply.ID {
+		t.Errorf("Thread(stable ID) = %v, want [%s]", got, reply.ID)
+	}
+	byRemovedID, err := p.Thread(legacy.ID)
+	if err != nil {
+		t.Fatalf("Thread(removed ID): %v", err)
+	}
+	for _, m := range byRemovedID {
+		if m.ID == legacy.ID {
+			t.Errorf("Thread(removed ID) returned removed message %q", legacy.ID)
+		}
+	}
+
+	// Archive must still delete a closed legacy message when called explicitly.
+	if err := p.Archive(legacy.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive(legacy closed) error = %v, want ErrAlreadyArchived", err)
+	}
+	if _, err := store.Get(legacy.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("store.Get(legacy) after Archive err = %v, want ErrNotFound", err)
+	}
+}
+
+func messageIDsOf(msgs []mail.Message) []string {
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
 func TestArchiveCandidatesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
@@ -1115,7 +1214,7 @@ func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	if _, err := p.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
 		t.Fatalf("Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
