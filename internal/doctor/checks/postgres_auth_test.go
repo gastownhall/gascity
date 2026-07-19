@@ -1,4 +1,4 @@
-package doctor
+package checks
 
 import (
 	"bytes"
@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
@@ -52,9 +53,9 @@ func TestPostgresAuthCheck_StatusOK_ScopeFile(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	r := check.Run(&CheckContext{CityPath: cityPath})
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
 
-	if r.Status != StatusOK {
+	if r.Status != doctor.StatusOK {
 		t.Fatalf("status = %v; want StatusOK; message=%q", r.Status, r.Message)
 	}
 	if want := "rigs/pwu (db.example.test:5432): password from scope file"; r.Message != want {
@@ -77,9 +78,9 @@ func TestPostgresAuthCheck_StatusWarning_ParentShellEnv(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	r := check.Run(&CheckContext{CityPath: cityPath})
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
 
-	if r.Status != StatusWarning {
+	if r.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v; want StatusWarning; message=%q", r.Status, r.Message)
 	}
 	if want := "rigs/pwu (db.example.test:5432): password from parent shell env"; r.Message != want {
@@ -101,9 +102,9 @@ func TestPostgresAuthCheck_StatusError_NoCredentials(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	r := check.Run(&CheckContext{CityPath: cityPath})
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
 
-	if r.Status != StatusError {
+	if r.Status != doctor.StatusError {
 		t.Fatalf("status = %v; want StatusError; message=%q", r.Status, r.Message)
 	}
 	if want := "rigs/pwu (db.example.test:5432): no password resolvable"; r.Message != want {
@@ -132,9 +133,9 @@ func TestPostgresAuthCheck_StatusError_PermissiveMode(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	r := check.Run(&CheckContext{CityPath: cityPath})
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
 
-	if r.Status != StatusError {
+	if r.Status != doctor.StatusError {
 		t.Fatalf("status = %v; want StatusError; message=%q", r.Status, r.Message)
 	}
 	if !strings.Contains(r.Message, "credentials file mode") {
@@ -156,9 +157,9 @@ func TestPostgresAuthCheck_NoScopes_ReturnsOK(t *testing.T) {
 	cityPath := t.TempDir()
 
 	check := NewPostgresAuthCheck(cityPath, &config.City{})
-	r := check.Run(&CheckContext{CityPath: cityPath})
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
 
-	if r.Status != StatusOK {
+	if r.Status != doctor.StatusOK {
 		t.Fatalf("status = %v; want StatusOK", r.Status)
 	}
 	if r.Message != "no postgres-backed scopes" {
@@ -186,9 +187,9 @@ func TestPostgresAuthCheck_MultipleScopes(t *testing.T) {
 		{Name: "beta", Path: "rigs/beta"},
 	}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	r := check.Run(&CheckContext{CityPath: cityPath})
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
 
-	if r.Status != StatusError {
+	if r.Status != doctor.StatusError {
 		t.Fatalf("status = %v; want StatusError (rig B failed)", r.Status)
 	}
 	if !strings.HasPrefix(r.Message, "2 postgres-backed scope(s); first issue: ") {
@@ -211,7 +212,7 @@ func TestPostgresAuthCheck_CanFix_ReturnsFalse(t *testing.T) {
 func TestPostgresAuthCheck_RenderExtras_NoScopesPrintsHint(t *testing.T) {
 	check := NewPostgresAuthCheck(t.TempDir(), &config.City{})
 	var buf bytes.Buffer
-	check.RenderExtras(&CheckContext{ExplainPostgresAuth: true}, &buf)
+	check.RenderExtras(&doctor.CheckContext{ExplainPostgresAuth: true}, &buf)
 	got := buf.String()
 	if !strings.Contains(got, "no postgres-backed scopes (this flag has no effect)") {
 		t.Fatalf("RenderExtras (no scopes) output = %q; want §4.6 hint", got)
@@ -228,10 +229,10 @@ func TestPostgresAuthCheck_RenderExtras_FlagOff(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	check.Run(&CheckContext{CityPath: cityPath})
+	check.Run(&doctor.CheckContext{CityPath: cityPath})
 
 	var buf bytes.Buffer
-	check.RenderExtras(&CheckContext{ExplainPostgresAuth: false}, &buf)
+	check.RenderExtras(&doctor.CheckContext{ExplainPostgresAuth: false}, &buf)
 	if buf.Len() != 0 {
 		t.Fatalf("RenderExtras (flag off) wrote %d bytes; want zero", buf.Len())
 	}
@@ -249,10 +250,10 @@ func TestPostgresAuthCheck_RenderExtras_ExplainTable_OK_TierFour(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	check.Run(&CheckContext{CityPath: cityPath})
+	check.Run(&doctor.CheckContext{CityPath: cityPath})
 
 	var buf bytes.Buffer
-	check.RenderExtras(&CheckContext{ExplainPostgresAuth: true}, &buf)
+	check.RenderExtras(&doctor.CheckContext{ExplainPostgresAuth: true}, &buf)
 	out := buf.String()
 
 	// Header.
@@ -303,10 +304,10 @@ func TestPostgresAuthCheck_RenderExtras_NoCredsPrintsAllNoTokens(t *testing.T) {
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
-	check.Run(&CheckContext{CityPath: cityPath})
+	check.Run(&doctor.CheckContext{CityPath: cityPath})
 
 	var buf bytes.Buffer
-	check.RenderExtras(&CheckContext{ExplainPostgresAuth: true}, &buf)
+	check.RenderExtras(&doctor.CheckContext{ExplainPostgresAuth: true}, &buf)
 	out := buf.String()
 	if strings.Contains(out, "[YES]") {
 		t.Errorf("no-creds case rendered [YES]:\n%s", out)

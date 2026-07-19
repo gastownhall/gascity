@@ -1,4 +1,10 @@
-package doctor
+// Package checks holds doctor.Check implementations that cannot live in
+// the flat internal/doctor package because they depend on a package that
+// itself depends on doctor (e.g. internal/warmup, for CustomWarmupMail).
+// Types here still satisfy doctor.Check and its optional interfaces
+// (Renderer, warmup.CustomWarmupMail) — they are registered exactly like
+// any other doctor.Check.
+package checks
 
 import (
 	"errors"
@@ -10,8 +16,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/warmup"
 )
 
 // PostgresAuthCheck verifies that every PG-backed scope (city + rigs) has
@@ -22,7 +30,8 @@ import (
 //
 // The check NEVER prints the password value. Verbose details surface the
 // per-scope source enum and path; the explain table (gated by
-// CheckContext.ExplainPostgresAuth) shows the per-tier evaluation chain.
+// doctor.CheckContext.ExplainPostgresAuth) shows the per-tier evaluation
+// chain.
 type PostgresAuthCheck struct {
 	cityPath string
 	scopes   []postgresAuthScope
@@ -65,13 +74,20 @@ func (c *PostgresAuthCheck) Name() string { return "postgres-auth" }
 func (c *PostgresAuthCheck) CanFix() bool { return false }
 
 // Fix is a no-op; CanFix is false.
-func (c *PostgresAuthCheck) Fix(_ *CheckContext) error { return nil }
+func (c *PostgresAuthCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+// WarmupEligible reports whether this check opts into the `gc start`
+// warm-up scan. Returns true: postgres-auth credential failures
+// cause every PG-backed agent to EAUTH on first bd-write. Catching
+// them at warm-up gives the operator one mail with the resolution
+// table pointer rather than per-agent failures in the city log.
+func (c *PostgresAuthCheck) WarmupEligible() bool { return true }
 
 // Run probes every PG-backed scope and aggregates the outcome.
-func (c *PostgresAuthCheck) Run(_ *CheckContext) *CheckResult {
-	r := &CheckResult{Name: c.Name()}
+func (c *PostgresAuthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	r := &doctor.CheckResult{Name: c.Name()}
 	if len(c.scopes) == 0 {
-		r.Status = StatusOK
+		r.Status = doctor.StatusOK
 		r.Message = "no postgres-backed scopes"
 		return r
 	}
@@ -103,9 +119,48 @@ func (c *PostgresAuthCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
+// WarmupMailSubject is the subject the postgres-auth check returns
+// from CustomWarmupMail.SoleFailureMail. The string is the exact
+// text pinned by ga-5c4x §7.2 — log scrapers and triage prompts
+// grep on it.
+const WarmupMailSubject = "postgres-auth alert during city warm-up"
+
+// SoleFailureMail implements warmup.CustomWarmupMail. The runner calls
+// this only when postgres-auth is the sole check responsible for every
+// failure in a warm-up cycle (see warmup.CustomWarmupMail for the
+// selection rule); otherwise the runner's generic subject/body apply.
+//
+// Per-scope lines are sorted by severity descending (errors before
+// warnings) then by scope name ascending, so multi-scope failures read
+// worst-first and are deterministic across runs.
+func (c *PostgresAuthCheck) SoleFailureMail(report warmup.WarmupReport) (subject, body string) {
+	failures := append([]warmup.WarmupCheckResult(nil), report.Failures...)
+	sort.SliceStable(failures, func(i, j int) bool {
+		if failures[i].Status != failures[j].Status {
+			return failures[i].Status > failures[j].Status
+		}
+		return failures[i].Scope < failures[j].Scope
+	})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d PG-backed scope(s) failed credential resolution before agents started:\n", len(failures))
+	b.WriteByte('\n')
+	for _, f := range failures {
+		glyph := "✗"
+		if f.Status == doctor.StatusWarning {
+			glyph = "⚠"
+		}
+		fmt.Fprintf(&b, "%s %s — %s\n", glyph, f.Scope, f.Message)
+	}
+	b.WriteByte('\n')
+	b.WriteString("Run `gc doctor --explain-postgres-auth` for the resolution table per scope.\n")
+	b.WriteString("Fix before agents try to bd-write or expect EAUTH on first PG operation.\n")
+	return WarmupMailSubject, b.String()
+}
+
 // RenderExtras emits the per-scope --explain-postgres-auth table when
 // CheckContext.ExplainPostgresAuth is true. No-op otherwise.
-func (c *PostgresAuthCheck) RenderExtras(ctx *CheckContext, w io.Writer) {
+func (c *PostgresAuthCheck) RenderExtras(ctx *doctor.CheckContext, w io.Writer) {
 	if ctx == nil || !ctx.ExplainPostgresAuth {
 		return
 	}
@@ -193,7 +248,7 @@ func loadPostgresAuthScope(scopeRoot, kind, displayBase, relEnv string) (postgre
 type perScopeReport struct {
 	scope    postgresAuthScope
 	resolved pgauth.Resolved
-	status   CheckStatus
+	status   doctor.CheckStatus
 	message  string
 	detail   string // verbose-mode line; empty when message already says everything
 	fixHint  string
@@ -216,12 +271,12 @@ func classifyPostgresAuthResult(res postgresAuthScopeResult) perScopeReport {
 	if res.resolveOK {
 		switch res.resolved.Source {
 		case pgauth.SourceProcessEnvBeads, pgauth.SourceProcessEnvGC:
-			out.status = StatusWarning
+			out.status = doctor.StatusWarning
 			out.message = fmt.Sprintf("%s: password from parent shell env", res.scope.display)
 			out.detail = fmt.Sprintf("scope=%s  source=%s  user=%s", res.scope.root, res.resolved.Source.String(), res.resolved.User)
 			out.fixHint = fmt.Sprintf("parent-shell env works for the current shell only. Persist via %s (chmod 600) for non-interactive use.", scopeRel)
 		default:
-			out.status = StatusOK
+			out.status = doctor.StatusOK
 			label := humanSourceLabel(res.resolved.Source)
 			out.message = fmt.Sprintf("%s: password from %s", res.scope.display, label)
 			out.detail = fmt.Sprintf("scope=%s  source=%s  user=%s", res.scope.root, res.resolved.Source.String(), res.resolved.User)
@@ -232,7 +287,7 @@ func classifyPostgresAuthResult(res postgresAuthScopeResult) perScopeReport {
 	// Error path.
 	var permErr *pgauth.PermissivePermissionError
 	if errors.As(res.err, &permErr) {
-		out.status = StatusError
+		out.status = doctor.StatusError
 		out.message = fmt.Sprintf("%s: credentials file mode %#o (group/other readable)", res.scope.display, permErr.Mode.Perm())
 		tier := classifyPermissionErrorTier(res.scope, permErr.Path)
 		out.detail = fmt.Sprintf("tier=%s  path=%s", tier, permErr.Path)
@@ -242,21 +297,21 @@ func classifyPostgresAuthResult(res postgresAuthScopeResult) perScopeReport {
 	}
 	var parseErr *pgauth.CredentialsParseError
 	if errors.As(res.err, &parseErr) {
-		out.status = StatusError
+		out.status = doctor.StatusError
 		out.message = fmt.Sprintf("%s: parse %s at line %d: %s", res.scope.display, parseErr.Path, parseErr.Line, parseErr.Reason)
 		out.fixHint = fmt.Sprintf("edit %s line %d — see slice-2 reason vocabulary", parseErr.Path, parseErr.Line)
 		out.errParse = parseErr
 		return out
 	}
 	if errors.Is(res.err, pgauth.ErrNoPasswordResolvable) {
-		out.status = StatusError
+		out.status = doctor.StatusError
 		out.message = fmt.Sprintf("%s: no password resolvable", res.scope.display)
 		out.fixHint = fmt.Sprintf("set BEADS_POSTGRES_PASSWORD in %s (chmod 600)\nor add a [%s:%s] section to ~/.config/beads/credentials.",
 			scopeRel, res.scope.endpoint.Host, res.scope.endpoint.Port)
 		return out
 	}
 	// Defensive fallthrough — design §3.3.6.
-	out.status = StatusError
+	out.status = doctor.StatusError
 	out.message = fmt.Sprintf("%s: pgauth returned unrecognized error: %s", res.scope.display, res.err.Error())
 	out.fixHint = "please file a bug — postgres-auth check did not recognize this error shape"
 	out.rawErr = res.err.Error()
@@ -315,8 +370,8 @@ func sortPerScopeReports(reports []perScopeReport) {
 }
 
 // aggregatePostgresAuthStatus returns the maximum severity across reports.
-func aggregatePostgresAuthStatus(reports []perScopeReport) CheckStatus {
-	out := StatusOK
+func aggregatePostgresAuthStatus(reports []perScopeReport) doctor.CheckStatus {
+	out := doctor.StatusOK
 	for _, p := range reports {
 		if p.status > out {
 			out = p.status
@@ -372,11 +427,11 @@ func aggregatePostgresAuthDetails(reports []perScopeReport) []string {
 }
 
 // statusGlyph returns the same icon vocabulary printResult uses.
-func statusGlyph(s CheckStatus) string {
+func statusGlyph(s doctor.CheckStatus) string {
 	switch s {
-	case StatusError:
+	case doctor.StatusError:
 		return "✗"
-	case StatusWarning:
+	case doctor.StatusWarning:
 		return "⚠"
 	}
 	return "✓"
