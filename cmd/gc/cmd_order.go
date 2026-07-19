@@ -1747,11 +1747,15 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 	return orders.Order{}, false
 }
 
-// bdCursorRecentRunsLimit bounds the cursor read to the newest tracking beads.
-// The seq:<n> cursor is forward-only — every new run records a seq >= all
-// prior runs — so the max always lives among the newest runs; an unbounded
-// IncludeClosed list scales with the whole retained tracking corpus instead
-// (sr-dp9o). 256 is a wide margin over any realistic same-instant run burst.
+// bdCursorRecentRunsLimit caps the cursor read to the newest tracking beads.
+// The seq:<n> cursor is forward-only — every new run records a seq >= all prior
+// runs — so the true max(seq) is the newest run, which the canonical
+// (created_at DESC, id DESC) order that ApplyListQuery applies places at the
+// front; a client-side prefix cut therefore always retains it. This is a
+// client-side result cap, NOT a backing pushdown: bdCursor must stay off the
+// backing's bounded created-desc read (AllowBackingCreatedLimit), whose id-ASC
+// tie-break would drop the newest largest-id row — exactly the max-seq run —
+// when a same-second burst exceeds the cap.
 const bdCursorRecentRunsLimit = 256
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
@@ -1761,6 +1765,13 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
 		TierMode:      beads.TierBoth,
+		// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces to
+		// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the created_at
+		// sort key — so the backing's id-ASC created-desc limit could drop the newest
+		// largest-id row carrying the max seq when a same-second burst exceeds the
+		// cap, regressing the event cursor into replaying consumed events. Fetch the
+		// full candidate set and let ApplyListQuery cut the canonical
+		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the front.
 	})
 	if err != nil {
 		if len(beadList) == 0 {
