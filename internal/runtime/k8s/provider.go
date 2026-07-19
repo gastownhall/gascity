@@ -716,6 +716,11 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	return []byte(out), 0, nil
 }
 
+// findRunningPod resolves the running pod for name. A missing pod (scaled
+// down, evicted, never provisioned) is reported as [runtime.ErrSessionNotFound]
+// so callers can distinguish "session is gone" from a genuine transport
+// failure reaching a pod that does exist — the same distinction Relaunch
+// already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
 	label := SanitizeLabel(name)
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
@@ -723,7 +728,7 @@ func (p *Provider) findRunningPod(ctx context.Context, name string) (string, err
 		return "", err
 	}
 	if len(pods) == 0 {
-		return "", fmt.Errorf("no running pod for session %q", name)
+		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
 	}
 	return pods[0].Name, nil
 }

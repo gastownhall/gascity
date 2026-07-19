@@ -353,7 +353,11 @@ func TestSendKeys(t *testing.T) {
 // running pod for the session) surfaces as a non-nil error instead of being
 // swallowed — Nudge is not best-effort at the delivery layer, callers up
 // through worker.RuntimeHandle.Nudge and `gc session nudge` rely on this
-// error to report failed delivery (#4389).
+// error to report failed delivery (#4389). It also verifies the missing-pod
+// case is specifically [runtime.ErrSessionNotFound] — distinct from a live
+// pod's exec-stream failure — so callers like internal/session/chat.go and
+// internal/api/session_resolution.go can no-op on a gone session instead of
+// hard-failing (sjarmak's #4405 review).
 func TestNudgePropagatesTransportError(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
@@ -363,10 +367,13 @@ func TestNudgePropagatesTransportError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Nudge: expected error for missing pod, got nil")
 	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Nudge missing-pod error = %v, want errors.Is(..., runtime.ErrSessionNotFound)", err)
+	}
 }
 
 // TestSendKeysPropagatesTransportError mirrors TestNudgePropagatesTransportError
-// for SendKeys (#4389).
+// for SendKeys (#4389), including the ErrSessionNotFound distinction.
 func TestSendKeysPropagatesTransportError(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
@@ -374,6 +381,53 @@ func TestSendKeysPropagatesTransportError(t *testing.T) {
 	err := p.SendKeys("gc-missing-agent", "Down", "Enter")
 	if err == nil {
 		t.Fatal("SendKeys: expected error for missing pod, got nil")
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("SendKeys missing-pod error = %v, want errors.Is(..., runtime.ErrSessionNotFound)", err)
+	}
+}
+
+// TestNudgeExecStreamFailureIsNotErrSessionNotFound verifies the other half
+// of sjarmak's #4405 review: a running pod whose exec stream fails (a real
+// transport failure — #4389's actual bug) must NOT be mistaken for a gone
+// session. Only the pod-not-found case is ErrSessionNotFound; this failure
+// mode must propagate as a plain error so callers correctly treat it as a
+// hard failure rather than silently no-opping.
+func TestNudgeExecStreamFailureIsNotErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "send-keys", "-t", "main", "-l", "hello world"},
+		"", errors.New("stream error: broken pipe"))
+
+	err := p.Nudge("gc-test-agent", runtime.TextContent("hello world"))
+	if err == nil {
+		t.Fatal("Nudge: expected error for exec-stream failure, got nil")
+	}
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Nudge exec-stream-failure error = %v, must NOT be ErrSessionNotFound (pod exists, this is a real transport failure)", err)
+	}
+}
+
+// TestSendKeysExecStreamFailureIsNotErrSessionNotFound mirrors
+// TestNudgeExecStreamFailureIsNotErrSessionNotFound for SendKeys.
+func TestSendKeysExecStreamFailureIsNotErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "send-keys", "-t", "main", "Down", "Enter"},
+		"", errors.New("stream error: broken pipe"))
+
+	err := p.SendKeys("gc-test-agent", "Down", "Enter")
+	if err == nil {
+		t.Fatal("SendKeys: expected error for exec-stream failure, got nil")
+	}
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("SendKeys exec-stream-failure error = %v, must NOT be ErrSessionNotFound (pod exists, this is a real transport failure)", err)
 	}
 }
 
