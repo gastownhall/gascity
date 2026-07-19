@@ -880,18 +880,29 @@ func TestNativeDoltStoreListSkipsInvalidMetadataRows(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreListDoesNotPushLimitBeforeLocalSort(t *testing.T) {
+// A limit may reach the backing search ONLY together with a pushed-down sort
+// (IssueFilter.SortBy) — a bare limit on an unsorted query truncates an
+// arbitrary subset. Created-order sorts push down (sr-dp9o: keeping the limit
+// stops the dispatcher's history read from materializing the whole retained
+// corpus); the backing then pages in the requested order and the local
+// ApplyListQuery re-sort is a stable no-op over the returned page.
+func TestNativeDoltStoreListPushesLimitOnlyWithSort(t *testing.T) {
 	createdAt := time.Date(2026, 5, 17, 11, 0, 0, 0, time.UTC)
+	newIssue := &beadslib.Issue{ID: "gc-new", Title: "new", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt.Add(2 * time.Minute)}
+	oldIssue := &beadslib.Issue{ID: "gc-old", Title: "old", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt}
+	midIssue := &beadslib.Issue{ID: "gc-mid", Title: "mid", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt.Add(time.Minute)}
 	storage := &nativeDoltStorageSpy{
 		searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			if filter.Limit != 0 {
-				t.Fatalf("upstream list limit = %d, want 0 when Gas City sorts locally", filter.Limit)
+			if filter.Limit != 0 && filter.SortBy == "" {
+				t.Fatalf("upstream list limit = %d pushed without a sort; a bare limit truncates an arbitrary subset", filter.Limit)
 			}
-			return []*beadslib.Issue{
-				{ID: "gc-new", Title: "new", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt.Add(2 * time.Minute)},
-				{ID: "gc-old", Title: "old", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt},
-				{ID: "gc-mid", Title: "mid", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt.Add(time.Minute)},
-			}, nil
+			switch {
+			case filter.SortBy == "created" && !filter.SortDesc:
+				return []*beadslib.Issue{cloneNativeIssueForTest(newIssue), cloneNativeIssueForTest(midIssue), cloneNativeIssueForTest(oldIssue)}, nil
+			case filter.SortBy == "created" && filter.SortDesc:
+				return []*beadslib.Issue{cloneNativeIssueForTest(oldIssue), cloneNativeIssueForTest(midIssue), cloneNativeIssueForTest(newIssue)}, nil
+			}
+			return []*beadslib.Issue{cloneNativeIssueForTest(newIssue), cloneNativeIssueForTest(oldIssue), cloneNativeIssueForTest(midIssue)}, nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -901,7 +912,7 @@ func TestNativeDoltStoreListDoesNotPushLimitBeforeLocalSort(t *testing.T) {
 		t.Fatalf("List asc: %v", err)
 	}
 	if len(asc) != 1 || asc[0].ID != "gc-old" {
-		t.Fatalf("List asc = %+v, want oldest bead after local sort", asc)
+		t.Fatalf("List asc = %+v, want oldest bead", asc)
 	}
 
 	desc, err := store.List(ListQuery{AllowScan: true, Sort: SortCreatedDesc, Limit: 1})
@@ -909,7 +920,7 @@ func TestNativeDoltStoreListDoesNotPushLimitBeforeLocalSort(t *testing.T) {
 		t.Fatalf("List desc: %v", err)
 	}
 	if len(desc) != 1 || desc[0].ID != "gc-new" {
-		t.Fatalf("List desc = %+v, want newest bead after local sort", desc)
+		t.Fatalf("List desc = %+v, want newest bead", desc)
 	}
 }
 
