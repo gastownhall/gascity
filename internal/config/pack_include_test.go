@@ -302,6 +302,11 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	}
 
 	// Touching the checkout invalidates the fingerprint → revalidate.
+	// Simulate a gc import install / git checkout by updating .git/index (a
+	// checkout rewrites the index to reflect the new tree). The .git directory
+	// itself is excluded from the fingerprint because git status --porcelain
+	// creates/removes a lock file inside .git/, updating .git dir mtime on every
+	// run and defeating the memo; .git/index mtime is stable across status runs.
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
 		t.Fatal(err)
 	}
