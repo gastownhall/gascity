@@ -8417,25 +8417,27 @@ func TestGcBeadsBdStartWaitsForConcurrentStarterSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
-	startedFile := filepath.Join(t.TempDir(), "starter-ready")
-	nowFile := filepath.Join(t.TempDir(), "gc-now-ms")
+	existingCountFile := filepath.Join(t.TempDir(), "existing-managed-count")
+	nowCountFile := filepath.Join(t.TempDir(), "now-ms-count")
+	flockInvocationFile := filepath.Join(t.TempDir(), "flock-invocation")
+	sleepInvocationFile := filepath.Join(t.TempDir(), "sleep-invocation")
 	fakeGC := filepath.Join(binDir, "gc")
 	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
 invocation_file=%q
-started_file=%q
-now_file=%q
+existing_count_file=%q
+now_count_file=%q
 subcmd="$1 $2"
 shift 2
 case "$subcmd" in
   "dolt-state now-ms")
-    if [ -f "$now_file" ]; then
-      now=$(cat "$now_file")
-    else
-      now=1000000
+    count=0
+    if [ -f "$now_count_file" ]; then
+      count=$(cat "$now_count_file")
     fi
-    printf '%%s\n' "$now"
-    printf '%%s\n' $((now + 250)) > "$now_file"
+    count=$((count + 1))
+    printf '%%s\n' "$count" > "$now_count_file"
+    printf '%%s\n' $((1000000 + (count - 1) * 250))
     ;;
   "dolt-state runtime-layout")
     city=""
@@ -8471,21 +8473,34 @@ case "$subcmd" in
       esac
     done
     printf 'gc dolt-state existing-managed\n' >> "$invocation_file"
-    if [ -f "$started_file" ]; then
-      printf 'managed_pid\t4242\n'
-      printf 'managed_owned\ttrue\n'
-      printf 'deleted_inodes\tfalse\n'
-      printf 'state_port\t3311\n'
-      printf 'ready\ttrue\n'
-      printf 'reusable\ttrue\n'
-    else
-      printf 'managed_pid\t0\n'
-      printf 'managed_owned\tfalse\n'
-      printf 'deleted_inodes\tfalse\n'
-      printf 'state_port\t0\n'
-      printf 'ready\tfalse\n'
-      printf 'reusable\tfalse\n'
+    count=0
+    if [ -f "$existing_count_file" ]; then
+      count=$(cat "$existing_count_file")
     fi
+    count=$((count + 1))
+    printf '%%s\n' "$count" > "$existing_count_file"
+    case "$count" in
+      1)
+        printf 'managed_pid\t0\n'
+        printf 'managed_owned\tfalse\n'
+        printf 'deleted_inodes\tfalse\n'
+        printf 'state_port\t0\n'
+        printf 'ready\tfalse\n'
+        printf 'reusable\tfalse\n'
+        ;;
+      2)
+        printf 'managed_pid\t4242\n'
+        printf 'managed_owned\ttrue\n'
+        printf 'deleted_inodes\tfalse\n'
+        printf 'state_port\t3311\n'
+        printf 'ready\ttrue\n'
+        printf 'reusable\ttrue\n'
+        ;;
+      *)
+        echo "unexpected existing-managed invocation $count" >&2
+        exit 68
+        ;;
+    esac
     ;;
   "dolt-state probe-managed")
     while [ "$#" -gt 0 ]; do
@@ -8524,9 +8539,6 @@ case "$subcmd" in
     done
     printf 'gc dolt-state query-probe
 ' >> "$invocation_file"
-    if [ -f "$started_file" ]; then
-      exit 0
-    fi
     exit 1
     ;;
   "dolt-state write-provider")
@@ -8576,8 +8588,43 @@ case "$subcmd" in
     exit 64
     ;;
 esac
-`, invocationFile, startedFile, nowFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+`, invocationFile, existingCountFile, nowCountFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeFlock := filepath.Join(binDir, "flock")
+	fakeFlockScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+invocation_file=%q
+if [ "$#" -ne 2 ] || [ "$1" != "-n" ] || [ "$2" != "9" ]; then
+  echo "unexpected flock args: $*" >&2
+  exit 64
+fi
+printf 'flock -n 9\n' >> "$invocation_file"
+exit 1
+`, flockInvocationFile)
+	if err := os.WriteFile(fakeFlock, []byte(fakeFlockScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeSleep := filepath.Join(binDir, "sleep")
+	fakeSleepScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+invocation_file=%q
+if [ "$#" -ne 1 ]; then
+  echo "unexpected sleep args: $*" >&2
+  exit 64
+fi
+case "$1" in
+  0.5|0.500)
+    ;;
+  *)
+    echo "unexpected sleep duration: $1" >&2
+    exit 64
+    ;;
+esac
+printf 'sleep %%s\n' "$1" >> "$invocation_file"
+`, sleepInvocationFile)
+	if err := os.WriteFile(fakeSleep, []byte(fakeSleepScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fakeDolt := filepath.Join(binDir, "dolt")
@@ -8586,42 +8633,10 @@ esac
 	}
 	invokedDolt := filepath.Join(t.TempDir(), "dolt-invocation")
 
-	readyFile := filepath.Join(t.TempDir(), "holder-ready")
-	holder := exec.Command("sh", "-c", `
-set -eu
-lock_file="$1"
-ready_file="$2"
-started_file="$3"
-: > "$lock_file"
-exec 9>"$lock_file"
-flock 9
-printf 'ready\n' > "$ready_file"
-sleep 4
-printf 'ready\n' > "$started_file"
-sleep 1
-`, "sh", layout.LockFile, readyFile, startedFile)
-	holder.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
-	if err := holder.Start(); err != nil {
-		t.Fatalf("start lock holder: %v", err)
-	}
-	defer func() {
-		_ = holder.Process.Kill()
-		_ = holder.Wait()
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(readyFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for lock holder to acquire flock")
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-
 	env := sanitizedBaseEnv(
 		"GC_CITY_PATH="+cityPath,
-		"GC_DOLT_PORT=3311",
+		"GC_DOLT_PORT=3399",
+		"GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS=1000",
 		"GC_BIN="+fakeGC,
 		"GC_FAKE_DOLT_INVOCATION_FILE="+invokedDolt,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
@@ -8635,8 +8650,32 @@ sleep 1
 	if got := strings.TrimSpace(string(mustReadFile(t, layout.PIDFile))); got != "4242" {
 		t.Fatalf("pid file = %q, want 4242", got)
 	}
-	if _, err := os.Stat(startedFile); err != nil {
-		t.Fatalf("concurrent starter success marker missing after start returned: %v", err)
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read provider runtime state: %v", err)
+	}
+	if !state.Running || state.PID != 4242 || state.Port != 3311 {
+		t.Fatalf("provider runtime state = {Running:%v PID:%d Port:%d}, want {Running:true PID:4242 Port:3311}", state.Running, state.PID, state.Port)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, existingCountFile))); got != "2" {
+		t.Fatalf("existing-managed observations = %q, want 2", got)
+	}
+	invocations := string(mustReadFile(t, invocationFile))
+	firstExisting := strings.Index(invocations, "gc dolt-state existing-managed\n")
+	probe := strings.Index(invocations, "gc dolt-state probe-managed\n")
+	query := strings.Index(invocations, "gc dolt-state query-probe\n")
+	secondExisting := strings.LastIndex(invocations, "gc dolt-state existing-managed\n")
+	if firstExisting < 0 || firstExisting == secondExisting || probe < firstExisting || query < probe || secondExisting < query {
+		t.Fatalf("initial non-reusable observation must fail its probe before reusable state is observed:\n%s", invocations)
+	}
+	if got := strings.Count(invocations, "gc dolt-state query-probe\n"); got != 1 {
+		t.Fatalf("query-probe observations = %d, want 1:\n%s", got, invocations)
+	}
+	if got, want := string(mustReadFile(t, flockInvocationFile)), strings.Repeat("flock -n 9\n", 6); got != want {
+		t.Fatalf("flock transcript = %q, want %q", got, want)
+	}
+	if got, want := string(mustReadFile(t, sleepInvocationFile)), strings.Repeat("sleep 0.5\n", 6)+"sleep 0.500\n"; got != want {
+		t.Fatalf("sleep transcript = %q, want %q", got, want)
 	}
 	if invocation, err := os.ReadFile(invokedDolt); err == nil && strings.TrimSpace(string(invocation)) != "" {
 		t.Fatalf("dolt should not have been invoked while concurrent starter won:\n%s", string(invocation))

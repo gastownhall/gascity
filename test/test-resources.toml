@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 530
+baseline_calls = 529
 baseline_files = 159
 reported_calls = 495
 reported_files = 135
@@ -23,7 +23,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 440
+baseline_calls = 439
 baseline_files = 157
 reported_calls = 447
 reported_files = 157
@@ -38,7 +38,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 401
+baseline_calls = 400
 baseline_files = 111
 reported_calls = 380
 reported_files = 98
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 286
+baseline_calls = 285
 baseline_files = 112
 reported_calls = 295
 reported_files = 114
@@ -250,7 +250,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 398
+baseline_calls = 397
 baseline_files = 109
 reported_calls = 394
 reported_files = 105
@@ -263,7 +263,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 286
+baseline_calls = 285
 baseline_files = 112
 reported_calls = 287
 reported_files = 113
