@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,8 +17,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
@@ -1424,44 +1427,102 @@ func (r *recordingMailInboxReader) Inbox(recipient string) ([]mail.Message, erro
 	return r.inbox[recipient], nil
 }
 
-func TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox(t *testing.T) {
-	cityDir, _ := setupManagedBdWaitTestCity(t)
+func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	cityDir := t.TempDir()
+	const projectID = "gc-local-mail-inbox-test"
+	setupQueries := append(seedDatabaseProjectIDQueries(projectID),
+		"CALL DOLT_ADD('.')",
+		"CALL DOLT_COMMIT('-m', 'test: seed mail inbox identity', '--author', 'gascity-test <test@gascity.local>')")
+	_, port, _, cleanupDolt := startPasswordedDoltServer(t, filepath.Join(t.TempDir(), "hq"), setupQueries...)
+	defer cleanupDolt()
 
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
-	if _, err := store.Create(beads.Bead{
-		Title:  "managed exec session",
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"session_name": "mayor",
-			"alias":        "mayor",
-			"template":     "worker",
-			"state":        "asleep",
-		},
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, cityDir, projectID); err != nil {
+		t.Fatalf("WriteProjectIdentity(): %v", err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
 	}); err != nil {
-		t.Fatalf("store.Create(session bead): %v", err)
+		t.Fatalf("EnsureCanonicalMetadata(): %v", err)
 	}
-	mp := beadmail.New(store)
-	if _, err := mp.Send("human", "mayor", "status", "hello from exec provider"); err != nil {
-		t.Fatalf("mp.Send(): %v", err)
+	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityDir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "127.0.0.1",
+		DoltPort:       fmt.Sprint(port),
+		DoltUser:       "root",
+		DoltMode:       "server",
+	}); err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState(): %v", err)
+	}
+	nativeEnv, err := nativeDoltOpenEnvForScope(cityDir, nil, cityDir)
+	if err != nil {
+		t.Fatalf("nativeDoltOpenEnvForScope(): %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	nativeStorage, err := beads.OpenNativeStorage(ctx, cityDir, nativeEnv)
+	if err != nil {
+		t.Fatalf("OpenNativeStorage(): %v", err)
+	}
+	if err := nativeStorage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		_ = nativeStorage.Close()
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := nativeStorage.Close(); err != nil {
+		t.Fatalf("close native fixture storage: %v", err)
 	}
 
-	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
+	// Native-store preflight treats an unreachable `bd context` as an optional
+	// cross-check when the real database identity matches. Keep that edge strict
+	// and fast so this test does not inherit or migrate with an ambient bd binary.
+	originalRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(map[string]string) beads.CommandRunner {
+		return func(string, string, ...string) ([]byte, error) {
+			return nil, errors.New("bd context unavailable in direct-Dolt fixture")
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = originalRunner })
+
+	canonicalProvider := "exec:" + gcBeadsBdScriptPath(cityDir)
+	t.Setenv("GC_BEADS", canonicalProvider)
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
+	if got := rawBeadsProvider(cityDir); got != "bd" {
+		t.Fatalf("rawBeadsProvider() with canonical GC_BEADS=%q = %q, want bd", canonicalProvider, got)
+	}
+
+	result, err := openStoreResultAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreResultAtForCity(%q) with canonical GC_BEADS=%q: %v", cityDir, canonicalProvider, err)
+	}
+	if got := result.Diagnostic.Store; got != beads.BeadsStoreNameNativeDoltStore {
+		t.Fatalf("store selected for canonical GC_BEADS=%q = %q, want %q; diagnostic: %+v", canonicalProvider, got, beads.BeadsStoreNameNativeDoltStore, result.Diagnostic)
+	}
+	mp := beadmail.New(result.Store)
+	if _, err := mp.Send("mayor", "human", "status", "hello from canonical provider"); err != nil {
+		t.Fatalf("mp.Send(): %v", err)
+	}
+	if err := closeBeadStoreHandle(result.Store); err != nil {
+		t.Fatalf("close native fixture store: %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdMailInbox([]string{"mayor"}, &stdout, &stderr); code != 0 {
+	if code := cmdMailInbox([]string{"human"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdMailInbox() = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	out := stdout.String()
-	for _, want := range []string{"FROM", "SUBJECT", "BODY", "human", "status", "hello from exec provider"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("stdout missing %q:\n%s", want, out)
-		}
+	if out := stdout.String(); !strings.Contains(out, "hello from canonical provider") {
+		t.Fatalf("stdout missing persisted message body:\n%s", out)
 	}
 }
 

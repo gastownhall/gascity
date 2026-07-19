@@ -46,17 +46,8 @@ type capturedProductMetricsRequest struct {
 	err                error
 }
 
-func TestProductMetricsPrivateUploaderUsesTaggedBinaryAndBypassesNormalStartup(t *testing.T) {
-	skipSlowCmdGCTest(t, "builds and executes a tagged gc binary")
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("detached product-metrics uploader is supported only on Linux and Darwin")
-	}
-	configureProductMetricsTrustedProcessTempRoot(t)
-
-	buildDir := t.TempDir()
-	taggedBinary := filepath.Join(buildDir, "gc-productmetrics-tagged")
-	buildGCBinaryForProductMetricsTest(t, taggedBinary, "productmetrics_testhook")
-
+func runProductMetricsPrivateUploaderProcessContract(t *testing.T, taggedBinary string) {
+	t.Helper()
 	requests := make(chan capturedProductMetricsRequest, 2)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, readErr := io.ReadAll(io.LimitReader(request.Body, 65*1024))

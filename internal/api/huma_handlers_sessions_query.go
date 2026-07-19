@@ -40,14 +40,6 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
-	wantPeek := input.Peek
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	items := make([]sessionResponse, len(sessions))
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
-	}
-
 	// Unified page contract (S4): default 100 like every other keyset list.
 	// The offset-cursor era defaulted sessions to the 1000-row server cap;
 	// truncated responses now always mint next_cursor, so a default-size
@@ -60,15 +52,17 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 	}
 
-	// items[i] mirrors sessions[i], and the read model returns them in the
-	// canonical (created_at DESC, id DESC) total order. The keyset boundary is
+	// The read model returns sessions in the canonical (created_at DESC, id
+	// DESC) total order. Resolve the page before runtime/transcript enrichment:
+	// Codex exact-key lookup can probe bounded date directories, so off-page
+	// rows must not pay that I/O on every dashboard poll. The keyset boundary is
 	// compared and minted from the UNDERLYING session times (sessions[i]),
 	// never the response's RFC3339-formatted string, so sub-second precision
 	// survives the round trip — hence the index-keyed reuse of the shared
 	// helpers. Total keeps its full-match-count meaning, and a truncated
 	// response always carries next_cursor — cursor-less requests previously
 	// truncated silently, the #3208 defect class the bead list already fixed.
-	rowIdx := make([]int, len(items))
+	rowIdx := make([]int, len(sessions))
 	for i := range rowIdx {
 		rowIdx[i] = i
 	}
@@ -77,9 +71,18 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	pageIdx, total, hasMore := resolveKeysetPage(rowIdx, infoKey, seek, limit)
 	nextCursor := mintKeysetNextCursor(pageIdx, infoKey, hasMore)
-	page := make([]sessionResponse, len(pageIdx))
+
+	wantPeek := input.Peek
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	pageSessions := make([]session.Info, len(pageIdx))
 	for j, i := range pageIdx {
-		page[j] = items[i]
+		pageSessions[j] = sessions[i]
+	}
+	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
+	page := make([]sessionResponse, len(pageSessions))
+	for j, sess := range pageSessions {
+		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
 	return &ListOutput[sessionResponse]{
 		Index:     s.latestIndex(),

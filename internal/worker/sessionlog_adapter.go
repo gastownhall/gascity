@@ -79,6 +79,15 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 	return sessionlog.ExtractTailMetaFromSearchPaths(a.SearchPaths, path)
 }
 
+// TailMetaForProvider reads model/context metadata using the provider's
+// transcript schema. TailMeta remains the Claude-shaped compatibility path.
+func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.ProviderFamily(provider) == "codex" {
+		return sessionlog.ExtractCodexTailMetaFromSearchPaths(a.SearchPaths, path)
+	}
+	return a.TailMeta(path)
+}
+
 // TailUsage reads per-invocation token usage entries from the tail of a
 // discovered transcript path, validating it against the search-path roots.
 func (a SessionLogAdapter) TailUsage(path string) ([]sessionlog.TailUsage, error) {

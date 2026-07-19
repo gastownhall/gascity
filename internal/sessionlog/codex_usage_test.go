@@ -192,6 +192,335 @@ func TestExtractCodexTailUsageModelMissing(t *testing.T) {
 	}
 }
 
+func TestExtractCodexTailMetaUsesLatestRealUsageShape(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "2026", "04", "16", "rollout-2026-04-16T21-49-29-meta.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+		codexTokenCountLine("2026-04-16T21:49:38.304Z", 10_000, 9_000, 8_000, 1_000, 100),
+		codexTokenCountLine("2026-04-16T21:49:45.100Z", 15_917, 15_562, 10_624, 355, 166),
+		codexNullInfoTokenCountLine,
+		`{"timestamp":"2026-04-16T21:49`, // torn trailing line remains observable
+	})
+
+	meta, err := ExtractCodexTailMetaFromSearchPaths([]string{root}, path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailMetaFromSearchPaths: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("ExtractCodexTailMetaFromSearchPaths = nil, want metadata")
+	}
+	if meta.Model != "gpt-5.5" {
+		t.Errorf("Model = %q, want gpt-5.5", meta.Model)
+	}
+	if meta.ContextUsage == nil {
+		t.Fatal("ContextUsage = nil, want latest non-null token_count info")
+	}
+	if got, want := meta.ContextUsage.InputTokens, 15_562; got != want {
+		t.Errorf("InputTokens = %d, want %d (cached input is already included)", got, want)
+	}
+	if got, want := meta.ContextUsage.ContextWindow, 258_400; got != want {
+		t.Errorf("ContextWindow = %d, want %d", got, want)
+	}
+	if got, want := meta.ContextUsage.Percentage, 15_562*100/258_400; got != want {
+		t.Errorf("Percentage = %d, want %d", got, want)
+	}
+	if !meta.MalformedTail {
+		t.Error("MalformedTail = false, want true for torn trailing JSONL")
+	}
+}
+
+func TestExtractCodexTailMetaContextWindowFallbackAndClamp(t *testing.T) {
+	t.Run("duplicate cumulative snapshot keeps its first model", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-duplicate-model-pair.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			codexTokenCountLine("2026-04-16T21:49:38.304Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			// Codex re-emits the prior turn's final cumulative snapshot
+			// after the new turn_context. It is not usage from the new model.
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-4o"; got != want {
+			t.Errorf("Model = %q, want usage-producing model %q", got, want)
+		}
+	})
+
+	t.Run("distinct cumulative snapshot advances to the new model", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-distinct-model-pair.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			codexTokenCountLine("2026-04-16T21:49:38.304Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTokenCountLine("2026-04-16T21:49:45.100Z", 34_114, 17_888, 15_232, 309, 28),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want new usage-producing model %q", got, want)
+		}
+		if got, want := meta.ContextUsage.InputTokens, 17_888; got != want {
+			t.Errorf("InputTokens = %d, want new distinct usage %d", got, want)
+		}
+	})
+
+	t.Run("usage stays paired with its preceding turn model", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-model-pair.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":64000,"cached_input_tokens":32000}}}}`,
+			// A new turn has selected a different model but has not emitted
+			// usage yet. Do not combine that model with the prior turn's usage.
+			codexTurnContextLine("2026-04-16T21:50:00.000Z", "gpt-5.5"),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-4o"; got != want {
+			t.Errorf("Model = %q, want usage-producing model %q", got, want)
+		}
+		if got, want := meta.ContextUsage.ContextWindow, 128_000; got != want {
+			t.Errorf("ContextWindow = %d, want paired model-family window %d", got, want)
+		}
+		if got, want := meta.ContextUsage.Percentage, 50; got != want {
+			t.Errorf("Percentage = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("absent window falls back to model family", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-fallback.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":129000,"cached_input_tokens":64000}}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want context usage", meta)
+		}
+		if got, want := meta.ContextUsage.ContextWindow, 258_000; got != want {
+			t.Errorf("ContextWindow = %d, want model-family fallback %d", got, want)
+		}
+		if got, want := meta.ContextUsage.Percentage, 50; got != want {
+			t.Errorf("Percentage = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("present window is authoritative and percentage is clamped", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-clamp.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":1100},"model_context_window":1000}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want context usage", meta)
+		}
+		if got, want := meta.ContextUsage.ContextWindow, 1_000; got != want {
+			t.Errorf("ContextWindow = %d, want provider value %d", got, want)
+		}
+		if got, want := meta.ContextUsage.Percentage, 100; got != want {
+			t.Errorf("Percentage = %d, want clamped %d", got, want)
+		}
+	})
+
+	t.Run("present zero window does not use model fallback", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-zero-window.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":1100},"model_context_window":0}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil {
+			t.Fatal("ExtractCodexTailMeta = nil, want model metadata")
+		}
+		if meta.ContextUsage != nil {
+			t.Errorf("ContextUsage = %#v, want nil for explicitly unusable context window", meta.ContextUsage)
+		}
+	})
+
+	t.Run("negative input is clamped to zero", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-negative-input.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1},"last_token_usage":{"input_tokens":-1},"model_context_window":1000}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want sanitized context usage", meta)
+		}
+		if meta.ContextUsage.InputTokens != 0 || meta.ContextUsage.Percentage != 0 {
+			t.Errorf("ContextUsage = %#v, want zero-clamped input and percentage", meta.ContextUsage)
+		}
+	})
+
+	t.Run("percentage calculation does not overflow", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-large-input.jsonl")
+		maxInt := int(^uint(0) >> 1)
+		inputTokens := maxInt/100 + 1
+		contextWindow := inputTokens * 2
+		line := fmt.Sprintf(`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1},"last_token_usage":{"input_tokens":%d},"model_context_window":%d}}}`, inputTokens, contextWindow)
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			line,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want context usage", meta)
+		}
+		if got, want := meta.ContextUsage.Percentage, 50; got != want {
+			t.Errorf("Percentage = %d, want overflow-safe %d", got, want)
+		}
+	})
+}
+
+func TestExtractCodexTailMetaTruncatedWindowFailsClosedOnFirstCumulativeTotal(t *testing.T) {
+	writeBoundaryFixture := func(t *testing.T, tailLines []string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "rollout-tail-boundary.jsonl")
+		outsideWindow := strings.Join([]string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			codexTokenCountLine("2026-04-16T21:49:38.304Z", 15_917, 15_562, 10_624, 355, 166),
+		}, "\n") + "\n"
+
+		insideWindow := strings.Join(tailLines, "\n") + "\n"
+		const fillerPrefix = `{"timestamp":"2026-04-16T21:49:39.000Z","type":"ignored","payload":{"padding":"`
+		const fillerSuffix = `"}}` + "\n"
+		fillerBytes := int(tailChunkSize) - len(insideWindow) - len(fillerPrefix) - len(fillerSuffix)
+		if fillerBytes < 0 {
+			t.Fatalf("tail fixture is %d bytes larger than tailChunkSize", -fillerBytes)
+		}
+		tailWindow := fillerPrefix + strings.Repeat("x", fillerBytes) + fillerSuffix + insideWindow
+		if got, want := len(tailWindow), int(tailChunkSize); got != want {
+			t.Fatalf("tail fixture size = %d, want %d", got, want)
+		}
+		if err := os.WriteFile(path, []byte(outsideWindow+tailWindow), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+		return path
+	}
+
+	t.Run("duplicate whose producer is outside the window has no context usage", func(t *testing.T) {
+		path := writeBoundaryFixture(t, []string{
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			// The original 15,917 snapshot was produced by gpt-4o outside
+			// the tail. This in-window re-emission must not be attributed to
+			// the latest turn_context merely because it is first observed.
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil {
+			t.Fatal("ExtractCodexTailMeta = nil, want model-only metadata")
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want latest in-window turn model %q", got, want)
+		}
+		if meta.ContextUsage != nil {
+			t.Errorf("ContextUsage = %#v, want nil for usage with an unknown producing model", meta.ContextUsage)
+		}
+	})
+
+	t.Run("later distinct total pairs with its in-window model", func(t *testing.T) {
+		path := writeBoundaryFixture(t, []string{
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTokenCountLine("2026-04-16T21:49:45.100Z", 34_114, 17_888, 15_232, 309, 28),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want usage-producing model %q", got, want)
+		}
+		if got, want := meta.ContextUsage.InputTokens, 17_888; got != want {
+			t.Errorf("InputTokens = %d, want later distinct usage %d", got, want)
+		}
+	})
+
+	t.Run("later distinct total without an in-window model stays closed", func(t *testing.T) {
+		path := writeBoundaryFixture(t, []string{
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTokenCountLine("2026-04-16T21:49:45.100Z", 34_114, 17_888, 15_232, 309, 28),
+			codexTurnContextLine("2026-04-16T21:50:00.000Z", "gpt-5.5"),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil {
+			t.Fatal("ExtractCodexTailMeta = nil, want later model-only metadata")
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want latest in-window turn model %q", got, want)
+		}
+		if meta.ContextUsage != nil {
+			t.Errorf("ContextUsage = %#v, want nil without an in-window producing model", meta.ContextUsage)
+		}
+	})
+}
+
+func TestExtractCodexTailMetaFromSearchPathsRejectsEscapedPath(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "rollout-outside.jsonl")
+	writeCodexUsageLines(t, outside, []string{
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+	})
+
+	if _, err := ExtractCodexTailMetaFromSearchPaths([]string{root}, outside); err == nil {
+		t.Fatal("path outside merged codex roots must be rejected")
+	}
+}
+
 func TestExtractCodexTailUsageFromSearchPaths(t *testing.T) {
 	root := t.TempDir()
 	inside := filepath.Join(root, "2026", "04", "16", "rollout-2026-04-16T21-49-29-in.jsonl")

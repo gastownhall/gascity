@@ -89,20 +89,28 @@ func validateSearchPathFile(searchPaths []string, path string) (string, error) {
 
 // readTail reads the last n bytes of r (or the whole thing if smaller).
 func readTail(r io.ReadSeeker, n int64) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindow(r, n)
+	return data, startsMidLine, err
+}
+
+// readTailWindow also reports whether bytes before the returned window were
+// omitted. A truncated window can begin exactly on a line boundary, so that
+// state cannot be inferred from startsMidLine.
+func readTailWindow(r io.ReadSeeker, n int64) ([]byte, bool, bool, error) {
 	size, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	offset := size - n
 	if offset < 0 {
 		offset = 0
 	}
 	if _, err := r.Seek(offset, io.SeekStart); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	data, err := io.ReadAll(r)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	startsMidLine := false
 	if offset > 0 {
@@ -113,7 +121,7 @@ func readTail(r io.ReadSeeker, n int64) ([]byte, bool, error) {
 			}
 		}
 	}
-	return data, startsMidLine, nil
+	return data, startsMidLine, offset > 0, nil
 }
 
 // splitLines splits data into JSONL lines. Partial lines from a mid-file

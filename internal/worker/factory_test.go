@@ -166,6 +166,39 @@ func TestFactoryTranscriptMethodsUseConfiguredSearchPaths(t *testing.T) {
 	}
 }
 
+func TestFactoryTailMetaForProviderUsesCodexSchema(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "2026", "04", "16", "rollout-codex-meta.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+	}
+	data := strings.Join([]string{
+		`{"timestamp":"2026-04-16T21:49:30.901Z","type":"turn_context","payload":{"model":"gpt-5.5"}}`,
+		`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":15562,"cached_input_tokens":10624},"model_context_window":258400}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:       beads.NewMemStore(),
+		SearchPaths: []string{root},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	meta, err := factory.TailMetaForProvider("codex", path)
+	if err != nil {
+		t.Fatalf("TailMetaForProvider(codex): %v", err)
+	}
+	if meta == nil || meta.ContextUsage == nil {
+		t.Fatalf("TailMetaForProvider(codex) = %#v, want model and context usage", meta)
+	}
+	if got, want := meta.Model, "gpt-5.5"; got != want {
+		t.Errorf("Model = %q, want %q", got, want)
+	}
+}
+
 func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
