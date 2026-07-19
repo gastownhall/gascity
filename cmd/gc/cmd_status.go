@@ -182,9 +182,9 @@ func routeRigStatus(
 // renderRigStatusFromAPI filters the supervisor's StatusView by rig name
 // and renders the same text output the fallback path produces. Pool
 // expansion, scale labels, and drain-state rendering all live in
-// agentStatusLine, so this function only needs to emit header lines
-// ("<rig>:", "Path:", "Suspended:") and dispatch to agentStatusLine for
-// each agent row.
+// agentStatusLineWithPartial, so this function only needs to emit header lines
+// ("<rig>:", "Path:", "Suspended:") and dispatch to agentStatusLineWithPartial
+// for each agent row.
 func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
 	suspStr := "no"
 	serverSuspended := rig.Suspended
@@ -397,14 +397,11 @@ func rigStatusAgentJSON(name, qualifiedName string, target statusObservationTarg
 	}
 }
 
-// agentStatusLine returns a human-readable status string for an agent session.
-// The drain probe is a runtime metadata lookup (tmux show-environment) per
-// session; skip it when the session is not running because the draining flag
-// is meaningless then and the probe dominates wall time on idle cities.
-func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) string {
-	return agentStatusLineWithPartial(running, dops, sn, suspended, false)
-}
-
+// agentStatusLineWithPartial returns a human-readable status string for an
+// agent session. The drain probe is a runtime metadata lookup (tmux
+// show-environment) per session; skip it when the session is not running
+// because the draining flag is meaningless then and the probe dominates wall
+// time on idle cities.
 func agentStatusLineWithPartial(running bool, dops drainOps, sn string, suspended bool, partial bool) string {
 	if !running {
 		if partial {
