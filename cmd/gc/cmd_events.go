@@ -174,6 +174,14 @@ DTO or SSE envelope.`,
 				fmt.Fprintln(stderr, "gc events: --after and --after-cursor are mutually exclusive") //nolint:errcheck
 				return errExit
 			}
+			// --after/--after-cursor resume a stream; the plain list and --seq
+			// paths do not consume them. Reject rather than silently ignore
+			// (a dropped --after otherwise returns the newest tail, masquerading
+			// as an events-after-N result). Time-bound a list with --since.
+			if (afterFlag > 0 || strings.TrimSpace(afterCursor) != "") && !followFlag && !watchFlag {
+				fmt.Fprintln(stderr, "gc events: --after/--after-cursor require --follow or --watch (they resume a stream); use --since to bound a list by time") //nolint:errcheck
+				return errExit
+			}
 			if seqFlag {
 				if cmdEventsSeq(apiURL, stdout, stderr) != 0 {
 					return errExit
@@ -834,7 +842,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 
 	resumeSeq := afterSeq
 	if resumeSeq > 0 {
-		items, err := fetchCityEvents(ctx, client, scope.cityName, "", "")
+		items, err := fetchCityEventsAfterSeq(ctx, client, scope.cityName, resumeSeq)
 		if err != nil {
 			if shouldUseLocalCityEventsFallback(scope, err) {
 				printStreamingCityAPIRequirement("--watch", stderr)
@@ -1005,6 +1013,65 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 			return nil, fmt.Errorf("decoding city event list item: %w", err)
 		}
 		all = append(all, wire)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	return all, nil
+}
+
+// fetchCityEventsAfterSeq returns every city event with Seq > afterSeq in
+// ascending seq order, walking the seq-DESC keyset list (#4194) from the head
+// and following next_cursor until a page descends to afterSeq (or the history
+// is exhausted). Unlike fetchCityEvents this paginates: the --watch buffered
+// replay needs the whole gap since the resume seq, and a single newest page
+// would silently drop events whenever more than one page arrived since afterSeq.
+// The walk is bounded by (head - afterSeq); --watch resumes are normally recent.
+func fetchCityEventsAfterSeq(ctx context.Context, client *genclient.ClientWithResponses, cityName string, afterSeq uint64) ([]cliWireEvent, error) {
+	var all []cliWireEvent
+	cursor := ""
+	for {
+		limit := int64(500)
+		params := &genclient.GetV0CityByCityNameEventsParams{
+			Limit: &limit,
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+		if err != nil {
+			return nil, &eventsAPITransportError{err: err}
+		}
+		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
+			return nil, err
+		}
+		if resp.JSON200 == nil || resp.JSON200.Items == nil {
+			break
+		}
+		// Collect every event above the resume seq; note if this page reached
+		// down to or below it. Order-agnostic: a page that already spans the
+		// resume seq needs no older page, whichever way its rows are ordered.
+		reachedFloor := false
+		for _, item := range *resp.JSON200.Items {
+			wire, err := cityWireEventFromTyped(item)
+			if err != nil {
+				return nil, fmt.Errorf("decoding city event list item: %w", err)
+			}
+			if wire.Seq <= int64(afterSeq) {
+				reachedFloor = true
+				continue
+			}
+			all = append(all, wire)
+		}
+		if reachedFloor {
+			break // the page descended past the resume seq — history below is covered
+		}
+		next := ""
+		if resp.JSON200.NextCursor != nil {
+			next = strings.TrimSpace(*resp.JSON200.NextCursor)
+		}
+		if next == "" || next == cursor {
+			break // history exhausted (or a non-advancing cursor — bail rather than spin)
+		}
+		cursor = next
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	return all, nil

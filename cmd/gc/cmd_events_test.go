@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,29 @@ func TestEventsJSONFlagIsSilentNoOp(t *testing.T) {
 	}
 	if got.City != "alpha" || got.Type != "bead.created" || got.Seq != 3 {
 		t.Fatalf("unexpected tagged event: %+v", got)
+	}
+}
+
+// TestEventsAfterRequiresFollowOrWatch pins workspace-jbhq: --after /
+// --after-cursor resume a stream, so the plain list and --seq paths (which do
+// not consume them) must reject rather than silently ignore them — a dropped
+// --after otherwise returns the newest tail, masquerading as events-after-N.
+func TestEventsAfterRequiresFollowOrWatch(t *testing.T) {
+	cases := [][]string{
+		{"--after", "100"},
+		{"--after-cursor", "city-a:5"},
+		{"--after", "100", "--seq"},
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		cmd := newEventsCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("args %v: expected error, got nil (stdout=%q)", args, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "require --follow or --watch") {
+			t.Fatalf("args %v: stderr = %q, want --follow/--watch guidance", args, stderr.String())
+		}
 	}
 }
 
@@ -1468,6 +1492,92 @@ func TestFetchCityEventsSinglePageChronological(t *testing.T) {
 	for i, item := range got {
 		if item.Seq != int64(i+4) {
 			t.Fatalf("event[%d].Seq = %d, want %d (chronological ascending)", i, item.Seq, i+4)
+		}
+	}
+}
+
+// pagedCityEventsHandler serves allDesc (events in seq-DESC order) as keyset
+// pages of at most pageSize, honoring the opaque `cursor` query param the same
+// way the #4194 server does: the cursor is the seq boundary, each page returns
+// events strictly below it, and next_cursor (the page's oldest seq as a decimal
+// string) is minted whenever more matching rows remain below the page.
+func pagedCityEventsHandler(t *testing.T, allDesc []cliWireEvent, pageSize int) func(http.ResponseWriter, *http.Request) {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		boundary := int64(-1) // -1 = no boundary (first page)
+		if c := r.URL.Query().Get("cursor"); c != "" {
+			v, err := strconv.ParseInt(c, 10, 64)
+			if err != nil {
+				t.Errorf("bad cursor %q: %v", c, err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			boundary = v
+		}
+		page := make([]cliWireEvent, 0, pageSize)
+		for _, e := range allDesc {
+			if boundary >= 0 && e.Seq >= boundary {
+				continue
+			}
+			if len(page) == pageSize {
+				break
+			}
+			page = append(page, e)
+		}
+		body := cityEventsListResponse(t, page)
+		body.Total = int64(len(allDesc))
+		if len(page) > 0 {
+			oldest := page[len(page)-1].Seq
+			for _, e := range allDesc {
+				if e.Seq < oldest {
+					next := strconv.FormatInt(oldest, 10)
+					body.NextCursor = &next
+					break
+				}
+			}
+		}
+		w.Header().Set("X-GC-Index", strconv.FormatInt(allDesc[0].Seq, 10))
+		writeJSONResponse(t, w, body)
+	}
+}
+
+// TestDoEventsWatchReplayDrainsAfterSeq pins workspace-d5rx: the --watch --after
+// buffered replay must return EVERY event after the resume seq, not just the
+// newest page. Regression guard for the single-page fetch that dropped events
+// when more than one page arrived since the resume seq.
+func TestDoEventsWatchReplayDrainsAfterSeq(t *testing.T) {
+	const total = 1200 // > 2 pages of 500
+	allDesc := make([]cliWireEvent, 0, total)
+	for seq := total; seq >= 1; seq-- {
+		allDesc = append(allDesc, cliWireEvent{
+			Actor: "gc", Seq: int64(seq), Type: "e.t",
+			Ts: time.Unix(1700000000+int64(seq), 0).UTC(),
+		})
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: pagedCityEventsHandler(t, allDesc, 500),
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	// Resume from seq 100 → expect the 1100 events 101..1200, replayed in full.
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"},
+		"", nil, 100, "", 30*time.Second, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != total-100 {
+		t.Fatalf("replayed %d events, want %d (full gap after resume seq 100)", len(lines), total-100)
+	}
+	// Chronological ascending, contiguous from seq 101, no gaps across page seams.
+	for i, line := range lines {
+		var e cliWireEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("unmarshal line %d: %v; line=%q", i, err, line)
+		}
+		if e.Seq != int64(i+101) {
+			t.Fatalf("event[%d].Seq = %d, want %d (ascending, contiguous from 101)", i, e.Seq, i+101)
 		}
 	}
 }
