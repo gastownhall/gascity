@@ -4612,6 +4612,72 @@ func TestCloseBeadReleasesWorkAssignedByNamedIdentity(t *testing.T) {
 	}
 }
 
+func TestCloseBeadReleasesDirectWorkWithRecoverableRoute(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 7, 2, 18, 2, 31, 0, time.UTC)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "developer",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "developer-ga-wisp-dead",
+			"template":     "developer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "direct named-session work",
+		Type:     "task",
+		Assignee: "developer-ga-wisp-dead",
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "dead-runtime", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	gotWork, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Assignee != "" {
+		t.Fatalf("work assignee = %q, want empty", gotWork.Assignee)
+	}
+	if gotWork.Status != "open" {
+		t.Fatalf("work status = %q, want open", gotWork.Status)
+	}
+	if gotWork.Metadata["gc.run_target"] != "developer" {
+		t.Fatalf("gc.run_target = %q, want developer", gotWork.Metadata["gc.run_target"])
+	}
+	if gotWork.Metadata["gc.routed_to"] != "" {
+		t.Fatalf("gc.routed_to = %q, want empty until route recovery runs", gotWork.Metadata["gc.routed_to"])
+	}
+
+	restored, err := restoreCarriedWorkRoutes(store)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored routes = %d, want 1", restored)
+	}
+	gotWork, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead after route recovery: %v", err)
+	}
+	if gotWork.Metadata["gc.routed_to"] != "developer" {
+		t.Fatalf("gc.routed_to = %q, want developer after route recovery", gotWork.Metadata["gc.routed_to"])
+	}
+}
+
 func TestCloseBeadLeavesUnrelatedWorkAlone(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)

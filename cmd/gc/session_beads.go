@@ -2994,6 +2994,7 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 		addAssignee(id)
 	}
 
+	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
 	seenWork := make(map[string]struct{})
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	for assignee := range seenAssignees {
@@ -3015,10 +3016,11 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 				// fully detached (not preserved to a new assignee). The
 				// release primitive clears the assignee (empty-string) and
 				// stale session-affinity metadata and resets in_progress to
-				// open — the same stale-affinity bug fixed on the retry,
-				// reopen, and orphan-pool release paths. No run_target
-				// fallback on the close-release path (passed "").
-				if err := wa.ReleaseWorkBead(item, ""); err != nil {
+				// open. When the work has no route, preserve the session's
+				// configured route as gc.run_target so route recovery can
+				// restore gc.routed_to and the work re-enters demand instead
+				// of going open/unassigned/invisible.
+				if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
 					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
 				}
 			}
