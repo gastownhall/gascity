@@ -1502,6 +1502,162 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	}
 }
 
+// reparentSurvivorProvider models PR #4181's finalizer finding: at the
+// finalizer's first observation the runtime pane is still live, so the
+// stop-pending session is queued for async stop; the first kill then takes out
+// the pane (IsRunning=false) while the drain-ack target's agent process is
+// reparented and survives — observable only through process-name liveness. The
+// embedded fake's StopLeavesRunning keeps the session, so ProcessAlive stays
+// true. Without the resolved process hints the queued confirm-dead loop reads
+// the pane alone and never checks the surviving process.
+type reparentSurvivorProvider struct {
+	*runtime.Fake
+	stopMu  sync.Mutex
+	stopped bool
+}
+
+func (p *reparentSurvivorProvider) Stop(name string) error {
+	p.stopMu.Lock()
+	p.stopped = true
+	p.stopMu.Unlock()
+	return p.Fake.Stop(name)
+}
+
+func (p *reparentSurvivorProvider) IsRunning(name string) bool {
+	p.stopMu.Lock()
+	stopped := p.stopped
+	p.stopMu.Unlock()
+	if stopped {
+		// Pane gone after the first kill; only the reparented process survives.
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+// TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor pins the
+// finalizer-only regression for PR #4181: a persisted stop-pending pool session
+// whose agent process outlives its runtime pane must be confirm-dead-killed with
+// the configured process-name hints, not misread as dead and freed. The finalizer
+// has no resolved TemplateParams, so it must recover the hints from config. With
+// nil hints the queued confirm-dead loop never observes process liveness at all.
+func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 200 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
+	oldPoke := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string) error { return nil }
+	t.Cleanup(func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+		drainAckAsyncStopPokeController = oldPoke
+	})
+
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", ProcessNames: []string{"claude"}}},
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Survivor: the agent process outlives the pane-killing Stop.
+	env.sp.StopLeavesRunning["worker"] = true
+	sp := &reparentSurvivorProvider{Fake: env.sp}
+
+	session := env.createSessionBead("worker", "worker")
+	patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	patch[poolManagedMetadataKey] = boolMetadata(true)
+	if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	session.Metadata = patch.Apply(session.Metadata)
+
+	tracker := &asyncStartTracker{}
+	finalized := finalizeDrainAckStopPendingSessions(
+		"", env.cfg, sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		newFakeDrainOps(), env.dt, tracker, env.clk, env.rec, &env.stderr,
+	)
+	if finalized != 0 {
+		t.Fatalf("finalized = %d, want 0 (a process-name survivor must not free the pool slot)", finalized)
+	}
+	if !tracker.wait(2 * time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	// tracker.wait establishes happens-before with the async goroutine, so
+	// reading the fake's recorded calls here is race-free (mirrors the sibling
+	// confirm-dead test). ProcessAlive is called only when the queued stop was
+	// given process hints; with the pre-fix nil hints the loop never checks it.
+	processAliveCalls, stopCalls := 0, 0
+	for _, call := range env.sp.Calls {
+		switch call.Method {
+		case "ProcessAlive":
+			if call.Name == "worker" {
+				processAliveCalls++
+			}
+		case "Stop":
+			if call.Name == "worker" {
+				stopCalls++
+			}
+		}
+	}
+	if processAliveCalls == 0 {
+		t.Fatal("confirm-dead never checked process-name liveness; the finalizer queued the stop with nil hints")
+	}
+	if stopCalls < 2 {
+		t.Fatalf("Stop call count = %d, want >= 2 (confirm-dead must keep re-killing the process-name survivor)", stopCalls)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("status = closed, but the surviving agent process must keep the pool bead open")
+	}
+}
+
+// TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement pins PR #4181's
+// concurrency regression: the confirm-dead re-kill loop targets the session by
+// name, and names are reused across incarnations. Once a re-woken same-name
+// replacement owns the name (a different GC_INSTANCE_TOKEN), the loop must treat
+// the original target as gone and stop, rather than kill the live replacement.
+func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 300 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// A re-woken same-name replacement now owns the name with a fresh token.
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	if !dead {
+		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "worker" {
+			t.Fatal("confirm-dead re-killed a name-reused replacement instead of stopping on the token mismatch")
+		}
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("confirm-dead killed the live replacement session")
+	}
+	if got := stderr.String(); !strings.Contains(got, "instance token mismatch") {
+		t.Fatalf("stderr = %q, want token mismatch diagnostic", got)
+	}
+}
+
 func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraining(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
