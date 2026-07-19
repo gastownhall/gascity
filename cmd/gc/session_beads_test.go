@@ -168,6 +168,38 @@ func (s *failingCloseStore) Tx(_ string, fn func(beads.Tx) error) error {
 	return fn(s)
 }
 
+// failingReopenWriteStore fails the single status+metadata Update the reopen
+// path issues (and any standalone metadata batch), so a test can prove a failed
+// reopen leaves the bead untouched -- still closed, prior terminal metadata
+// intact -- rather than flipped open without its reopen metadata. Failing both
+// write shapes also pins the single-write structure: a regression back to a
+// separate status-only Update plus SetMetadataBatch would flip the status via
+// the (metadata-less, so un-failed) status Update and trip the status assertion.
+type failingReopenWriteStore struct {
+	*beads.MemStore
+	fail bool
+}
+
+func (s *failingReopenWriteStore) Update(id string, opts beads.UpdateOpts) error {
+	if s.fail && len(opts.Metadata) > 0 {
+		return errors.New("status+metadata update failed")
+	}
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *failingReopenWriteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.fail {
+		return errors.New("metadata batch failed")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// Tx passes s (the wrapper) into the callback so the injected write failures are
+// observed inside the Tx; the embedded MemStore.Tx would bind the raw store.
+func (s *failingReopenWriteStore) Tx(_ string, fn func(beads.Tx) error) error {
+	return fn(s)
+}
+
 func (p *stopHookProvider) Stop(name string) error {
 	if p.beforeStop != nil {
 		p.beforeStop(name)
@@ -1398,12 +1430,16 @@ func TestReopenClosedConfiguredNamedSessionBeadUsesSingleTransactionForStatusAnd
 }
 
 // TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails pins
-// ga-igcny0.1.1's partial-success fix: if the status flip succeeds but the
-// terminal metadata batch then fails, the function must report failure —
-// not a bead that looks "open" but is missing its reopen metadata.
+// ga-igcny0.1.1's partial-success fix. The reopen writes the status flip and the
+// terminal metadata as ONE recoverable Update, so when that write fails the
+// function must report failure AND leave the bead untouched -- still closed,
+// still carrying its prior terminal metadata -- never a bead that looks "open"
+// but is missing its reopen metadata. This holds even on a store whose Tx runs
+// callbacks sequentially without rollback, because a single Update is atomic on
+// every backing store.
 func TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails(t *testing.T) {
 	cityPath := t.TempDir()
-	store := &failingMetadataBatchStore{MemStore: beads.NewMemStore()}
+	store := &failingReopenWriteStore{MemStore: beads.NewMemStore()}
 	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -1436,17 +1472,35 @@ func TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails(t *te
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("close canonical bead: %v", err)
 	}
-	store.failBatch = true
+	store.fail = true
 
 	var stderr bytes.Buffer
 	_, _, ok := reopenClosedConfiguredNamedSessionBead(
 		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, nil, &stderr,
 	)
 	if ok {
-		t.Fatal("reopenClosedConfiguredNamedSessionBead returned true, want false when the metadata batch fails")
+		t.Fatal("reopenClosedConfiguredNamedSessionBead returned true, want false when the reopen write fails")
 	}
 	if stderr.Len() == 0 {
-		t.Fatal("expected a diagnostic on stderr when the metadata batch fails")
+		t.Fatal("expected a diagnostic on stderr when the reopen write fails")
+	}
+	// The single status+metadata Update is all-or-nothing on every store, so a
+	// failed reopen must leave the bead exactly as it was: closed, carrying its
+	// prior terminal metadata, with none of the reopen batch applied. A
+	// regression to a separate status flip plus metadata batch would surface
+	// here as an "open" bead (or one whose terminal state was overwritten).
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("get bead after failed reopen: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed: a failed single-write reopen must not flip the bead open", got.Status)
+	}
+	if got.Metadata["state"] != "suspended" {
+		t.Fatalf("state = %q, want suspended: the reopen sets state=active, so the old terminal state must survive a failed write", got.Metadata["state"])
+	}
+	if got.Metadata["close_reason"] != "suspended" {
+		t.Fatalf("close_reason = %q, want suspended: the reopen clears close_reason, so it must survive a failed write", got.Metadata["close_reason"])
 	}
 }
 
