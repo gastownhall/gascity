@@ -660,10 +660,20 @@ case "$op" in
       --arg registration_token "$registration_token" \
       '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
-    reply_to=""
+    # Confirm the original still exists in the recipient's inbox. The recipient
+    # cache can be stale: if the message was archived, deleted, or purged
+    # server-side out of band, fetch_inbox no longer returns it. Replying to a
+    # removed message must be a not-found, not a fresh send to the cached
+    # recipient. Mirrors the read/get removal checks above.
+    orig=""
     if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "[]" ]; then
-      reply_to=$(echo "$result" | jq -r --arg tid "$id" '[.[] | select((.id | tostring) == $tid)] | .[0].from // empty')
+      orig=$(echo "$result" | jq --arg tid "$id" '[.[] | select((.id | tostring) == $tid)] | .[0] // empty')
     fi
+    if [ -z "$orig" ] || [ "$orig" = "null" ]; then
+      message_not_found "$id"
+    fi
+
+    reply_to=$(echo "$orig" | jq -r '.from // empty')
     if [ -z "$reply_to" ]; then
       reply_to="$recipient"
     fi
