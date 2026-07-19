@@ -110,6 +110,32 @@ func TestNativeDoltStoreCountTranslatesExactFilterShapes(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreCountBothTiersSupported asserts the TierBoth shape —
+// what beadPolicyStore expands every TierIssues read into — is served by
+// CountIssues with no ephemeral predicate. TierBoth has no narrowing on
+// either side (no SQL tier filter, matchesTier always true), so the merged
+// backend count is exact; gating it out silently cost policy-wrapped cities
+// the store-health fast path.
+func TestNativeDoltStoreCountBothTiersSupported(t *testing.T) {
+	var gotFilter beadslib.IssueFilter
+	store := newNativeDoltStoreForTest(&nativeDoltStorageSpy{
+		countIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) (int64, error) {
+			gotFilter = filter
+			return 20641, nil
+		},
+	})
+	n, err := store.Count(context.Background(), ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("Count(TierBoth) err = %v, want nil", err)
+	}
+	if n != 20641 {
+		t.Fatalf("Count(TierBoth) = %d, want 20641", n)
+	}
+	if gotFilter.Ephemeral != nil {
+		t.Fatalf("filter.Ephemeral = %v, want nil (no tier predicate for TierBoth)", *gotFilter.Ephemeral)
+	}
+}
+
 // TestNativeDoltStoreCountUnsupportedShapes asserts Count reports
 // ErrCountUnsupported for every shape List narrows Go-side, so callers fall
 // back to the hydrating path instead of receiving a superset count.
@@ -122,7 +148,6 @@ func TestNativeDoltStoreCountUnsupportedShapes(t *testing.T) {
 		{name: "excludeTypes", query: ListQuery{AllowScan: true, IncludeClosed: true}, excludeTypes: []string{"message"}},
 		{name: "status open exclude-list translation", query: ListQuery{Status: "open", AllowScan: true}},
 		{name: "wisps tier filtered Go-side", query: ListQuery{AllowScan: true, TierMode: TierWisps}},
-		{name: "both tiers filtered Go-side", query: ListQuery{AllowScan: true, TierMode: TierBoth}},
 		{name: "metadata re-filtered Go-side", query: ListQuery{AllowScan: true, Metadata: map[string]string{"gc.rig": "fc"}}},
 		{name: "assignees not translated", query: ListQuery{AllowScan: true, Assignees: []string{"a", "b"}}},
 		{name: "parentID Go-side projection", query: ListQuery{AllowScan: true, ParentID: "ga-parent"}},

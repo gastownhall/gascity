@@ -83,9 +83,20 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 //     over-conservative gate the DoltLite Counter applies.
 //   - Limit: the Counter contract is List cardinality, including List's
 //     post-sort limit cap.
+//
+// TierBoth is supported alongside TierIssues: it is the one tier with no
+// narrowing anywhere — no SQL ephemeral predicate (nativeIssueFilterFromListQuery
+// emits no tier filter) and no Go-side re-filter (matchesTier returns true
+// unconditionally) — so CountIssues' SearchIssues-mirroring merge is already
+// the exact List cardinality. This matters in practice: beadPolicyStore
+// expands every TierIssues read to TierBoth, so a TierIssues-only gate makes
+// policy-wrapped cities (any city with bead policies, e.g. order_tracking
+// retention) silently lose the Counter fast path and fall back to hydration.
+// TierWisps stays unsupported: its ephemeral||no-history membership is
+// resolved Go-side and has no exact filter translation.
 func nativeDoltCountSupported(query ListQuery, excludeTypes []string) bool {
 	return len(excludeTypes) == 0 &&
-		query.TierMode == TierIssues &&
+		(query.TierMode == TierIssues || query.TierMode == TierBoth) &&
 		query.Status != "open" &&
 		len(query.Assignees) == 0 &&
 		len(query.ParentIDs) == 0 &&
