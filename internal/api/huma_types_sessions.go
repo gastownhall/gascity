@@ -85,17 +85,21 @@ type SessionIDInput struct {
 type SessionTranscriptInput struct {
 	CityScope
 	TailParam
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
-	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
-	After  string `query:"after" required:"false" doc:"Pagination cursor: return entries after this UUID."`
+	ID              string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format          string `query:"format" required:"false" enum:"conversation,raw,structured" doc:"Transcript format: conversation (default), raw, or structured."`
+	IncludeThinking bool   `query:"include_thinking" required:"false" doc:"Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise."`
+	Before          string `query:"before" required:"false" doc:"Pagination cursor: return entries before this stable transcript entry ID."`
+	After           string `query:"after" required:"false" doc:"Pagination cursor: return entries after this stable transcript entry ID."`
 }
 
 // SessionStreamInput is the Huma input for GET /v0/city/{cityName}/session/{id}/stream.
 type SessionStreamInput struct {
 	CityScope
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
+	ID              string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format          string `query:"format" required:"false" enum:"conversation,raw,structured" doc:"Transcript format: conversation (default), raw, or structured."`
+	IncludeThinking bool   `query:"include_thinking" required:"false" doc:"Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise."`
+	AfterCursor     string `query:"after_cursor" required:"false" maxLength:"2048" doc:"Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect."`
+	LastEventID     string `header:"Last-Event-ID" required:"false" maxLength:"2048" doc:"Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor."`
 
 	resolved *sessionStreamState
 }

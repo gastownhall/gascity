@@ -24,6 +24,12 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			RunningAgents: int(body.Agents.Running),
 		},
 	}
+	if body.Partial != nil {
+		out.Partial = *body.Partial
+	}
+	if body.PartialErrors != nil {
+		out.PartialErrors = append([]string(nil), (*body.PartialErrors)...)
+	}
 	if body.Version != nil {
 		out.Version = *body.Version
 	}

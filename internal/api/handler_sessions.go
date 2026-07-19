@@ -253,37 +253,73 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 	sessions, responseByID := filterEnrichReadModel(mgr, listings, stateFilter, templateFilter)
 
-	items := make([]sessionResponse, len(sessions))
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+	// Resolve the legacy offset page before runtime/transcript enrichment so
+	// off-page sessions do not perform filesystem discovery on every list poll.
+	pp := parsePagination(r, maxPaginationLimit)
+	rowIdx := make([]int, len(sessions))
+	for i := range rowIdx {
+		rowIdx[i] = i
+	}
+	pageIdx := rowIdx
+	var total int
+	nextCursor := ""
+	if !pp.IsPaging {
+		if pp.Limit < len(pageIdx) {
+			pageIdx = pageIdx[:pp.Limit]
+		}
+		total = len(pageIdx)
+	} else {
+		pageIdx, total, nextCursor = paginate(rowIdx, pp)
+		if pageIdx == nil {
+			pageIdx = []int{}
+		}
 	}
 
-	pp := parsePagination(r, maxPaginationLimit)
+	pageSessions := make([]session.Info, len(pageIdx))
+	for i, row := range pageIdx {
+		pageSessions[i] = sessions[row]
+	}
+	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
+	items := make([]sessionResponse, len(pageSessions))
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	for i, sess := range pageSessions {
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+	}
+
 	if !pp.IsPaging {
-		if pp.Limit < len(items) {
-			items = items[:pp.Limit]
-		}
 		writeJSON(w, http.StatusOK, listResponse{
 			Items:         items,
-			Total:         len(items),
+			Total:         total,
 			Partial:       len(partialErrors) > 0,
 			PartialErrors: partialErrors,
 		})
 		return
 	}
-	page, total, nextCursor := paginate(items, pp)
-	if page == nil {
-		page = []sessionResponse{}
-	}
 	writeJSON(w, http.StatusOK, listResponse{
-		Items:         page,
+		Items:         items,
 		Total:         total,
 		NextCursor:    nextCursor,
 		Partial:       len(partialErrors) > 0,
 		PartialErrors: partialErrors,
 	})
+}
+
+func sessionTranscriptLookupCandidates(infos []session.Info) []session.Info {
+	candidates := make([]session.Info, 0, len(infos))
+	for _, info := range infos {
+		if info.State == session.StateActive && strings.TrimSpace(info.WorkDir) != "" && strings.TrimSpace(info.SessionKey) != "" {
+			candidates = append(candidates, info)
+		}
+	}
+	return candidates
+}
+
+func sessionTranscriptProviderFallback(cfg *config.City) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Workspace.Provider)
 }
 
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
@@ -545,34 +581,17 @@ const defaultSessionPeekLines = 5
 // peekLines controls the line count for the preview when wantPeek is true.
 // Zero means "use default" (defaultSessionPeekLines).
 func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
+	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery, peekLines, nil)
+}
+
+// enrichSessionResponseWithKeyedPaths accepts an optional page-level map of
+// exact transcript paths. A non-nil map is authoritative, including misses,
+// so list callers can batch Codex discovery once instead of scanning per row.
+func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
 	if info.State != session.StateActive {
 		return
 	}
-	var (
-		stateHandle worker.StateHandle
-		peekHandle  worker.PeekHandle
-	)
-	switch v := runtimeHandle.(type) {
-	case worker.Handle:
-		stateHandle = v
-		peekHandle = v
-	case sessionResponseHandle:
-		stateHandle = v
-		peekHandle = v
-	case runtime.Provider:
-		store := s.state.SessionsBeadStore()
-		if store.Store == nil {
-			return
-		}
-		resolved, err := s.workerHandleForSession(store.Store, info.ID)
-		if err != nil {
-			return
-		}
-		stateHandle = resolved
-		peekHandle = resolved
-	default:
-		return
-	}
+	stateHandle, peekHandle := s.sessionRuntimeHandles(runtimeHandle, info)
 	if stateHandle == nil {
 		return
 	}
@@ -612,48 +631,90 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 	}
 
-	// Model + context usage (best-effort).
-	if resp.Running && info.WorkDir != "" {
-		workDir := info.WorkDir
-		if abs, err := filepath.Abs(workDir); err == nil {
-			workDir = abs
+	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
+}
+
+// sessionRuntimeHandles resolves the state and peek handles for an active
+// session from its runtime handle. It returns nil handles when none is usable
+// (unsupported handle type, missing bead store, or a worker lookup error); the
+// caller treats a nil state handle as "nothing to enrich".
+func (s *Server) sessionRuntimeHandles(runtimeHandle any, info session.Info) (worker.StateHandle, worker.PeekHandle) {
+	switch v := runtimeHandle.(type) {
+	case worker.Handle:
+		return v, v
+	case sessionResponseHandle:
+		return v, v
+	case runtime.Provider:
+		store := s.state.SessionsBeadStore()
+		if store.Store == nil {
+			return nil, nil
 		}
-		factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+		resolved, err := s.workerHandleForSession(store.Store, info.ID)
 		if err != nil {
-			return
+			return nil, nil
 		}
-		// Prefer session-key lookup to avoid cross-reading another session's transcript.
-		// Cache the resolved file path — session files don't move once created.
-		provider := info.Provider
-		if strings.TrimSpace(provider) == "" && cfg != nil {
-			provider, _ = resolveProviderInfo(provider, cfg)
-		}
-		if !allowWorkdirTranscriptDiscovery && !canUseCheapTranscriptLookup(provider, info.SessionKey) {
-			return
-		}
-		sessionFile := factory.DiscoverTranscript(provider, workDir, info.SessionKey)
-		if sessionFile != "" {
-			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
-				resp.Model = meta.Model
-				if meta.ContextUsage != nil {
-					resp.ContextPct = &meta.ContextUsage.Percentage
-					resp.ContextWindow = &meta.ContextUsage.ContextWindow
-				}
-				resp.Activity = meta.Activity
-			}
-		}
+		return resolved, resolved
+	default:
+		return nil, nil
 	}
 }
 
-func canUseCheapTranscriptLookup(provider, sessionKey string) bool {
-	if strings.TrimSpace(sessionKey) == "" {
-		return false
+// applySessionModelContext fills the best-effort model and context-occupancy
+// fields on a running session response from its transcript tail metadata.
+func (s *Server) applySessionModelContext(resp *sessionResponse, info session.Info, cfg *config.City, allowWorkdirTranscriptDiscovery bool, keyedTranscriptPaths map[string]string) {
+	if !resp.Running || info.WorkDir == "" {
+		return
 	}
-	p := strings.ToLower(strings.TrimSpace(provider))
-	if strings.Contains(p, "codex") || strings.Contains(p, "gemini") {
-		return false
+	workDir := info.WorkDir
+	if abs, err := filepath.Abs(workDir); err == nil {
+		workDir = abs
 	}
-	return true
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+	if err != nil {
+		return
+	}
+	// Prefer session-key lookup to avoid cross-reading another session's transcript.
+	provider := info.Provider
+	if strings.TrimSpace(provider) == "" && cfg != nil {
+		provider, _ = resolveProviderInfo(provider, cfg)
+	}
+	transcriptProvider := session.ProviderFamilyFromInfo(info, provider)
+	sessionFile := s.resolveSessionTranscriptFile(info, workDir, transcriptProvider, factory, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
+	if sessionFile == "" {
+		return
+	}
+	meta, err := factory.TailMetaForProvider(transcriptProvider, sessionFile)
+	if err != nil || meta == nil {
+		return
+	}
+	resp.Model = meta.Model
+	if meta.ContextUsage != nil {
+		resp.ContextPct = &meta.ContextUsage.Percentage
+		resp.ContextWindow = &meta.ContextUsage.ContextWindow
+	}
+	resp.Activity = meta.Activity
+}
+
+// resolveSessionTranscriptFile picks the exact transcript file for one session.
+// Get/create callers allow same-workdir discovery; list callers pass a
+// pre-batched keyed map where a missing entry is an authoritative miss.
+func (s *Server) resolveSessionTranscriptFile(info session.Info, workDir, transcriptProvider string, factory *worker.Factory, allowWorkdirTranscriptDiscovery bool, keyedTranscriptPaths map[string]string) string {
+	switch {
+	case allowWorkdirTranscriptDiscovery:
+		return factory.DiscoverTranscript(transcriptProvider, workDir, info.SessionKey)
+	case keyedTranscriptPaths != nil:
+		return keyedTranscriptPaths[info.ID]
+	default:
+		// Defensive exact-attribution path for a not-yet-existing caller that
+		// wants keyed telemetry without a prebuilt page map. No current handler
+		// reaches this branch: list callers pass a non-nil keyed map and
+		// get/create callers pass allowWorkdirTranscriptDiscovery=true. It is
+		// kept so any future caller resolves one exact session instead of
+		// silently getting "", and never falls back to a same-workdir file.
+		lookupInfo := info
+		lookupInfo.WorkDir = workDir
+		return session.ResolveKeyedTranscriptPath(lookupInfo, s.sessionLogPaths())
+	}
 }
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.

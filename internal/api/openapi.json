@@ -2230,6 +2230,7 @@
               "urn:gascity:error:sling-missing-bead",
               "urn:gascity:error:sling-source-workflow-conflict",
               "urn:gascity:error:store-unavailable",
+              "urn:gascity:error:transcript-cursor-invalidated",
               "urn:gascity:error:validation-failed",
               "urn:gascity:error:wait-not-found",
               "urn:gascity:error:webhook-rejected",
@@ -2276,6 +2277,7 @@
               "urn:gascity:error:sling-missing-bead",
               "urn:gascity:error:sling-source-workflow-conflict",
               "urn:gascity:error:store-unavailable",
+              "urn:gascity:error:transcript-cursor-invalidated",
               "urn:gascity:error:validation-failed",
               "urn:gascity:error:wait-not-found",
               "urn:gascity:error:webhook-rejected",
@@ -5290,6 +5292,9 @@
       "PaginationInfo": {
         "additionalProperties": false,
         "properties": {
+          "has_newer_messages": {
+            "type": "boolean"
+          },
           "has_older_messages": {
             "type": "boolean"
           },
@@ -7306,6 +7311,19 @@
         },
         "type": "object"
       },
+      "SessionPendingClearedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "description": "Request ID of the interaction that was cleared.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      },
       "SessionPendingResponse": {
         "additionalProperties": false,
         "properties": {
@@ -7573,13 +7591,16 @@
         "type": "object"
       },
       "SessionStreamCommonEvent": {
-        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/SessionActivityEvent"
           },
           {
             "$ref": "#/components/schemas/PendingInteraction"
+          },
+          {
+            "$ref": "#/components/schemas/SessionPendingClearedEvent"
           },
           {
             "$ref": "#/components/schemas/HeartbeatEvent"
@@ -7600,7 +7621,7 @@
             "$ref": "#/components/schemas/PaginationInfo"
           },
           "provider": {
-            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.).",
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.).",
             "type": "string"
           },
           "template": {
@@ -7648,7 +7669,7 @@
             "$ref": "#/components/schemas/PaginationInfo"
           },
           "provider": {
-            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.",
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.",
             "type": "string"
           },
           "template": {
@@ -7662,6 +7683,2715 @@
           "format",
           "messages"
         ],
+        "type": "object"
+      },
+      "SessionStreamStructuredMessageEvent": {
+        "additionalProperties": false,
+        "description": "Provider-neutral structured transcript update with explicit snapshot, upsert, or reset application semantics.",
+        "properties": {
+          "format": {
+            "const": "structured",
+            "description": "Always structured for this event.",
+            "type": "string"
+          },
+          "history": {
+            "$ref": "#/components/schemas/SessionStructuredHistory",
+            "description": "Normalized worker-history envelope for this snapshot or stream batch."
+          },
+          "id": {
+            "type": "string"
+          },
+          "operation": {
+            "description": "How the client applies this structured frame: replace from a snapshot/reset or merge an upsert.",
+            "enum": [
+              "snapshot",
+              "upsert",
+              "reset"
+            ],
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.).",
+            "type": "string"
+          },
+          "reset_reason": {
+            "description": "Present if and only if operation is reset; absent for snapshot and upsert. Identifies why the reset replaced the client transcript.",
+            "enum": [
+              "resume_invalid",
+              "stream_changed",
+              "cursor_invalidated",
+              "history_rewritten"
+            ],
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "session.structured.v1",
+            "description": "Structured session transcript schema version.",
+            "type": "string"
+          },
+          "structured_messages": {
+            "description": "Provider-normalized structured messages.",
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredMessage"
+            },
+            "type": "array"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "provider",
+          "format",
+          "schema_version",
+          "operation",
+          "history",
+          "structured_messages"
+        ],
+        "title": "Structured session stream message",
+        "type": "object"
+      },
+      "SessionStructuredArgument": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredBlock": {
+        "description": "Provider-normalized transcript block discriminated by its closed block type vocabulary.",
+        "discriminator": {
+          "mapping": {
+            "image": "#/components/schemas/SessionStructuredBlockImage",
+            "interaction": "#/components/schemas/SessionStructuredBlockInteraction",
+            "text": "#/components/schemas/SessionStructuredBlockText",
+            "thinking": "#/components/schemas/SessionStructuredBlockThinking",
+            "tool_result": "#/components/schemas/SessionStructuredBlockToolResult",
+            "tool_use": "#/components/schemas/SessionStructuredBlockToolUse",
+            "unknown": "#/components/schemas/SessionStructuredBlockUnknown"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockText"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockThinking"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockToolUse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockToolResult"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockInteraction"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockImage"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredBlockUnknown"
+          }
+        ],
+        "title": "Structured transcript block"
+      },
+      "SessionStructuredBlockImage": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "image",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockImage",
+        "type": "object"
+      },
+      "SessionStructuredBlockInteraction": {
+        "additionalProperties": false,
+        "properties": {
+          "interaction": {
+            "$ref": "#/components/schemas/SessionStructuredInteraction"
+          },
+          "type": {
+            "const": "interaction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockInteraction",
+        "type": "object"
+      },
+      "SessionStructuredBlockText": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockText",
+        "type": "object"
+      },
+      "SessionStructuredBlockThinking": {
+        "additionalProperties": false,
+        "properties": {
+          "signature": {
+            "type": "string"
+          },
+          "thinking": {
+            "type": "string"
+          },
+          "type": {
+            "const": "thinking",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockThinking",
+        "type": "object"
+      },
+      "SessionStructuredBlockToolResult": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "is_error": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "structured": {
+            "$ref": "#/components/schemas/SessionStructuredToolResult"
+          },
+          "tool_call_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockToolResult",
+        "type": "object"
+      },
+      "SessionStructuredBlockToolUse": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/SessionStructuredToolInput"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_use",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockToolUse",
+        "type": "object"
+      },
+      "SessionStructuredBlockUnknown": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/SessionStructuredToolInput"
+          },
+          "interaction": {
+            "$ref": "#/components/schemas/SessionStructuredInteraction"
+          },
+          "is_error": {
+            "type": "boolean"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "structured": {
+            "$ref": "#/components/schemas/SessionStructuredToolResult"
+          },
+          "text": {
+            "type": "string"
+          },
+          "thinking": {
+            "type": "string"
+          },
+          "tool_call_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionStructuredBlockUnknown",
+        "type": "object"
+      },
+      "SessionStructuredContinuity": {
+        "additionalProperties": false,
+        "properties": {
+          "compaction_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "has_branches": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "after_entry_id": {
+            "type": "string"
+          },
+          "resume_token": {
+            "description": "Opaque cursor for an exact structured REST-to-SSE handoff or SSE reconnect.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resume_token"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredGeneration": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "continuity": {
+            "$ref": "#/components/schemas/SessionStructuredContinuity"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/SessionStructuredCursor"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredDiagnostic"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "gc_session_id": {
+            "type": "string"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/SessionStructuredGeneration"
+          },
+          "logical_conversation_id": {
+            "type": "string"
+          },
+          "provider_session_id": {
+            "type": "string"
+          },
+          "tail_state": {
+            "$ref": "#/components/schemas/SessionStructuredTailState"
+          },
+          "transcript_stream_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "transcript_stream_id",
+          "generation",
+          "cursor",
+          "continuity",
+          "tail_state"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredIDESelection": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredInteraction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredMessage": {
+        "description": "Provider-normalized transcript message discriminated by its closed role vocabulary.",
+        "discriminator": {
+          "mapping": {
+            "assistant": "#/components/schemas/SessionStructuredMessageAssistant",
+            "system": "#/components/schemas/SessionStructuredMessageSystem",
+            "tool": "#/components/schemas/SessionStructuredMessageTool",
+            "unknown": "#/components/schemas/SessionStructuredMessageUnknown",
+            "user": "#/components/schemas/SessionStructuredMessageUser"
+          },
+          "propertyName": "role"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionStructuredMessageUnknown"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredMessageUser"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredMessageAssistant"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredMessageSystem"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredMessageTool"
+          }
+        ],
+        "title": "Structured transcript message"
+      },
+      "SessionStructuredMessageAssistant": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredBlock"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "const": "assistant",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "unknown",
+              "final",
+              "partial",
+              "superseded"
+            ],
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/SessionStructuredUsage"
+          }
+        },
+        "required": [
+          "role",
+          "id",
+          "status",
+          "blocks"
+        ],
+        "title": "SessionStructuredMessageAssistant",
+        "type": "object"
+      },
+      "SessionStructuredMessageSystem": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredBlock"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "const": "system",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "unknown",
+              "final",
+              "partial",
+              "superseded"
+            ],
+            "type": "string"
+          },
+          "system_event": {
+            "$ref": "#/components/schemas/SessionStructuredSystemEvent"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "id",
+          "status",
+          "blocks"
+        ],
+        "title": "SessionStructuredMessageSystem",
+        "type": "object"
+      },
+      "SessionStructuredMessageTool": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredBlock"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "const": "tool",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "unknown",
+              "final",
+              "partial",
+              "superseded"
+            ],
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "id",
+          "status",
+          "blocks"
+        ],
+        "title": "SessionStructuredMessageTool",
+        "type": "object"
+      },
+      "SessionStructuredMessageUnknown": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredBlock"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "const": "unknown",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "unknown",
+              "final",
+              "partial",
+              "superseded"
+            ],
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": "string"
+          },
+          "system_event": {
+            "$ref": "#/components/schemas/SessionStructuredSystemEvent"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/SessionStructuredUsage"
+          },
+          "user_prompt": {
+            "$ref": "#/components/schemas/SessionStructuredUserPrompt"
+          }
+        },
+        "required": [
+          "role",
+          "id",
+          "status",
+          "blocks"
+        ],
+        "title": "SessionStructuredMessageUnknown",
+        "type": "object"
+      },
+      "SessionStructuredMessageUser": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredBlock"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "const": "user",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "unknown",
+              "final",
+              "partial",
+              "superseded"
+            ],
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "user_prompt": {
+            "$ref": "#/components/schemas/SessionStructuredUserPrompt"
+          }
+        },
+        "required": [
+          "role",
+          "id",
+          "status",
+          "blocks"
+        ],
+        "title": "SessionStructuredMessageUser",
+        "type": "object"
+      },
+      "SessionStructuredPatchHunk": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "new_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "new_start": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "old_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "old_start": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredPlanStep": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredQuestion": {
+        "additionalProperties": false,
+        "properties": {
+          "header": {
+            "type": "string"
+          },
+          "multi_select": {
+            "type": "boolean"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredQuestionOption"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredQuestionOption": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredSearchResultItem": {
+        "additionalProperties": false,
+        "properties": {
+          "snippet": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredSystemEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredTailState": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "type": "string"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "degraded_reason": {
+            "type": "string"
+          },
+          "last_entry_id": {
+            "type": "string"
+          },
+          "open_tool_call_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pending_interaction_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "activity"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredTodoItem": {
+        "additionalProperties": false,
+        "properties": {
+          "active_form": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredToolError": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "description": "Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown.",
+            "enum": [
+              "user_rejection",
+              "user_rejection_with_reason",
+              "command_failure",
+              "file_error",
+              "validation_error",
+              "timeout",
+              "network_error",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "user_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "category"
+        ],
+        "type": "object"
+      },
+      "SessionStructuredToolInput": {
+        "description": "Provider-neutral tool input discriminated by its closed kind vocabulary.",
+        "discriminator": {
+          "mapping": {
+            "arguments": "#/components/schemas/SessionStructuredToolInputArguments",
+            "code": "#/components/schemas/SessionStructuredToolInputCode",
+            "command": "#/components/schemas/SessionStructuredToolInputCommand",
+            "fetch": "#/components/schemas/SessionStructuredToolInputFetch",
+            "file": "#/components/schemas/SessionStructuredToolInputFile",
+            "glob": "#/components/schemas/SessionStructuredToolInputGlob",
+            "patch": "#/components/schemas/SessionStructuredToolInputPatch",
+            "plan": "#/components/schemas/SessionStructuredToolInputPlan",
+            "question": "#/components/schemas/SessionStructuredToolInputQuestion",
+            "search": "#/components/schemas/SessionStructuredToolInputSearch",
+            "stdin": "#/components/schemas/SessionStructuredToolInputStdin",
+            "task": "#/components/schemas/SessionStructuredToolInputTask",
+            "text": "#/components/schemas/SessionStructuredToolInputText",
+            "todo": "#/components/schemas/SessionStructuredToolInputTodo",
+            "unknown": "#/components/schemas/SessionStructuredToolInputUnknown",
+            "write": "#/components/schemas/SessionStructuredToolInputWrite"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputUnknown"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputCommand"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputStdin"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputCode"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputPatch"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputWrite"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputGlob"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputFetch"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputSearch"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputFile"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputTodo"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputPlan"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputQuestion"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputTask"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputText"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolInputArguments"
+          }
+        ],
+        "title": "Structured tool input"
+      },
+      "SessionStructuredToolInputArguments": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "arguments",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "arguments"
+        ],
+        "title": "SessionStructuredToolInputArguments",
+        "type": "object"
+      },
+      "SessionStructuredToolInputCode": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "code",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "code"
+        ],
+        "title": "SessionStructuredToolInputCode",
+        "type": "object"
+      },
+      "SessionStructuredToolInputCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "command",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "command"
+        ],
+        "title": "SessionStructuredToolInputCommand",
+        "type": "object"
+      },
+      "SessionStructuredToolInputFetch": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "fetch",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputFetch",
+        "type": "object"
+      },
+      "SessionStructuredToolInputFile": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "file",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "file_path"
+        ],
+        "title": "SessionStructuredToolInputFile",
+        "type": "object"
+      },
+      "SessionStructuredToolInputGlob": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "glob",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputGlob",
+        "type": "object"
+      },
+      "SessionStructuredToolInputPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "patch",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "patch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "patch"
+        ],
+        "title": "SessionStructuredToolInputPatch",
+        "type": "object"
+      },
+      "SessionStructuredToolInputPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "explanation": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "plan",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPlanStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputPlan",
+        "type": "object"
+      },
+      "SessionStructuredToolInputQuestion": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "question",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputQuestion",
+        "type": "object"
+      },
+      "SessionStructuredToolInputSearch": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "search",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputSearch",
+        "type": "object"
+      },
+      "SessionStructuredToolInputStdin": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "stdin",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "linked_command": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputStdin",
+        "type": "object"
+      },
+      "SessionStructuredToolInputTask": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "task",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "task_status": {
+            "type": "string"
+          },
+          "task_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputTask",
+        "type": "object"
+      },
+      "SessionStructuredToolInputText": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "text",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "title": "SessionStructuredToolInputText",
+        "type": "object"
+      },
+      "SessionStructuredToolInputTodo": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "todo",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "todos": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredTodoItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputTodo",
+        "type": "object"
+      },
+      "SessionStructuredToolInputUnknown": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "unknown",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "linked_command": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "patch": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPlanStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "task_status": {
+            "type": "string"
+          },
+          "task_type": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "todos": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredTodoItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputUnknown",
+        "type": "object"
+      },
+      "SessionStructuredToolInputWrite": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "write",
+            "description": "Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolInputWrite",
+        "type": "object"
+      },
+      "SessionStructuredToolResult": {
+        "description": "Provider-neutral tool result discriminated by its closed kind vocabulary.",
+        "discriminator": {
+          "mapping": {
+            "bash": "#/components/schemas/SessionStructuredToolResultBash",
+            "edit": "#/components/schemas/SessionStructuredToolResultEdit",
+            "fetch": "#/components/schemas/SessionStructuredToolResultFetch",
+            "glob": "#/components/schemas/SessionStructuredToolResultGlob",
+            "grep": "#/components/schemas/SessionStructuredToolResultGrep",
+            "plan": "#/components/schemas/SessionStructuredToolResultPlan",
+            "python": "#/components/schemas/SessionStructuredToolResultPython",
+            "question": "#/components/schemas/SessionStructuredToolResultQuestion",
+            "read": "#/components/schemas/SessionStructuredToolResultRead",
+            "search": "#/components/schemas/SessionStructuredToolResultSearch",
+            "stdin": "#/components/schemas/SessionStructuredToolResultStdin",
+            "task": "#/components/schemas/SessionStructuredToolResultTask",
+            "text": "#/components/schemas/SessionStructuredToolResultText",
+            "todo": "#/components/schemas/SessionStructuredToolResultTodo",
+            "unknown": "#/components/schemas/SessionStructuredToolResultUnknown",
+            "write": "#/components/schemas/SessionStructuredToolResultWrite"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultUnknown"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultBash"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultPython"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultRead"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultGlob"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultGrep"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultSearch"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultFetch"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultTodo"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultPlan"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultQuestion"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultStdin"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultTask"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultWrite"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultEdit"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStructuredToolResultText"
+          }
+        ],
+        "title": "Structured tool result"
+      },
+      "SessionStructuredToolResultBash": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "exit_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "interrupted": {
+            "type": "boolean"
+          },
+          "is_image": {
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "bash",
+            "type": "string"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stderr_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stdout_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "task_status": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultBash",
+        "type": "object"
+      },
+      "SessionStructuredToolResultEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "file_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "edit",
+            "type": "string"
+          },
+          "new_string": {
+            "type": "string"
+          },
+          "old_string": {
+            "type": "string"
+          },
+          "original_file": {
+            "type": "string"
+          },
+          "patch": {
+            "type": "string"
+          },
+          "patch_hunks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPatchHunk"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "replace_all": {
+            "type": "boolean"
+          },
+          "user_modified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultEdit",
+        "type": "object"
+      },
+      "SessionStructuredToolResultFetch": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "content": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "kind": {
+            "const": "fetch",
+            "type": "string"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status_text": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultFetch",
+        "type": "object"
+      },
+      "SessionStructuredToolResultGlob": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "filenames": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "glob",
+            "type": "string"
+          },
+          "num_files": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultGlob",
+        "type": "object"
+      },
+      "SessionStructuredToolResultGrep": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "content": {
+            "type": "string"
+          },
+          "counts": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "filenames": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "grep",
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "num_files": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_results": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "result_items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredSearchResultItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultGrep",
+        "type": "object"
+      },
+      "SessionStructuredToolResultPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "plan",
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPlanStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultPlan",
+        "type": "object"
+      },
+      "SessionStructuredToolResultPython": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "exit_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "interrupted": {
+            "type": "boolean"
+          },
+          "is_image": {
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "python",
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultPython",
+        "type": "object"
+      },
+      "SessionStructuredToolResultQuestion": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "kind": {
+            "const": "question",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "question": {
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredQuestion"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultQuestion",
+        "type": "object"
+      },
+      "SessionStructuredToolResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "read",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "start_line": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_lines": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultRead",
+        "type": "object"
+      },
+      "SessionStructuredToolResultSearch": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "content": {
+            "type": "string"
+          },
+          "counts": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "filenames": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "search",
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "num_files": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_results": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "result_items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredSearchResultItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultSearch",
+        "type": "object"
+      },
+      "SessionStructuredToolResultStdin": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "kind": {
+            "const": "stdin",
+            "type": "string"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultStdin",
+        "type": "object"
+      },
+      "SessionStructuredToolResultTask": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "exit_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "task",
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "task_status": {
+            "type": "string"
+          },
+          "task_type": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "total_duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_tool_use_count": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultTask",
+        "type": "object"
+      },
+      "SessionStructuredToolResultText": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "kind": {
+            "const": "text",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultText",
+        "type": "object"
+      },
+      "SessionStructuredToolResultTodo": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "kind": {
+            "const": "todo",
+            "type": "string"
+          },
+          "new_todos": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredTodoItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "old_todos": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredTodoItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultTodo",
+        "type": "object"
+      },
+      "SessionStructuredToolResultUnknown": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "applied_limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "counts": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredArgument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "exit_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "file_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "filenames": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "interrupted": {
+            "type": "boolean"
+          },
+          "is_image": {
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "new_string": {
+            "type": "string"
+          },
+          "new_todos": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredTodoItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "num_files": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "num_results": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "old_string": {
+            "type": "string"
+          },
+          "old_todos": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredTodoItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "original_file": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "patch": {
+            "type": "string"
+          },
+          "patch_hunks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPatchHunk"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "plan": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredQuestion"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "replace_all": {
+            "type": "boolean"
+          },
+          "result_items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredSearchResultItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "start_line": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status_code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status_text": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stderr_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stdout_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPlanStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "task_status": {
+            "type": "string"
+          },
+          "task_type": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "total_duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_tool_use_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          },
+          "user_modified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultUnknown",
+        "type": "object"
+      },
+      "SessionStructuredToolResultWrite": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionStructuredToolError"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "file_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "write",
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "num_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "patch": {
+            "type": "string"
+          },
+          "patch_hunks": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredPatchHunk"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "start_line": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          },
+          "total_lines": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "SessionStructuredToolResultWrite",
+        "type": "object"
+      },
+      "SessionStructuredUploadedFile": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "original_name": {
+            "type": "string"
+          },
+          "preview_url": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "context_percent": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "context_used_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "context_window_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionStructuredUserPrompt": {
+        "additionalProperties": false,
+        "properties": {
+          "opened_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "selections": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredIDESelection"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "uploaded_files": {
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredUploadedFile"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "SessionSubmitInputBody": {
@@ -7716,38 +10446,32 @@
         ],
         "type": "object"
       },
-      "SessionTranscriptGetResponse": {
+      "SessionTranscriptConversationResponse": {
         "additionalProperties": false,
         "properties": {
           "format": {
-            "description": "conversation, text, or raw.",
+            "description": "Conversation or text transcript format.",
+            "enum": [
+              "conversation",
+              "text"
+            ],
             "type": "string"
           },
           "id": {
             "type": "string"
           },
-          "messages": {
-            "description": "Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.",
-            "items": {
-              "$ref": "#/components/schemas/SessionRawMessageFrame"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "pagination": {
             "$ref": "#/components/schemas/PaginationInfo"
           },
           "provider": {
-            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.",
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.).",
             "type": "string"
           },
           "template": {
             "type": "string"
           },
           "turns": {
-            "description": "Populated for conversation/text formats.",
+            "description": "Conversation/text transcript turns.",
             "items": {
               "$ref": "#/components/schemas/OutputTurn"
             },
@@ -7763,6 +10487,130 @@
           "provider",
           "format"
         ],
+        "type": "object"
+      },
+      "SessionTranscriptGetResponse": {
+        "description": "Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.",
+        "discriminator": {
+          "mapping": {
+            "conversation": "#/components/schemas/SessionTranscriptConversationResponse",
+            "raw": "#/components/schemas/SessionTranscriptRawResponse",
+            "structured": "#/components/schemas/SessionTranscriptStructuredResponse",
+            "text": "#/components/schemas/SessionTranscriptConversationResponse"
+          },
+          "propertyName": "format"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionTranscriptConversationResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionTranscriptRawResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionTranscriptStructuredResponse"
+          }
+        ],
+        "title": "Session transcript response"
+      },
+      "SessionTranscriptRawResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "Raw provider-native transcript format.",
+            "enum": [
+              "raw"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messages": {
+            "description": "Provider-native transcript frames emitted only for raw format.",
+            "items": {
+              "$ref": "#/components/schemas/SessionRawMessageFrame"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.",
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "provider",
+          "format",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "SessionTranscriptStructuredResponse": {
+        "additionalProperties": false,
+        "description": "Provider-neutral structured transcript snapshot.",
+        "properties": {
+          "format": {
+            "const": "structured",
+            "description": "Structured provider-neutral transcript format.",
+            "type": "string"
+          },
+          "history": {
+            "$ref": "#/components/schemas/SessionStructuredHistory",
+            "description": "Normalized worker-history envelope when format is structured."
+          },
+          "id": {
+            "type": "string"
+          },
+          "operation": {
+            "const": "snapshot",
+            "description": "Always snapshot for a REST structured transcript.",
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, opencode, etc.).",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "session.structured.v1",
+            "description": "Structured session transcript schema version.",
+            "type": "string"
+          },
+          "structured_messages": {
+            "description": "Provider-normalized structured messages.",
+            "items": {
+              "$ref": "#/components/schemas/SessionStructuredMessage"
+            },
+            "type": "array"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "provider",
+          "format",
+          "schema_version",
+          "operation",
+          "history",
+          "structured_messages"
+        ],
+        "title": "Structured session transcript response",
         "type": "object"
       },
       "SessionUnknownStatePayload": {
@@ -39847,7 +42695,7 @@
     },
     "/v0/city/{cityName}/session/{id}/stream": {
       "get": {
-        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format) or raw messages (JSONL format) based on the format query parameter. Emits activity and pending events for tool approval prompts.",
+        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.",
         "operationId": "stream-session",
         "parameters": [
           {
@@ -39873,12 +42721,48 @@
             }
           },
           {
-            "description": "Transcript format: conversation (default) or raw.",
+            "description": "Transcript format: conversation (default), raw, or structured.",
             "explode": false,
             "in": "query",
             "name": "format",
             "schema": {
-              "description": "Transcript format: conversation (default) or raw.",
+              "description": "Transcript format: conversation (default), raw, or structured.",
+              "enum": [
+                "conversation",
+                "raw",
+                "structured"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise.",
+            "explode": false,
+            "in": "query",
+            "name": "include_thinking",
+            "schema": {
+              "description": "Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect.",
+            "explode": false,
+            "in": "query",
+            "name": "after_cursor",
+            "schema": {
+              "description": "Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect.",
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "description": "Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor.",
+              "maxLength": 2048,
               "type": "string"
             }
           }
@@ -39902,8 +42786,8 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
+                            "description": "The event resume cursor.",
+                            "type": "string"
                           },
                           "retry": {
                             "description": "The retry time in milliseconds.",
@@ -39928,8 +42812,8 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
+                            "description": "The event resume cursor.",
+                            "type": "string"
                           },
                           "retry": {
                             "description": "The retry time in milliseconds.",
@@ -39954,8 +42838,8 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
+                            "description": "The event resume cursor.",
+                            "type": "string"
                           },
                           "retry": {
                             "description": "The retry time in milliseconds.",
@@ -39979,8 +42863,8 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
+                            "description": "The event resume cursor.",
+                            "type": "string"
                           },
                           "retry": {
                             "description": "The retry time in milliseconds.",
@@ -39997,6 +42881,58 @@
                       {
                         "properties": {
                           "data": {
+                            "$ref": "#/components/schemas/SessionPendingClearedEvent"
+                          },
+                          "event": {
+                            "const": "pending_cleared",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event pending_cleared",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionStreamStructuredMessageEvent"
+                          },
+                          "event": {
+                            "const": "structured",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event structured",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
                             "$ref": "#/components/schemas/SessionStreamMessageEvent"
                           },
                           "event": {
@@ -40005,8 +42941,8 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
+                            "description": "The event resume cursor.",
+                            "type": "string"
                           },
                           "retry": {
                             "description": "The retry time in milliseconds.",
@@ -40440,32 +43376,47 @@
             }
           },
           {
-            "description": "Transcript format: conversation (default) or raw.",
+            "description": "Transcript format: conversation (default), raw, or structured.",
             "explode": false,
             "in": "query",
             "name": "format",
             "schema": {
-              "description": "Transcript format: conversation (default) or raw.",
+              "description": "Transcript format: conversation (default), raw, or structured.",
+              "enum": [
+                "conversation",
+                "raw",
+                "structured"
+              ],
               "type": "string"
             }
           },
           {
-            "description": "Pagination cursor: return entries before this UUID.",
+            "description": "Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise.",
+            "explode": false,
+            "in": "query",
+            "name": "include_thinking",
+            "schema": {
+              "description": "Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Pagination cursor: return entries before this stable transcript entry ID.",
             "explode": false,
             "in": "query",
             "name": "before",
             "schema": {
-              "description": "Pagination cursor: return entries before this UUID.",
+              "description": "Pagination cursor: return entries before this stable transcript entry ID.",
               "type": "string"
             }
           },
           {
-            "description": "Pagination cursor: return entries after this UUID.",
+            "description": "Pagination cursor: return entries after this stable transcript entry ID.",
             "explode": false,
             "in": "query",
             "name": "after",
             "schema": {
-              "description": "Pagination cursor: return entries after this UUID.",
+              "description": "Pagination cursor: return entries after this stable transcript entry ID.",
               "type": "string"
             }
           }
@@ -42262,7 +45213,7 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID (composite cursor).",
+                            "description": "The event resume cursor.",
                             "type": "string"
                           },
                           "retry": {
@@ -42288,7 +45239,7 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID (composite cursor).",
+                            "description": "The event resume cursor.",
                             "type": "string"
                           },
                           "retry": {

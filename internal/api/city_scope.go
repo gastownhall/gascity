@@ -251,6 +251,19 @@ func sseCityStream[I any](sm *SupervisorMux,
 	}
 }
 
+// sseCityStringIDStream is the string-cursor sibling of sseCityStream.
+func sseCityStringIDStream[I any](sm *SupervisorMux,
+	fn func(*Server, huma.Context, *I, StringIDSender),
+) func(huma.Context, *I, StringIDSender) {
+	return func(hctx huma.Context, input *I, send StringIDSender) {
+		srv := sm.resolveCityServer(cityScopeName(input))
+		if srv == nil {
+			return
+		}
+		fn(srv, hctx, input, send)
+	}
+}
+
 // cityScopeName extracts the city name from any city-scoped Huma input.
 // The type assertion is a programmer-bug tripwire — every city-scoped
 // input embeds CityScope by construction, so a failure here means

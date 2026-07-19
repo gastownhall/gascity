@@ -35,6 +35,8 @@ type StatusJSON struct {
 	Agents            []StatusAgentJSON            `json:"agents"`
 	Rigs              []StatusRigJSON              `json:"rigs"`
 	Summary           StatusSummaryJSON            `json:"summary"`
+	Partial           bool                         `json:"partial,omitempty"`
+	PartialErrors     []string                     `json:"partial_errors,omitempty"`
 }
 
 type WorkspaceJSON struct {
@@ -279,6 +281,8 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 		Controller:        controllerStatusForCity(cityPath),
 		Beads:             v.Beads,
 		ConditionalWrites: v.ConditionalWrites,
+		Partial:           v.Partial,
+		PartialErrors:     append([]string(nil), v.PartialErrors...),
 		Summary: StatusSummaryJSON{
 			TotalAgents:       v.Summary.TotalAgents,
 			RunningAgents:     v.Summary.RunningAgents,
@@ -376,11 +380,15 @@ func observeSessionTargetWithWarning(
 
 	select {
 	case result := <-done:
-		if result.err != nil && stderr != nil {
-			fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target.runtimeSessionName, result.err) //nolint:errcheck // best-effort stderr
+		if result.err != nil {
+			markStatusProviderPartial(sp)
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target.runtimeSessionName, result.err) //nolint:errcheck // best-effort stderr
+			}
 		}
 		return result.observation
 	case <-time.After(statusObservationTimeout):
+		markStatusProviderPartial(sp)
 		if stderr != nil {
 			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target.runtimeSessionName, statusObservationTimeout) //nolint:errcheck // best-effort stderr
 		}

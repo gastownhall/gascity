@@ -177,6 +177,36 @@ func TestHandleStatusPreservesStoredCountsWhenReadyFails(t *testing.T) {
 	}
 }
 
+type partialStatusRuntimeProvider struct {
+	runtime.Provider
+}
+
+func (partialStatusRuntimeProvider) StatusPartial() bool { return true }
+
+func TestHandleStatusMarksRuntimeProbePartial(t *testing.T) {
+	state := newFakeState(t)
+	state.sessionProvider = partialStatusRuntimeProvider{Provider: state.sp}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true when runtime provider reports partial status")
+	}
+	if !statusPartialErrorsContain(resp.PartialErrors, "runtime status probe incomplete") {
+		t.Fatalf("PartialErrors = %#v, want runtime partial diagnostic", resp.PartialErrors)
+	}
+}
+
 func TestHandleHealth(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)

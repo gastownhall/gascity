@@ -326,10 +326,17 @@ test.describe('dashboard render smoke over the seeded corpus', () => {
     // correctly absent from this pane).
     await expect(page.getByText(OPERATOR_MAIL_BODY)).toBeVisible();
     await expect(page.getByText(AGENT_REPLY_BODY)).toBeVisible();
-    // Live-peek pane: the seeded stack backs no live runtime, so no transcript is
-    // streamed. Assert the pane's DESIGNED idle/empty state (its explicit copy),
-    // not a blank pane — the "renders a designed empty state" branch of the bar.
-    await expect(page.getByText('No turns in this session yet.')).toBeVisible();
+    // Live-peek pane: the seeded stack backs no live provider runtime, so the
+    // structured peek (AgentLivePeek → StructuredLivePeek) resolves the snapshot
+    // to the provider-neutral text fallback and renders the structured history
+    // block's DESIGNED degraded copy — a real designed state, not a blank pane.
+    // (Before #3931's structured peek this pane was the conversation peek's
+    // "No turns in this session yet." empty state.)
+    await expect(
+      page.getByText('provider transcript is unavailable; using provider-neutral text fallback', {
+        exact: false,
+      }),
+    ).toBeVisible();
   });
 
   test('run detail diff tab renders its designed unavailable state', async ({ page }) => {
