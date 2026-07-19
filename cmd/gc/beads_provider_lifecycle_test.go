@@ -10965,14 +10965,7 @@ esac
 		t.Fatal(err)
 	}
 
-	testExecutable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-	reexecGC := filepath.Join(binDir, "gc")
-	if err := os.Symlink(testExecutable, reexecGC); err != nil {
-		t.Fatalf("Symlink(test executable): %v", err)
-	}
+	reexecGC := reexecGCTestBinaryForTests(t)
 	gcWrapper := filepath.Join(binDir, "gc-wrapper")
 	gcWrapperScript := fmt.Sprintf(`#!/bin/sh
 set -eu

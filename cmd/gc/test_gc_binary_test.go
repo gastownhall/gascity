@@ -15,6 +15,22 @@ var (
 	testGCBinaryErr  error
 )
 
+// reexecGCTestBinaryForTests returns the current Go test executable through a
+// symlink named gc. TestMain recognizes that basename and dispatches the
+// supplied arguments through the real CLI command tree without rebuilding gc.
+func reexecGCTestBinaryForTests(t *testing.T) string {
+	t.Helper()
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	gcPath := filepath.Join(t.TempDir(), "gc")
+	if err := os.Symlink(testExecutable, gcPath); err != nil {
+		t.Fatalf("symlink test executable as gc: %v", err)
+	}
+	return gcPath
+}
+
 func currentGCBinaryForTests(t *testing.T) string {
 	t.Helper()
 	testGCBinaryOnce.Do(func() {

@@ -1423,7 +1423,7 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 }
 
 func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.T) {
-	cityPath, _ := setupFreshManagedBdWaitTestCity(t)
+	cityPath := setupFreshManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 
 	cmd := exec.Command("dolt", "sql", "-q", "show tables")

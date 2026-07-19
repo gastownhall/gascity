@@ -2694,7 +2694,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 	}
 }
 
-func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
+func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Helper()
 	configureIsolatedRuntimeEnv(t)
 
@@ -2715,8 +2715,9 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
+	reexecGC := reexecGCTestBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return reexecGC }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
@@ -2728,8 +2729,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	})
 
 	cityPath := shortSocketTempDir(t, "gc-bd-city-")
-	rigPath, err := writeManagedBdWaitTestCityScaffold(cityPath)
-	if err != nil {
+	if _, err := writeManagedBdWaitTestCityScaffold(cityPath); err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
 	t.Setenv("GC_CITY", cityPath)
@@ -2744,13 +2744,10 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
 	}
-	if err := initAndHookDir(cityPath, rigPath, "fe"); err != nil {
-		t.Fatalf("initAndHookDir(rig): %v", err)
-	}
 	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
 		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}
-	return cityPath, rigPath
+	return cityPath
 }
 
 func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
