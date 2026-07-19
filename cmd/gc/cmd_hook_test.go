@@ -1737,6 +1737,62 @@ func TestPoolWorkerIdentityCandidatesExcludeBareTemplate(t *testing.T) {
 	}
 }
 
+// TestHookClaimSkipsMessageBeadsAheadOfRoutedWork guards against #4419:
+// hookClaimExistingOrAssigned matched any OPEN candidate whose Assignee
+// equaled one of the session's identity strings, with no type check. A mail
+// message bead (issue_type="message") addressed to this session has exactly
+// that shape, so it was returned as "ready_assignment" work ahead of real
+// routed work waiting in the same work-query batch -- not by race, by
+// construction: the message-bead-matching loop runs before
+// claimFirstEligibleHookCandidate ever sees the routed work. A build lane
+// that consumed the response would attempt to execute a mail wisp instead
+// of its actual task.
+func TestHookClaimSkipsMessageBeadsAheadOfRoutedWork(t *testing.T) {
+	const (
+		identity = "builder"
+		mailID   = "ra-wisp-qgcfg1"
+		workID   = "ga-real-work"
+	)
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"` + mailID + `","status":"open","issue_type":"message","assignee":"` + identity + `"},
+			{"id":"` + workID + `","status":"open","issue_type":"task","assignee":"","metadata":{"gc.routed_to":"` + identity + `"}}
+		]`, nil
+	}
+	claimed := false
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+			if id != workID {
+				t.Fatalf("store.Claim called for %q, want the routed work bead %q (a mail bead must never reach the claim mutation)", id, workID)
+			}
+			claimed = true
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Type: "task"}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           identity,
+		IdentityCandidates: hookClaimIdentityCandidates(identity, "", identity, identity, identity),
+		RouteTargets:       hookClaimRouteTargets(identity, identity),
+		JSON:               true,
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID == mailID {
+		t.Fatalf("REGRESSION #4419: hook returned mail bead %q as work instead of routed work %q (%+v)", mailID, workID, result)
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != workID {
+		t.Fatalf("want claimed routed work %q, got action=%q reason=%q bead=%q code=%d", workID, result.Action, result.Reason, result.BeadID, code)
+	}
+	if !claimed {
+		t.Fatal("store.Claim was never called for the routed work bead")
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
