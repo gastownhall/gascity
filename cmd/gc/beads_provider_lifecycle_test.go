@@ -4451,74 +4451,46 @@ exit 1
 	}
 }
 
-func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
-	cityPath := t.TempDir()
-	writeMinimalCityToml(t, cityPath)
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"mc","project_id":"test-project"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+type rootStoreVerificationRetryStore struct {
+	*beads.MemStore
+	failuresRemaining int
+	listQueries       []beads.ListQuery
+}
 
-	materializeBuiltinPacksForTest(t, cityPath)
-
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
+func (s *rootStoreVerificationRetryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listQueries = append(s.listQueries, query)
+	if s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return nil, errors.New("root store not ready")
 	}
+	return s.MemStore.List(query)
+}
 
-	listCountFile := filepath.Join(t.TempDir(), "bd-list-count")
-	fakeBd := filepath.Join(binDir, "bd")
-	fakeBdScript := `#!/bin/sh
-set -eu
-count_file="` + listCountFile + `"
-cmd="${1:-}"
-case "$cmd" in
-  list)
-    count=0
-    if [ -f "$count_file" ]; then
-      count=$(cat "$count_file")
-    fi
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$count_file"
-    if [ "$count" -lt 3 ]; then
-      exit 1
-    fi
-    exit 0
-    ;;
-  config)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
-		t.Fatal(err)
+func TestVerifyCanonicalBdScopeStoreReadyRetries(t *testing.T) {
+	store := &rootStoreVerificationRetryStore{
+		MemStore:          beads.NewMemStore(),
+		failuresRemaining: 2,
+	}
+	var delays []time.Duration
+
+	if err := verifyCanonicalBdScopeStoreReady(store, func(delay time.Duration) {
+		delays = append(delays, delay)
+	}); err != nil {
+		t.Fatalf("verifyCanonicalBdScopeStoreReady: %v", err)
 	}
 
-	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
+	if got, want := len(store.listQueries), 3; got != want {
+		t.Fatalf("List attempts = %d, want %d", got, want)
 	}
-
-	configureTestDoltIdentityEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
-	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-
-	if err := initBeadsForDir(cityPath, cityPath, "mc", "mc"); err != nil {
-		t.Fatalf("initBeadsForDir: %v", err)
+	wantQuery := beads.ListQuery{AllowScan: true, Limit: 1}
+	for attempt, query := range store.listQueries {
+		if !reflect.DeepEqual(query, wantQuery) {
+			t.Errorf("List attempt %d query = %#v, want %#v", attempt+1, query, wantQuery)
+		}
 	}
-
-	data, err := os.ReadFile(listCountFile)
-	if err != nil {
-		t.Fatalf("read list retry count: %v", err)
-	}
-	if strings.TrimSpace(string(data)) != "3" {
-		t.Fatalf("expected bd list to retry until third attempt, got %q", strings.TrimSpace(string(data)))
+	wantDelays := []time.Duration{500 * time.Millisecond, 500 * time.Millisecond}
+	if !reflect.DeepEqual(delays, wantDelays) {
+		t.Fatalf("retry delays = %v, want %v", delays, wantDelays)
 	}
 }
 
