@@ -371,8 +371,9 @@ provider = "file"
 }
 
 // TestAuthoritativeBeadsProviderForScopeKeepsScopePinnedCustomExec guards the
-// "preserve custom exec semantics" half of the fix: a scope-pinned custom exec
-// provider is a deliberate selection and must still win over on-disk markers.
+// "preserve custom exec semantics" half of the fix. The basename deliberately
+// matches the managed wrapper: only the exact city shim path normalizes to bd;
+// another gc-beads-bd executable remains a deliberate override.
 func TestAuthoritativeBeadsProviderForScopeKeepsScopePinnedCustomExec(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
@@ -389,10 +390,10 @@ provider = "file"
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	setScopedBeadsProviderForTest(t, cityDir, "exec:/tmp/custom-beads")
+	setScopedBeadsProviderForTest(t, cityDir, "exec:/tmp/gc-beads-bd")
 
-	if got := authoritativeBeadsProviderForScope(cityDir, cityDir); got != "exec:/tmp/custom-beads" {
-		t.Fatalf("authoritativeBeadsProviderForScope(cityRoot) = %q, want scope-pinned custom exec provider preserved", got)
+	if got := authoritativeBeadsProviderForScope(cityDir, cityDir); got != "exec:/tmp/gc-beads-bd" {
+		t.Fatalf("authoritativeBeadsProviderForScope(cityRoot) = %q, want scope-pinned non-shim gc-beads-bd exec provider preserved", got)
 	}
 }
 

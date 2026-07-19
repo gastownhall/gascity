@@ -649,12 +649,12 @@ func providerUsesBdStoreContract(provider string) bool {
 	return contract.ProviderUsesBDContract(provider)
 }
 
-// isCustomExecProvider reports whether provider is a user-supplied exec:
-// beads provider (not the managed gc-beads-bd wrapper, which normalizes to
-// the "bd" contract). A custom exec provider is always a deliberate
-// selection and outranks on-disk store-marker inference.
+// isCustomExecProvider reports whether a normalized provider is a
+// user-supplied exec: provider. The city-managed gc-beads-bd wrapper
+// normalizes to "bd" before this check; another script with the same basename
+// remains a deliberate exec selection and outranks on-disk marker inference.
 func isCustomExecProvider(provider string) bool {
-	return strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider)
+	return strings.HasPrefix(provider, "exec:")
 }
 
 func cityUsesBdStoreContract(cityPath string) bool {
@@ -698,9 +698,11 @@ func resolveRawBeadsProviderForScope(scopeRoot, cityPath string, authoritative b
 			return normalized
 		}
 	}
-	provider := rawBeadsProvider(runtimeCityPath)
+	var provider string
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
+	} else {
+		provider = rawBeadsProvider(runtimeCityPath)
 	}
 	if isCustomExecProvider(provider) {
 		return provider
