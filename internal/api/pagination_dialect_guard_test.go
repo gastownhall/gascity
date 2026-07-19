@@ -65,7 +65,16 @@ var grandfatheredDialects = map[string][]string{
 	"GET /v0/events/stream":                             {"after_cursor"},
 	"GET /v0/city/{cityName}/extmsg/transcript":         {"after_sequence", "limit"},
 	"GET /v0/city/{cityName}/orders/history":            {"before", "limit"},
-	"GET /v0/city/{cityName}/session/{id}/transcript":   {"after", "before", "tail"},
+	// Session structured-transcript SSE stream. Owner sign-off 2026-07-18:
+	// this is a live Server-Sent-Events reconnection endpoint, not a keyset
+	// list walk. It resumes via the Last-Event-ID header, with after_cursor as
+	// the browser fallback query param — the identical reconnect dialect the
+	// event streams above already speak (/v0/events/stream and
+	// /v0/city/{cityName}/events/stream). Grandfathered as a conscious
+	// SSE-resume exception: a live stream has no page boundary to express as
+	// cursor+limit.
+	"GET /v0/city/{cityName}/session/{id}/stream":     {"after_cursor"},
+	"GET /v0/city/{cityName}/session/{id}/transcript": {"after", "before", "tail"},
 }
 
 // boundedLimitOnlyFeeds is the "METHOD path" allowlist of endpoints that

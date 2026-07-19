@@ -3,7 +3,6 @@ package sessionlog
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,6 +73,8 @@ func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
 	messages := make([]*Entry, 0)
 	messageIndex := make(map[string]int)
 	syntheticIDs := newStableSyntheticEntryIDSequence("gemini")
+	var diagnostics SessionDiagnostics
+	var lastNonEmptyLineMalformed bool
 
 	appendEntry := func(rawMessage json.RawMessage) {
 		entry := parseGeminiMessage(rawMessage, syntheticIDs.ForRecord(rawMessage))
@@ -103,8 +104,11 @@ func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
 		}
 		var payload linePayload
 		if err := json.Unmarshal(line, &payload); err != nil {
-			return nil, fmt.Errorf("parsing Gemini JSONL %s: %w", path, err)
+			diagnostics.MalformedLineCount++
+			lastNonEmptyLineMalformed = true
+			continue
 		}
+		lastNonEmptyLineMalformed = false
 		if sessionID == "" {
 			sessionID = strings.TrimSpace(payload.SessionID)
 		}
@@ -124,12 +128,14 @@ func readGeminiJSONLFile(path string, data []byte) (*Session, error) {
 			appendEntry(append(json.RawMessage(nil), line...))
 		}
 	}
+	diagnostics.MalformedTail = lastNonEmptyLineMalformed
 	if sessionID == "" {
 		sessionID = geminiSessionID(path)
 	}
 	return &Session{
-		ID:       sessionID,
-		Messages: messages,
+		ID:          sessionID,
+		Messages:    messages,
+		Diagnostics: diagnostics,
 	}, nil
 }
 

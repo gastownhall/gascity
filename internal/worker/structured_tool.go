@@ -17,20 +17,41 @@ type structuredToolContext struct {
 }
 
 func attachStructuredToolData(entries []HistoryEntry) []HistoryEntry {
+	return attachStructuredToolDataWithContext(entries, entries)
+}
+
+// attachStructuredToolDataWithContext normalizes structured tool input and result
+// data on entries. The tool_use -> context map is built from contextEntries — the
+// full session — rather than from entries alone, so a tool_result on a paginated
+// page whose matching tool_use falls off the page can still recover the tool name
+// and input needed to type the result (command, diff, read range, task). When
+// entries and contextEntries are the same slice (an un-paged load), the context
+// pass runs once and behavior is unchanged.
+func attachStructuredToolDataWithContext(entries, contextEntries []HistoryEntry) []HistoryEntry {
 	contexts := make(map[string]structuredToolContext)
-	for entryIndex := range entries {
-		for blockIndex := range entries[entryIndex].Blocks {
-			block := &entries[entryIndex].Blocks[blockIndex]
-			if block.Kind != BlockKindToolUse || strings.TrimSpace(block.ToolUseID) == "" {
-				continue
-			}
-			input := normalizeStructuredToolInput(block.Name, block.Input)
-			block.StructuredInput = input
-			contexts[block.ToolUseID] = structuredToolContext{
-				Name:  block.Name,
-				Input: input,
+	recordToolUseContexts := func(src []HistoryEntry) {
+		for entryIndex := range src {
+			for blockIndex := range src[entryIndex].Blocks {
+				block := &src[entryIndex].Blocks[blockIndex]
+				if block.Kind != BlockKindToolUse || strings.TrimSpace(block.ToolUseID) == "" {
+					continue
+				}
+				input := normalizeStructuredToolInput(block.Name, block.Input)
+				block.StructuredInput = input
+				contexts[block.ToolUseID] = structuredToolContext{
+					Name:  block.Name,
+					Input: input,
+				}
 			}
 		}
+	}
+	recordToolUseContexts(contextEntries)
+	if !sameHistoryEntries(entries, contextEntries) {
+		// Distinct paged slice: the context pass populated the map (including
+		// off-page tool_use) but set StructuredInput only on the context copies,
+		// so run it over the returned page too — its own tool_use blocks must
+		// carry StructuredInput, and an on-page tool_use wins for its own ID.
+		recordToolUseContexts(entries)
 	}
 	for entryIndex := range entries {
 		for blockIndex := range entries[entryIndex].Blocks {
@@ -47,6 +68,19 @@ func attachStructuredToolData(entries []HistoryEntry) []HistoryEntry {
 	}
 	attachLinkedStdinCommands(entries)
 	return entries
+}
+
+// sameHistoryEntries reports whether a and b are the same underlying slice, so
+// the un-paged fast path (entries == contextEntries) does the tool_use context
+// pass exactly once.
+func sameHistoryEntries(a, b []HistoryEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	return &a[0] == &b[0]
 }
 
 func attachLinkedStdinCommands(entries []HistoryEntry) {

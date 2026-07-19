@@ -167,10 +167,14 @@ func mergeConversationHistorySnapshots(previous, current *HistorySnapshot) *Hist
 		return merged
 	}
 	// A later generation of the same provider stream is authoritative: some
-	// structured transcripts are rewritten in place. Stitch only across a
-	// rotated stream, where the prior file is the continuity evidence.
+	// structured transcripts are rewritten in place. Apply that in-place
+	// replacement only for a genuine single-file rewrite. A retained snapshot
+	// that already stitched a rotation reports the current stream ID even though
+	// it still carries pre-rotation entries from the prior file; letting the
+	// shared stream ID trigger replacement would drop that stitched history.
 	previousStreamID := strings.TrimSpace(previous.TranscriptStreamID)
-	if previousStreamID != "" && previousStreamID == strings.TrimSpace(current.TranscriptStreamID) {
+	if previousStreamID != "" && previousStreamID == strings.TrimSpace(current.TranscriptStreamID) &&
+		!historySnapshotSpansRotation(previous) {
 		return merged
 	}
 
@@ -196,6 +200,30 @@ func mergeConversationHistorySnapshots(previous, current *HistorySnapshot) *Hist
 		merged.TailState.LastEntryID = merged.Cursor.AfterEntryID
 	}
 	return merged
+}
+
+// historySnapshotSpansRotation reports whether snapshot carries entries stitched
+// from a transcript stream other than the one it now identifies as. normalizeEntry
+// stamps each entry's Provenance.TranscriptPath from the same cleaned path used
+// for the snapshot's TranscriptStreamID, so within a single read they always
+// match; an entry whose source path differs was retained across a file rotation.
+// Such a snapshot reports the current stream ID yet still holds pre-rotation
+// history, so it must not take the same-stream in-place replacement path.
+func historySnapshotSpansRotation(snapshot *HistorySnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	streamID := strings.TrimSpace(snapshot.TranscriptStreamID)
+	if streamID == "" {
+		return false
+	}
+	for _, entry := range snapshot.Entries {
+		source := strings.TrimSpace(entry.Provenance.TranscriptPath)
+		if source != "" && source != streamID {
+			return true
+		}
+	}
+	return false
 }
 
 func sameHistoryConversation(previous, current *HistorySnapshot) bool {

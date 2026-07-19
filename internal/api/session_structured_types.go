@@ -343,10 +343,9 @@ func structuredHistoryFromSnapshot(snapshot *worker.HistorySnapshot) *SessionStr
 		GCSessionID:           snapshot.GCSessionID,
 		LogicalConversationID: snapshot.LogicalConversationID,
 		ProviderSessionID:     snapshot.ProviderSessionID,
-		TranscriptStreamID:    snapshot.TranscriptStreamID,
+		TranscriptStreamID:    opaqueTranscriptStreamID(snapshot),
 		Generation: SessionStructuredGeneration{
-			ID:         snapshot.Generation.ID,
-			ObservedAt: formatOptionalTime(snapshot.Generation.ObservedAt),
+			ID: opaqueGenerationID(snapshot.Generation.ID),
 		},
 		Cursor: SessionStructuredCursor{
 			AfterEntryID: snapshot.Cursor.AfterEntryID,
@@ -367,6 +366,36 @@ func structuredHistoryFromSnapshot(snapshot *worker.HistorySnapshot) *SessionStr
 		},
 		Diagnostics: diagnostics,
 	}
+}
+
+// opaqueTranscriptStreamID derives a stable, path-free wire identity for a
+// transcript stream. The worker's HistorySnapshot.TranscriptStreamID is the
+// absolute server-side transcript file path, which must never reach the
+// structured wire: it discloses the OS username, the on-disk directory layout,
+// the project working directory, and the provider session UUID. Hashing the
+// path together with the provider and logical conversation IDs yields an
+// identifier that is stable for a given stream and changes when the transcript
+// rotates to a new path — all a client needs for stream identity — while
+// revealing none of the underlying filesystem detail.
+func opaqueTranscriptStreamID(snapshot *worker.HistorySnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	identity := snapshot.TranscriptStreamID + "\x00" + snapshot.ProviderSessionID + "\x00" + snapshot.LogicalConversationID
+	return sha256Hex([]byte(identity))
+}
+
+// opaqueGenerationID hashes the raw generation token (the worker records it as
+// "<mtime>:<size>" file-observation evidence) so the wire keeps a per-generation
+// change discriminator without disclosing the transcript file's modification
+// time or size. Generation is deliberately excluded from the projection hash
+// (it is not transcript identity), so the wire has no need for the raw values.
+// An empty token stays empty.
+func opaqueGenerationID(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return sha256Hex([]byte("generation\x00" + raw))
 }
 
 func structuredFallbackHistory(sessionID, providerSessionID, activity string) *SessionStructuredHistory {
@@ -938,11 +967,4 @@ func structuredInteraction(in *worker.HistoryInteraction) *SessionStructuredInte
 		Options:   append([]string(nil), in.Options...),
 		Action:    in.Action,
 	}
-}
-
-func formatOptionalTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.Format(time.RFC3339Nano)
 }

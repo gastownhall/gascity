@@ -2497,6 +2497,42 @@ func TestReadGeminiJSONLFilePreservesRepeatedIdlessMessages(t *testing.T) {
 	}
 }
 
+func TestReadGeminiJSONLFileSkipsTornFinalLine(t *testing.T) {
+	// Live-tailing reads a Gemini JSONL mid-append, so the final line is often a
+	// torn/partial JSON object. The good lines must still render, matching the
+	// skip-and-diagnose behavior of the sibling JSONL readers.
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := strings.Join([]string{
+		`{"sessionId":"session-torn-tail","kind":"main"}`,
+		`{"$set":{"messages":[{"id":"u1","timestamp":"2026-06-21T17:08:00Z","type":"user","content":"hello"}]}}`,
+		`{"id":"a1","timestamp":"2026-06-21T17:08:10Z","type":"gemini","content":"Answer"}`,
+		`{"id":"a2","timestamp":"2026-06-21T17:08:20Z","type":"gemini","content":"torn`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadGeminiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadGeminiFile with torn final line: %v", err)
+	}
+	if got := len(sess.Messages); got != 2 {
+		t.Fatalf("messages = %d, want 2 (torn final line skipped)", got)
+	}
+	if sess.Messages[0].Type != "user" {
+		t.Fatalf("messages[0].Type = %q, want user", sess.Messages[0].Type)
+	}
+	if sess.Messages[1].Type != "assistant" {
+		t.Fatalf("messages[1].Type = %q, want assistant", sess.Messages[1].Type)
+	}
+	if sess.Diagnostics.MalformedLineCount != 1 {
+		t.Fatalf("MalformedLineCount = %d, want 1", sess.Diagnostics.MalformedLineCount)
+	}
+	if !sess.Diagnostics.MalformedTail {
+		t.Fatalf("MalformedTail = false, want true for torn final line")
+	}
+}
+
 func TestReadGeminiJSONLFileNormalizesToolResultDisplayDiff(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	content := strings.Join([]string{

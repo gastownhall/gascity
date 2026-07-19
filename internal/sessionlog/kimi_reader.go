@@ -54,6 +54,7 @@ func readKimiFile(path string) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	var lastUUID string
 	var checkpointID string
+	syntheticIDs := newStableSyntheticEntryIDSequence("kimi")
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -72,7 +73,7 @@ func readKimiFile(path string) (*Session, error) {
 			}
 			continue
 		}
-		entry := convertKimiContextEntry(raw, line, kimiSessionID(path), checkpointID)
+		entry := convertKimiContextEntry(raw, line, kimiSessionID(path), checkpointID, syntheticIDs.ForRecord(line))
 		if entry == nil {
 			continue
 		}
@@ -353,12 +354,12 @@ func logKimiMissingWorkHash(root, workHash string) {
 	)
 }
 
-func convertKimiContextEntry(raw kimiContextEntry, rawLine []byte, sessionID, checkpointID string) *Entry {
+func convertKimiContextEntry(raw kimiContextEntry, rawLine []byte, sessionID, checkpointID string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	role := strings.ToLower(strings.TrimSpace(raw.Role))
 	switch role {
 	case "user", "assistant", "system":
 	case "tool":
-		return convertKimiToolEntry(raw, rawLine, sessionID, checkpointID)
+		return convertKimiToolEntry(raw, rawLine, sessionID, checkpointID, syntheticID)
 	default:
 		return nil
 	}
@@ -369,7 +370,7 @@ func convertKimiContextEntry(raw kimiContextEntry, rawLine []byte, sessionID, ch
 	}
 	entryType := role
 	return &Entry{
-		UUID:      kimiEntryID(rawLine, checkpointID),
+		UUID:      syntheticID.ID(checkpointID),
 		Type:      entryType,
 		SessionID: sessionID,
 		Message: mustMarshal(MessageContent{
@@ -380,7 +381,7 @@ func convertKimiContextEntry(raw kimiContextEntry, rawLine []byte, sessionID, ch
 	}
 }
 
-func convertKimiToolEntry(raw kimiContextEntry, rawLine []byte, sessionID, checkpointID string) *Entry {
+func convertKimiToolEntry(raw kimiContextEntry, rawLine []byte, sessionID, checkpointID string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	toolCallID := strings.TrimSpace(raw.ToolCallID)
 	block := ContentBlock{
 		Type:      "tool_result",
@@ -389,7 +390,7 @@ func convertKimiToolEntry(raw kimiContextEntry, rawLine []byte, sessionID, check
 		IsError:   raw.IsError || raw.IsErrorJS || kimiStatusIsError(raw.Status),
 	}
 	return &Entry{
-		UUID:      kimiEntryID(rawLine, checkpointID),
+		UUID:      syntheticID.ID(checkpointID),
 		Type:      "result",
 		SessionID: sessionID,
 		ToolUseID: toolCallID,
@@ -399,10 +400,6 @@ func convertKimiToolEntry(raw kimiContextEntry, rawLine []byte, sessionID, check
 		}),
 		Raw: append(json.RawMessage(nil), rawLine...),
 	}
-}
-
-func kimiEntryID(rawLine []byte, checkpointID string) string {
-	return stableSyntheticEntryID("kimi", rawLine, checkpointID)
 }
 
 func kimiCheckpointID(raw json.RawMessage) (string, bool) {

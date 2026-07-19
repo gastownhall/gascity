@@ -226,7 +226,8 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		return nil, err
 	}
 	session := fullSession
-	if req.TailCompactions > 0 || beforeID != "" || afterID != "" {
+	paged := req.TailCompactions > 0 || beforeID != "" || afterID != ""
+	if paged {
 		session, err = sessionlog.PageSession(fullSession, req.TailCompactions, beforeID, afterID)
 		if err != nil {
 			return nil, err
@@ -239,10 +240,25 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 
 	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
-	entries = attachStructuredToolData(entries)
-	entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
-	if err != nil {
-		return nil, err
+	contextEntries := entries
+	if paged {
+		// Pair tool_result blocks whose tool_use is off the current page against
+		// the full session (already read above — no extra I/O), so paginated
+		// structured pages keep typed command/diff/read/task results instead of
+		// degrading to plain text at page boundaries.
+		contextEntries = normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
+	}
+	entries = attachStructuredToolDataWithContext(entries, contextEntries)
+	if beforeID == "" {
+		// Detached (Codex) usage is extracted from the file tail — the newest
+		// turns. It belongs only to a page that includes the tail. On an older
+		// "before" page the tail usages are for newer, off-page turns and would
+		// be mis-attributed onto earlier assistants, so skip attachment there;
+		// those older turns have no tail-extractable usage to show anyway.
+		entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
+		if err != nil {
+			return nil, err
+		}
 	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 

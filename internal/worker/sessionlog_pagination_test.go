@@ -14,6 +14,99 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+// TestAttachStructuredToolDataWithContextPairsOffPageToolUse pins Finding 5: a
+// Claude-style tool_result (no Name on the result block) whose matching tool_use
+// is off the current page must still be typed from the full-session context,
+// instead of degrading to plain text at the page boundary.
+func TestAttachStructuredToolDataWithContextPairsOffPageToolUse(t *testing.T) {
+	newResultEntry := func() HistoryEntry {
+		return HistoryEntry{Blocks: []HistoryBlock{{
+			Kind:      BlockKindToolResult,
+			ToolUseID: "call-read",
+			Content:   mustMarshalStructuredToolTest(t, "line1\nline2\n"),
+		}}}
+	}
+	toolUseEntry := HistoryEntry{
+		Actor: ActorAssistant,
+		Blocks: []HistoryBlock{{
+			Kind:      BlockKindToolUse,
+			ToolUseID: "call-read",
+			Name:      "Read",
+			Input:     mustMarshalStructuredToolTest(t, map[string]any{"file_path": "/tmp/foo.go"}),
+		}},
+	}
+
+	// Page-only (pre-fix behavior): the tool_use is off the page, so the result
+	// cannot recover its read typing or the file path.
+	pageOnly := attachStructuredToolData([]HistoryEntry{newResultEntry()})
+	if got := pageOnly[0].Blocks[0].StructuredResult; got != nil && got.Kind == "read" {
+		t.Fatalf("page-only result typed as read without tool_use context: %+v", got)
+	}
+	if got := pageOnly[0].Blocks[0].StructuredResult; got != nil && got.FilePath == "/tmp/foo.go" {
+		t.Fatalf("page-only result recovered off-page file path: %+v", got)
+	}
+
+	// With full-session context: the off-page tool_use pairs the result, so it
+	// keeps its typed read shape across the page boundary.
+	page := []HistoryEntry{newResultEntry()}
+	full := []HistoryEntry{toolUseEntry, newResultEntry()}
+	page = attachStructuredToolDataWithContext(page, full)
+	got := page[0].Blocks[0].StructuredResult
+	if got == nil || got.Kind != "read" {
+		t.Fatalf("context result = %+v, want kind=read paired from off-page tool_use", got)
+	}
+	if got.FilePath != "/tmp/foo.go" {
+		t.Fatalf("context result FilePath = %q, want /tmp/foo.go from off-page tool_use input", got.FilePath)
+	}
+}
+
+// TestLoadHistorySkipsCodexTailUsageOnBeforePage pins Finding 6: Codex tail
+// usage is extracted from the file tail (the newest turns), so it must land on a
+// page only when that page includes the tail. On an older "before" page the tail
+// usages belong to newer, off-page turns and must not be back-filled onto the
+// page's earlier assistants.
+func TestLoadHistorySkipsCodexTailUsageOnBeforePage(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	writeLines(t, path,
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}`,
+		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}}`,
+		`{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second"}]}}`,
+		`{"timestamp":"2026-01-02T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":150},"last_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":150},"model_context_window":258400}}}`,
+	)
+
+	full, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{Provider: "codex/tmux-cli", TranscriptPath: path})
+	if err != nil {
+		t.Fatalf("LoadHistory(full) error = %v", err)
+	}
+	if len(full.Entries) != 2 {
+		t.Fatalf("full entries = %d, want 2", len(full.Entries))
+	}
+	// The tail usage lands on the newest assistant when the page includes the tail.
+	if full.Entries[1].Usage == nil {
+		t.Fatal("newest assistant lost its tail usage on the full read")
+	}
+
+	// Scroll up: a "before" page excludes the tail, so its older assistant must
+	// not inherit the newest, off-page turn's token counts.
+	older, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "codex/tmux-cli",
+		TranscriptPath: path,
+		BeforeEntryID:  full.Entries[1].ID,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory(before) error = %v", err)
+	}
+	if len(older.Entries) != 1 {
+		t.Fatalf("before-page entries = %d, want 1 (older turn only); entries=%+v", len(older.Entries), older.Entries)
+	}
+	if older.Entries[0].Usage != nil {
+		t.Fatalf("older-page assistant wrongly tagged with newer off-page tail usage: %+v", older.Entries[0].Usage)
+	}
+}
+
 func TestSessionLogAdapterPaginationProviderMatrix(t *testing.T) {
 	t.Parallel()
 

@@ -37,6 +37,33 @@ func TestReadCodexFileNormalizesExecCommandReadInput(t *testing.T) {
 	}
 }
 
+func TestReadProviderFileCodexDisambiguatesRepeatedResponseItemRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
+	row := map[string]any{
+		"timestamp": "2026-06-01T00:00:00Z",
+		"type":      "response_item",
+		"payload": map[string]any{
+			"type":    "message",
+			"role":    "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": "Done."}},
+		},
+	}
+	// Two byte-identical response_item rows (no distinguishing timestamp) must not
+	// collide onto one entry ID and hard-fail the uniqueness gate.
+	writeCodexReaderFixture(t, path, row, row)
+
+	sess, err := ReadProviderFile("codex/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile with byte-identical response_item rows: %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("messages = %d, want two entries", len(sess.Messages))
+	}
+	if sess.Messages[0].UUID == sess.Messages[1].UUID {
+		t.Fatalf("byte-identical response_item rows share entry ID %q", sess.Messages[0].UUID)
+	}
+}
+
 func TestReadCodexFilePreservesMessageImageBlocks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
 	writeCodexReaderFixture(t, path, map[string]any{

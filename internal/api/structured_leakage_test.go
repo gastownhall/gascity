@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -59,6 +61,7 @@ func structuredWireLeakage(wire []byte, extraForbidden ...string) ([]string, err
 		return nil, err
 	}
 	collectStructuredArgumentLeakage(decoded, "", leaked)
+	collectStructuredHistoryEnvelopeLeakage(decoded, leaked)
 	if len(leaked) == 0 {
 		return nil, nil
 	}
@@ -94,6 +97,43 @@ func collectStructuredArgumentLeakage(value any, path string, leaked map[string]
 		for i, child := range typed {
 			collectStructuredArgumentLeakage(child, path+"["+strconv.Itoa(i)+"]", leaked)
 		}
+	}
+}
+
+// rawGenerationTokenPattern matches the worker's raw "<mtime>:<size>" generation
+// token — file-observation evidence that must not reach the structured wire.
+var rawGenerationTokenPattern = regexp.MustCompile(`^\d+:\d+$`)
+
+// collectStructuredHistoryEnvelopeLeakage flags server-only filesystem evidence
+// that legitimate envelope KEYS can smuggle as VALUES. The key-allowlist gate
+// accepts transcript_stream_id and generation because they are real fields; it
+// cannot see that transcript_stream_id must never be an absolute server path, or
+// that generation must not carry the raw file mtime:size. A path separator in
+// the stream identity, a bare "<int>:<int>" generation id, or a populated
+// observed_at is such a leak. This is envelope-scoped, so it never
+// false-positives on the legitimate file paths that appear inside tool
+// inputs/results, which are real transcript content rather than server metadata.
+func collectStructuredHistoryEnvelopeLeakage(value any, leaked map[string]struct{}) {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	history, ok := root["history"].(map[string]any)
+	if !ok {
+		return
+	}
+	if streamID, ok := history["transcript_stream_id"].(string); ok && strings.ContainsAny(streamID, `/\`) {
+		leaked["history.transcript_stream_id:server_path"] = struct{}{}
+	}
+	generation, ok := history["generation"].(map[string]any)
+	if !ok {
+		return
+	}
+	if id, ok := generation["id"].(string); ok && rawGenerationTokenPattern.MatchString(id) {
+		leaked["history.generation.id:raw_mtime_size"] = struct{}{}
+	}
+	if observed, ok := generation["observed_at"].(string); ok && observed != "" {
+		leaked["history.generation.observed_at:file_mtime"] = struct{}{}
 	}
 }
 
@@ -278,6 +318,83 @@ func TestStructuredLeakageGateCatchesInjectedNativeKey(t *testing.T) {
 	}
 	if len(unexpected) != 1 || unexpected[0] != "someBrandNewProviderKey" {
 		t.Fatalf("allowlist gate must catch a novel non-schema key, got %v", unexpected)
+	}
+}
+
+// TestStructuredHistoryWireHidesServerPathAndGeneration pins the value-level
+// contract Finding 3 raised: the structured history envelope must never emit the
+// absolute server transcript path or the raw mtime:size generation data. The
+// key-level allowlist gate cannot catch this because transcript_stream_id and
+// generation are legitimate keys — only their VALUES leak.
+func TestStructuredHistoryWireHidesServerPathAndGeneration(t *testing.T) {
+	rawPath := "/home/ubuntu/.claude/projects/-data-projects-secret/9f1c2d3e-uuid.jsonl"
+	snapshot := &worker.HistorySnapshot{
+		GCSessionID:           "gc-session-1",
+		LogicalConversationID: "logical-1",
+		ProviderSessionID:     "provider-uuid-1",
+		TranscriptStreamID:    rawPath,
+		Generation:            worker.Generation{ID: "1749123456789012345:20481", ObservedAt: time.Date(2026, 6, 1, 2, 3, 4, 0, time.UTC)},
+		Cursor:                worker.Cursor{AfterEntryID: "entry-1"},
+		Continuity:            worker.Continuity{Status: worker.ContinuityStatusContinuous},
+		TailState:             worker.TailState{Activity: worker.TailActivityIdle, LastEntryID: "entry-1"},
+	}
+	history := structuredHistoryFromSnapshot(snapshot)
+	if history == nil {
+		t.Fatal("structuredHistoryFromSnapshot returned nil")
+	}
+	wire, err := json.Marshal(history)
+	if err != nil {
+		t.Fatalf("marshal history: %v", err)
+	}
+
+	// The absolute path, its directory segments, and the raw mtime:size must not
+	// appear anywhere on the wire.
+	for _, secret := range []string{rawPath, "/home/ubuntu", ".claude/projects", "-data-projects-secret", "20481", "1749123456789012345"} {
+		if bytes.Contains(wire, []byte(secret)) {
+			t.Fatalf("structured history wire leaked server data %q: %s", secret, wire)
+		}
+	}
+	// transcript_stream_id is an opaque, path-free identity: non-empty, not the
+	// raw path, and carrying no filesystem separator.
+	if history.TranscriptStreamID == "" || history.TranscriptStreamID == rawPath || strings.ContainsAny(history.TranscriptStreamID, `/\`) {
+		t.Fatalf("transcript_stream_id is not an opaque identity: %q", history.TranscriptStreamID)
+	}
+	// generation carries no raw mtime:size and no observed_at timestamp.
+	if history.Generation.ObservedAt != "" {
+		t.Fatalf("generation.observed_at leaked file mtime: %q", history.Generation.ObservedAt)
+	}
+	if history.Generation.ID == snapshot.Generation.ID || rawGenerationTokenPattern.MatchString(history.Generation.ID) {
+		t.Fatalf("generation.id still carries raw mtime:size: %q", history.Generation.ID)
+	}
+	// The reusable leak gate now also bites on an enveloped path/mtime value.
+	if leaked, _ := structuredWireLeakage(wire); len(leaked) != 0 {
+		t.Fatalf("sanitized history still flagged by leak gate: %v", leaked)
+	}
+
+	// Opaque identity is deterministic for a given stream and rotation-sensitive.
+	if again := structuredHistoryFromSnapshot(snapshot); again.TranscriptStreamID != history.TranscriptStreamID || again.Generation.ID != history.Generation.ID {
+		t.Fatal("opaque identity is not deterministic for the same stream")
+	}
+	rotated := *snapshot
+	rotated.TranscriptStreamID = rawPath + ".rotated"
+	if structuredHistoryFromSnapshot(&rotated).TranscriptStreamID == history.TranscriptStreamID {
+		t.Fatal("transcript_stream_id did not change across transcript rotation")
+	}
+}
+
+// TestStructuredHistoryEnvelopeLeakGateCatchesRawPathAndGeneration proves the
+// envelope value-leak gate actually bites, so the sanitization above cannot
+// silently regress without a test failing.
+func TestStructuredHistoryEnvelopeLeakGateCatchesRawPathAndGeneration(t *testing.T) {
+	leakyWire := []byte(`{"history":{"transcript_stream_id":"/home/ubuntu/.claude/x.jsonl","generation":{"id":"1749123456789012345:20481","observed_at":"2026-06-01T02:03:04Z"}}}`)
+	leaked, err := structuredWireLeakage(leakyWire)
+	if err != nil {
+		t.Fatalf("scan leaky wire: %v", err)
+	}
+	for _, want := range []string{"history.transcript_stream_id:server_path", "history.generation.id:raw_mtime_size", "history.generation.observed_at:file_mtime"} {
+		if !stringSliceContainsSubstring(leaked, want) {
+			t.Fatalf("envelope leak gate missed %q, got %v", want, leaked)
+		}
 	}
 }
 

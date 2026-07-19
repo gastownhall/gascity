@@ -3,7 +3,6 @@ package sessionlog
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -456,8 +455,11 @@ func TestReadProviderFileKimiDisambiguatesRepeatedNativeRowsAcrossAppend(t *test
 	if want := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:1"); beforeIDs[1] != want {
 		t.Fatalf("first repeated row ID = %q, want checkpoint-derived %q", beforeIDs[1], want)
 	}
-	if want := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:2"); beforeIDs[3] != want {
-		t.Fatalf("second repeated row ID = %q, want checkpoint-derived %q", beforeIDs[3], want)
+	// The second identical row shares its content digest with the first, so the
+	// occurrence sequence must discriminate it beyond the checkpoint-derived
+	// base ID that only the first occurrence retains.
+	if base := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:2"); beforeIDs[3] == base {
+		t.Fatalf("second repeated row ID = %q missing occurrence discriminator", beforeIDs[3])
 	}
 
 	writeKimiContext(t, path, []string{
@@ -484,16 +486,23 @@ func TestReadProviderFileKimiDisambiguatesRepeatedNativeRowsAcrossAppend(t *test
 	}
 }
 
-func TestReadProviderFileKimiRejectsRepeatedNativeRowsWithinCheckpoint(t *testing.T) {
+func TestReadProviderFileKimiDisambiguatesRepeatedNativeRowsWithinCheckpoint(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "context.jsonl"), []string{
 		`{"role":"_checkpoint","id":1}`,
 		`{"role":"assistant","content":"same answer"}`,
 		`{"role":"assistant","content":"same answer"}`,
 	})
 
-	_, err := ReadProviderFile("kimi/tmux-cli", path, 0)
-	if !errors.Is(err, ErrDuplicateEntryID) {
-		t.Fatalf("ReadProviderFile error = %v, want ErrDuplicateEntryID", err)
+	sess, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile with byte-identical in-window rows: %v", err)
+	}
+	ids := kimiEntryIDs(sess.Messages)
+	if len(ids) != 2 {
+		t.Fatalf("entry IDs = %v, want two entries", ids)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("byte-identical in-window rows share entry ID %q", ids[0])
 	}
 }
 

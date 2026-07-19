@@ -77,13 +77,15 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	var messages []*Entry
 	var lastUUID string
 	toolContexts := make(map[string]codexToolCallContext)
+	responseItemIDs := newStableSyntheticEntryIDSequence("codex")
+	eventMsgIDs := newStableSyntheticEntryIDSequence("codex-event")
 
 	for _, e := range entries {
 		ts, _ := time.Parse(time.RFC3339Nano, e.raw.Timestamp)
 
 		switch e.raw.Type {
 		case "response_item":
-			entry := convertResponseItem(e.raw.Payload, e.line, ts, patchApplyResults, toolContexts)
+			entry := convertResponseItem(e.raw.Payload, e.line, ts, patchApplyResults, toolContexts, responseItemIDs.ForRecord([]byte(e.line)))
 			if entry != nil {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -95,13 +97,14 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 			if json.Unmarshal(e.raw.Payload, &em) != nil {
 				continue
 			}
+			eventID := eventMsgIDs.ForRecord([]byte(e.line))
 			switch em.Type {
 			case "user_message":
 				if hasResponseItemUser {
 					continue // prefer response_item user messages
 				}
 				entry := &Entry{
-					UUID:      stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
+					UUID:      eventID.ID("event_msg:" + em.Type),
 					Type:      "user",
 					Timestamp: ts,
 					Message:   mustMarshal(MessageContent{Role: "user", Content: mustMarshal(em.Message)}),
@@ -118,7 +121,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 					continue
 				}
 				entry := &Entry{
-					UUID:      stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
+					UUID:      eventID.ID("event_msg:" + em.Type),
 					Type:      "assistant",
 					Timestamp: ts,
 					Message: mustMarshal(MessageContent{
@@ -133,7 +136,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 
 			case "agent_reasoning":
 				entry := &Entry{
-					UUID:      stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
+					UUID:      eventID.ID("event_msg:" + em.Type),
 					Type:      "assistant",
 					Timestamp: ts,
 					Message: mustMarshal(MessageContent{
@@ -149,7 +152,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 			case "error", "stream_error", "turn_aborted":
 				systemEvent := codexSystemEvent(em)
 				entry := &Entry{
-					UUID:        stableSyntheticEntryID("codex-event", []byte(e.line), "event_msg:"+em.Type),
+					UUID:        eventID.ID("event_msg:" + em.Type),
 					Type:        "system",
 					Subtype:     systemEvent.Kind,
 					Timestamp:   ts,
@@ -177,13 +180,13 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}, nil
 }
 
-func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext) *Entry {
+func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext, syntheticID stableSyntheticEntryIDSource) *Entry {
 	var ri codexResponseItem
 	if json.Unmarshal(payload, &ri) != nil {
 		return nil
 	}
 
-	uuid := stableSyntheticEntryID("codex", []byte(rawLine), "response_item:"+ri.Type)
+	uuid := syntheticID.ID("response_item:" + ri.Type)
 
 	switch ri.Type {
 	case "message":

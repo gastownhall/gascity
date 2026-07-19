@@ -665,6 +665,28 @@ func TestFindAntigravitySessionFileHonorsSearchPaths(t *testing.T) {
 	}
 }
 
+func TestReadProviderFileAntigravityDisambiguatesRepeatedRows(t *testing.T) {
+	// Two byte-identical trajectory rows (same step, content, and no timestamp)
+	// must not collapse onto one entry ID and hard-fail the uniqueness gate.
+	repeated := `{"type":"PLANNER_RESPONSE","content":"Continuing."}`
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(repeated+"\n"+repeated+"\n"), 0o644); err != nil {
+		t.Fatalf("write antigravity fixture: %v", err)
+	}
+
+	sess, err := ReadProviderFile("antigravity/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile with byte-identical rows: %v", err)
+	}
+	ids := antigravityEntryIDs(sess.Messages)
+	if len(ids) != 2 {
+		t.Fatalf("entry IDs = %v, want two entries", ids)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("byte-identical rows share entry ID %q", ids[0])
+	}
+}
+
 func antigravityEntryIDs(entries []*Entry) []string {
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {

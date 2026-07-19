@@ -121,6 +121,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	var lastNonEmptyLineMalformed bool
 	var lastUUID string
 	var pendingCallIDs []string
+	syntheticIDs := newStableSyntheticEntryIDSequence("agy")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -135,7 +136,7 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 		}
 		lastNonEmptyLineMalformed = false
 
-		entry := convertAgyEntry(raw, line, &pendingCallIDs)
+		entry := convertAgyEntry(raw, line, &pendingCallIDs, syntheticIDs.ForRecord(line))
 		if entry == nil {
 			continue
 		}
@@ -168,9 +169,9 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	}, nil
 }
 
-func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) *Entry {
+func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string, syntheticID stableSyntheticEntryIDSource) *Entry {
 	ts, _ := time.Parse(time.RFC3339, raw.CreatedAt)
-	uuid := stableSyntheticEntryID("agy", rawLine, raw.Type)
+	uuid := syntheticID.ID(raw.Type)
 
 	switch raw.Type {
 	case "USER_INPUT":
