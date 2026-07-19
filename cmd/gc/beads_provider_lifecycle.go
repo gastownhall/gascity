@@ -1757,17 +1757,43 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contract.ConfigState) contract.ConfigState {
 	rig = normalizedRigConfig(cityPath, rig)
 	if rig.DoltHost != "" || rig.DoltPort != "" {
+		host, port := configuredExternalDoltTargetForRig(rig)
+		// A rig whose configured dolt target merely mirrors the city canonical
+		// endpoint is an inherited mirror, not a genuine per-rig override.
+		// Promoting it to `explicit` would clobber the intended `inherited_city`
+		// origin and drop the inherited dolt.user on every reconcile (the rig
+		// .beads/config.yaml churns back to explicit on each city start). Only a
+		// target that genuinely differs from the city endpoint stays explicit.
+		if rigDoltTargetMirrorsCity(cityState, host, port) {
+			return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+		}
 		state := contract.ConfigState{
 			IssuePrefix:    rig.EffectivePrefix(),
 			EndpointOrigin: contract.EndpointOriginExplicit,
 		}
-		state.DoltHost, state.DoltPort = configuredExternalDoltTargetForRig(rig)
+		state.DoltHost, state.DoltPort = host, port
 		state.DoltUser = preservedDoltUser(rig.Path, state)
 		state.EndpointStatus = preservedEndpointStatus(rig.Path, state, contract.EndpointStatusUnverified)
 		return state
 	}
 
 	return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+}
+
+// rigDoltTargetMirrorsCity reports whether a rig's configured external dolt
+// target (host, port) is identical to the city canonical endpoint. Such a rig
+// is an inherited mirror rather than a genuine override, so it must resolve to
+// `inherited_city` — not `explicit`. Mirrors sameExternalEndpoint's host/port
+// comparison; user is inherited from the city and is not compared here.
+func rigDoltTargetMirrorsCity(cityState contract.ConfigState, rigHost, rigPort string) bool {
+	if cityState.EndpointOrigin != contract.EndpointOriginCityCanonical {
+		return false
+	}
+	if strings.TrimSpace(cityState.DoltPort) != strings.TrimSpace(rigPort) {
+		return false
+	}
+	return canonicalExternalHost(strings.TrimSpace(cityState.DoltHost), strings.TrimSpace(cityState.DoltPort)) ==
+		canonicalExternalHost(strings.TrimSpace(rigHost), strings.TrimSpace(rigPort))
 }
 
 func inheritedRigDoltConfigState(rigPath, prefix string, cityState contract.ConfigState) contract.ConfigState {
