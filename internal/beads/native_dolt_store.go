@@ -1995,13 +1995,77 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 	return &priority
 }
 
+// nativeCreatedLimitPushdown reports the row limit to forward to the backing
+// search for a ListQuery, or 0 to fetch the full candidate set and let
+// ApplyListQuery cut the exact page client-side. Created-order sorts push down
+// to the backing search (IssueFilter.SortBy drives sqlbuild.OrderBy) so the
+// caller's limit survives and the store pages instead of materializing +
+// hydrating the whole corpus (sr-dp9o: the dispatcher's RecentRunsAll(2048) was
+// scanning ~22k closed order-tracking wisps per call with the limit stripped).
+// A backing limit is exact only when the backing's ordering and tie-break match
+// the query's client-side semantics; the guards below keep every shape whose
+// exact result needs client-side work from truncating the page early.
+func nativeCreatedLimitPushdown(query ListQuery) int {
+	if query.Limit <= 0 {
+		return 0
+	}
+	// The wisp tier still needs the gc-side post-filter over the full candidate
+	// set (it can discard rows), so a backing limit would cut the page short.
+	if query.TierMode == TierWisps {
+		return 0
+	}
+	// SeekAfter, UpdatedBefore, and plural Assignees are enforced only Go-side in
+	// ApplyListQuery (q.Matches); they are not pushed to the backing search, so a
+	// backing limit applied before them would cut rows before the residual filter
+	// runs and silently drop page rows. Fetch the full candidate set for those
+	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
+	// exec.go, bdstore canApplyWispsServerLimit).
+	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+		return 0
+	}
+	switch query.Sort {
+	case SortCreatedAsc:
+		// The backing renders created-asc ties as `id ASC`, matching the
+		// canonical (created_at ASC, id ASC) order, so a bounded asc read is exact.
+		return query.Limit
+	case SortCreatedDesc:
+		// The backing renders created-desc ties as `id ASC` (upstream
+		// sqlbuild.OrderBy hardcodes the id tie-break), but Gas City's canonical
+		// order and cursor continuation break created_at ties by `id DESC`
+		// (sortBeadsForQuery / SeekBoundary.After). A bounded desc read therefore
+		// keeps the smaller-id tie members at the boundary and drops the larger-id
+		// ties, so an exact or cursor-paginated caller loses rows across the page
+		// seam. Only push the limit when the caller opted into a bounded
+		// newest-by-created_at sample (aggregates); otherwise fetch the full set
+		// and let ApplyListQuery cut the exact (created_at DESC, id DESC) prefix.
+		if query.AllowBackingCreatedLimit {
+			return query.Limit
+		}
+		return 0
+	case SortDefault:
+		// The default backing order (priority, created_at DESC, id ASC) is
+		// deterministic, so a bounded default read cuts a stable prefix.
+		return query.Limit
+	default:
+		// Non-mappable sorts can't page server-side; fetch unbounded and sort
+		// client-side in ApplyListQuery.
+		return 0
+	}
+}
+
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
-	limit := query.Limit
-	if query.Sort != SortDefault || query.TierMode == TierWisps {
-		limit = 0
+	var sortBy string
+	var sortDesc bool
+	switch query.Sort {
+	case SortCreatedDesc:
+		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
+	case SortCreatedAsc:
+		sortBy, sortDesc = "created", true // flip the DESC default
 	}
 	filter := beadslib.IssueFilter{
-		Limit:               limit,
+		Limit:               nativeCreatedLimitPushdown(query),
+		SortBy:              sortBy,
+		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
 		IncludeDependencies: true,

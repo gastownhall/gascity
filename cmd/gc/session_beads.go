@@ -409,11 +409,6 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable during reopen: %v\n", sessionName, identity, err) //nolint:errcheck
 			return nil
 		}
-		if err := sessionFrontDoor(store).SetStatusOpen(bead.ID); err != nil {
-			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
-			return nil
-		}
-		bead.Status = "open"
 		pendingCreateClaim := ""
 		if state != "active" {
 			pendingCreateClaim = "true"
@@ -466,17 +461,32 @@ func reopenClosedConfiguredNamedSessionBead(
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
-		if setMetaBatch(sessionFrontDoor(store), bead.ID, batch, stderr) == nil {
-			// S19 Stage 3 shadow: record the legacy priming-marker clears so the
-			// converge comparator can attribute this owned-key delta (no-op unless
-			// the shadow harness is enabled).
-			recordLegacyCompareWrites(bead.ID, "syncSessionBeads.reclaim", batch)
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string, len(batch))
-			}
-			for k, v := range batch {
-				bead.Metadata[k] = v
-			}
+		// The status flip and the terminal metadata are a single recoverable
+		// store write: UpdateOpts carries both Status and Metadata, so every
+		// backing store commits them together (native Dolt folds both into one
+		// UpdateIssue; MemStore/FileStore apply them under one lock). A failed
+		// write leaves the bead closed with its prior metadata intact -- the
+		// "open without its reopen metadata" split cannot occur, even on a store
+		// whose Tx executes callbacks sequentially without rollback
+		// (ga-igcny0.1.1). The Tx wrapper is kept only for the labeled commit.
+		open := "open"
+		txErr := store.Tx("gc: reopen configured named session "+bead.ID, func(tx beads.Tx) error {
+			return tx.Update(bead.ID, beads.UpdateOpts{Status: &open, Metadata: batch})
+		})
+		if txErr != nil {
+			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, txErr) //nolint:errcheck
+			return nil
+		}
+		// S19 Stage 3 shadow: record the legacy priming-marker clears so the
+		// converge comparator can attribute this owned-key delta (no-op unless
+		// the shadow harness is enabled).
+		recordLegacyCompareWrites(bead.ID, "syncSessionBeads.reclaim", batch)
+		bead.Status = "open"
+		if bead.Metadata == nil {
+			bead.Metadata = make(map[string]string, len(batch))
+		}
+		for k, v := range batch {
+			bead.Metadata[k] = v
 		}
 		reopened = bead
 		return nil
@@ -2365,16 +2375,36 @@ func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, 
 	return nil
 }
 
-func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
+// closeFailedCreateBeadInTx performs the failed-create terminal metadata
+// batch and Close as a single Tx-callback step. Shared by closeFailedCreateBead
+// and rollbackPendingCreate so the latter can fold this close into its own
+// larger transaction instead of nesting a second store.Tx call.
+func closeFailedCreateBeadInTx(tx beads.Tx, id string, now time.Time) error {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	patch["sleep_intent"] = ""
-	if setMetaBatch(sessFront, id, patch, stderr) != nil {
-		return false
+	if err := tx.SetMetadataBatch(id, patch); err != nil {
+		return err
 	}
-	if err := sessFront.CloseWithoutReason(id); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
+	return tx.Close(id)
+}
+
+func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
+	// The terminal metadata batch and the Close land inside one Tx. On an
+	// atomic backing (the production Dolt/DoltLite store) a bead that reports
+	// closed always carries its failed-create terminal state, never one without
+	// the other (ga-igcny0.1.1). The metadata batch is ordered before the Close
+	// on purpose: on a store whose Tx is not atomic the claim/marker clears
+	// still land even if the Close then fails, because a stale claim on a
+	// still-open bead would ping-pong the reconciler
+	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). The helper
+	// reports failure either way, so the reconciler re-runs the close.
+	txErr := sessFront.Store().Tx("gc: close failed-create session "+id, func(tx beads.Tx) error {
+		return closeFailedCreateBeadInTx(tx, id, now)
+	})
+	if txErr != nil {
+		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, txErr) //nolint:errcheck
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
@@ -2945,11 +2975,20 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	if reason == string(session.StateFailedCreate) {
 		return closeFailedCreateBead(sessionFrontDoor(store), id, now, stderr)
 	}
-	if setMetaBatch(sessionFrontDoor(store), id, session.ClosePatch(now, reason), stderr) != nil {
-		return false
-	}
-	if err := sessionFrontDoor(store).CloseWithoutReason(id); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
+	// The terminal metadata batch and the Close land inside one Tx. On an
+	// atomic backing (the production Dolt/DoltLite store) a bead that reports
+	// closed always carries its terminal state, never one without the other
+	// (ga-igcny0.1.1). On a non-atomic Tx the metadata (ordered first) may land
+	// while the Close fails; the helper then reports failure and the reconciler
+	// re-runs the close next tick, so no bead is durably left half-closed.
+	txErr := store.Tx("gc: close session "+id, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(id, session.ClosePatch(now, reason)); err != nil {
+			return err
+		}
+		return tx.Close(id)
+	})
+	if txErr != nil {
+		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, txErr) //nolint:errcheck
 		return false
 	}
 	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;

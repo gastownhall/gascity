@@ -78,7 +78,15 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
-	orderTrackingHistoryIndexLimit   = 2048
+	// orderTrackingHistoryIndexLimit bounds the per-tick cooldown-history
+	// index read (RecentRunsAll). Since created-order sorts push their limit
+	// to the backing search, this is the number of rows fetched AND hydrated
+	// every tick per store — 2048 cost ~0.64s/store/tick on a 22k-run
+	// retention corpus (sr-dp9o). 256 covers ~1h of runs at the srv city's
+	// peak cadence; an order whose last run is older than the window misses
+	// the index and pays one LIMIT-1 LastRun fallback (itself limit-pushed
+	// now), after which cachedLastRun remembers it across ticks and rebuilds.
+	orderTrackingHistoryIndexLimit   = 256
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 
