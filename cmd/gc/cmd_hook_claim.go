@@ -218,6 +218,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
+			if ok {
+				// The atomic mutation committed, but its canonical readback failed.
+				// Stop immediately: trying another candidate or draining would strand
+				// the assignment while falsely reporting idle work.
+				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			// A single unclaimable candidate (a routed id whose bead was deleted,
 			// one that no longer resolves in the store this context can reach, or a
 			// transient write failure) must not wedge the whole hook. Record it and
@@ -404,8 +411,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	return assigned, nil
 }
 
-func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-	store := hookClaimBdStore(dir, env, assignee)
+func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
 	claimed, ok, err := store.Claim(beadID)
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -426,7 +433,14 @@ func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, a
 		// the caller can report the rejection rather than treat it as ours.
 		return claimed, false, nil
 	}
-	return claimed, true, nil
+	canonical, err := store.Get(beadID)
+	if err != nil {
+		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
+	}
+	if !hookClaimHasIdentity(canonical.Assignee, []string{assignee}) {
+		return canonical, false, nil
+	}
+	return canonical, true, nil
 }
 
 // stampHookWorkBranch records the claiming worker's git branch on the bead as
