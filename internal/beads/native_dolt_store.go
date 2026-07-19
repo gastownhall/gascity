@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -31,31 +32,86 @@ type rawDBGetter interface {
 var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
 
 // repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
-// tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
-// and only issues the ALTER when the id column exists without a default.
+// tolerant of an absent table (e.g. wisp_events): it only issues the ALTER when
+// the id column exists without a default.
 //
-//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+// The probe is a single-table SHOW COLUMNS, not INFORMATION_SCHEMA.COLUMNS:
+// Dolt does not push the WHERE predicate into INFORMATION_SCHEMA, so the old
+// probe was a full catalog scan — cheap once, but it runs per store open per
+// repair table, and a fleet of concurrent gc/bd sessions firing it several
+// times a second pegged the shared Dolt server's CPU. SHOW COLUMNS returns the
+// Default cell directly, so one cheap statement replaces the scan.
 func repairIDDefault(db *sql.DB, table string) error {
-	var idCols, withDefault int
-	err := db.QueryRow(`
-		SELECT COUNT(*), COUNT(COLUMN_DEFAULT)
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE()
-		  AND TABLE_NAME = ?
-		  AND COLUMN_NAME = 'id'
-	`, table).Scan(&idCols, &withDefault)
+	// 'id' contains no LIKE wildcards, but Field is still compared exactly
+	// (matching upstream beads' SHOW COLUMNS probes) rather than trusting LIKE.
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
+	if err != nil {
+		if isTableNotExistError(err) {
+			return nil
+		}
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("checking %s.id default: %w", table, err)
 	}
-	if idCols == 0 || withDefault > 0 {
-		// Table/column absent, or the default is already present.
+	defaultIdx := -1
+	for i, col := range cols {
+		if strings.EqualFold(col, "Default") {
+			defaultIdx = i
+			break
+		}
+	}
+	if defaultIdx < 0 {
+		return fmt.Errorf("checking %s.id default: SHOW COLUMNS returned no Default column (got %v)", table, cols)
+	}
+
+	idFound, withDefault := false, false
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("checking %s.id default: %w", table, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == "id" {
+			idFound = true
+			withDefault = cells[defaultIdx] != nil
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	if !idFound || withDefault {
+		// Column absent, or the default is already present.
 		return nil
 	}
-	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table))
-	if err != nil {
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table)); err != nil {
 		return fmt.Errorf("repairing %s.id default: %w", table, err)
 	}
 	return nil
+}
+
+// isTableNotExistError reports whether err is the MySQL/Dolt "table doesn't
+// exist" error (1146). SHOW COLUMNS errors on a missing table where the old
+// INFORMATION_SCHEMA probe returned zero rows; an absent repair table (e.g.
+// wisp_events on an older schema) is not an error.
+func isTableNotExistError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1146
+	}
+	// The embedded Dolt driver surfaces the same condition without the
+	// go-sql-driver error type; match Dolt's message shape.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
 }
 
 const nativeDoltStoreActor = "gascity"
