@@ -26,7 +26,18 @@ set -euo pipefail
 routed_to="${CENSUS_OWNER_LIVENESS_ROUTED_TO:-gascity/architect}"
 alert_label="source:census-owner-liveness-patrol"
 
+# gc doctor exits nonzero when unrelated BLOCKING checks fail; the
+# census-owner-liveness check is advisory-only, so capture the JSON
+# regardless of exit code and validate it parses before trusting it.
+# A bare `doctor_json=$(...)` under `set -e` would abort the patrol here.
+set +e
 doctor_json=$(gc doctor --json)
+set -e
+
+if ! printf '%s' "$doctor_json" | jq -e . >/dev/null 2>&1; then
+    echo "check-census-owner-liveness: gc doctor --json did not return valid JSON" >&2
+    exit 1
+fi
 
 check_status=$(printf '%s' "$doctor_json" | jq -r '
   .results[] | select(.name == "census-owner-liveness") | .status // empty
