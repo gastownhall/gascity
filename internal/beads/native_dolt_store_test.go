@@ -1870,6 +1870,7 @@ type nativeDoltStorageSpy struct {
 	closeIssue                  func(context.Context, string, string, string, string) error
 	deleteIssue                 func(context.Context, string) error
 	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
+	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
 	getReadyWork                func(context.Context, beadslib.WorkFilter) ([]*beadslib.Issue, error)
 	addLabel                    func(context.Context, string, string, string) error
 	removeLabel                 func(context.Context, string, string, string) error
@@ -1948,6 +1949,13 @@ func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, f
 		return nil, nil
 	}
 	return s.searchIssues(ctx, query, filter)
+}
+
+func (s *nativeDoltStorageSpy) CountIssues(ctx context.Context, query string, filter beadslib.IssueFilter) (int64, error) {
+	if s.countIssues == nil {
+		return 0, nil
+	}
+	return s.countIssues(ctx, query, filter)
 }
 
 func (s *nativeDoltStorageSpy) GetReadyWork(ctx context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
