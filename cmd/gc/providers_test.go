@@ -331,6 +331,71 @@ provider = "file"
 	}
 }
 
+// TestAuthoritativeBeadsProviderForScopeIgnoresScopePinnedFileAtBdCityRoot is
+// the reopened dr-h6ze regression: the live mayor environment carries BOTH
+// GC_BEADS=file AND GC_BEADS_SCOPE_ROOT pinned to the city root. The earlier
+// fix only outranked an *unscoped* ambient GC_BEADS=file, so a non-empty scope
+// pin equal to the city root still masked the on-disk Dolt/bd HQ store and
+// stranded HQ beads ("bead not found in city:..."). Authoritative arbitrary-
+// bead resolution must honor the store's on-disk identity even when an
+// inherited session env scope-pins the city provider to a simple file/bd
+// value; only a scope-pinned custom exec provider stays a deliberate override.
+func TestAuthoritativeBeadsProviderForScopeIgnoresScopePinnedFileAtBdCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "hq-demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The exact reopened failure env: non-empty scope pin equal to the city
+	// root, not the empty scope root the prior regression test used.
+	setScopedBeadsProviderForTest(t, cityDir, "file")
+
+	if got := authoritativeBeadsProviderForScope(cityDir, cityDir); got != "bd" {
+		t.Fatalf("authoritativeBeadsProviderForScope(cityRoot) = %q, want bd metadata to outrank scope-pinned GC_BEADS=file at the city root", got)
+	}
+	// Caller-scope (non-authoritative) resolution still honors the scope pin:
+	// the pin describes the command's own store context.
+	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "file" {
+		t.Fatalf("rawBeadsProviderForScope(cityRoot) = %q, want scope-pinned GC_BEADS=file semantics preserved for caller scope", got)
+	}
+}
+
+// TestAuthoritativeBeadsProviderForScopeKeepsScopePinnedCustomExec guards the
+// "preserve custom exec semantics" half of the fix: a scope-pinned custom exec
+// provider is a deliberate selection and must still win over on-disk markers.
+func TestAuthoritativeBeadsProviderForScopeKeepsScopePinnedCustomExec(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "hq-demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setScopedBeadsProviderForTest(t, cityDir, "exec:/tmp/custom-beads")
+
+	if got := authoritativeBeadsProviderForScope(cityDir, cityDir); got != "exec:/tmp/custom-beads" {
+		t.Fatalf("authoritativeBeadsProviderForScope(cityRoot) = %q, want scope-pinned custom exec provider preserved", got)
+	}
+}
+
 func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{
 		Type:   sessionBeadType,

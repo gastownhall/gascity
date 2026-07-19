@@ -649,6 +649,14 @@ func providerUsesBdStoreContract(provider string) bool {
 	return contract.ProviderUsesBDContract(provider)
 }
 
+// isCustomExecProvider reports whether provider is a user-supplied exec:
+// beads provider (not the managed gc-beads-bd wrapper, which normalizes to
+// the "bd" contract). A custom exec provider is always a deliberate
+// selection and outranks on-disk store-marker inference.
+func isCustomExecProvider(provider string) bool {
+	return strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider)
+}
+
 func cityUsesBdStoreContract(cityPath string) bool {
 	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
 }
@@ -663,9 +671,9 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 
 // authoritativeBeadsProviderForScope resolves the provider for a store chosen
 // from an arbitrary bead ID rather than from the caller's current scope. An
-// unscoped GC_BEADS value describes the caller's command context and must not
-// mask the selected store's on-disk identity. Scope-pinned overrides and
-// custom exec providers remain deliberate selections and retain precedence.
+// ambient or scope-pinned simple GC_BEADS value describes the caller's command
+// context and must not mask the selected store's on-disk identity. Custom exec
+// providers remain deliberate selections and retain precedence.
 func authoritativeBeadsProviderForScope(scopeRoot, cityPath string) string {
 	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, true)
 }
@@ -676,14 +684,25 @@ func resolveRawBeadsProviderForScope(scopeRoot, cityPath string, authoritative b
 		runtimeCityPath = cityForStoreDir(scopeRoot)
 	}
 	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
-	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok && (!authoritative || strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "") {
-		return normalizeRawBeadsProvider(runtimeCityPath, explicit)
+	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok {
+		normalized := normalizeRawBeadsProvider(runtimeCityPath, explicit)
+		// Caller-scope resolution always honors the scoped override: it
+		// describes the command's own store context. Authoritative
+		// arbitrary-bead resolution must not let a scope-pinned *simple*
+		// provider (file/bd) mask the selected store's on-disk identity --
+		// an inherited session env can scope-pin GC_BEADS=file at the city
+		// root even though that root hosts a Dolt/bd HQ store, which would
+		// strand HQ beads at the wrong backend (dr-h6ze). A scope-pinned
+		// custom exec provider stays a deliberate selection and wins.
+		if !authoritative || isCustomExecProvider(normalized) {
+			return normalized
+		}
 	}
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
+	if isCustomExecProvider(provider) {
 		return provider
 	}
 	if !authoritative && samePath(resolvedScopeRoot, runtimeCityPath) {
