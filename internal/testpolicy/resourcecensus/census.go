@@ -113,7 +113,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   530,
+			BaselineCalls:   529,
 			BaselineFiles:   160,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -141,7 +141,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   400,
+			BaselineCalls:   399,
 			BaselineFiles:   111,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -167,7 +167,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4331,
+			BaselineCalls:   4328,
 			BaselineFiles:   204,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -193,7 +193,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   71,
+			BaselineCalls:   70,
 			BaselineFiles:   24,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -349,7 +349,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   397,
+			BaselineCalls:   396,
 			BaselineFiles:   109,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
@@ -375,7 +375,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4325,
+			BaselineCalls:   4322,
 			BaselineFiles:   204,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
@@ -401,7 +401,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   71,
+			BaselineCalls:   70,
 			BaselineFiles:   24,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
