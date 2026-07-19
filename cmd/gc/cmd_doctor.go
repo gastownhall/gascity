@@ -64,7 +64,7 @@ legacy-to-current pack rewrites that are available on this branch.`,
 	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false,
 		"after running checks, print per-scope Postgres credential resolution table (no values printed)")
 	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 60*time.Second,
-		"per-check time budget; a check exceeding it is abandoned and reported as a timed-out advisory error (0 disables)")
+		"per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables)")
 	return cmd
 }
 
@@ -582,6 +582,10 @@ type doctorJSONResult struct {
 	FixAttempted bool     `json:"fix_attempted,omitempty"`
 	FixError     string   `json:"fix_error,omitempty"`
 	Fixed        bool     `json:"fixed,omitempty"`
+	// TimedOut projects CheckResult.TimedOut so automation can structurally
+	// distinguish an abandoned check (outcome unknown, worth retrying) from a
+	// check that ran and returned an ordinary advisory error.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 type doctorJSONReport struct {
@@ -636,6 +640,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			FixAttempted: r.FixAttempted,
 			FixError:     r.FixError,
 			Fixed:        r.Fixed,
+			TimedOut:     r.TimedOut,
 		})
 	}
 	return writeCLIJSONLine(w, out)

@@ -1051,3 +1051,39 @@ dolt_port = "3307"
 		t.Fatalf("status = %v, want ok; message = %q", res.Status, res.Message)
 	}
 }
+
+// TestWriteDoctorJSONProjectsTimedOut pins the machine-readable timeout
+// signal: a timed-out check projects timed_out=true so automation can tell an
+// abandoned check (outcome unknown) from an ordinary advisory failure, while
+// omitempty keeps output byte-identical for every non-timed-out result.
+func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
+	report := &doctor.Report{
+		Failed: 2,
+		Results: []*doctor.CheckResult{
+			{Name: "wedged", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, Message: "timed out", TimedOut: true},
+			{Name: "advisory", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, Message: "ran and found an advisory issue"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := writeDoctorJSON(&buf, report); err != nil {
+		t.Fatalf("writeDoctorJSON: %v", err)
+	}
+	var decoded doctorJSONReport
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode doctor JSON: %v; out=%q", err, buf.String())
+	}
+	if len(decoded.Results) != 2 {
+		t.Fatalf("Results = %d, want 2", len(decoded.Results))
+	}
+	if !decoded.Results[0].TimedOut {
+		t.Fatalf("timed-out check projected TimedOut=false, want true")
+	}
+	if decoded.Results[1].TimedOut {
+		t.Fatalf("ordinary advisory check projected TimedOut=true, want false")
+	}
+	// omitempty: only the abandoned check carries the key, so existing --json
+	// consumers of non-timed-out results see unchanged output.
+	if n := strings.Count(buf.String(), "timed_out"); n != 1 {
+		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
+	}
+}
