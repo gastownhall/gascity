@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -231,8 +232,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
-		if claimed.Metadata == nil {
-			claimed.Metadata = candidate.Metadata
+		if len(candidate.Metadata) > 0 {
+			// bd update --claim can return a partial metadata projection. Retain
+			// candidate fields while preferring values returned by the mutation.
+			metadata := maps.Clone(candidate.Metadata)
+			maps.Copy(metadata, claimed.Metadata)
+			claimed.Metadata = metadata
 		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",

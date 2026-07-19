@@ -376,13 +376,17 @@ func TestDoHookClaimReturnsExistingAssignment(t *testing.T) {
 func TestDoHookClaimClaimsRoutedUnassignedWork(t *testing.T) {
 	var claimedID string
 	runner := func(string, string) (string, error) {
-		return `[{"id":"hw-2","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		return `[{"id":"hw-2","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-2","gc.continuation_group":"body"}}]`, nil
 	}
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			claimedID = beadID
+			// bd update --claim may return only a partial metadata projection.
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
 		},
 	}
 	opts := hookClaimOptions{
@@ -407,8 +411,8 @@ func TestDoHookClaimClaimsRoutedUnassignedWork(t *testing.T) {
 	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "hw-2" || result.Assignee != "worker-1" {
 		t.Fatalf("unexpected claim result: %+v", result)
 	}
-	if strings.Contains(stdout.String(), "root_bead_id") || strings.Contains(stdout.String(), "continuation_group") {
-		t.Fatalf("claim result includes empty context fields: %s", stdout.String())
+	if result.RootBeadID != "root-2" || result.ContinuationGroup != "body" {
+		t.Fatalf("claim context = {%q %q}, want {root-2 body}", result.RootBeadID, result.ContinuationGroup)
 	}
 }
 
