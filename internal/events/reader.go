@@ -31,7 +31,17 @@ type Filter struct {
 	// append-only and seq-ordered, so "strictly before this seq" is a
 	// stable resume point regardless of concurrent appends.
 	BeforeSeq uint64
-	Limit     int // cap results at this count (0 or negative = unlimited)
+	Limit int // cap results at this count (0 or negative = unlimited)
+	// WindowBytes, when positive, limits how far ReadFilteredTail walks
+	// backward from the end of the log. Events more than WindowBytes bytes
+	// before EOF are not examined; the caller should treat "not found in
+	// window" as unknown. Zero means no bound (scan the entire file). This
+	// is complementary to BeforeSeq: BeforeSeq bounds which events are
+	// accepted, but does not stop the backward walk when no event matches —
+	// the reader walks to byte 0 in the not-found case regardless of
+	// BeforeSeq. WindowBytes stops the walk itself.
+	// Has no effect on ReadFiltered (forward scans).
+	WindowBytes int64
 }
 
 // matchesFilter reports whether e satisfies all non-zero predicates in f.
@@ -381,13 +391,17 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		return nil, nil
 	}
 	const chunkSize int64 = 64 * 1024
+	floor := int64(0)
+	if filter.WindowBytes > 0 && size > filter.WindowBytes {
+		floor = size - filter.WindowBytes
+	}
 	var reversed []Event
 	var pending []byte
 	end := size
-	for end > 0 && len(reversed) < limit {
+	for end > floor && len(reversed) < limit {
 		n := chunkSize
-		if end < n {
-			n = end
+		if end-floor < n {
+			n = end - floor
 		}
 		start := end - n
 		chunk := make([]byte, n)

@@ -1,6 +1,7 @@
 package storehealth
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+// Compile-time checks: spyTailProvider must implement both interfaces.
+var _ events.Provider = (*spyTailProvider)(nil)
+var _ events.TailProvider = (*spyTailProvider)(nil)
 
 func TestStorePath(t *testing.T) {
 	got := StorePath("/tmp/citysvc")
@@ -256,5 +261,108 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 	ts, status := LastMaintenance(ep)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
+	}
+}
+
+// tailCallRecord captures a single ListTail invocation for inspection.
+type tailCallRecord struct {
+	filter events.Filter
+	limit  int
+}
+
+// spyTailProvider is a Provider+TailProvider that records every ListTail call
+// and delegates to an inner Fake for actual event results.
+type spyTailProvider struct {
+	inner *events.Fake
+	calls []tailCallRecord
+}
+
+func (s *spyTailProvider) Record(e events.Event)                       { s.inner.Record(e) }
+func (s *spyTailProvider) List(f events.Filter) ([]events.Event, error) { return s.inner.List(f) }
+
+func (s *spyTailProvider) ListTail(f events.Filter, limit int) ([]events.Event, error) {
+	s.calls = append(s.calls, tailCallRecord{filter: f, limit: limit})
+	return s.inner.ListTail(f, limit)
+}
+
+func (s *spyTailProvider) LatestSeq() (uint64, error) { return s.inner.LatestSeq() }
+func (s *spyTailProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	return s.inner.Watch(ctx, afterSeq)
+}
+func (s *spyTailProvider) Close() error { return s.inner.Close() }
+
+// TestLastMaintenanceUsesWindowedTailScan verifies that LastMaintenance
+// delegates to ListTail (not List) with the correct WindowBytes bound.
+// Without the hasTail branch, List would be called instead and this test
+// fails. Without the WindowBytes value, the bound is silently absent.
+func TestLastMaintenanceUsesWindowedTailScan(t *testing.T) {
+	spy := &spyTailProvider{inner: events.NewFake()}
+	LastMaintenance(spy)
+
+	if len(spy.calls) != 2 {
+		t.Fatalf("expected 2 ListTail calls (one per maintenance type), got %d", len(spy.calls))
+	}
+	for i, call := range spy.calls {
+		if call.filter.WindowBytes != lastMaintenanceScanWindow {
+			t.Errorf("call[%d]: WindowBytes=%d, want %d", i, call.filter.WindowBytes, lastMaintenanceScanWindow)
+		}
+		if call.limit != 1 {
+			t.Errorf("call[%d]: limit=%d, want 1", i, call.limit)
+		}
+	}
+}
+
+// TestLastMaintenanceBoundedScan_EventBeforeWindow verifies end-to-end that
+// when the bounded tail scan is used, maintenance events placed before the
+// scan window are NOT returned — they are treated as unknown.
+//
+// Failing case without the fix: ReadFilteredTail walks to byte 0, finds the
+// maintenance event, and LastMaintenance returns a non-zero timestamp.
+// With the fix: the walk stops at the window floor and returns (zero, "").
+func TestLastMaintenanceBoundedScan_EventBeforeWindow(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+
+	// Write a maintenance-done event at the very start of the file.
+	maintenanceEvent := events.Event{
+		Seq:  1,
+		Ts:   time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC),
+		Type: events.StoreMaintenanceDone,
+	}
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 10})
+	maintenanceEvent.Payload = payload
+	lineBytes, err := json.Marshal(maintenanceEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Create(eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write(append(lineBytes, '\n')) //nolint:errcheck
+
+	// Fill with noise events until the file exceeds lastMaintenanceScanWindow,
+	// pushing the maintenance event before the window floor.
+	noiseBase, _ := json.Marshal(events.Event{Seq: 2, Ts: time.Date(2026, 4, 1, 12, 0, 1, 0, time.UTC), Type: "gc.session.started"})
+	noiseLine := append(noiseBase, '\n')
+	written := int64(len(lineBytes) + 1)
+	for written <= lastMaintenanceScanWindow+int64(len(noiseLine))*10 {
+		f.Write(noiseLine) //nolint:errcheck
+		written += int64(len(noiseLine))
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ep, err := events.NewFileRecorder(eventsPath, os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ep.Close() //nolint:errcheck
+
+	ts, status := LastMaintenance(ep)
+	if !ts.IsZero() || status != "" {
+		t.Errorf("LastMaintenance returned (%v, %q): maintenance event before window should be treated as unknown", ts, status)
 	}
 }

@@ -115,14 +115,26 @@ func WalkSize(path string) int64 {
 	return total
 }
 
+// lastMaintenanceScanWindow bounds how far back LastMaintenance walks the
+// event log. At 8 MB (≈10 000 events of typical size), the scan is O(window)
+// rather than O(log size). Events before the window are treated as unknown —
+// the same state as "never ran maintenance", which LastGCAt (json:omitempty)
+// already renders correctly without the field.
+const lastMaintenanceScanWindow = 8 * 1024 * 1024
+
 // LastMaintenance returns the timestamp and status ("success" or
 // "failed") of the most-recent store-maintenance event in provider.
 // Zero time and empty status when no events, provider is nil, or the
 // provider returns an error.
+//
+// When ep implements [events.TailProvider] the backward scan is bounded to
+// the last lastMaintenanceScanWindow bytes of the log, preventing a full
+// log walk when no maintenance event has ever been recorded.
 func LastMaintenance(ep events.Provider) (time.Time, string) {
 	if ep == nil {
 		return time.Time{}, ""
 	}
+	tp, hasTail := ep.(events.TailProvider)
 	var (
 		latestTs     time.Time
 		latestStatus string
@@ -134,7 +146,13 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		{events.StoreMaintenanceDone, "success"},
 		{events.StoreMaintenanceFailed, "failed"},
 	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
+		var evts []events.Event
+		var err error
+		if hasTail {
+			evts, err = tp.ListTail(events.Filter{Type: spec.typ, WindowBytes: lastMaintenanceScanWindow}, 1)
+		} else {
+			evts, err = ep.List(events.Filter{Type: spec.typ, Limit: 1})
+		}
 		if err != nil {
 			continue
 		}
