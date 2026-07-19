@@ -130,7 +130,11 @@ type SlingDeps struct {
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	Tracer               func(format string, args ...any)
+	// SourceWorkflowStoreScanWarning reports a non-source store whose live-root
+	// scan failed and was skipped. When nil, scan failures remain fatal. The
+	// source store identified by StoreRef is always strict and is never skipped.
+	SourceWorkflowStoreScanWarning func(storeRef string, err error)
+	Tracer                         func(format string, args ...any)
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution

@@ -131,6 +131,210 @@ func TestOpenSourceWorkflowStoresFailsOnlyWhenEverythingBroken(t *testing.T) {
 	}
 }
 
+type sourceWorkflowScanFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s sourceWorkflowScanFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+type sourceWorkflowDescendantScanFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s sourceWorkflowDescendantScanFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+func TestCollectSourceWorkflowMatchesSkipsNonSourceListFailure(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "healthy", Path: "rigs/healthy"},
+			{Name: "stale", Path: "rigs/stale"},
+		},
+	}
+	cityStore := beads.NewMemStore()
+	healthyStore := beads.NewMemStore()
+	root, err := healthyStore.Create(beads.Bead{
+		ID:     "wf-existing",
+		Title:  "existing workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	staleErr := errors.New("issues.revision is missing")
+	stores := []convoyStoreView{
+		{path: cityPath, store: cityStore},
+		{path: filepath.Join(cityPath, "rigs/stale"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: staleErr}},
+		{path: filepath.Join(cityPath, "rigs/healthy"), store: healthyStore},
+	}
+
+	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores: %v", err)
+	}
+	if len(matches) != 1 || len(matches[0].roots) != 1 || matches[0].roots[0].ID != root.ID {
+		t.Fatalf("matches = %#v, want healthy root %s", matches, root.ID)
+	}
+	if len(skips) != 1 || !strings.Contains(skips[0].path, "rigs/stale") || !errors.Is(skips[0].err, staleErr) {
+		t.Fatalf("skips = %#v, want stale rig list failure", skips)
+	}
+	if warning := formatSourceWorkflowStoreSkips(skips); !strings.Contains(warning, "revision") || !strings.Contains(warning, "invisible") {
+		t.Fatalf("warning = %q, want scan failure and degraded-coverage context", warning)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesSurfacesDescendantScanFailure(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "stale", Path: "rigs/stale"}},
+	}
+	staleBacking := beads.NewMemStore()
+	root, err := staleBacking.Create(beads.Bead{
+		ID:     "wf-stale",
+		Title:  "stale workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	descendantErr := errors.New("descendant query failed")
+	stores := []convoyStoreView{
+		{path: cityPath, store: beads.NewMemStore()},
+		{path: filepath.Join(cityPath, "rigs/stale"), store: sourceWorkflowDescendantScanFailStore{Store: staleBacking, err: descendantErr}},
+	}
+
+	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %#v, want incomplete store %s excluded", matches, root.ID)
+	}
+	if len(skips) != 1 || !errors.Is(skips[0].err, descendantErr) {
+		t.Fatalf("skips = %#v, want descendant query failure", skips)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesKeepsSelectedStoreListFailureStrict(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	selectedErr := errors.New("selected store read failed")
+	stores := []convoyStoreView{
+		{path: cityPath, store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: selectedErr}},
+		{path: filepath.Join(cityPath, "rigs/healthy"), store: beads.NewMemStore()},
+	}
+
+	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want selected store error %v", err, selectedErr)
+	}
+	if len(skips) != 1 || !errors.Is(skips[0].err, selectedErr) {
+		t.Fatalf("skips = %#v, want selected store failure recorded", skips)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesFailsWhenSelectedStoreIsMissing(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "healthy", Path: "rigs/healthy"}},
+	}
+	stores := []convoyStoreView{
+		{path: filepath.Join(cityPath, "rigs/healthy"), store: beads.NewMemStore()},
+	}
+	selectedErr := errors.New("selected store reopen failed")
+	skips := []sourceWorkflowStoreSkip{{path: cityPath, err: selectedErr}}
+
+	_, _, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, skips)
+	if err == nil || !strings.Contains(err.Error(), "city:test") {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want missing selected-store failure", err)
+	}
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want wrapped selected open error %v", err, selectedErr)
+	}
+}
+
+func TestUnscannedSourceWorkflowStoreSkipsExcludesRecoveredSelectedStore(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "stale", Path: "rigs/stale"}},
+	}
+	skips := []sourceWorkflowStoreSkip{
+		{path: cityPath, err: errors.New("selected reopen failed")},
+		{path: filepath.Join(cityPath, "rigs/stale"), err: errors.New("stale rig failed")},
+	}
+
+	unscanned, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, cityPath, "city:test", skips)
+	if !selectedRecovered {
+		t.Fatal("selectedRecovered = false, want already-open selected store to repair its reopen skip")
+	}
+	if len(unscanned) != 1 || !strings.Contains(unscanned[0].path, "rigs/stale") {
+		t.Fatalf("unscanned skips = %#v, want only stale non-selected rig", unscanned)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesFailsWhenNoStoreCanBeScanned(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "stale-a", Path: "rigs/stale-a"},
+			{Name: "stale-b", Path: "rigs/stale-b"},
+		},
+	}
+	firstErr := errors.New("first store failed")
+	stores := []convoyStoreView{
+		{path: filepath.Join(cityPath, "rigs/stale-a"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: firstErr}},
+		{path: filepath.Join(cityPath, "rigs/stale-b"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: errors.New("second store failed")}},
+	}
+
+	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "", stores, nil)
+	if !errors.Is(err, firstErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want first scan error %v", err, firstErr)
+	}
+	if len(skips) != 2 {
+		t.Fatalf("len(skips) = %d, want both failed stores recorded: %#v", len(skips), skips)
+	}
+}
+
+func TestCollectSourceWorkflowMatchesFailsWhenNoStoreIsAvailable(t *testing.T) {
+	_, _, err := collectSourceWorkflowMatchesFromStores(
+		&config.City{Workspace: config.Workspace{Name: "test"}},
+		"/city",
+		"mc-source",
+		"",
+		[]convoyStoreView{{path: "/city/rigs/nil"}},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "no source workflow stores") {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want no-usable-store failure", err)
+	}
+}
+
 func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *testing.T) {
 	cityPath := "/city"
 	cfg := &config.City{
