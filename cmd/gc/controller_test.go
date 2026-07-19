@@ -21,74 +21,68 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestControllerLoopCancel(t *testing.T) {
+	setScopedBeadsProviderForTest(t, "", "file")
 	sp := runtime.NewFake()
-	name := "mayor"
-	tp := TemplateParams{
-		SessionName:  name,
-		TemplateName: name,
-		Command:      "echo hello",
-	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
 
 	var reconcileCount atomic.Int32
 	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
 		reconcileCount.Add(1)
-		return DesiredStateResult{State: map[string]TemplateParams{name: tp}}
+		cancel()
+		return DesiredStateResult{}
 	}
 
-	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
-	ctx, cancel := context.WithCancel(context.Background())
 	var stdout, stderr bytes.Buffer
-
-	// Cancel immediately after initial reconciliation completes.
-	go func() {
-		for reconcileCount.Load() < 1 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
 
 	controllerLoop(ctx, time.Hour, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
-	if reconcileCount.Load() < 1 {
-		t.Error("expected at least one reconciliation")
+	if got := reconcileCount.Load(); got != 1 {
+		t.Errorf("reconcile count = %d, want 1", got)
+	}
+	if strings.Contains(stderr.String(), "reconciler tick panicked") {
+		t.Fatalf("controller loop recovered a reconciliation panic:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "native_store_unavailable") {
+		t.Fatalf("controller loop selected the native store:\n%s", stderr.String())
 	}
 }
 
 func TestControllerLoopTick(t *testing.T) {
+	setScopedBeadsProviderForTest(t, "", "file")
 	sp := runtime.NewFake()
-	name := "mayor"
-	tp := TemplateParams{
-		SessionName:  name,
-		TemplateName: name,
-		Command:      "echo hello",
-	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
 
 	var reconcileCount atomic.Int32
 	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-		reconcileCount.Add(1)
-		return DesiredStateResult{State: map[string]TemplateParams{name: tp}}
+		if reconcileCount.Add(1) == 2 {
+			cancel()
+		}
+		return DesiredStateResult{}
 	}
 
-	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var stdout, stderr bytes.Buffer
 
-	// Use a very short interval so the tick fires quickly.
-	go func() {
-		for reconcileCount.Load() < 2 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
+	controllerLoop(ctx, time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
-	controllerLoop(ctx, 10*time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
-
-	if got := reconcileCount.Load(); got < 2 {
-		t.Errorf("reconcile count = %d, want >= 2", got)
+	if got := reconcileCount.Load(); got != 2 {
+		t.Errorf("reconcile count = %d, want 2", got)
+	}
+	if !strings.Contains(stdout.String(), "City started.") {
+		t.Fatalf("controller loop did not reach the patrol loop:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "reconciler tick panicked") {
+		t.Fatalf("controller loop recovered a reconciliation panic:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "native_store_unavailable") {
+		t.Fatalf("controller loop selected the native store:\n%s", stderr.String())
 	}
 }
 
