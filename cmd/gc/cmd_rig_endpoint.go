@@ -644,7 +644,7 @@ func validateExternalDoltIssuesTableScan(database string, scanErr error) error {
 	if scanErr == nil {
 		return nil
 	}
-	if errors.Is(scanErr, sql.ErrNoRows) {
+	if scanErr == sql.ErrNoRows { //nolint:errorlint // Preserve the pre-extraction exact-sentinel contract.
 		return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
 	}
 	return fmt.Errorf("beads store not usable on external endpoint: %w", scanErr)
