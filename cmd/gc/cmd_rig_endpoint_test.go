@@ -1527,6 +1527,7 @@ func TestReadCanonicalProjectIDReturnsEmptyWhenL1AndL2Missing(t *testing.T) {
 
 func TestValidateExternalDoltIssuesTableScanMapsScanResults(t *testing.T) {
 	queryErr := errors.New("query failed")
+	wrappedNoRows := fmt.Errorf("query context: %w", sql.ErrNoRows)
 	tests := []struct {
 		name      string
 		scanErr   error
@@ -1538,6 +1539,12 @@ func TestValidateExternalDoltIssuesTableScanMapsScanResults(t *testing.T) {
 			name:      "issues table missing",
 			scanErr:   sql.ErrNoRows,
 			wantError: `beads store not usable on external endpoint: database "hq" is missing the issues table`,
+		},
+		{
+			name:      "wrapped no rows remains query failure",
+			scanErr:   wrappedNoRows,
+			wantError: "beads store not usable on external endpoint: query context: sql: no rows in result set",
+			wantCause: wrappedNoRows,
 		},
 		{
 			name:      "query fails",
