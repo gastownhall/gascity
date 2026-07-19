@@ -511,8 +511,8 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
-		StampWorkBranch: func(_ context.Context, _ string, _ []string, beadID, assignee, branch string) error {
-			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, branch
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, assignee string, patch map[string]string) error {
+			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, patch["gc.work_branch"]
 			return nil
 		},
 	}
@@ -546,7 +546,7 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem"}}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
-		StampWorkBranch: func(_ context.Context, _ string, _ []string, _, _, _ string) error {
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
 			stampCalls++
 			return nil
 		},

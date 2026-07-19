@@ -42,10 +42,13 @@ type hookClaimOps struct {
 	EmitClaimRejected hookEmitClaimRejectedFunc
 	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
 	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
-	// repo / detached HEAD) skips the stamp.
+	// repo / detached HEAD) omits the branch key — the session back-reference is
+	// still stamped.
 	ResolveWorkBranch hookResolveWorkBranchFunc
-	// StampWorkBranch writes gc.work_branch onto the claimed bead. Best-effort.
-	StampWorkBranch hookStampWorkBranchFunc
+	// StampWorkMeta writes the claim-time execution-identity metadata patch
+	// (gc.work_branch and/or the durable session back-reference gc.session_id /
+	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
+	StampWorkMeta hookStampWorkMetaFunc
 	// RecordSessionPointers writes the session bead's current-pointers — gc.current_run_id
 	// AND gc.active_work_bead (the claimed work bead's gc.step_id) — in ONE update, so
 	// the (run, step) tuple stays atomically consistent. Best-effort.
@@ -60,7 +63,7 @@ type (
 	hookDrainAckFunc              func(io.Writer) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(dir string) string
-	hookStampWorkBranchFunc       func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
+	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
 	hookRecordSessionPointersFunc func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
 )
 
@@ -179,8 +182,8 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
-	if ops.StampWorkBranch == nil {
-		ops.StampWorkBranch = hookStampWorkBranchWithBdStore
+	if ops.StampWorkMeta == nil {
+		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
 	}
 	if ops.RecordSessionPointers == nil {
 		ops.RecordSessionPointers = hookRecordSessionPointersWithBdStore
@@ -311,7 +314,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 }
 
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
-	stampHookWorkBranch(bead, opts, ops, dir, stderr)
+	stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	recordHookClaimSessionPointers(bead, opts, ops, dir, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -420,29 +423,64 @@ func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, a
 	return claimed, true, nil
 }
 
-// stampHookWorkBranch records the claiming worker's git branch on the bead as
-// gc.work_branch — the durable handle from the bead to its work that the close
-// gate later reads (ADR-0009). Idempotent (skips when already current) and
-// best-effort: a missing repo, detached HEAD, or write error never blocks the
-// claim.
-func stampHookWorkBranch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
-	branch := strings.TrimSpace(ops.ResolveWorkBranch(dir))
-	if branch == "" {
-		return
-	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == branch {
+// stampHookClaimIdentity records the claiming worker's execution identity on the
+// claimed bead in ONE metadata write: gc.work_branch (the durable handle from the
+// bead to its work that the close gate later reads, ADR-0009) plus the durable
+// session back-reference gc.session_id / gc.session_name (#2843) so the dashboard
+// run-detail can resolve which session executed a pool step after the transient
+// Assignee is cleared on close. graphroute leaves pool steps unbound at route time,
+// deferring the session binding to this claim (graphroute.go:200-203).
+//
+// The patch is compare-and-skipped against the bead's current metadata and the
+// write is issued only when at least one key actually changes: this runs again on
+// every hook tick via the existing_assignment / ready_assignment adoption paths, so
+// an unconditional write would emit a bead.updated per tick per in-progress bead
+// (the cache-reconcile flood class). Best-effort: a missing repo, detached HEAD,
+// absent session, or write error never blocks the claim.
+func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
+	if len(patch) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	if err := ops.StampWorkBranch(ctx, dir, opts.Env, bead.ID, opts.Assignee, branch); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: stamping work_branch on %s: %v\n", bead.ID, err) //nolint:errcheck
+	if err := ops.StampWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee, patch); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: stamping execution identity on %s: %v\n", bead.ID, err) //nolint:errcheck
 	}
 }
 
-func hookStampWorkBranchWithBdStore(_ context.Context, dir string, env []string, beadID, assignee, branch string) error {
+// hookClaimIdentityPatch builds the compare-and-skipped claim-time metadata patch.
+// It carries gc.work_branch when the worktree resolves a branch that differs from
+// the bead's, and the session back-reference gc.session_id / gc.session_name when
+// this is a session-run claim (GC_SESSION_ID present) of a non-control bead and the
+// values differ. Session identity is stamped even when the branch is empty — a
+// session with no worktree still needs its back-reference — but never on control
+// beads, which stay session-free by graphroute's design
+// (ApplyGraphControlRouteBinding), even when a control-dispatcher session claims one
+// through this same hook path. An empty result means every key is already current,
+// so the caller issues no write.
+func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
+	patch := map[string]string{}
+	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
+		patch[beadmeta.WorkBranchMetadataKey] = branch
+	}
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
+		!beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
+		if strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+			patch[beadmeta.SessionIDMetadataKey] = sessionID
+		}
+		if sessionName := hookClaimSessionName(opts.Env); sessionName != "" &&
+			strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+			patch[beadmeta.SessionNameMetadataKey] = sessionName
+		}
+	}
+	return patch
+}
+
+func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
-	return store.Update(beadID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkBranchMetadataKey: branch}})
+	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
 }
 
 // recordHookClaimRunID records, on the session bead named by GC_SESSION_ID, the
@@ -546,6 +584,21 @@ func hookClaimSessionID(env []string) string {
 		}
 	}
 	return strings.TrimSpace(sessionID)
+}
+
+// hookClaimSessionName returns the session display name (GC_SESSION_NAME) from the
+// claim env — the pool slot's session/tmux name (e.g. "gc__role-mc-xxxxx") — stamped
+// onto the work bead as the durable gc.session_name back-reference so the dashboard's
+// byName index can resolve the step's session even when the raw id fails the
+// resolver's prefix gate. Empty when the env carries no session name.
+func hookClaimSessionName(env []string) string {
+	sessionName := ""
+	for _, entry := range env {
+		if k, v, ok := strings.Cut(entry, "="); ok && k == "GC_SESSION_NAME" {
+			sessionName = v
+		}
+	}
+	return strings.TrimSpace(sessionName)
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir
