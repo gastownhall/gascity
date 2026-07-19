@@ -444,6 +444,22 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch[session.PrimedAtMetadataKey] = ""
 			batch[session.PrimingAttemptedAtMetadataKey] = ""
 			batch[session.PromptHashMetadataKey] = ""
+			// A fresh spawn must clear the same advisory wake blockers and
+			// crash-accrual counters the canonical wake patches reset -- a
+			// stale hold/quarantine, sleep_intent, or wake/churn counter would
+			// otherwise keep gating wake or re-quarantine the reopened runtime
+			// on its first failure. Compose ClearWakeBlockersPatch so this path
+			// tracks that full set (including sleep_intent, wake_attempts, and
+			// churn_count) by construction instead of hand-listing a subset
+			// that drifts from the canonical contract.
+			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"])
+			delete(blockers, "state") // the reopen owns the target state set above.
+			for k, v := range blockers {
+				batch[k] = v
+			}
+			// ClearWakeBlockersPatch only drops sleep_reason for its recognized
+			// reasons; a fresh spawn always clears it, matching RequestWakePatch.
+			batch["sleep_reason"] = ""
 		} else {
 			batch["pending_create_started_at"] = ""
 		}
@@ -2966,6 +2982,12 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 		stderr = io.Discard
 	}
 
+	// The owning pool/agent route, recovered from the closing session's own
+	// template metadata. ZFC-safe: derived from configuration carried on the
+	// session bead, never a hardcoded role name. Used below to re-route work
+	// that lost its routing mid-handoff so it stays discoverable.
+	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
+
 	seenAssignees := make(map[string]struct{}, 3)
 	addAssignee := func(val string) {
 		val = strings.TrimSpace(val)
@@ -3000,9 +3022,20 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 				// release primitive clears the assignee (empty-string) and
 				// stale session-affinity metadata and resets in_progress to
 				// open — the same stale-affinity bug fixed on the retry,
-				// reopen, and orphan-pool release paths. No run_target
-				// fallback on the close-release path (passed "").
-				if err := wa.ReleaseWorkBead(item, ""); err != nil {
+				// reopen, and orphan-pool release paths.
+				//
+				// ga-n2d.2: pass the owning pool route (retiredSessionFallbackRoute,
+				// derived from the closing session's own template metadata) as the
+				// run_target fallback instead of "". A polecat that pushed its branch
+				// but died before completing the refinery handoff can leave work whose
+				// gc.routed_to was cleared; releasing it here with no route would
+				// strand it open+unassigned+unrouted — invisible to both the pool
+				// demand probe (keys on gc.routed_to) and releaseOrphanedPoolAssignments
+				// (skips empty-routed beads). ReleaseWorkBead applies the fallback only
+				// when BOTH routed_to and run_target are empty, and restoreCarriedWorkRoutes
+				// (#3421) then backfills gc.routed_to from that run_target so the work
+				// re-enters pool demand.
+				if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
 					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
 				}
 			}

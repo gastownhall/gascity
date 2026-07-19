@@ -1084,3 +1084,114 @@ func TestCachingStoreUpdateFallsThroughPerFieldMismatch(t *testing.T) {
 		})
 	}
 }
+
+func TestCachingStoreCloseAdoptsFreshBackingRead(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "close-adopt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	fresh, err := backing.Get(b.ID)
+	if err != nil {
+		t.Fatalf("backing Get after close: %v", err)
+	}
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after close: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("cached status after Close = %q, want %q", got.Status, "closed")
+	}
+	if got.Revision != fresh.Revision {
+		t.Fatalf("cached revision after Close = %d, backing = %d; the successful refresh read must be adopted, "+
+			"or a Get→conditional-write consumer fences against a revision that no longer exists",
+			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "reopen-adopt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := cache.Reopen(b.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	fresh, err := backing.Get(b.ID)
+	if err != nil {
+		t.Fatalf("backing Get after reopen: %v", err)
+	}
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after reopen: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("cached status after Reopen = %q, want %q", got.Status, "open")
+	}
+	if got.Revision != fresh.Revision {
+		t.Fatalf("cached revision after Reopen = %d, backing = %d; the successful refresh read must be adopted",
+			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	// When the post-close refresh Get fails, Close must still fall back to the
+	// cached-status synthesis (today's behavior) rather than dropping the entry.
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "close-refresh-fails"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The synthesis keeps the entry cached (distinguishing it from an evict,
+	// whose follow-up Get would fall through to the backing and also report
+	// closed).
+	cache.mu.RLock()
+	_, inBeads := cache.beads[b.ID]
+	cache.mu.RUnlock()
+	if !inBeads {
+		t.Fatal("entry missing from the cache after Close with failed refresh; want the cached-status synthesis, not an evict")
+	}
+
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after close with failed refresh: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("cached status after Close with failed refresh = %q, want %q (synthesis fallback)", got.Status, "closed")
+	}
+}

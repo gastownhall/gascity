@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/featureflags"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
+	"golang.org/x/sync/singleflight"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -53,6 +54,14 @@ type Server struct {
 	mux      *http.ServeMux
 	readOnly bool // mirrors supervisor's read-only flag for /svc/ enforcement
 
+	// bootFlags is the rollout-gate snapshot latched at Server construction —
+	// from the State's boot latch when it implements RolloutFlagsProvider, else
+	// resolved once from Config(). Immutable for the Server lifetime, mirroring
+	// readOnly; the S2+/S3 handler consumers read it.
+	bootFlags rollout.Flags
+
+	runCensusSource RunCensusSource
+
 	backgroundTasks sync.WaitGroup
 
 	// sessionLogSearchPaths overrides the default search paths for Claude
@@ -61,6 +70,12 @@ type Server struct {
 
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
+
+	// rigIdem is the in-process live index + request_id state machine backing
+	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
+	// starts empty at boot and is authoritative for admission (G13). One index
+	// per per-city Server (the supervisor caches one Server per city).
+	rigIdem *rigIdemIndex
 
 	// lookPathCache caches exec.LookPath results with a short TTL to avoid
 	// repeated filesystem scans on every GET /v0/agents request.
@@ -84,7 +99,8 @@ type Server struct {
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
-	storeHealthComputer func(ctx context.Context) *StatusStoreHealth
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
+	storeHealthFlight   singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
@@ -234,8 +250,20 @@ func newServer(state State, readOnly bool) *Server {
 		mux:            mux,
 		readOnly:       readOnly,
 		idem:           newIdempotencyCache(30 * time.Minute),
+		rigIdem:        newRigIdemIndex(),
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
+	}
+	// Latch the rollout snapshot once: prefer the State's boot latch (the
+	// production controllerState); fall back to resolving from Config() for
+	// States without it (test fakes). A Resolve error leaves the zero Flags —
+	// the documented degraded-safe legacy value; the production root already
+	// surfaced the error at boot, and this fallback only runs for provider-less
+	// States, so the error is intentionally not re-surfaced here.
+	if p, ok := state.(RolloutFlagsProvider); ok {
+		s.bootFlags = p.RolloutFlags()
+	} else if cfg := state.Config(); cfg != nil {
+		s.bootFlags, _ = rollout.Resolve(cfg, rollout.ResolveOptions{})
 	}
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
 	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
@@ -250,13 +278,7 @@ func newServer(state State, readOnly bool) *Server {
 // feature flags based on the city's daemon config. Called from New
 // and NewReadOnly so both modes observe the same flag state.
 func syncFeatureFlags(cfg *config.City) {
-	enabled := cfg != nil && cfg.Daemon.FormulaV2Enabled()
-	if formula.IsFormulaV2Enabled() != enabled {
-		formula.SetFormulaV2Enabled(enabled)
-	}
-	if molecule.IsGraphApplyEnabled() != enabled {
-		molecule.SetGraphApplyEnabled(enabled)
-	}
+	featureflags.Apply(featureflags.FromConfig(cfg))
 }
 
 type singleStateResolver struct {

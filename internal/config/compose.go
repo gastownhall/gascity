@@ -1028,7 +1028,21 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
+		// Preserve rollout-gate fields the fragment did not itself set: a
+		// fragment defining any [beads] key would otherwise reset the whole
+		// struct and silently downgrade an explicit conditional_writes /
+		// guarded_release opt-in (mirror of the daemon.formula_v2 preservation
+		// below). Capture before the overwrite; a fragment that DOES set the
+		// field still wins.
+		conditionalWrites := base.Beads.ConditionalWrites
+		guardedRelease := base.Beads.GuardedRelease
 		base.Beads = fragment.Beads
+		if !fragMeta.IsDefined("beads", "conditional_writes") {
+			base.Beads.ConditionalWrites = conditionalWrites
+		}
+		if !fragMeta.IsDefined("beads", "guarded_release") {
+			base.Beads.GuardedRelease = guardedRelease
+		}
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt

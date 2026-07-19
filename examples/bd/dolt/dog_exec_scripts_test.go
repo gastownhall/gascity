@@ -114,8 +114,21 @@ type compactScriptFixture struct {
 	port          int
 }
 
+const compactScriptTestParallelism = 8
+
+// compactScriptTestSlots bounds real shell fan-out on high-core test hosts.
+var compactScriptTestSlots = make(chan struct{}, compactScriptTestParallelism)
+
+// newCompactScriptFixture runs its hermetic shell scenario in parallel while
+// holding one bounded process slot for the lifetime of the test.
 func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	t.Helper()
+	t.Parallel()
+	compactScriptTestSlots <- struct{}{}
+	t.Cleanup(func() {
+		<-compactScriptTestSlots
+	})
+
 	root := repoRoot(t)
 	port, cleanup := startReachableTCPListener(t)
 	t.Cleanup(cleanup)

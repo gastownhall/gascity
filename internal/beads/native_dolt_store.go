@@ -60,19 +60,27 @@ func repairIDDefault(db *sql.DB, table string) error {
 
 const nativeDoltStoreActor = "gascity"
 
+// nativeDoltOpenReadyStatuses lists the upstream bd statuses Ready() queries
+// GetReadyWork for. This must match IsReadyCandidateForTier's contract of
+// "open status ... and no future defer_until": only StatusOpen (bd's own
+// status-category table marks it the sole "active" category status) and
+// StatusDeferred (kept only because IsDeferred independently re-checks
+// DeferUntil, so an expired deferral must still resurface) belong here.
+// blocked/hooked are bd's "wip" category and pinned is "frozen" — bd's own
+// ready semantics already exclude them, and Gas City has no analogous
+// re-check for them the way it does for deferred, so querying for them let
+// dependency-blocked beads erase their status to "open" via mapBdStatus and
+// pass IsReadyCandidateForTier's status gate. See ga-3mv5d3 bead notes for
+// the full investigation.
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
-	beadslib.StatusBlocked,
 	beadslib.StatusDeferred,
-	beadslib.Status("pinned"),
-	beadslib.Status("hooked"),
-	beadslib.Status("review"),
-	beadslib.Status("testing"),
 }
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
 	nativeDoltOpenEnvMu         sync.Mutex
+	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
 var nativeDoltOpenEnvKeys = []string{
@@ -96,6 +104,25 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 		parent = context.Background()
 	}
 	return context.WithTimeout(parent, bdCommandTimeout)
+}
+
+// nativeGraphApplyDeadline scales the graph-apply transaction budget with plan
+// size. The library's AddDependency runs a recursive cycle-reachability query
+// per blocking edge, so a large molecule (67 nodes / ~100 edges on the
+// mol-adopt-pr-v2 shape) cannot finish inside the flat per-command budget: the
+// batch died at the 120s deadline mid-edges, retried into the same wall, and
+// fell back to per-bead creates — turning a single atomic pour into ~9 minutes
+// of partial work (2026-07-17 code red). Until the per-edge check is replaced
+// by one whole-graph CycleThroughEdges pass (needs a beads-side export of
+// DependencyAddOptions), give each node and edge a slice of budget on top of
+// the flat floor so the atomic path completes instead of falling back.
+func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
+	d := bdCommandTimeout
+	if plan == nil {
+		return d
+	}
+	const perItem = 2 * time.Second
+	return d + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
 }
 
 func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
@@ -200,6 +227,12 @@ type NativeDoltStore struct {
 	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
+
+	// condWritesStamp carries the factory-stamped conditional-writes mode.
+	// NativeDoltStore implements no ConditionalWriter yet, so the stamp's
+	// effect today is require→typed refusal / auto→loud degrade at the
+	// seam, never a silent legacy write under require.
+	condWritesStamp
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -229,6 +262,7 @@ var (
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
+	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -659,7 +693,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	}
 	defer release()
 
-	ctx, cancel := nativeDoltOperationContext(parent)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
 	keyToID := make(map[string]string, len(plan.Nodes))
@@ -1121,6 +1158,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		for _, issue := range issues {
 			bead, err := beadFromNativeIssue(issue)
 			if err != nil {
+				if isNativeIssueMetadataParseError(err) {
+					continue
+				}
 				return err
 			}
 			beads = append(beads, bead)
@@ -1849,7 +1889,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	}
 	metadata, err := metadataMapFromNative(issue.Metadata)
 	if err != nil {
-		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", issue.ID, err)
+		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
 	b := Bead{
 		ID:          issue.ID,
@@ -1882,6 +1922,10 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		}
 	}
 	return b, nil
+}
+
+func isNativeIssueMetadataParseError(err error) bool {
+	return errors.Is(err, errNativeIssueMetadataParse)
 }
 
 func nativePriorityFromIssue(issue *beadslib.Issue) *int {

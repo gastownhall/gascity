@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -104,17 +105,19 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
 	runTests func() int,
 	enumerate func() ([]DoltProcInfo, error),
 	sweepStale func(string) bool,
+	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
 ) int {
 	_ = sweepStale("startup")
+	sweepOrphanDirs()
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
@@ -227,6 +230,24 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	writeDoltLeakReport(os.Stderr, leaked)
 	reapDoltLeakProcesses(leaked)
 	return true
+}
+
+// sweepOrphanDoltStoreDirs runs the symptom-based fallback sweep
+// (internal/doltorphan.Sweep) over os.TempDir(), removing stray dolt store
+// directories regardless of what created them (ga-ntbpyb.2 acceptance
+// criterion 2). It composes with, but does not replace,
+// sweepStaleCmdGCTestDoltProcesses above: that reaps stale *processes* by
+// config-path heuristics; this catches the *directory* left behind when a
+// process is already gone by the time any process-level sweep runs (e.g. a
+// SIGKILLed test binary whose pid was later reused).
+func sweepOrphanDoltStoreDirs() {
+	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: os.TempDir()})
+	for _, dir := range result.Removed {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir %s\n", dir) //nolint:errcheck
+	}
+	for _, err := range result.Errors {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep error: %v\n", err) //nolint:errcheck
+	}
 }
 
 func cmdGCTestActiveRoots(currentRoot string) []string {

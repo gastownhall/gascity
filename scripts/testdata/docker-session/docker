@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+: "${GC_TEST_DOCKER_STATE_DIR:?GC_TEST_DOCKER_STATE_DIR is required}"
+
+state_dir="$GC_TEST_DOCKER_STATE_DIR"
+calls_dir="$state_dir/calls"
+containers_dir="$state_dir/containers"
+tmux_dir="$state_dir/tmux"
+container_ids_dir="$state_dir/container-ids"
+container_names_dir="$state_dir/container-names"
+mkdir -p "$calls_dir" "$containers_dir" "$tmux_dir" \
+    "$container_ids_dir" "$container_names_dir"
+
+original_argv=("$@")
+
+# Store one invocation per file. The decimal argc followed by NUL-delimited
+# arguments preserves empty arguments, embedded newlines, and trailing spaces.
+call_number=0
+if [[ -r "$state_dir/call-counter" ]]; then
+    read -r call_number < "$state_dir/call-counter"
+fi
+call_number=$((call_number + 1))
+printf '%d\n' "$call_number" > "$state_dir/call-counter"
+call_path=$(printf '%s/%08d.argv' "$calls_dir" "$call_number")
+{
+    printf '%d\n' "$#"
+    if [[ $# -gt 0 ]]; then
+        printf '%s\0' "$@"
+    fi
+} > "$call_path"
+
+unsupported() {
+    printf 'fake docker: unsupported argv:' >&2
+    if [[ ${#original_argv[@]} -gt 0 ]]; then
+        for arg in "${original_argv[@]}"; do
+            printf ' %q' "$arg" >&2
+        done
+    fi
+    printf '\n' >&2
+    exit 97
+}
+
+valid_container_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]
+}
+
+resolve_container_name() {
+    local target="$1"
+    local resolved=""
+
+    valid_container_name "$target" || return 1
+    if [[ -r "$container_ids_dir/$target" ]]; then
+        IFS= read -r resolved < "$container_ids_dir/$target"
+        valid_container_name "$resolved" || return 1
+        printf '%s\n' "$resolved"
+        return 0
+    fi
+    printf '%s\n' "$target"
+}
+
+injected_failure_status() {
+    local path="$1"
+    local status=""
+
+    IFS= read -r status < "$path" || true
+    if [[ ! "$status" =~ ^[0-9]+$ ]] || \
+        ((10#$status < 1 || 10#$status > 255)); then
+        printf 'fake docker: invalid injected failure status in %s: %q\n' \
+            "$path" "$status" >&2
+        exit 98
+    fi
+    printf '%d\n' "$((10#$status))"
+}
+
+valid_env_assignment() {
+    local entry="$1"
+    local key="${entry%%=*}"
+
+    [[ "$entry" == *=* && "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
+}
+
+[[ $# -gt 0 ]] || unsupported
+
+if [[ $# -eq 3 && "$1" == "image" && "$2" == "inspect" ]]; then
+    grep -Fqx -- "$3" "$state_dir/images" 2>/dev/null
+    exit $?
+fi
+
+if [[ $# -eq 4 && "$1" == "inspect" && "$2" == "-f" && "$3" == "{{.State.Running}}" ]]; then
+    cname="$4"
+    valid_container_name "$cname" || unsupported
+    container_path="$containers_dir/$cname"
+    [[ -r "$container_path" ]] || exit 1
+    if [[ "$(<"$container_path")" == "running" ]]; then
+        printf 'true\n'
+    else
+        printf 'false\n'
+    fi
+    exit 0
+fi
+
+if [[ "$1" == "run" ]]; then
+    shift
+    run_argv=("$@")
+    run_argc=${#run_argv[@]}
+    index=0
+    cname=""
+    image=""
+    saw_detached=0
+    saw_init=0
+    saw_managed_label=0
+    saw_agent_label=0
+    saw_name=0
+    saw_network=0
+    saw_user=0
+    saw_workdir=0
+
+    while [[ $index -lt $run_argc ]]; do
+        arg="${run_argv[$index]}"
+        case "$arg" in
+            -d)
+                [[ $saw_detached -eq 0 ]] || unsupported
+                saw_detached=1
+                index=$((index + 1))
+                ;;
+            --init)
+                [[ $saw_init -eq 0 ]] || unsupported
+                saw_init=1
+                index=$((index + 1))
+                ;;
+            --name)
+                [[ $saw_name -eq 0 && $((index + 1)) -lt $run_argc ]] || unsupported
+                cname="${run_argv[$((index + 1))]}"
+                valid_container_name "$cname" || unsupported
+                saw_name=1
+                index=$((index + 2))
+                ;;
+            --label)
+                [[ $((index + 1)) -lt $run_argc ]] || unsupported
+                value="${run_argv[$((index + 1))]}"
+                case "$value" in
+                    gc.managed=true)
+                        [[ $saw_managed_label -eq 0 ]] || unsupported
+                        saw_managed_label=1
+                        ;;
+                    gc.agent=*)
+                        [[ $saw_agent_label -eq 0 && -n "${value#gc.agent=}" ]] || unsupported
+                        saw_agent_label=1
+                        ;;
+                    *)
+                        unsupported
+                        ;;
+                esac
+                index=$((index + 2))
+                ;;
+            -e)
+                [[ $((index + 1)) -lt $run_argc ]] || unsupported
+                value="${run_argv[$((index + 1))]}"
+                valid_env_assignment "$value" || unsupported
+                index=$((index + 2))
+                ;;
+            -v)
+                [[ $((index + 1)) -lt $run_argc ]] || unsupported
+                value="${run_argv[$((index + 1))]}"
+                [[ -n "$value" && "$value" == *:* ]] || unsupported
+                index=$((index + 2))
+                ;;
+            --network)
+                [[ $saw_network -eq 0 && $((index + 1)) -lt $run_argc ]] || unsupported
+                value="${run_argv[$((index + 1))]}"
+                [[ -n "$value" && "$value" != -* ]] || unsupported
+                saw_network=1
+                index=$((index + 2))
+                ;;
+            --user)
+                [[ $saw_user -eq 0 && $((index + 1)) -lt $run_argc ]] || unsupported
+                value="${run_argv[$((index + 1))]}"
+                [[ -n "$value" && "$value" != -* ]] || unsupported
+                saw_user=1
+                index=$((index + 2))
+                ;;
+            -w)
+                [[ $saw_workdir -eq 0 && $((index + 1)) -lt $run_argc ]] || unsupported
+                value="${run_argv[$((index + 1))]}"
+                [[ -n "$value" ]] || unsupported
+                saw_workdir=1
+                index=$((index + 2))
+                ;;
+            -*)
+                unsupported
+                ;;
+            *)
+                image="$arg"
+                index=$((index + 1))
+                break
+                ;;
+        esac
+    done
+
+    [[ $saw_detached -eq 1 && $saw_init -eq 1 && $saw_name -eq 1 && \
+        $saw_managed_label -eq 1 && $saw_agent_label -eq 1 && \
+        $saw_workdir -eq 1 && -n "$image" && "$image" != -* ]] || unsupported
+    [[ $((run_argc - index)) -eq 2 && \
+        "${run_argv[$index]}" == "sleep" && \
+        "${run_argv[$((index + 1))]}" == "infinity" ]] || unsupported
+
+    container_id="fake-container-id"
+    printf 'running\n' > "$containers_dir/$cname"
+    printf '%s\n' "$cname" > "$container_ids_dir/$container_id"
+    printf '%s\n' "$container_id" > "$container_names_dir/$cname"
+    printf '%s\n' "$container_id"
+    exit 0
+fi
+
+if [[ $# -eq 4 && "$1" == "stop" && "$2" == "-t" && "$3" == "10" ]]; then
+    target="$4"
+    cname=$(resolve_container_name "$target") || unsupported
+    # Simulate a graceful stop that outruns the caller's cancellation grace: a
+    # container whose PID 1 ignores SIGTERM makes "docker stop" block until its
+    # timeout. Tests inject this to prove failed-start rollback removes the
+    # container without first waiting on a slow stop.
+    if [[ -r "$state_dir/stop-stall-seconds" ]]; then
+        IFS= read -r stall_seconds < "$state_dir/stop-stall-seconds" || true
+        if [[ "$stall_seconds" =~ ^[0-9]+$ ]]; then
+            sleep "$stall_seconds"
+        fi
+    fi
+    if [[ -e "$containers_dir/$cname" ]]; then
+        printf 'stopped\n' > "$containers_dir/$cname"
+    fi
+    exit 0
+fi
+
+if [[ $# -eq 3 && "$1" == "rm" && "$2" == "-f" ]]; then
+    target="$3"
+    cname=$(resolve_container_name "$target") || unsupported
+    if [[ -r "$state_dir/fail-rm-status" ]]; then
+        failure_status=$(injected_failure_status "$state_dir/fail-rm-status")
+        printf 'fake docker: injected rm failure (status %s) for container %q\n' \
+            "$failure_status" "$target" >&2
+        exit "$failure_status"
+    fi
+    container_id=""
+    if [[ -r "$container_names_dir/$cname" ]]; then
+        IFS= read -r container_id < "$container_names_dir/$cname"
+    fi
+    rm -f "$containers_dir/$cname" "$tmux_dir/$cname" \
+        "$container_names_dir/$cname"
+    if [[ -n "$container_id" ]]; then
+        rm -f "$container_ids_dir/$container_id"
+    fi
+    exit 0
+fi
+
+if [[ "$1" == "exec" ]]; then
+    shift
+    exec_argv=("$@")
+    exec_argc=${#exec_argv[@]}
+
+    if [[ $exec_argc -eq 3 && \
+        "${exec_argv[1]}" == "which" && "${exec_argv[2]}" == "tmux" ]]; then
+        cname="${exec_argv[0]}"
+        valid_container_name "$cname" || unsupported
+        [[ ! -e "$state_dir/tmux-missing" ]]
+        exit $?
+    fi
+
+    if [[ $exec_argc -eq 6 && \
+        "${exec_argv[0]}" == "--user" && "${exec_argv[1]}" == "0" && \
+        "${exec_argv[3]}" == "sh" && "${exec_argv[4]}" == "-c" && \
+        "${exec_argv[5]}" == "mkdir -p '/run/gc-tmux' && chmod 1777 '/run/gc-tmux'" ]]; then
+        cname="${exec_argv[2]}"
+        valid_container_name "$cname" || unsupported
+        if [[ -r "$state_dir/fail-mkdir-status" ]]; then
+            failure_status=$(injected_failure_status "$state_dir/fail-mkdir-status")
+            printf 'fake docker: injected tmux socket mkdir failure for container %q\n' \
+                "$cname" >&2
+            exit "$failure_status"
+        fi
+        exit 0
+    fi
+
+    if [[ $exec_argc -ge 6 && \
+        "${exec_argv[0]}" == "-e" && \
+        "${exec_argv[1]}" == "TMUX_TMPDIR=/run/gc-tmux" && \
+        "${exec_argv[3]}" == "tmux" && "${exec_argv[4]}" == "-u" ]]; then
+        cname="${exec_argv[2]}"
+        valid_container_name "$cname" || unsupported
+        tmux_argv=("${exec_argv[@]:5}")
+        tmux_argc=${#tmux_argv[@]}
+        tmux_op="${tmux_argv[0]}"
+        case "$tmux_op" in
+            new-session)
+                [[ $tmux_argc -ge 10 && \
+                    "${tmux_argv[1]}" == "-d" && \
+                    "${tmux_argv[2]}" == "-s" && \
+                    "${tmux_argv[3]}" == "main" && \
+                    "${tmux_argv[4]}" == "-c" && \
+                    -n "${tmux_argv[5]}" ]] || unsupported
+                index=6
+                while [[ $index -lt $tmux_argc && "${tmux_argv[$index]}" == "-e" ]]; do
+                    [[ $((index + 1)) -lt $tmux_argc ]] || unsupported
+                    valid_env_assignment "${tmux_argv[$((index + 1))]}" || unsupported
+                    index=$((index + 2))
+                done
+                [[ $((tmux_argc - index)) -eq 4 && \
+                    "${tmux_argv[$index]}" == "--" && \
+                    "${tmux_argv[$((index + 1))]}" == "sh" && \
+                    "${tmux_argv[$((index + 2))]}" == "-c" && \
+                    "${tmux_argv[$((index + 3))]}" == "exec "?* ]] || unsupported
+                printf 'running\n' > "$tmux_dir/$cname"
+                exit 0
+                ;;
+            capture-pane)
+                [[ $tmux_argc -eq 6 && \
+                    "${tmux_argv[1]}" == "-p" && \
+                    "${tmux_argv[2]}" == "-t" && \
+                    "${tmux_argv[3]}" == "main" && \
+                    "${tmux_argv[4]}" == "-S" && \
+                    "${tmux_argv[5]}" =~ ^-[1-9][0-9]*$ ]] || unsupported
+                [[ -e "$tmux_dir/$cname" ]] || exit 1
+                if [[ -r "$state_dir/prompt-output" ]]; then
+                    line_count="${tmux_argv[5]#-}"
+                    tail -n "$line_count" "$state_dir/prompt-output"
+                fi
+                exit 0
+                ;;
+            has-session)
+                [[ $tmux_argc -eq 3 && \
+                    "${tmux_argv[1]}" == "-t" && \
+                    "${tmux_argv[2]}" == "=main" ]] || unsupported
+                [[ -e "$tmux_dir/$cname" ]]
+                exit $?
+                ;;
+            set-option)
+                [[ $tmux_argc -eq 5 && \
+                    "${tmux_argv[1]}" == "-t" && \
+                    "${tmux_argv[2]}" == "main" && \
+                    "${tmux_argv[3]}" == "remain-on-exit" && \
+                    "${tmux_argv[4]}" == "on" ]] || unsupported
+                [[ -e "$tmux_dir/$cname" ]]
+                exit $?
+                ;;
+            *)
+                unsupported
+                ;;
+        esac
+    fi
+fi
+
+unsupported

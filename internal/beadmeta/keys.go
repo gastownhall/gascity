@@ -68,7 +68,13 @@ const (
 	// stamped at the claim hook and read at the usage record site to populate
 	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
 	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
-	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
+	ActiveWorkBeadMetadataKey = "gc.active_work_bead"
+	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
+	// between speculative (deferred, non-runnable) creation and the CAS-last
+	// epoch fence committing. Cleared on activation; a root still carrying it
+	// is a pre-fence candidate that idempotency recovery either activates
+	// (deterministically, when it is the surviving candidate) or neutralizes.
+	AttachFencePendingMetadataKey        = "gc.attach_fence_pending"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -222,6 +228,14 @@ const (
 // user-authored variable name), so it is declared as a prefix, not enumerated.
 const FormulaVarPrefix = Namespace + "var."
 
+// IdemPrefix is the key prefix for the remote rig-create idempotency record's
+// metadata (gc.idem.kind/city/request_id/digest/state/event_cursor/rig_name,
+// the open-world gc.idem.result.* success fields, and gc.idem.created_dir/dolt_db
+// rollback manifest). This is an internal-to-internal/api namespace whose keys
+// are defined once as local constants next to their reader/writer (rigidem.go),
+// so it is declared as a prefix here rather than re-enumerated in this file.
+const IdemPrefix = Namespace + "idem."
+
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
 // fallback semantics (canonical-then-legacy) live with their owner in
@@ -302,6 +316,7 @@ var KnownMetadataKeys = []string{
 	CurrentRunIDMetadataKey,
 	ActiveWorkBeadMetadataKey,
 	CwdMetadataKey,
+	AttachFencePendingMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -428,6 +443,7 @@ var KnownMetadataKeys = []string{
 // not enumerable.
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
+	IdemPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a

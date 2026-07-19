@@ -299,7 +299,47 @@ func TestNativeDoltStoreListStatusOpenMatchesOpenNormalizedUpstreamStatuses(t *t
 	}
 }
 
-func TestNativeDoltStoreReadyIncludesOpenNormalizedUpstreamStatuses(t *testing.T) {
+// TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift guards
+// against Dolt status-index drift (gcy-1on) where SearchIssues returns a bead
+// with status="closed" even though the ExcludeStatus filter asked to exclude it.
+// ApplyListQuery must catch leaked closed beads so List(Status: "open") never
+// returns them regardless of upstream inconsistency.
+func TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift(t *testing.T) {
+	// Spy that ignores the ExcludeStatus filter and returns a closed bead,
+	// simulating Dolt status-index drift.
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, _ string, _ beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			return []*beadslib.Issue{
+				{ID: "gc-closed-drift", Title: "closed but leaking from index", Status: beadslib.StatusClosed, IssueType: beadslib.TypeTask, Priority: 2},
+				{ID: "gc-open", Title: "genuinely open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+			}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{AllowScan: true, Status: "open", TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("List(Status: open) len = %d, want 1 (closed drift bead must be excluded); got %+v", len(got), got)
+	}
+	if got[0].ID != "gc-open" {
+		t.Fatalf("List(Status: open) returned unexpected bead %q, want gc-open", got[0].ID)
+	}
+}
+
+func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *testing.T) {
+	// bd's own status-category table (vendored beads internal/types.
+	// BuiltInStatusCategory) marks blocked/hooked as "wip" and pinned as
+	// "frozen" — both excluded from bd's own ready semantics. Only "open"
+	// (category active) and deferred (once DeferUntil has passed, handled
+	// via IsReadyCandidateForTier's IsDeferred check) belong here. This
+	// issue set intentionally includes a blocked bead whose dependency
+	// graph the spy treats as fully satisfied (it is returned unconditionally
+	// whenever queried by status), to prove Ready() must never surface it
+	// even when GetReadyWork would happily return it if asked.
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: beadslib.TypeTask, Priority: 2},
@@ -330,15 +370,14 @@ func TestNativeDoltStoreReadyIncludesOpenNormalizedUpstreamStatuses(t *testing.T
 	}
 
 	wantIDs := map[string]bool{
-		"gc-open": true, "gc-blocked": true, "gc-deferred": true,
-		"gc-pinned": true, "gc-hooked": true, "gc-review": true,
+		"gc-open": true, "gc-deferred": true,
 	}
 	if len(got) != len(wantIDs) {
 		t.Fatalf("Ready len = %d, want %d; got %+v", len(got), len(wantIDs), got)
 	}
 	for _, bead := range got {
 		if !wantIDs[bead.ID] {
-			t.Fatalf("Ready returned unexpected bead %q from %+v", bead.ID, got)
+			t.Fatalf("Ready returned unexpected bead %q from %+v — blocked/pinned/hooked/review must never surface as ready even when their dependency graph is satisfied", bead.ID, got)
 		}
 		if bead.Status != "open" {
 			t.Fatalf("Ready bead %q status = %q, want normalized open", bead.ID, bead.Status)
@@ -716,6 +755,8 @@ func TestNativeDoltStoreGetRejectsInvalidMetadata(t *testing.T) {
 
 	if _, err := store.Get("gc-corrupt"); err == nil {
 		t.Fatal("Get error = nil, want invalid metadata error")
+	} else if !errors.Is(err, ErrMetadataParse) {
+		t.Fatalf("Get error = %v, want ErrMetadataParse", err)
 	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
 		t.Fatalf("Get error = %v, want bead metadata context", err)
 	}
@@ -790,6 +831,52 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	}
 	if got[0].Metadata["gc.step_ref"] != "list" {
 		t.Fatalf("metadata = %#v, want gc.step_ref=list", got[0].Metadata)
+	}
+}
+
+func TestNativeDoltStoreListSkipsInvalidMetadataRows(t *testing.T) {
+	corrupt := &beadslib.Issue{
+		ID:        "gc-corrupt",
+		Title:     "corrupt metadata",
+		Status:    beadslib.StatusOpen,
+		IssueType: beadslib.IssueType("convoy"),
+		Priority:  2,
+		Metadata:  json.RawMessage(`metadata is not json`),
+	}
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, query string, _ beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			if query == "gc-corrupt" {
+				return []*beadslib.Issue{corrupt}, nil
+			}
+			return []*beadslib.Issue{
+				corrupt,
+				{
+					ID:        "gc-listed",
+					Title:     "valid convoy",
+					Status:    beadslib.StatusOpen,
+					IssueType: beadslib.IssueType("convoy"),
+					Priority:  2,
+					Metadata:  json.RawMessage(`{"gc.step_ref":"list"}`),
+				},
+			}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{AllowScan: true, Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List len = %d, want only valid rows: %#v", len(got), got)
+	}
+	if got[0].ID != "gc-listed" {
+		t.Fatalf("List[0].ID = %q, want gc-listed", got[0].ID)
+	}
+	if _, err := store.Get("gc-corrupt"); err == nil {
+		t.Fatal("Get error = nil, want invalid metadata error")
+	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
+		t.Fatalf("Get error = %v, want bead metadata context", err)
 	}
 }
 

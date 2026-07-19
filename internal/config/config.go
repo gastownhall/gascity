@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/remotesource"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -1274,6 +1275,11 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
+	// in which cron order schedules are evaluated when an order does not set
+	// its own tz. Empty means the controller's process-local zone. Invalid
+	// names fail order discovery loudly rather than falling back silently.
+	Timezone string `toml:"timezone,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Suspended is the deprecated pre-runtime-state city suspension
@@ -1383,6 +1389,17 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
+	// byte-identical), "auto" (compare-and-swap where the store is capable,
+	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
+	// defaults to "off". Any other value fails config load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// GuardedRelease selects the ownership-release discipline for work beads:
+	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
+	// release verbs where the bd binary is capable, loud degrade otherwise), or
+	// "require" (guarded release or a typed refusal). Empty defaults to "off".
+	// Any other value fails config load.
+	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1415,6 +1432,32 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	default:
 		return BeadsBDCompatibility104
 	}
+}
+
+// NormalizedConditionalWrites returns the configured conditional-writes value,
+// mapping ONLY the empty string to the built-in default "off". Unlike
+// NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+// The string→rollout.Mode mapping deliberately lives in internal/rollout to keep
+// config free of a rollout import (cycle).
+func (b BeadsConfig) NormalizedConditionalWrites() string {
+	if b.ConditionalWrites == "" {
+		return "off"
+	}
+	return b.ConditionalWrites
+}
+
+// NormalizedGuardedRelease returns the configured guarded-release value,
+// mapping ONLY the empty string to the built-in default "off". Like
+// NormalizedConditionalWrites, an unknown non-empty value passes through
+// verbatim rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+func (b BeadsConfig) NormalizedGuardedRelease() string {
+	if b.GuardedRelease == "" {
+		return "off"
+	}
+	return b.GuardedRelease
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -1512,6 +1555,12 @@ type SessionConfig struct {
 	// NudgeRetryInterval is the retry interval between nudge readiness polls.
 	// Duration string. Defaults to "500ms".
 	NudgeRetryInterval string `toml:"nudge_retry_interval,omitempty" jsonschema:"default=500ms"`
+	// NudgePollInterval is the cycle interval for the per-session nudge
+	// poller sidecar (`gc nudge poll`). Each cycle observes the session and
+	// checks the queued-nudge state, so on hosts running many sessions a
+	// longer interval trades nudge-delivery latency for less standing load.
+	// Duration string. Unset means the poller's built-in default (2s).
+	NudgePollInterval string `toml:"nudge_poll_interval,omitempty" jsonschema:"default=2s"`
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
@@ -1592,6 +1641,20 @@ func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
 	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
+}
+
+// NudgePollIntervalDuration returns the configured nudge poller cycle
+// interval, or 0 when unset, unparseable, or non-positive — 0 means "not
+// configured" and callers fall back to their built-in default.
+func (s *SessionConfig) NudgePollIntervalDuration() time.Duration {
+	if s.NudgePollInterval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.NudgePollInterval)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // NudgeLockTimeoutDuration returns the nudge lock timeout as a time.Duration.
@@ -1963,9 +2026,11 @@ type FormulasConfig struct {
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`
-	// MaxTimeout is an operator hard cap on per-order timeouts.
-	// No order gets more than this duration. Go duration string (e.g., "60s").
-	// Empty means uncapped (no override).
+	// MaxTimeout is an operator hard cap on the per-order dispatch timeout: no
+	// order's dispatched exec/formula runs longer than this. Go duration string
+	// (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch
+	// timeout only; a condition trigger's check_timeout is a separate probe
+	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -1999,6 +2064,11 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// CheckTimeout overrides the condition trigger's check-command deadline.
+	// Go duration string. Lets a deployment tune check_timeout for a scanned
+	// shared-pack order (e.g. a slow-store queue check) without editing the
+	// pack source.
+	CheckTimeout *string `toml:"check_timeout,omitempty"`
 	// Idempotent overrides whether the order's dispatch is safe to repeat.
 	// Idempotent orders fail open when the open-work gate times out (#2893).
 	Idempotent *bool `toml:"idempotent,omitempty"`
@@ -2065,6 +2135,13 @@ type APIConfig struct {
 	// gate writes fails closed if the key is ever dropped. The
 	// GC_CITY_WRITE_REQUIRED=1 env var has the same effect.
 	WriteAuthRequired bool `toml:"write_auth_required,omitempty"`
+	// WriteAuthAllowUnverified acknowledges running a non-loopback bind with
+	// allow_mutations and NO write-auth verify key — an unauthenticated write
+	// plane fronted only by the network. Without it, that combination is a
+	// fail-closed startup error (gate G10) so a hardened deployment cannot boot
+	// wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for
+	// a network-fronted deployment that intentionally trusts its perimeter.
+	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
 	// ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an
 	// already-registered city on the typed per-city API — the routes under
 	// /v0/city/{cityName} — to carry a signed read grant from a configured
@@ -4369,7 +4446,44 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
+		return nil, err
+	}
+	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateConditionalWrites rejects an out-of-enum beads.conditional_writes
+// value at load time. This gate selects a correctness discipline: a typo like
+// "requre" silently meaning "off" would leave an operator believing the epoch
+// fence is enforced while every write runs unfenced, so the config fails to
+// load instead. The empty string (unset) is valid and defaults to off.
+func validateConditionalWrites(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
+}
+
+// validateGuardedRelease rejects an out-of-enum beads.guarded_release value at
+// load time. Like conditional_writes, this gate selects a correctness
+// discipline: a typo silently meaning "off" would leave an operator believing
+// ownership-fenced release is enforced while every release runs owner-blind, so
+// the config fails to load instead. The empty string (unset) is valid and
+// defaults to off.
+func validateGuardedRelease(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

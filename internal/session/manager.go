@@ -557,11 +557,12 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store             beads.Store
-	sp                runtime.Provider
-	cityPath          string
-	transportResolver func(template, provider string) transportResolution
-	clk               clock.Clock
+	store                   beads.Store
+	sp                      runtime.Provider
+	cityPath                string
+	transportResolver       func(template, provider string) transportResolution
+	clk                     clock.Clock
+	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -781,11 +782,22 @@ func WithTransportPolicyResolver(resolver func(template, provider string) (strin
 	}
 }
 
+// WithStaleKeyDetectionWaiter supplies the lifecycle signal used before a
+// keyed start is probed for stale resume-key failure. A nil waiter retains the
+// immutable production timer.
+func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
+	return func(m *Manager) {
+		if waiter != nil {
+			m.staleKeyDetectionWaiter = waiter
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
 func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
-	m := &Manager{store: store, sp: sp}
+	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
 	for _, opt := range opts {
 		opt(m)
 	}

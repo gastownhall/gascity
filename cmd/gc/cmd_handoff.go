@@ -34,8 +34,10 @@ func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 Self-handoff (default): sends mail to self. If the current session is
 controller-restartable, requests a restart and blocks until the controller
 stops the session. For on-demand configured named sessions, sends mail and
-returns without requesting restart because the controller cannot restart the
-user-attended process.
+returns without requesting restart: handoff intentionally leaves the
+user-attended session running instead of restarting it out from under the
+user. The controller can restart such a session via
+gc runtime request-restart; handoff deliberately does not.
 
 For controller-restartable sessions, equivalent to:
 
@@ -162,7 +164,11 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 		return doHandoffAuto(store, sessStore, rec, current.display, args, hookFormat, stdout, stderr)
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	persistRestart := sessionRestartPersister(current.cityPath, sessStore, sp, cfg, current.sessionName)
@@ -209,7 +215,11 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	rec := openCityRecorder(stderr)
 	return doHandoffRemote(store, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, stdout, stderr)
 }

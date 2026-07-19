@@ -121,7 +121,7 @@ func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (
 		SupervisorBaseURL: baseURL,
 	})
 	plane.Start(ctx)
-	mux.WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
+	mux.WithRunCensusSource(plane).WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
 
 	return mux.Handler(), plane.Stop, nil
 }

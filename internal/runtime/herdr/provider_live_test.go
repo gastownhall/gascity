@@ -20,7 +20,7 @@ func TestProviderLive(t *testing.T) {
 		t.Skip("herdr not installed")
 	}
 
-	p := New("gctest-live", t.TempDir(), t.TempDir())
+	p := New("gctest-live", t.TempDir(), t.TempDir(), 0)
 	_ = p.Stop("smoke") // clear any leftover from a crashed prior run
 	t.Cleanup(func() { _ = p.Stop("smoke"); _ = p.TeardownServer() })
 
@@ -28,9 +28,17 @@ func TestProviderLive(t *testing.T) {
 	cfg := runtime.Config{
 		WorkDir: t.TempDir(),
 		Command: `for i in $(seq 1 60); do echo "tick $i"; sleep 1; done`,
+		Env:     map[string]string{"GC_SESSION_ID": "gctest-live-session"},
 	}
 	if err := p.Start(ctx, "smoke", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+
+	// Start must persist GC_SESSION_ID to the meta sidecar (tmux parity):
+	// ProcessAlive's session-scoped tree-walk widening has nothing to read
+	// without it.
+	if v, err := p.GetMeta("smoke", "GC_SESSION_ID"); err != nil || v != "gctest-live-session" {
+		t.Errorf("GetMeta(GC_SESSION_ID) = %q, %v; want %q, nil", v, err, "gctest-live-session")
 	}
 
 	if !p.IsRunning("smoke") {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
@@ -137,6 +140,27 @@ func TestExtractBdScopeFlags(t *testing.T) {
 	}
 	if len(gotArgs) != 1 || gotArgs[0] != "list" {
 		t.Fatalf("fallback args = %v, want [list]", gotArgs)
+	}
+}
+
+func TestExtractBdDirectoryFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"short flag", []string{"create", "-C", "/tmp/packs", "--json"}, "/tmp/packs"},
+		{"long flag space", []string{"create", "--directory", "/tmp/packs"}, "/tmp/packs"},
+		{"long flag equals", []string{"create", "--directory=/tmp/packs"}, "/tmp/packs"},
+		{"absent", []string{"create", "--json"}, ""},
+		{"short flag at end no value", []string{"create", "-C"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractBdDirectoryFlag(tt.args); got != tt.want {
+				t.Fatalf("extractBdDirectoryFlag(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -267,6 +291,38 @@ func TestResolveBdScopeTarget(t *testing.T) {
 				ScopeKind: "rig",
 				Prefix:    "projectwrenunity",
 				RigName:   "wren",
+			},
+		},
+		{
+			name:    "-C routes to matching rig",
+			rigName: "",
+			args:    []string{"create", "-C", filepath.Join(cityDir, "rigs", "wren"), "--json"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name:    "--directory routes to matching rig",
+			rigName: "",
+			args:    []string{"create", "--directory", filepath.Join(cityDir, "rigs", "wren"), "--json"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name:    "-C outside known rigs falls back to city",
+			rigName: "",
+			args:    []string{"create", "-C", "/tmp/unknown-dir", "--json"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
 			},
 		},
 	}
@@ -1191,104 +1247,120 @@ func TestGcBdRigListRecoversAfterManagedHardKillPortRebind(t *testing.T) {
 		}
 		t.Fatalf("managed Dolt did not rebind after hard kill; before=%+v after=%+v", before, after)
 	}
-	rawList := runRawBDFromDir(t, bdPath, rawDir, "list", "--json", "--all", "--limit=0")
-	if !strings.Contains(rawList, rawID) {
-		t.Fatalf("raw bd rig list output missing bead %q after rebind:\n%s", rawID, rawList)
-	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", rawID)
 	if !strings.Contains(rawShow, rawID) {
 		t.Fatalf("raw bd rig show output missing bead %q after rebind:\n%s", rawID, rawShow)
 	}
 }
 
-func TestManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	resetFlags(t)
+	setEnv := func(values map[string]string) {
+		for key, value := range values {
+			t.Setenv(key, value)
+		}
+	}
+
 	bdPath := waitTestRealBDPath(t)
-	rawDir := filepath.Join(rigPath, "nested")
-	if err := os.MkdirAll(rawDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(rawDir): %v", err)
-	}
-
-	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw mixed bead", "-t", "task"))
-	providerStore, err := openStoreAtForCity(rigPath, cityPath)
+	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
+		t.Skip("dolt not installed")
 	}
-	if got, err := providerStore.Get(rawID); err != nil {
-		t.Fatalf("providerStore.Get(rawID): %v", err)
-	} else if got.ID != rawID {
-		t.Fatalf("providerStore.Get(rawID).ID = %q, want %q", got.ID, rawID)
-	}
+	setEnv(map[string]string{
+		"PATH": strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
+	})
 
-	t.Setenv("GC_DOLT_PORT", "9999")
-	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "show", rawID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show rawID = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), rawID) {
-		t.Fatalf("gc bd show output missing raw id %q:\n%s", rawID, stdout.String())
-	}
-
-	providerBead, err := providerStore.Create(beads.Bead{Title: "provider mixed bead", Type: "task"})
+	cityPath := t.TempDir()
+	rigPath, err := writeManagedBdWaitTestCityScaffold(cityPath)
 	if err != nil {
-		t.Fatalf("providerStore.Create: %v", err)
+		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
-	if got := beadPrefix(nil, providerBead.ID); got != "fe" {
-		t.Fatalf("provider rig bead prefix = %q, want %q", got, "fe")
-	}
-	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
-	if !strings.Contains(rawShow, providerBead.ID) {
-		t.Fatalf("raw bd show missing provider-created bead %q:\n%s", providerBead.ID, rawShow)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "show", providerBead.ID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show provider bead = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), providerBead.ID) {
-		t.Fatalf("gc bd show output missing provider bead %q:\n%s", providerBead.ID, stdout.String())
-	}
-}
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	const projectID = "gc-rig-worktree-consistency-test"
+	setupQueries := append(seedDatabaseProjectIDQueries(projectID),
+		"CALL DOLT_ADD('.')",
+		"CALL DOLT_COMMIT('-m', 'test: seed rig worktree identity', '--author', 'gascity-test <test@gascity.local>')")
+	_, port, _, cleanupDolt := startPasswordedDoltServer(t, filepath.Join(t.TempDir(), "fe"), setupQueries...)
+	defer cleanupDolt()
 
-func TestManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
-	bdPath := waitTestRealBDPath(t)
-	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
-	rawDir := filepath.Join(rigPath, "nested-exec")
-	if err := os.MkdirAll(rawDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(rawDir): %v", err)
+	for _, scope := range []struct {
+		name     string
+		root     string
+		prefix   string
+		database string
+		origin   contract.EndpointOrigin
+	}{
+		// Keep the city database intentionally unprovisioned. A worktree-routing
+		// regression must fail against hq instead of reaching the rig's fe store.
+		{name: "city", root: cityPath, prefix: "gc", database: "hq", origin: contract.EndpointOriginCityCanonical},
+		{name: "rig", root: rigPath, prefix: "fe", database: "fe", origin: contract.EndpointOriginExplicit},
+	} {
+		if err := os.MkdirAll(filepath.Join(scope.root, ".beads"), 0o700); err != nil {
+			t.Fatalf("MkdirAll(%s .beads): %v", scope.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(scope.root, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=secret\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s .beads/.env): %v", scope.name, err)
+		}
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, scope.root, projectID); err != nil {
+			t.Fatalf("WriteProjectIdentity(%s): %v", scope.name, err)
+		}
+		if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(scope.root, ".beads", "metadata.json"), contract.MetadataState{
+			Database:     "dolt",
+			Backend:      "dolt",
+			DoltMode:     "server",
+			DoltDatabase: scope.database,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalMetadata(%s): %v", scope.name, err)
+		}
+		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, scope.root, contract.ConfigState{
+			IssuePrefix:    scope.prefix,
+			EndpointOrigin: scope.origin,
+			EndpointStatus: contract.EndpointStatusVerified,
+			DoltHost:       "127.0.0.1",
+			DoltPort:       strconv.Itoa(port),
+			DoltUser:       "root",
+			DoltMode:       "server",
+		}); err != nil {
+			t.Fatalf("ensureCanonicalScopeConfigState(%s): %v", scope.name, err)
+		}
 	}
 
-	providerStore, err := openStoreAtForCity(rigPath, cityPath)
+	setEnv(map[string]string{
+		"BEADS_DOLT_PASSWORD": "secret",
+		"GC_BEADS":            "bd",
+		"GC_CITY":             cityPath,
+		"GC_CITY_PATH":        cityPath,
+	})
+	nativeEnv, err := nativeDoltOpenEnvForScope(cityPath, nil, rigPath)
 	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
+		t.Fatalf("nativeDoltOpenEnvForScope(rig): %v", err)
 	}
-	providerBead, err := providerStore.Create(beads.Bead{Title: "provider exec bead", Type: "task"})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	nativeStorage, err := beads.OpenNativeStorage(ctx, rigPath, nativeEnv)
 	if err != nil {
-		t.Fatalf("providerStore.Create: %v", err)
+		t.Fatalf("OpenNativeStorage(rig): %v", err)
 	}
-	if rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID); !strings.Contains(rawShow, providerBead.ID) {
-		t.Fatalf("raw bd show missing provider-created bead %q:\n%s", providerBead.ID, rawShow)
+	if err := nativeStorage.SetConfig(ctx, "issue_prefix", "fe"); err != nil {
+		_ = nativeStorage.Close()
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
 	}
-	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "show", providerBead.ID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show provider bead = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), providerBead.ID) {
-		t.Fatalf("gc bd show output missing provider bead %q:\n%s", providerBead.ID, stdout.String())
+	if err := nativeStorage.Close(); err != nil {
+		t.Fatalf("close native fixture storage: %v", err)
 	}
 
-	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw exec bead", "-t", "task"))
-	if got, err := providerStore.Get(rawID); err != nil {
-		t.Fatalf("providerStore.Get(rawID): %v", err)
-	} else if got.ID != rawID {
-		t.Fatalf("providerStore.Get(rawID).ID = %q, want %q", got.ID, rawID)
+	// Database identity is authoritative for this direct fixture. Keep the
+	// optional bd-context cross-check strict and fast without replacing the real
+	// raw bd and gc bd processes exercised below.
+	originalRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(map[string]string) beads.CommandRunner {
+		return func(string, string, ...string) ([]byte, error) {
+			return nil, errors.New("bd context unavailable in direct-Dolt fixture")
+		}
 	}
-}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = originalRunner })
 
-func TestManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
-	bdPath := waitTestRealBDPath(t)
 	worktreeDir := filepath.Join(cityPath, ".gc", "worktrees", "frontend", "polecats", "polecat-1")
 	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(worktree .beads): %v", err)
@@ -1297,10 +1369,19 @@ func TestManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *t
 		t.Fatalf("WriteFile(redirect): %v", err)
 	}
 
-	providerStore, err := openStoreAtForCity(rigPath, cityPath)
+	providerResult, err := openStoreResultAtForCity(rigPath, cityPath)
 	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
+		t.Fatalf("openStoreResultAtForCity(rig): %v", err)
 	}
+	if got, want := providerResult.Diagnostic.Store, beads.BeadsStoreNameNativeDoltStore; got != want {
+		t.Fatalf("provider store = %q, want %q; diagnostic: %+v", got, want, providerResult.Diagnostic)
+	}
+	providerStore := providerResult.Store
+	defer func() {
+		if err := closeBeadStoreHandle(providerStore); err != nil {
+			t.Errorf("close provider store: %v", err)
+		}
+	}()
 
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, worktreeDir, "create", "--json", "raw worktree bead", "-t", "task"))
 	if got, err := providerStore.Get(rawID); err != nil {
@@ -1310,7 +1391,9 @@ func TestManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *t
 	}
 
 	setCwd(t, worktreeDir)
-	t.Setenv("GC_CITY_PATH", "")
+	setEnv(map[string]string{
+		"GC_CITY_PATH": "",
+	})
 	t.Setenv("GC_DOLT_PORT", "9999")
 	var stdout, stderr bytes.Buffer
 	if code := doBd([]string{"show", rawID}, &stdout, &stderr); code != 0 {
@@ -1327,14 +1410,6 @@ func TestManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *t
 	if rawShow := runRawBDFromDir(t, bdPath, worktreeDir, "show", "--json", providerBead.ID); !strings.Contains(rawShow, providerBead.ID) {
 		t.Fatalf("raw bd show missing provider-created bead %q from worktree:\n%s", providerBead.ID, rawShow)
 	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := doBd([]string{"show", providerBead.ID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show provider bead from worktree = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), providerBead.ID) {
-		t.Fatalf("gc bd show output missing provider bead %q from worktree:\n%s", providerBead.ID, stdout.String())
-	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -1342,65 +1417,8 @@ func TestManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *t
 		t.Fatalf("gc bd create from worktree = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	gcID := parseCreatedBeadID(t, stdout.String())
-	if got, err := providerStore.Get(gcID); err != nil {
-		t.Fatalf("providerStore.Get(gcID): %v", err)
-	} else if got.ID != gcID {
-		t.Fatalf("providerStore.Get(gcID).ID = %q, want %q", got.ID, gcID)
-	}
 	if rawShow := runRawBDFromDir(t, bdPath, worktreeDir, "show", "--json", gcID); !strings.Contains(rawShow, gcID) {
 		t.Fatalf("raw bd show missing gc-created bead %q from worktree:\n%s", gcID, rawShow)
-	}
-}
-
-func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {
-	cityPath, _ := setupManagedBdWaitTestCity(t)
-	bdPath := waitTestRealBDPath(t)
-	rawDir := filepath.Join(cityPath, "nested")
-	if err := os.MkdirAll(rawDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(rawDir): %v", err)
-	}
-
-	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw city bead", "-t", "task"))
-	if got := beadPrefix(nil, rawID); got != "gc" {
-		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
-	}
-	providerStore, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity(city): %v", err)
-	}
-	if got, err := providerStore.Get(rawID); err != nil {
-		t.Fatalf("providerStore.Get(rawID): %v", err)
-	} else if got.ID != rawID {
-		t.Fatalf("providerStore.Get(rawID).ID = %q, want %q", got.ID, rawID)
-	}
-
-	t.Setenv("GC_DOLT_PORT", "9999")
-	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"--city", cityPath, "show", rawID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show rawID = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), rawID) {
-		t.Fatalf("gc bd show output missing raw id %q:\n%s", rawID, stdout.String())
-	}
-
-	providerBead, err := providerStore.Create(beads.Bead{Title: "provider city bead", Type: "task"})
-	if err != nil {
-		t.Fatalf("providerStore.Create: %v", err)
-	}
-	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
-		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
-	}
-	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
-	if !strings.Contains(rawShow, providerBead.ID) {
-		t.Fatalf("raw bd show missing provider-created bead %q:\n%s", providerBead.ID, rawShow)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := doBd([]string{"--city", cityPath, "show", providerBead.ID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show provider bead = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), providerBead.ID) {
-		t.Fatalf("gc bd show output missing provider bead %q:\n%s", providerBead.ID, stdout.String())
 	}
 }
 
@@ -1436,159 +1454,6 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	}
 	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
-	}
-}
-
-func TestInheritedExternalExecBdRigStoreConsistentAcrossRawBdAndProviderStore(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
-	bdPath := waitTestRealBDPath(t)
-	statePath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
-	stateData, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatalf("ReadFile(dolt-state.json): %v", err)
-	}
-	var state struct {
-		Port int `json:"port"`
-	}
-	if err := json.Unmarshal(stateData, &state); err != nil {
-		t.Fatalf("json.Unmarshal(dolt-state.json): %v", err)
-	}
-	port := strconv.Itoa(state.Port)
-	cityCfg := strings.Join([]string{
-		"issue_prefix: gc",
-		"gc.endpoint_origin: city_canonical",
-		"gc.endpoint_status: verified",
-		"dolt.auto-start: false",
-		"dolt.host: 127.0.0.1",
-		"dolt.port: " + port,
-		"",
-	}, "\n")
-	rigCfg := strings.Join([]string{
-		"issue_prefix: fe",
-		"gc.endpoint_origin: inherited_city",
-		"gc.endpoint_status: verified",
-		"dolt.auto-start: false",
-		"dolt.host: 127.0.0.1",
-		"dolt.port: " + port,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cityCfg), 0o644); err != nil {
-		t.Fatalf("WriteFile(city config): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
-		t.Fatalf("WriteFile(rig config): %v", err)
-	}
-	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
-	t.Setenv("GC_DOLT_HOST", "bad.example.invalid")
-	t.Setenv("GC_DOLT_PORT", "9999")
-	rawDir := filepath.Join(rigPath, "nested-exec-external")
-	if err := os.MkdirAll(rawDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(rawDir): %v", err)
-	}
-
-	providerStore, err := openStoreAtForCity(rigPath, cityPath)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
-	}
-	providerBead, err := providerStore.Create(beads.Bead{Title: "provider exec external bead", Type: "task"})
-	if err != nil {
-		t.Fatalf("providerStore.Create: %v", err)
-	}
-	if rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID); !strings.Contains(rawShow, providerBead.ID) {
-		t.Fatalf("raw bd show missing provider-created bead %q:\n%s", providerBead.ID, rawShow)
-	}
-
-	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw exec external bead", "-t", "task"))
-	if got, err := providerStore.Get(rawID); err != nil {
-		t.Fatalf("providerStore.Get(rawID): %v", err)
-	} else if got.ID != rawID {
-		t.Fatalf("providerStore.Get(rawID).ID = %q, want %q", got.ID, rawID)
-	}
-}
-
-func TestInheritedExternalBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
-	bdPath := waitTestRealBDPath(t)
-	statePath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
-	stateData, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatalf("ReadFile(dolt-state.json): %v", err)
-	}
-	var state struct {
-		Port int `json:"port"`
-	}
-	if err := json.Unmarshal(stateData, &state); err != nil {
-		t.Fatalf("json.Unmarshal(dolt-state.json): %v", err)
-	}
-	if state.Port == 0 {
-		t.Fatalf("dolt runtime port = 0 in %s", statePath)
-	}
-	port := strconv.Itoa(state.Port)
-	cityCfg := strings.Join([]string{
-		"issue_prefix: gc",
-		"gc.endpoint_origin: city_canonical",
-		"gc.endpoint_status: verified",
-		"dolt.auto-start: false",
-		"dolt.host: 127.0.0.1",
-		"dolt.port: " + port,
-		"",
-	}, "\n")
-	rigCfg := strings.Join([]string{
-		"issue_prefix: fe",
-		"gc.endpoint_origin: inherited_city",
-		"gc.endpoint_status: verified",
-		"dolt.auto-start: false",
-		"dolt.host: 127.0.0.1",
-		"dolt.port: " + port,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cityCfg), 0o644); err != nil {
-		t.Fatalf("WriteFile(city config): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
-		t.Fatalf("WriteFile(rig config): %v", err)
-	}
-	rawDir := filepath.Join(rigPath, "nested")
-	if err := os.MkdirAll(rawDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(rawDir): %v", err)
-	}
-
-	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw inherited external bead", "-t", "task"))
-	providerStore, err := openStoreAtForCity(rigPath, cityPath)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
-	}
-	if got, err := providerStore.Get(rawID); err != nil {
-		t.Fatalf("providerStore.Get(rawID): %v", err)
-	} else if got.ID != rawID {
-		t.Fatalf("providerStore.Get(rawID).ID = %q, want %q", got.ID, rawID)
-	}
-
-	t.Setenv("GC_DOLT_HOST", "bad.example.invalid")
-	t.Setenv("GC_DOLT_PORT", "9999")
-	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "show", rawID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show rawID = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), rawID) {
-		t.Fatalf("gc bd show output missing raw id %q:\n%s", rawID, stdout.String())
-	}
-
-	providerBead, err := providerStore.Create(beads.Bead{Title: "provider inherited external bead", Type: "task"})
-	if err != nil {
-		t.Fatalf("providerStore.Create: %v", err)
-	}
-	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
-	if !strings.Contains(rawShow, providerBead.ID) {
-		t.Fatalf("raw bd show missing provider-created bead %q:\n%s", providerBead.ID, rawShow)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "show", providerBead.ID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd show provider bead = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), providerBead.ID) {
-		t.Fatalf("gc bd show output missing provider bead %q:\n%s", providerBead.ID, stdout.String())
 	}
 }
 

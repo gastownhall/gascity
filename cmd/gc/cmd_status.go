@@ -90,7 +90,11 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 		}
 	}
 	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	c, reason := rigStatusAPIClient(cityPath)
 	return routeRigStatus(cityPath, cityName, rig, rigAgents, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, sp, dops, c, reason, jsonOutput, stdout, stderr)
@@ -163,12 +167,12 @@ func routeRigStatus(
 			logRoute(stderr, cmdName, "api", "")
 			return renderRigStatusFromAPI(cr, rig, dops, jsonOutput, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -178,9 +182,9 @@ func routeRigStatus(
 // renderRigStatusFromAPI filters the supervisor's StatusView by rig name
 // and renders the same text output the fallback path produces. Pool
 // expansion, scale labels, and drain-state rendering all live in
-// agentStatusLine, so this function only needs to emit header lines
-// ("<rig>:", "Path:", "Suspended:") and dispatch to agentStatusLine for
-// each agent row.
+// agentStatusLineWithPartial, so this function only needs to emit header lines
+// ("<rig>:", "Path:", "Suspended:") and dispatch to agentStatusLineWithPartial
+// for each agent row.
 func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
 	suspStr := "no"
 	serverSuspended := rig.Suspended
@@ -230,7 +234,7 @@ func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, d
 		if !rigStatusAgentBelongsToRig(a, rig.Name) {
 			continue
 		}
-		status := agentStatusLine(a.Running, dops, a.SessionName, a.Suspended)
+		status := agentStatusLineWithPartial(a.Running, dops, a.SessionName, a.Suspended, cr.Body.Partial)
 		fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName, status) //nolint:errcheck // best-effort stdout
 	}
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
@@ -306,13 +310,13 @@ func doRigStatusWithStoreAndSnapshot(
 		if !a.SupportsInstanceExpansion() {
 			target := statusObservationTargetForIdentity(statusSnapshot, cityName, a.QualifiedName(), sessionTemplate)
 			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
-			status := agentStatusLine(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended)
+			status := agentStatusLineWithPartial(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended, statusProviderPartial(sp))
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
 		} else {
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				target := statusObservationTargetForIdentity(statusSnapshot, cityName, qualifiedInstance, sessionTemplate)
 				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
-				status := agentStatusLine(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended)
+				status := agentStatusLineWithPartial(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended, statusProviderPartial(sp))
 				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
 			}
 		}
@@ -393,12 +397,19 @@ func rigStatusAgentJSON(name, qualifiedName string, target statusObservationTarg
 	}
 }
 
-// agentStatusLine returns a human-readable status string for an agent session.
-// The drain probe is a runtime metadata lookup (tmux show-environment) per
-// session; skip it when the session is not running because the draining flag
-// is meaningless then and the probe dominates wall time on idle cities.
-func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) string {
+// agentStatusLineWithPartial returns a human-readable status string for an
+// agent session. The drain probe is a runtime metadata lookup (tmux
+// show-environment) per session; skip it when the session is not running
+// because the draining flag is meaningless then and the probe dominates wall
+// time on idle cities.
+func agentStatusLineWithPartial(running bool, dops drainOps, sn string, suspended bool, partial bool) string {
 	if !running {
+		if partial {
+			if suspended {
+				return "unknown  (partial status, suspended)"
+			}
+			return "unknown  (partial status)"
+		}
 		if suspended {
 			return "stopped  (suspended)"
 		}

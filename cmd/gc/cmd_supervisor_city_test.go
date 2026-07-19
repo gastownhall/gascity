@@ -252,7 +252,7 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T
 			reloads++
 			return 1
 		},
-		func() int { return 4242 },
+		func() int { return 0 },
 		func(string) (bool, string, bool) { return false, "", true },
 		20*time.Millisecond,
 		time.Millisecond,

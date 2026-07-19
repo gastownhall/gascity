@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -12,11 +14,13 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":      SessionStreamMessageEvent{},
-		"message":   SessionStreamRawMessageEvent{},
-		"activity":  SessionActivityEvent{},
-		"pending":   runtime.PendingInteraction{},
-		"heartbeat": HeartbeatEvent{},
+		"turn":            SessionStreamMessageEvent{},
+		"message":         SessionStreamRawMessageEvent{},
+		"structured":      SessionStreamStructuredMessageEvent{},
+		"activity":        SessionActivityEvent{},
+		"pending":         runtime.PendingInteraction{},
+		"pending_cleared": SessionPendingClearedEvent{},
+		"heartbeat":       HeartbeatEvent{},
 	}
 }
 
@@ -32,6 +36,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Status + Health.
 	cityGet(sm, "/status", (*Server).humaHandleStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/health", (*Server).humaHandleHealth, errorStatuses(http.StatusNotFound))
+	cityGet(sm, "/usage", (*Server).humaHandleUsage, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// City detail.
 	cityGet(sm, "", (*Server).humaHandleCityGet, errorStatuses(http.StatusNotFound))
@@ -117,13 +122,48 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Rigs.
 	cityGet(sm, "/rigs", (*Server).humaHandleRigList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/rig/{name}", (*Server).humaHandleRigGet, errorStatuses(http.StatusNotFound))
+	// create-rig returns one of three success statuses (201 sync create, 202
+	// async clone accepted, 200 idempotent replay) over one union body. Huma
+	// only auto-schematizes op.DefaultStatus (201), so the 200/202 responses are
+	// declared manually here — cityRegister takes op by value with no
+	// op-modifier closure (city_scope.go), so they must exist before the call.
+	// All three reference the same RigCreateResponseBody registry schema, so
+	// genclient/dashboard get one type discriminated by status.
+	rigBodyRef := sm.humaAPI.OpenAPI().Components.Schemas.Schema(
+		reflect.TypeOf(RigCreateResponseBody{}), true, "RigCreateResponseBody")
+	// Huma's defineErrors only synthesizes the default application/problem+json
+	// error response when op.Responses has at most one entry (huma.go: the
+	// `len(op.Responses) <= 1` guard). Declaring the 200/202 union bodies manually
+	// trips that guard, so the default error response would be dropped and the
+	// generated CreateRigResponse would lose ApplicationproblemJSONDefault —
+	// degrading every 400/409 (including the structured 409 that carries the
+	// re-attach request_id + event_cursor) to a detail-less "API returned NNN".
+	// Restore it here so it references the same apierr.ErrorModel schema this fork
+	// registers under the "ErrorModel" name for every other cityPost op (using
+	// huma.ErrorModel here would double-register that name and panic at startup).
+	errModelRef := sm.humaAPI.OpenAPI().Components.Schemas.Schema(
+		reflect.TypeOf(apierr.ErrorModel{}), true, "ErrorModel")
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-rig",
 		Method:        http.MethodPost,
 		Path:          "/rigs",
 		Summary:       "Create a rig",
-		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented},
+		Description:   "Create a rig. Without git_url, appends the rig to city.toml synchronously (201). With git_url, clones and provisions asynchronously: returns 202 with an event_cursor — watch the city event stream for request.result.rig.create, rig.provision.progress, or request.failed carrying the request_id — or 200 for an idempotent replay of a succeeded create.",
+		DefaultStatus: http.StatusCreated, // 201 — Huma auto-schematizes the union body here
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Rig already exists — idempotent request_id replay of a succeeded async create.",
+				Content:     map[string]*huma.MediaType{"application/json": {Schema: rigBodyRef}},
+			},
+			"202": {
+				Description: "Provisioning accepted; watch the city event stream from event_cursor for request.result.rig.create, rig.provision.progress, or request.failed with this request_id.",
+				Content:     map[string]*huma.MediaType{"application/json": {Schema: rigBodyRef}},
+			},
+			"default": {
+				Description: "Error",
+				Content:     map[string]*huma.MediaType{"application/problem+json": {Schema: errModelRef}},
+			},
+		},
 	}, (*Server).humaHandleRigCreate)
 	cityPatch(sm, "/rig/{name}", (*Server).humaHandleRigUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
@@ -156,7 +196,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// a mutation with a 403 before the handler runs; reads never emit it.
 	// GET /beads also declares 400: an invalid pagination cursor is a typed
 	// invalid-cursor problem response, never a silent page-1 restart.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest beads first"))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
@@ -179,7 +219,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Mail. Part of the P12 error-contract slice (see Beads above): each op
 	// enumerates the error statuses it can return (Huma adds auto 422/500);
 	// mutations declare 403 for the CSRF/read-only middleware.
-	cityGet(sm, "/mail", (*Server).humaHandleMailList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/mail", (*Server).humaHandleMailList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest messages first"))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-mail",
 		Method:        http.MethodPost,
@@ -207,7 +247,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// Convoys.
 	// 400: invalid pagination cursor (invalid-cursor problem type).
-	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest convoys first"))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-convoy",
 		Method:        http.MethodPost,
@@ -225,7 +265,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Events (list/emit/rotate — stream is a separate SSE registration below).
-	cityGet(sm, "/events", (*Server).humaHandleEventList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
+	cityGet(sm, "/events", (*Server).humaHandleEventList, errorStatuses(http.StatusBadRequest, http.StatusNotFound), listOrder("seq DESC — newest events first"))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "emit-event",
 		Method:        http.MethodPost,
@@ -277,6 +317,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Canonical Run resource — the ONE typed run projection, sourced from the
 	// city event log.
 	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
+	cityGet(sm, "/runs/census", (*Server).humaHandleRunsCensus, errorStatuses(http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
@@ -327,7 +368,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionCreate)
 	// 400: invalid pagination cursor (invalid-cursor problem type).
-	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest sessions first"))
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
@@ -340,7 +381,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/submit",
 		Summary:       "Submit a message to a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionSubmit)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-session-message",
@@ -348,7 +389,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/messages",
 		Summary:       "Send a message to a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
@@ -372,19 +413,19 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// Session SSE stream.
-	registerSSE(sm.humaAPI, huma.Operation{
+	registerSSEStringID(sm.humaAPI, huma.Operation{
 		OperationID: "stream-session",
 		Method:      http.MethodGet,
 		Path:        cityScopePrefix + "/session/{id}/stream",
 		Summary:     "Stream session output in real time",
 		Description: "Server-Sent Events stream of session transcript updates. " +
-			"Streams turns (conversation format) or raw messages (JSONL format) " +
+			"Streams turns (conversation format), raw messages (JSONL format), or structured messages " +
 			"based on the format query parameter. Emits activity and pending events " +
 			"for tool approval prompts.",
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),
 	}, sessionStreamEventMap(),
 		sseCityPrecheck(sm, (*Server).checkSessionStream),
-		sseCityStream(sm, (*Server).streamSession))
+		sseCityStringIDStream(sm, (*Server).streamSession))
 
 	// Event SSE stream (per-city).
 	registerSSE(sm.humaAPI, huma.Operation{

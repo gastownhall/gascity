@@ -113,6 +113,40 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	_ = normalizeScope.MarkFlagRequired("dir")
 	_ = normalizeScope.MarkFlagRequired("prefix")
 	cmd.AddCommand(normalizeScope)
+
+	var reindexCheck bool
+	reindex := &cobra.Command{
+		Use:    "doltlite-reindex",
+		Short:  "Rebuild a DoltLite store's SQLite secondary indexes after flatten/gc",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			// --check reports whether this build can reindex in process, without
+			// touching the store. The maintenance path probes this before
+			// running the stale-index-producing flatten/gc so it never creates
+			// index corruption a non-native build cannot heal (ga-7hei).
+			if reindexCheck {
+				if !doltliteReindexSupported() {
+					fmt.Fprintln(stderr, "gc dolt-config doltlite-reindex: in-process reindex unavailable in this build (needs -tags gascity_native_beads)") //nolint:errcheck
+					return errExit
+				}
+				return nil
+			}
+			if scopeDir == "" {
+				fmt.Fprintln(stderr, "gc dolt-config doltlite-reindex: missing --dir") //nolint:errcheck
+				return errExit
+			}
+			if err := runDoltliteReindex(scopeDir); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-config doltlite-reindex: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	reindex.Flags().StringVar(&scopeDir, "dir", "", "DoltLite store root to reindex")
+	reindex.Flags().BoolVar(&reindexCheck, "check", false, "report whether this build can reindex in process, then exit without reindexing")
+	_ = reindex.MarkFlagRequired("dir")
+	cmd.AddCommand(reindex)
 	return cmd
 }
 

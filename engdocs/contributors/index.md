@@ -15,6 +15,9 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Huma Usage Notes](huma-usage.md) when touching `internal/api/`,
   OpenAPI generation, or SSE registration
 - [Excalidraw Setup](excalidraw-setup.md) when authoring diagrams for the docs
+- [Hold and Blocked Label Conventions](hold-label-conventions.md) when a bead
+  needs to pause on a specific actor or condition — only `hold:mayor` and
+  `hold:external` are canonical
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 

@@ -214,6 +214,48 @@ func TestOrderShowJSONIncludesEnv(t *testing.T) {
 	}
 }
 
+func TestOrderShowJSONSurfacesCheckTimeout(t *testing.T) {
+	// Regression (PR #4190 iter-4): check_timeout must be visible on
+	// `gc order show --json`, matching how the sibling `timeout` is projected,
+	// so an operator can confirm the configured condition-check deadline.
+	aa := []orders.Order{{
+		Name:         "merge-queue",
+		Exec:         "true",
+		Trigger:      "condition",
+		Check:        "queue-pending",
+		CheckTimeout: "120s",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderShowJSON("/city", nil, aa, "merge-queue", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderShowJSON = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got struct {
+		Order struct {
+			CheckTimeout string `json:"check_timeout"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if got.Order.CheckTimeout != "120s" {
+		t.Fatalf("check_timeout = %q, want %q", got.Order.CheckTimeout, "120s")
+	}
+
+	// An unset check_timeout stays off the wire (omitempty), matching timeout.
+	unset := []orders.Order{{Name: "poll", Exec: "true", Trigger: "condition", Check: "true"}}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doOrderShowJSON("/city", nil, unset, "poll", "", &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderShowJSON(unset) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "check_timeout") {
+		t.Fatalf("unset check_timeout should be omitted, got %s", stdout.String())
+	}
+}
+
 func TestOrderShowJSONMissingOrderKeepsHumanError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doOrderShowJSON("/city", nil, nil, "missing", "", &stdout, &stderr)
@@ -3069,6 +3111,52 @@ prefix = "ct"
 	}
 	if !strings.Contains(stderr.String(), "[redacted]") {
 		t.Fatalf("stderr = %q, want redaction marker for the echoed token", stderr.String())
+	}
+}
+
+// TestOrderRunExecSuccessRedactsProjectedGitHubToken proves that when a manual
+// `gc order run` exec order succeeds after echoing the controller's projected
+// GitHub token, the token is redacted from the combined output printed to
+// stdout. The exec env projects GH_TOKEN/GITHUB_TOKEN into the child (see
+// projectGitHubTokenExecEnv), so the success path must scrub them just like the
+// failure path does — a passing order that prints the token would otherwise
+// leak it verbatim.
+func TestOrderRunExecSuccessRedactsProjectedGitHubToken(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	// Echo the projected token to the child's combined output, then succeed so
+	// the success (stdout) branch runs.
+	a := orders.Order{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN"`,
+	}
+
+	var stdout, stderr bytes.Buffer
+	result := doOrderRunExecResult(a, cityDir, cfg, nil, &stdout, &stderr)
+	if result.code != 0 {
+		t.Fatalf("doOrderRunExecResult = %d, want exec success; stdout=%q stderr=%q", result.code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), secret) {
+		t.Fatalf("stdout leaked projected GitHub token: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[redacted]") {
+		t.Fatalf("stdout = %q, want redaction marker for the echoed token", stdout.String())
 	}
 }
 

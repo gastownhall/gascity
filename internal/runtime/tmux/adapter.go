@@ -64,8 +64,8 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // Start creates a new detached tmux session and performs a multi-step
 // startup sequence to ensure agent readiness. The sequence handles zombie
 // detection, command launch verification, permission warning dismissal,
-// and runtime readiness polling. Steps are conditional on Config fields
-// being set; an agent with no startup hints gets fire-and-forget.
+// and runtime readiness polling. Steps are conditional on Config fields;
+// an agent with no startup hints gets fire-and-forget.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	var err error
 	cfg.Env, err = ensureInstanceToken(cfg.Env)
@@ -142,6 +142,12 @@ func ensureInstanceToken(env map[string]string) (map[string]string, error) {
 		}
 		cloned["GC_INSTANCE_TOKEN"] = token
 	}
+	// Keep BEADS_HOLDER_TOKEN aligned to GC_INSTANCE_TOKEN. Managed starts set
+	// both via session.RuntimeEnv, but this backstop is the unmanaged/legacy path
+	// where GC_INSTANCE_TOKEN can be minted (or arrive) without a matching holder
+	// token — a divergent or absent holder token is a silent actor-only downgrade
+	// the template-inspecting gate cannot see (ownership-fencing DESIGN §2.4).
+	cloned["BEADS_HOLDER_TOKEN"] = cloned["GC_INSTANCE_TOKEN"]
 	return cloned, nil
 }
 
@@ -1184,6 +1190,17 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return fmt.Errorf("relaunch: %w: %s (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
+	// Run pre_start before respawning: relaunch re-homes the agent into a
+	// possibly different (or not-yet-prepared) WorkDir, and launching into an
+	// unprepared workDir can point agents at the wrong repo — the same
+	// rationale that makes pre_start failures fatal in doStartSession.
+	if err := runPreStart(ctx, ops, name, cfg, setupTimeout); err != nil {
+		return fmt.Errorf("relaunch: running pre_start: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
 	if err != nil {
 		return err
@@ -1372,6 +1389,26 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // (~2KB) so large prompts cause "command too long" errors.
 const maxInlinePromptLen = 1024
 
+func shouldUnsetInteractiveColorEnv(command string) bool {
+	args := shellquote.Split(command)
+	if len(args) == 0 {
+		return false
+	}
+	switch filepath.Base(args[0]) {
+	case "claude", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
+func wrapInteractiveColorEnv(command string, unset bool) string {
+	if command == "" || !unset {
+		return command
+	}
+	return "env -u CI -u NO_COLOR " + command
+}
+
 // buildLaunchCommand computes the full agent command line for a session, writing
 // a prompt temp file when the inline prompt would overflow the exec command line.
 // Returns the command, the prompt file path (empty when none was written), and
@@ -1379,10 +1416,10 @@ const maxInlinePromptLen = 1024
 // (relaunch into a warm box) so both produce an identical agent command.
 func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFile string, err error) {
 	fullCommand = cfg.Command
-	if cfg.PromptSuffix == "" {
-		return fullCommand, "", nil
-	}
-	if len(cfg.PromptSuffix) > maxInlinePromptLen {
+	unsetColorEnv := shouldUnsetInteractiveColorEnv(cfg.Command)
+	switch {
+	case cfg.PromptSuffix == "":
+	case len(cfg.PromptSuffix) > maxInlinePromptLen:
 		// Large prompt — write to temp file and use $(cat ...) expansion inside
 		// the tmux session's shell to avoid the protocol limit and prevent the
 		// quoted prompt from leaking into the exec command line (which triggers
@@ -1390,18 +1427,15 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 		// argv/exec buffers).
 		promptFile, err = writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
 		if err != nil {
-			// No silent fallback: the inline path would produce the "File name
-			// too long" tmux pane death that this helper exists to prevent.
-			// Surface the failure so the reconciler records it and the operator
-			// can diagnose the cause.
 			return "", "", fmt.Errorf("writing prompt temp file for session %q: %w", name, err)
 		}
-		return longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile), promptFile, nil
+		fullCommand = longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile)
+	case cfg.PromptFlag != "":
+		fullCommand += " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+	default:
+		fullCommand += " " + cfg.PromptSuffix
 	}
-	if cfg.PromptFlag != "" {
-		return fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix, "", nil
-	}
-	return fullCommand + " " + cfg.PromptSuffix, "", nil
+	return wrapInteractiveColorEnv(fullCommand, unsetColorEnv), promptFile, nil
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {

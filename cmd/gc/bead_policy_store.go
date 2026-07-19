@@ -35,7 +35,20 @@ type beadPolicyGraphStore struct {
 	applier beads.GraphApplyStore
 }
 
-var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
+var (
+	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+)
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target. The policy layer shapes creation and
+// reads; it does not intercept metadata writes (SetMetadata promotes from the
+// embedded store), so fenced writes resolve against the inner store — without
+// this declaration, interface embedding would hide the factory stamp and a
+// require deployment would silently collapse to legacy writes through the
+// wrapper. beadPolicyGraphStore inherits this via its embedded
+// *beadPolicyStore.
+func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
@@ -82,6 +95,17 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
+}
+
+// ReadyContext preserves the policy-expanded read tier for deadline-sensitive
+// Ready projections. Optional capabilities are hidden by the embedded Store
+// interface, so forward explicitly just like Count.
+func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := s.Store.(beads.ContextReadyReader)
+	if !ok {
+		return nil, fmt.Errorf("reading ready beads through policy store: %w", beads.ErrReadyContextUnsupported)
+	}
+	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
 }
 
 // Count implements beads.Counter with the same read-tier expansion as List.

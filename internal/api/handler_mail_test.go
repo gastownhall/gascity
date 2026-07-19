@@ -818,7 +818,7 @@ func TestClientMailListAllRigsMultipleStoreSlowReturnsTyped503BeforeClientTimeou
 	if !IsStoreSlowError(err) {
 		t.Fatalf("ListMailInbox error = %v, want typed store_slow before client timeout", err)
 	}
-	if ShouldFallbackForRead(err) {
+	if ShouldFallbackForRead(nil, err) {
 		t.Fatalf("ShouldFallbackForRead = true for typed store_slow error: %v", err)
 	}
 }

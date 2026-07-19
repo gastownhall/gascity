@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Compile-time check.
@@ -40,8 +41,6 @@ func TestTmuxConformance(t *testing.T) {
 	runtimetest.RunProviderTestsWithOptions(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		id := atomic.AddInt64(&counter, 1)
 		name := fmt.Sprintf("gc-test-conform-%d", id)
-		// Safety cleanup for orphan prevention.
-		t.Cleanup(func() { _ = p.Stop(name) })
 		return p, runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),
@@ -128,6 +127,56 @@ func TestProvider_StartWithEnv(t *testing.T) {
 	}
 	if val != "hello" {
 		t.Fatalf("GC_TEST: got %q, want %q", val, "hello")
+	}
+}
+
+func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gc-test-color-%d", time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	t.Cleanup(func() { _ = p.TeardownServer() })
+	name := "gc-test-adapter-color-env"
+
+	outPath := filepath.Join(t.TempDir(), "env.txt")
+	tmpPath := outPath + ".tmp"
+	ready := "gc-test-color-ready"
+	script := "env > " + shellquote.Quote(tmpPath) + "; mv " + shellquote.Quote(tmpPath) + " " + shellquote.Quote(outPath) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(ready) + "; sleep 300"
+	commandPath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatalf("writing Claude fixture: %v", err)
+	}
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command:      shellquote.Quote(commandPath),
+		ProviderName: "claude",
+		Env: map[string]string{
+			"CI":       "1",
+			"NO_COLOR": "1",
+			"CIRCLECI": "true",
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := p.Tmux().runCtx(readyCtx, "wait-for", ready); err != nil {
+		t.Fatalf("waiting for pane environment signal: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading pane environment after readiness signal: %v", err)
+	}
+	env := string(data)
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "CI=") || strings.HasPrefix(line, "NO_COLOR=") {
+			t.Fatalf("interactive pane inherited color-killing environment:\n%s", env)
+		}
+	}
+	if !strings.Contains(env, "CIRCLECI=true") {
+		t.Fatalf("unrelated CI-vendor environment was removed:\n%s", env)
 	}
 }
 

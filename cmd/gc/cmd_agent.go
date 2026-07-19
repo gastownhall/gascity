@@ -79,6 +79,17 @@ var loadCityConfigDefaultWarningWriter = func() io.Writer {
 	return os.Stderr
 }
 
+// configWarnWriter routes advisory config-load warnings to io.Discard in JSON
+// mode and to stderr otherwise, so `--json` output stays clean for scripting on
+// every command (extending c806e54a3's rig-list fix uniformly). Hard load errors
+// are unaffected — they always go to stderr with a non-zero exit.
+func configWarnWriter(jsonOut bool, stderr io.Writer) io.Writer {
+	if jsonOut {
+		return io.Discard
+	}
+	return stderr
+}
+
 func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
 	for _, w := range warningWriter {
 		if w != nil {
@@ -110,6 +121,9 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 // [agent_defaults]/[agents] config remains strict-fatal because overlapping
 // default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
+	if config.IsRetiredKeyWarning(warning) {
+		return true
+	}
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}
@@ -771,7 +785,7 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Suspended agent '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -849,7 +863,7 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Resumed agent '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
