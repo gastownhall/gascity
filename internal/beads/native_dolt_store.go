@@ -99,6 +99,25 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 	return context.WithTimeout(parent, bdCommandTimeout)
 }
 
+// nativeGraphApplyDeadline scales the graph-apply transaction budget with plan
+// size. The library's AddDependency runs a recursive cycle-reachability query
+// per blocking edge, so a large molecule (67 nodes / ~100 edges on the
+// mol-adopt-pr-v2 shape) cannot finish inside the flat per-command budget: the
+// batch died at the 120s deadline mid-edges, retried into the same wall, and
+// fell back to per-bead creates — turning a single atomic pour into ~9 minutes
+// of partial work (2026-07-17 code red). Until the per-edge check is replaced
+// by one whole-graph CycleThroughEdges pass (needs a beads-side export of
+// DependencyAddOptions), give each node and edge a slice of budget on top of
+// the flat floor so the atomic path completes instead of falling back.
+func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
+	d := bdCommandTimeout
+	if plan == nil {
+		return d
+	}
+	const perItem = 2 * time.Second
+	return d + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
+}
+
 func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), bdCommandTimeout)
 }
@@ -667,7 +686,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	}
 	defer release()
 
-	ctx, cancel := nativeDoltOperationContext(parent)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
 	keyToID := make(map[string]string, len(plan.Nodes))

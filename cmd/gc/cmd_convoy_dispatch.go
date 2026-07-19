@@ -1723,7 +1723,13 @@ func openSourceWorkflowStores(cfg *config.City, cityPath, beadID string) ([]conv
 // It takes the store-opening callback explicitly so tests can inject broken
 // rig stores without touching the filesystem.
 func openSourceWorkflowStoresWith(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
-	candidates := convoyStoreCandidates(cfg, cityPath, beadID)
+	return openSourceWorkflowStoresWithProvider(cfg, cityPath, beadID, func(scopeRoot string) string {
+		return rawBeadsProviderForScope(scopeRoot, cityPath)
+	}, openStore)
+}
+
+func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID string, providerForScope func(string) string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+	candidates := convoyStoreCandidatesWithProvider(cfg, cityPath, beadID, providerForScope)
 	var (
 		stores   = make([]convoyStoreView, 0, len(candidates))
 		skips    []sourceWorkflowStoreSkip

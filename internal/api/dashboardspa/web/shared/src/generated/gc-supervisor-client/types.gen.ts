@@ -2026,6 +2026,8 @@ export type OrderListBody = {
 export type OrderResponse = {
     capture_output: boolean;
     check?: string;
+    check_timeout?: string;
+    check_timeout_ms?: number;
     description?: string;
     enabled: boolean;
     env?: {
@@ -3394,6 +3396,26 @@ export type SlingInputBody = {
      */
     formula?: string;
     /**
+     * Merge strategy: direct, mr, or local.
+     */
+    merge?: string;
+    /**
+     * Do not create an auto-convoy for the routed bead.
+     */
+    no_convoy?: boolean;
+    /**
+     * Suppress the target's default_sling_formula even when configured.
+     */
+    no_formula?: boolean;
+    /**
+     * Mark the routed bead as owned by the target.
+     */
+    owned?: boolean;
+    /**
+     * Clear any existing human assignee on the bead before routing, so a bead claimed via bd update --claim is handed to the target's pool.
+     */
+    reassign?: boolean;
+    /**
      * Rig name.
      */
     rig?: string;
@@ -3766,7 +3788,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Live bead row count.
+     * Retained bead row count used as the denominator, including open and closed beads.
      */
     live_rows: number;
     /**
@@ -3774,7 +3796,7 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per row.
+     * Derived megabytes per retained row, including open and closed beads.
      */
     ratio_mb_per_row: number;
     /**
@@ -9115,11 +9137,11 @@ export type GetV0CityByCityNameBeadsData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**
@@ -9847,11 +9869,11 @@ export type GetV0CityByCityNameConvoysData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
     };
@@ -9974,11 +9996,11 @@ export type GetV0CityByCityNameEventsData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**
@@ -11707,11 +11729,11 @@ export type GetV0CityByCityNameMailData = {
          */
         wait?: string;
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**
@@ -14553,7 +14575,7 @@ export type CreateRigData = {
          */
         'X-GC-Request': string;
         /**
-         * Idempotency key for safe retries.
+         * Idempotency key for safe retries (synchronous create).
          */
         'Idempotency-Key'?: string;
     };
@@ -15362,6 +15384,10 @@ export type SendSessionMessageErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -15855,6 +15881,10 @@ export type SubmitSessionErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -16088,11 +16118,11 @@ export type GetV0CityByCityNameSessionsData = {
     };
     query?: {
         /**
-         * Pagination cursor from a previous response's next_cursor field.
+         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
          */
         cursor?: string;
         /**
-         * Maximum number of results to return. 0 = server default.
+         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
          */
         limit?: number;
         /**

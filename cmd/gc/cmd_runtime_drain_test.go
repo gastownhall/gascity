@@ -1122,75 +1122,55 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	}
 }
 
-func TestRuntimeRequestRestartNamedOnDemandReturnsWithoutBlocking(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_ALIAS", "mayor")
-	t.Setenv("GC_SESSION_NAME", "mayor")
+// TestDoRuntimeRequestRestartProceedsAndPendsOnCancel pins the restart-request
+// helper flow that every session — including named on-demand sessions — now
+// takes. PR #3994 removed the early "restart skipped for named session" gate
+// from cmdRuntimeRequestRestart, so doRuntimeRequestRestart is always reached:
+// it sets the restart flag, persists it through the worker boundary, and on a
+// context cancel exits 0 while leaving the request pending (never reporting a
+// skipped restart). The on-demand session's reconciler-side restart handling is
+// covered by session_reconciler_restart_request_test.go; this test exercises
+// the generic helper, not a configured named on-demand session fixture.
+func TestDoRuntimeRequestRestartProceedsAndPendsOnCancel(t *testing.T) {
+	dops := newFakeDrainOps()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	b, err := store.Create(beads.Bead{
-		Type:   sessionBeadType,
-		Labels: []string{"gc:session"},
-	})
-	if err != nil {
-		t.Fatalf("seeding session bead: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
-		t.Fatalf("set session_name: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
-		t.Fatalf("set configured_named_session: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "configured_named_mode", "on_demand"); err != nil {
-		t.Fatalf("set configured_named_mode: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "restart_requested", "true"); err != nil {
-		t.Fatalf("set restart_requested: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "continuation_reset_pending", "true"); err != nil {
-		t.Fatalf("set continuation_reset_pending: %v", err)
+	var persistCalled bool
+	persistRestart := func() error { //nolint:unparam // test double must satisfy doRuntimeRequestRestart's func() error param; the spy never fails.
+		persistCalled = true
+		return nil
 	}
 
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdRuntimeRequestRestart(&stdout, &stderr)
+		done <- doRuntimeRequestRestart(ctx, dops, persistRestart, events.Discard, "mayor", "mayor",
+			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
 	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
 
 	select {
 	case code := <-done:
 		if code != 0 {
-			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+			t.Fatalf("code = %d, want 0 on context cancel; stderr: %s", code, stderr.String())
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("cmdRuntimeRequestRestart blocked for named on-demand session")
+	case <-time.After(2 * time.Second):
+		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
 	}
-	if !strings.Contains(stdout.String(), "Restart skipped for named session") {
-		t.Fatalf("stdout = %q, want restart skipped confirmation", stdout.String())
+	if !persistCalled {
+		t.Fatal("persistRestart was not called")
 	}
-	freshStore, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
+	if !dops.restartRequested["mayor"] {
+		t.Fatal("restart request was not left set for named on-demand session")
 	}
-	refreshed, err := freshStore.Get(b.ID)
-	if err != nil {
-		t.Fatalf("fetching seeded bead: %v", err)
+	if strings.Contains(stdout.String(), "Restart skipped for named session") {
+		t.Fatalf("stdout = %q, must not report a skipped restart", stdout.String())
 	}
-	if refreshed.Metadata["restart_requested"] != "" {
-		t.Fatalf("restart_requested = %q, want cleared", refreshed.Metadata["restart_requested"])
-	}
-	if refreshed.Metadata["continuation_reset_pending"] != "" {
-		t.Fatalf("continuation_reset_pending = %q, want cleared", refreshed.Metadata["continuation_reset_pending"])
+	if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
+		t.Fatalf("stderr = %q, want pending restart warning", got)
 	}
 }
 

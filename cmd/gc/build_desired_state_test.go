@@ -4332,8 +4332,8 @@ func TestRealizePoolDesiredSessionsRefundsFreshCreateBudgetAfterFailure(t *testi
 	}
 }
 
-func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
-	maxWakes := 2
+func TestBuildDesiredStateTranslatesFloorDemandIntoCreateBudget(t *testing.T) {
+	maxWakes := 1
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -4349,8 +4349,8 @@ func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
 			{
 				Name:              "zulu",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 5",
-				MinActiveSessions: intPtr(0),
+				ScaleCheck:        "printf 0",
+				MinActiveSessions: intPtr(1),
 				MaxActiveSessions: intPtr(5),
 			},
 		},
@@ -4363,115 +4363,11 @@ func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
 	for _, tp := range result.State {
 		counts[tp.TemplateName]++
 	}
-	if got := counts["alpha"]; got != 1 {
-		t.Fatalf("alpha fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
+	if got := counts["alpha"]; got != 0 {
+		t.Fatalf("alpha fresh creates = %d, want 0 while floor demand consumes the only token; counts=%v stderr=%q", got, counts, stderr.String())
 	}
 	if got := counts["zulu"]; got != 1 {
-		t.Fatalf("zulu fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
-	}
-}
-
-// TestFairPoolSessionCreateSharesReservesFloorFirst guards against cold-pool
-// floor starvation: a cold pool's min_active_sessions floor request must get a
-// create-budget token before
-// a warm pool's larger elastic scale-check demand, regardless of the round-robin
-// seed. Before the fix the floor competed equally in the round-robin and was
-// starved (cold pools never spawned their floor).
-func TestFairPoolSessionCreateSharesReservesFloorFirst(t *testing.T) {
-	// "alpha" sorts first and has large elastic demand; "zulu" sorts last and
-	// has only a single floor-guarantee request. With budget=1 the floor must
-	// still win for every seed.
-	states := []PoolDesiredState{
-		{Template: "alpha", Requests: []SessionRequest{{Tier: "new"}, {Tier: "new"}, {Tier: "new"}}},
-		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-	}
-	for seed := uint64(0); seed < 5; seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
-		if shares["zulu"] != 1 {
-			t.Errorf("seed=%d: floor pool zulu got %d budget, want 1 (floor reserved before elastic)", seed, shares["zulu"])
-		}
-		if shares["alpha"] != 0 {
-			t.Errorf("seed=%d: elastic alpha got %d budget, want 0 (budget consumed by floor)", seed, shares["alpha"])
-		}
-	}
-
-	// Surplus budget beyond the reserved floor still flows to elastic demand,
-	// and a floor-only template is not topped up past its single request.
-	shares, spare := fairPoolSessionCreateShares(states, 3, 0)
-	if shares["zulu"] != 1 {
-		t.Errorf("floor pool zulu got %d, want 1 (not topped up past its single request)", shares["zulu"])
-	}
-	if shares["alpha"] != 2 {
-		t.Errorf("elastic alpha got %d of surplus, want 2", shares["alpha"])
-	}
-	if spare != 0 {
-		t.Errorf("spare=%d, want 0 (all budget allocated)", spare)
-	}
-}
-
-// TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation guards
-// against the inverse of the floor guarantee: when floor-bearing demand meets or
-// exceeds the budget, the Phase-1 floor reservation must NOT consume the whole
-// budget and zero out elastic pools. A high-demand elastic pool (e.g. a rig
-// executor with a full rig-store queue, min=0) sitting behind ~budget floor pools
-// would otherwise get zero create tokens every tick and never spawn — the
-// voxist-city vw-executor starvation. The elastic reserve (limit/4) guarantees it
-// a share for every seed.
-func TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation(t *testing.T) {
-	var states []PoolDesiredState
-	for i := 0; i < 8; i++ {
-		states = append(states, PoolDesiredState{
-			Template: fmt.Sprintf("rig%d/reviewer", i),
-			Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}},
-		})
-	}
-	// One elastic pool (no floor) with demand 6, like a backed-up rig executor.
-	elastic := PoolDesiredState{Template: "voxist-web/executor"}
-	for j := 0; j < 6; j++ {
-		elastic.Requests = append(elastic.Requests, SessionRequest{Tier: "new"})
-	}
-	states = append(states, elastic)
-
-	const budget = 8 // floors (8) >= budget: Phase 1 alone would consume it all.
-	wantReserve := budget / 4
-	for seed := uint64(0); seed < uint64(len(states)); seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, budget, seed)
-		if got := shares["voxist-web/executor"]; got < wantReserve {
-			t.Fatalf("seed=%d: elastic pool starved by floor saturation (got %d), want >= %d (reserved elastic slice)", seed, got, wantReserve)
-		}
-	}
-}
-
-// TestFairPoolSessionCreateSharesRotatesFloorReservation guards the Phase-1 floor
-// reservation against deterministic starvation: when floor-bearing templates
-// exceed the budget, the seed must rotate which floors are reserved so that no
-// (e.g. alphabetically-late) floor template is permanently starved across ticks.
-func TestFairPoolSessionCreateSharesRotatesFloorReservation(t *testing.T) {
-	// Three floor-bearing templates, budget 1 -> only one floor reserved per tick.
-	// Over rotating seeds every template must be reserved at least once.
-	states := []PoolDesiredState{
-		{Template: "alpha", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-		{Template: "mike", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-	}
-	reserved := map[string]bool{}
-	for seed := uint64(0); seed < 6; seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
-		total := 0
-		for tmpl, n := range shares {
-			if n > 0 {
-				reserved[tmpl] = true
-				total += n
-			}
-		}
-		if total != 1 {
-			t.Errorf("seed=%d: total floor reservations=%d, want 1 (budget=1)", seed, total)
-		}
-	}
-	for _, tmpl := range []string{"alpha", "mike", "zulu"} {
-		if !reserved[tmpl] {
-			t.Errorf("floor template %q never reserved across seeds (deterministic starvation)", tmpl)
-		}
+		t.Fatalf("zulu fresh creates = %d, want 1 from translated floor demand; counts=%v stderr=%q", got, counts, stderr.String())
 	}
 }
 

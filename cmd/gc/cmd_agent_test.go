@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1534,5 +1535,17 @@ knob = "keep-me"
 	}
 	if string(data) != src {
 		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
+	}
+}
+
+// TestConfigWarnWriter verifies advisory config warnings are discarded in JSON
+// mode and passed to stderr otherwise (the C5 uniform-suppression rule).
+func TestConfigWarnWriter(t *testing.T) {
+	var stderr bytes.Buffer
+	if w := configWarnWriter(true, &stderr); w != io.Discard {
+		t.Fatalf("json mode: writer = %v, want io.Discard", w)
+	}
+	if w := configWarnWriter(false, &stderr); w != io.Writer(&stderr) {
+		t.Fatalf("human mode: writer must be stderr")
 	}
 }

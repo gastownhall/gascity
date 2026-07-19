@@ -33,6 +33,24 @@ type slingBody struct {
 	ScopeKind      string            `json:"scope_kind"`
 	ScopeRef       string            `json:"scope_ref"`
 	Force          bool              `json:"force"`
+	Reassign       bool              `json:"reassign"`
+	Merge          string            `json:"merge"`
+	NoConvoy       bool              `json:"no_convoy"`
+	Owned          bool              `json:"owned"`
+	NoFormula      bool              `json:"no_formula"`
+}
+
+// routeOptsFromBody builds the domain RouteOpts from the wire body for a plain
+// bead route (direct or default-formula), carrying every server-expressible flag.
+func routeOptsFromBody(body slingBody) sling.RouteOpts {
+	return sling.RouteOpts{
+		Force:     body.Force,
+		Reassign:  body.Reassign,
+		Merge:     body.Merge,
+		NoConvoy:  body.NoConvoy,
+		Owned:     body.Owned,
+		NoFormula: body.NoFormula,
+	}
 }
 
 type slingResponse struct {
@@ -127,6 +145,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 		Force:     body.Force,
+		Reassign:  body.Reassign,
+		Merge:     body.Merge,
+		NoConvoy:  body.NoConvoy,
+		Owned:     body.Owned,
 	}
 
 	// Dispatch to the right intent-based method.
@@ -146,6 +168,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		result, err = sl.LaunchFormula(ctx, formulaName, agentCfg, formulaOpts)
 
 	case strings.TrimSpace(body.Bead) != "" &&
+		!body.NoFormula &&
 		agentCfg.EffectiveDefaultSlingFormula() != "" &&
 		(len(body.Vars) > 0 || body.Title != "" || body.ScopeKind != "" || body.ScopeRef != ""):
 		mode = "attached"
@@ -153,10 +176,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		attachedBeadID = strings.TrimSpace(body.Bead)
 		formulaName = agentCfg.EffectiveDefaultSlingFormula()
 		// Default formula: route the bead and let the domain apply the default.
-		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, routeOptsFromBody(body))
 
 	default:
-		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, routeOptsFromBody(body))
 	}
 
 	if err != nil {

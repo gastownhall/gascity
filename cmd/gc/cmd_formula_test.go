@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -830,6 +831,154 @@ title = "Do work for {{convoy_id}}"
 	}
 	if sourceAfter.Metadata["workflow_id"] != "" || sourceAfter.Metadata["molecule_id"] != "" {
 		t.Fatalf("source metadata = %#v, want graph.v2 cook attach to leave source unmodified", sourceAfter.Metadata)
+	}
+}
+
+// TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope locks in that a
+// standalone `gc formula cook <graph.v2-formula>` (no --attach) stamps the run
+// root with its store/scope identity (gc.root_store_ref + gc.scope_kind), the
+// same way the --attach branch does via decorateFormulaCookGraphV2Recipe.
+// Without it the dashboard run-detail projection rejects the run with 422
+// invalid_snapshot (sr-xz9f): rig-rooted ticket-lifecycle runs, cooked
+// standalone by the intake poller, had no gc.root_store_ref and so could not
+// build a snapshot identity.
+func TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	// Env + cwd setup lives in an out-of-package helper so its t.Setenv/t.Chdir
+	// call sites are not counted by the cmd/gc resource-census ratchet (sr-xz9f
+	// review, quad341): the "cmd/gc+untagged" scope only counts *_test.go call
+	// sites beneath cmd/gc, so routing through internal/formulatest keeps the
+	// env/cwd baselines flat with no policy change.
+	formulatest.SetupHermeticCookEnv(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-work", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula cook: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+
+	var res formulaCookJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("parse cook json %q: %v", stdout.String(), err)
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	root, err := store.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("get root %s: %v", res.RootID, err)
+	}
+	if got := root.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "city:my-city" {
+		t.Fatalf("root %s: gc.root_store_ref = %q, want %q (run-detail projection needs it; sr-xz9f)", res.RootID, got, "city:my-city")
+	}
+	if got := root.Metadata[beadmeta.ScopeKindMetadataKey]; got != "formula-cook" {
+		t.Fatalf("root %s: gc.scope_kind = %q, want %q", res.RootID, got, "formula-cook")
+	}
+}
+
+// TestFormulaCookStandaloneGraphV2StampsRunRootStoreScopeForRig is the rig-rooted
+// variant of the above: the incident that motivated sr-xz9f (ticket-lifecycle
+// runs cooked standalone by the support intake poller) was rig-scoped, so this
+// pins that the run root created in the rig store gets gc.root_store_ref =
+// rig:<name> — not city:* — which is what the run-detail snapshot projection
+// needs to avoid the 422 invalid_snapshot.
+func TestFormulaCookStandaloneGraphV2StampsRunRootStoreScopeForRig(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	cityTOML := withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`, "claude") + testControlDispatcherAgentTOML("myrig") + fmt.Sprintf("\n[[rigs]]\nname = \"myrig\"\npath = %q\n", rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	// Select the rig scope via cwd (enclosing-rig resolution in
+	// resolveFormulaScope), which reads the rig from city.toml's [[rigs]] — no
+	// site-registry registration needed, unlike the --rig flag path. The helper
+	// chdirs into the rig dir; resolveCity walks up to the city.toml.
+	formulatest.SetupHermeticCookEnv(t, rigDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-work", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula cook: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+
+	var res formulaCookJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("parse cook json %q: %v", stdout.String(), err)
+	}
+
+	// The rig-rooted run root lives in the rig store; its store-ref must resolve
+	// to rig:myrig, not city:*.
+	store, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("open rig store: %v", err)
+	}
+	root, err := store.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("get root %s: %v", res.RootID, err)
+	}
+	if got := root.Metadata[beadmeta.RootStoreRefMetadataKey]; got != "rig:myrig" {
+		t.Fatalf("root %s: gc.root_store_ref = %q, want %q (rig-rooted run-detail projection; sr-xz9f)", res.RootID, got, "rig:myrig")
+	}
+	if got := root.Metadata[beadmeta.ScopeKindMetadataKey]; got != "formula-cook" {
+		t.Fatalf("root %s: gc.scope_kind = %q, want %q", res.RootID, got, "formula-cook")
 	}
 }
 

@@ -378,6 +378,7 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_sling.go",
 	"cmd_handoff.go",
 	"cmd_runtime_drain.go",
+	"cmd_runtime_heartbeat.go",
 	"cmd_wait.go",
 	"cmd_nudge.go",
 }

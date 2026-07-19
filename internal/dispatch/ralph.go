@@ -481,8 +481,10 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 	// A routeConfig error is intentionally tolerated here: Ralph retry preserves
 	// the prior attempt's already-stamped routes rather than scope-routing, so a
 	// nil cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
-	// (control.go, fanout.go) fail closed on this error because they scope-route
-	// through applyAttemptControlStepRoute.
+	// (control.go, fanout.go) cannot degrade to metadata-only because they
+	// scope-route fresh through applyAttemptControlStepRoute, so they instead
+	// classify a load/parse failure as a transient controller-boundary error and
+	// retry it as pending.
 	cfg, _ := opts.routeConfig()
 	if molecule.IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {

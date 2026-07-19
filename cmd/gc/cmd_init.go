@@ -79,7 +79,7 @@ const defaultInitTemplate = "gascity"
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
 	interactive      bool   // true if the wizard ran with user interaction
-	configName       string // canonical values: "minimal", "gastown", "gascity", or "custom"
+	configName       string // canonical values: "minimal", "gastown", "gascity", "custom", or "empty"
 	defaultProvider  string // selected default provider key
 	providers        []string
 	provider         string                // compatibility mirror for older internal callers
@@ -400,7 +400,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
-	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, or custom")
+	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, custom, or empty")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt")
 	cmd.Flags().StringVar(&doltPortFlag, "dolt-port", "", "external/hosted Dolt port (or "+envDoltPort+"); required with --dolt-host")
@@ -640,8 +640,8 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	if defaultProvider != "" && !stringInSlice(defaultProvider, providers) {
 		return wizardConfig{}, "", fmt.Errorf("--default-provider %q must be included in --providers", defaultProvider)
 	}
-	if template == "custom" && (legacyChanged || defaultChanged || providersChanged) {
-		return wizardConfig{}, "", fmt.Errorf("--template custom cannot be combined with provider flags")
+	if (template == "custom" || template == "empty") && (legacyChanged || defaultChanged || providersChanged) {
+		return wizardConfig{}, "", fmt.Errorf("--template %s cannot be combined with provider flags", template)
 	}
 	if (template == "minimal" || template == "gastown" || template == "gascity") && defaultProvider == "" {
 		return wizardConfig{}, "", fmt.Errorf("--template %s requires --default-provider", template)
@@ -710,11 +710,11 @@ func normalizeInitTemplate(template string, supplied bool) (string, error) {
 		return defaultInitTemplate, nil
 	}
 	switch template {
-	case "minimal", "gastown", "gascity", "custom":
+	case "minimal", "gastown", "gascity", "custom", "empty":
 		return template, nil
 	default:
 		if supplied {
-			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, gascity, custom)", template)
+			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, gascity, custom, empty)", template)
 		}
 		return defaultInitTemplate, nil
 	}
@@ -1280,7 +1280,24 @@ func hasInitRigSiteBindings(rigs []config.Rig) bool {
 // when a provider or start command is supplied; otherwise init writes the
 // default mayor-only city. Errors if the runtime scaffold already exists. Accepts an
 // injected FS for testability.
+// warnEmptyTemplateMissingBootstrapProfile emits a warning when the "empty"
+// template is scaffolded without a --bootstrap-profile. The empty template
+// ships no [api] block by design; it composes deterministic API config from a
+// bootstrap profile (k8s-cell binds 0.0.0.0:9443 with mutations allowed).
+// Without one the API binds to localhost — reachable only within this box.
+// That is a legitimate default for a LOCAL controller; the warning exists for
+// the HOSTED case, where an entrypoint that forgets --bootstrap-profile leaves
+// its front door reachable only inside the pod, and that regression should
+// surface in logs rather than pass silently.
+func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer) {
+	if wiz.configName != "empty" || strings.TrimSpace(wiz.bootstrapProfile) != "" {
+		return
+	}
+	fmt.Fprintf(stderr, "gc init: WARNING: --template empty ships no [api] block; without --bootstrap-profile the controller API binds to localhost and is not reachable outside this box. That is fine for a local controller, but a hosted controller must pass --bootstrap-profile %s (0.0.0.0:9443) to serve the front door externally.\n", bootstrapProfileK8sCell) //nolint:errcheck // best-effort stderr
+}
+
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
+	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
@@ -1331,7 +1348,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	defaultProvider := wizardDefaultProvider(wiz)
 	providers := wizardProviders(wiz)
 	switch {
-	case wiz.configName == "custom":
+	case wiz.configName == "custom" || wiz.configName == "empty":
+		// Both scaffold a bare, providerless city with no bundled agents,
+		// roles, or formulas. "custom" is the human affordance ("configure it
+		// yourself"); "empty" is the front-door base — a controller boots it
+		// with only the core infra pack (control-dispatcher pool + API) and the
+		// pack API installs behavior later via POST /v0/city/{name}/packs.
 		cfg = config.EmptyCity(cityName)
 	case wiz.configName == "gastown":
 		cfg = config.GastownCityWithProviders(cityName, defaultProvider, providers)
@@ -1443,6 +1465,9 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	switch {
 	case wiz.interactive:
 		fmt.Fprintf(stdout, "Created %s config (Level 1) in %q.\n", wiz.configName, cityName) //nolint:errcheck // best-effort stdout
+	case wiz.configName == "empty":
+		fmt.Fprintln(stdout, "Welcome to Gas City!")                                   //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Initialized bare city %q (no bundled pack).\n", cityName) //nolint:errcheck // best-effort stdout
 	case defaultProvider != "":
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                                                      //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Initialized city %q with default provider %q.\n", cityName, defaultProvider) //nolint:errcheck // best-effort stdout
