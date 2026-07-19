@@ -413,7 +413,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		}
 		return err
 	}
-	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
+	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
 	return nil
 }
 
