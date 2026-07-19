@@ -283,6 +283,8 @@ func readDiscoveredHelp(entry config.DiscoveredCommand) string {
 	return strings.TrimSpace(string(data))
 }
 
+var resolveInvokingExecutable = os.Executable
+
 func discoveredHelpRequested(args []string) bool {
 	for _, arg := range args {
 		if arg == "--" {
@@ -318,7 +320,11 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	// Pack commands are extensions of this exact gc process. Pin recursive
 	// calls to the invoking executable instead of inheriting an ambient GC_BIN
 	// (or falling back to a different `gc` on PATH).
-	exe, _ := os.Executable()
+	exe, err := resolveInvokingExecutable()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc %s %s: resolving invoking gc executable: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		return 1
+	}
 	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)

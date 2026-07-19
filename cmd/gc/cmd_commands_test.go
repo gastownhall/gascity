@@ -152,6 +152,38 @@ func TestPinInvokingGCBinary_ReplacesAmbientValue(t *testing.T) {
 	}
 }
 
+func TestRunDiscoveredCommand_FailsClosedWhenInvokingExecutableCannotBeResolved(t *testing.T) {
+	old := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) {
+		return "", errors.New("executable unavailable")
+	}
+	t.Cleanup(func() { resolveInvokingExecutable = old })
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "must-not-run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := config.DiscoveredCommand{
+		BindingName: "test",
+		Command:     []string{"status"},
+		RunScript:   scriptPath,
+		SourceDir:   dir,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDiscoveredCommand(entry, dir, "testcity", nil, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want child command not to run", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "resolving invoking gc executable: executable unavailable") {
+		t.Fatalf("stderr = %q, want executable resolution error", got)
+	}
+}
+
 const packCommandProcessHelperArg = "pack-command-process-helper"
 
 type packCommandProcessInvocation struct {
