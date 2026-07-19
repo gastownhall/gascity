@@ -96,11 +96,36 @@ func findCodexSessionFilesByIDWithReaders(
 	readSessionCWD func(string) string,
 	lookupEntry codexBatchEntryLookup,
 ) map[string]string {
-	found := make(map[string]string)
 	if len(targets) == 0 || readDir == nil || readSessionCWD == nil || lookupEntry == nil {
-		return found
+		return make(map[string]string)
 	}
+	states := buildCodexBatchTargets(targets)
+	if len(states) == 0 {
+		return make(map[string]string)
+	}
+	days := planCodexBatchDays(states)
 
+	scanner := &codexBatchScanner{
+		readDir:     readDir,
+		lookupEntry: lookupEntry,
+		days:        days,
+		seenRoots:   make(map[string]bool),
+	}
+	if !scanner.scan(searchPaths) {
+		// Matches collected before exhaustion are not authoritative: an
+		// unscanned root/day could contain a second physical candidate.
+		return make(map[string]string)
+	}
+	collectCodexBatchMatches(states, days)
+	return resolveCodexBatchResults(states, readSessionCWD)
+}
+
+// buildCodexBatchTargets validates and normalizes batch targets into per-target
+// scan state, applying the same admission contract as the scalar
+// FindCodexSessionFileByID: the correlation key must be non-empty and unique in
+// the batch, workdir and session ID are trimmed and required, NotAfter must be
+// set, and the padded day window must not be reversed.
+func buildCodexBatchTargets(targets []CodexSessionTarget) []codexBatchTarget {
 	keyCounts := make(map[string]int, len(targets))
 	for _, target := range targets {
 		if target.Key != "" {
@@ -129,56 +154,40 @@ func findCodexSessionFilesByIDWithReaders(
 			seen:      make(map[string]bool),
 		})
 	}
-	if len(states) == 0 {
-		return found
-	}
+	return states
+}
 
+// codexBatchTargetDays returns the eligible rollout day directories for one
+// target, keyed by "YYYY/MM/DD" relative path with the year as value. It admits
+// the newest codexByIDDayDirCap lifecycle days in range plus a UUIDv7
+// creation-day hint padded by codexUUIDv7HintPaddingDays local calendar days.
+func codexBatchTargetDays(state *codexBatchTarget) map[string]string {
+	targetDays := make(map[string]string)
+	addTargetDay := func(day time.Time) {
+		year := day.Format("2006")
+		relPath := filepath.Join(year, day.Format("01"), day.Format("02"))
+		targetDays[relPath] = year
+	}
+	scanned := 0
+	for day := state.lastDay; !day.Before(state.firstDay) && scanned < codexByIDDayDirCap; day = day.AddDate(0, 0, -1) {
+		scanned++
+		addTargetDay(day)
+	}
+	if createdAt, ok := codexUUIDv7CreationTime(state.sessionID); ok {
+		creationDay := startOfLocalDay(createdAt.In(time.Local))
+		for offset := -codexUUIDv7HintPaddingDays; offset <= codexUUIDv7HintPaddingDays; offset++ {
+			addTargetDay(creationDay.AddDate(0, 0, offset))
+		}
+	}
+	return targetDays
+}
+
+// planCodexBatchDays merges every admitted target's eligible days into a shared
+// set of day directories to scan at most once, ordered newest first.
+func planCodexBatchDays(states []codexBatchTarget) []*codexBatchDay {
 	daysByPath := make(map[string]*codexBatchDay)
 	for targetIndex := range states {
-		state := &states[targetIndex]
-		targetDays := make(map[string]string)
-		addTargetDay := func(day time.Time) {
-			year := day.Format("2006")
-			relPath := filepath.Join(year, day.Format("01"), day.Format("02"))
-			targetDays[relPath] = year
-		}
-		scanned := 0
-		for day := state.lastDay; !day.Before(state.firstDay) && scanned < codexByIDDayDirCap; day = day.AddDate(0, 0, -1) {
-			scanned++
-			addTargetDay(day)
-		}
-		if createdAt, ok := codexUUIDv7CreationTime(state.sessionID); ok {
-			creationDay := startOfLocalDay(createdAt.In(time.Local))
-			for offset := -codexUUIDv7HintPaddingDays; offset <= codexUUIDv7HintPaddingDays; offset++ {
-				addTargetDay(creationDay.AddDate(0, 0, offset))
-			}
-		}
-
-		newDays := 0
-		for relPath := range targetDays {
-			if daysByPath[relPath] == nil {
-				newDays++
-			}
-		}
-		if len(daysByPath)+newDays > codexBatchRequestDayDirCap {
-			// Never register only the overlapping subset of a target. A match
-			// from that subset would be unsafe because an unplanned eligible
-			// day could contain a second physical rollout with the same ID.
-			continue
-		}
-		for relPath := range targetDays {
-			batchDay := daysByPath[relPath]
-			if batchDay == nil {
-				batchDay = &codexBatchDay{
-					relPath:            relPath,
-					year:               targetDays[relPath],
-					targetsBySessionID: make(map[string][]int),
-					matchesBySessionID: make(map[string]*codexBatchMatches),
-				}
-				daysByPath[relPath] = batchDay
-			}
-			batchDay.targetsBySessionID[state.sessionID] = append(batchDay.targetsBySessionID[state.sessionID], targetIndex)
-		}
+		registerCodexBatchTargetDays(daysByPath, &states[targetIndex], targetIndex)
 	}
 	days := make([]*codexBatchDay, 0, len(daysByPath))
 	for _, day := range daysByPath {
@@ -187,120 +196,208 @@ func findCodexSessionFilesByIDWithReaders(
 	sort.Slice(days, func(i, j int) bool {
 		return days[i].relPath > days[j].relPath
 	})
+	return days
+}
 
-	readDirCalls := 0
-	readDirExhausted := false
-	readDirFailed := false
-	boundedReadDir := func(path string) ([]os.DirEntry, error) {
-		if readDirCalls >= codexBatchRequestReadDirCap {
-			readDirExhausted = true
-			return nil, os.ErrInvalid
-		}
-		readDirCalls++
-		entries, err := readDir(path)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			readDirFailed = true
-		}
-		return entries, err
-	}
+// registerCodexBatchTargetDays records one target's eligible days into the
+// shared plan. A target whose days would push the batch past
+// codexBatchRequestDayDirCap is dropped whole rather than registered on a
+// partial window: matching from only the overlapping subset would be unsafe
+// because an unplanned eligible day could contain a second physical rollout
+// with the same ID.
+func registerCodexBatchTargetDays(daysByPath map[string]*codexBatchDay, state *codexBatchTarget, targetIndex int) {
+	targetDays := codexBatchTargetDays(state)
 
-	seenRoots := make(map[string]bool)
-	scanRoot := func(root string, years map[string]bool) {
-		for _, day := range days {
-			if readDirExhausted || readDirFailed {
-				return
-			}
-			if !years[day.year] {
-				continue
-			}
-			dayDir := filepath.Join(root, day.relPath)
-			entries, err := boundedReadDir(dayDir)
-			if err != nil {
-				continue
-			}
-			for _, entry := range entries {
-				if entry.IsDir() {
-					continue
-				}
-				sessionID, ok := lookupEntry(entry.Name(), day.targetsBySessionID)
-				if !ok {
-					continue
-				}
-				matches := day.matchesBySessionID[sessionID]
-				if matches == nil {
-					matches = &codexBatchMatches{seen: make(map[string]bool)}
-					day.matchesBySessionID[sessionID] = matches
-				}
-				if len(matches.paths) > 1 {
-					continue
-				}
-				path := filepath.Join(dayDir, entry.Name())
-				appendCodexRolloutMatch(path, matches.seen, &matches.paths)
-			}
+	newDays := 0
+	for relPath := range targetDays {
+		if daysByPath[relPath] == nil {
+			newDays++
 		}
 	}
+	if len(daysByPath)+newDays > codexBatchRequestDayDirCap {
+		return
+	}
+	for relPath := range targetDays {
+		batchDay := daysByPath[relPath]
+		if batchDay == nil {
+			batchDay = &codexBatchDay{
+				relPath:            relPath,
+				year:               targetDays[relPath],
+				targetsBySessionID: make(map[string][]int),
+				matchesBySessionID: make(map[string]*codexBatchMatches),
+			}
+			daysByPath[relPath] = batchDay
+		}
+		batchDay.targetsBySessionID[state.sessionID] = append(batchDay.targetsBySessionID[state.sessionID], targetIndex)
+	}
+}
 
+// codexBatchScanner reads the planned day directories under each search root at
+// most once, recording exact filename matches per day. A ReadDir error other
+// than a missing path, or crossing codexBatchRequestReadDirCap, aborts the whole
+// batch: filesystem uncertainty must omit telemetry rather than resolve from a
+// partially scanned ambiguity window.
+type codexBatchScanner struct {
+	readDir      func(string) ([]os.DirEntry, error)
+	lookupEntry  codexBatchEntryLookup
+	days         []*codexBatchDay
+	seenRoots    map[string]bool
+	readDirCalls int
+	exhausted    bool
+	failed       bool
+}
+
+// aborted reports whether the request-wide ReadDir budget was exhausted or a
+// non-missing ReadDir error was seen. Either makes collected matches unsafe.
+func (s *codexBatchScanner) aborted() bool {
+	return s.exhausted || s.failed
+}
+
+func (s *codexBatchScanner) boundedReadDir(path string) ([]os.DirEntry, error) {
+	if s.readDirCalls >= codexBatchRequestReadDirCap {
+		s.exhausted = true
+		return nil, os.ErrInvalid
+	}
+	s.readDirCalls++
+	entries, err := s.readDir(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.failed = true
+	}
+	return entries, err
+}
+
+// scan walks every merged search root and its one-level symlinked extra roots.
+// It returns true only when the scan completed within the ReadDir budget with
+// no non-missing directory error, i.e. the collected matches are authoritative.
+func (s *codexBatchScanner) scan(searchPaths []string) bool {
 	for _, mergedRoot := range mergeCodexSearchPaths(searchPaths) {
-		if readDirExhausted || readDirFailed {
+		if s.aborted() {
 			break
 		}
 		root := filepath.Clean(mergedRoot)
-		if !markCodexBatchRoot(root, seenRoots) {
+		if !markCodexBatchRoot(root, s.seenRoots) {
 			continue
 		}
 		// Probe/enumerate the root first so a missing configured path costs
 		// one bounded read rather than every planned day beneath it.
-		rootEntries, err := boundedReadDir(root)
+		rootEntries, err := s.boundedReadDir(root)
 		if err != nil {
 			continue
 		}
-		scanRoot(root, codexBatchRootYears(rootEntries))
-		if readDirExhausted || readDirFailed {
+		s.scanRoot(root, codexBatchRootYears(rootEntries))
+		if s.aborted() {
 			break
 		}
-		for _, entry := range rootEntries {
-			if readDirExhausted || readDirFailed {
-				break
-			}
-			if entry.Type()&os.ModeSymlink == 0 {
-				continue
-			}
-			name := entry.Name()
-			if codexBatchYearName(name) {
-				continue
-			}
-			extraRoot := filepath.Join(root, name)
-			if markCodexBatchRoot(extraRoot, seenRoots) {
-				extraEntries, err := boundedReadDir(extraRoot)
-				if err != nil {
-					continue
-				}
-				scanRoot(extraRoot, codexBatchRootYears(extraEntries))
-			}
+		s.scanExtraRoots(root, rootEntries)
+	}
+	return !s.aborted()
+}
+
+// scanExtraRoots follows one level of non-year symlinks beneath root, scanning
+// each newly seen physical extra root for the planned days.
+func (s *codexBatchScanner) scanExtraRoots(root string, rootEntries []os.DirEntry) {
+	for _, entry := range rootEntries {
+		if s.aborted() {
+			return
 		}
+		if entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		name := entry.Name()
+		if codexBatchYearName(name) {
+			continue
+		}
+		extraRoot := filepath.Join(root, name)
+		if !markCodexBatchRoot(extraRoot, s.seenRoots) {
+			continue
+		}
+		extraEntries, err := s.boundedReadDir(extraRoot)
+		if err != nil {
+			continue
+		}
+		s.scanRoot(extraRoot, codexBatchRootYears(extraEntries))
 	}
-	if readDirExhausted || readDirFailed {
-		// Matches collected before exhaustion are not authoritative: an
-		// unscanned root/day could contain a second physical candidate.
-		return found
+}
+
+// scanRoot records matches for every planned day that exists under root.
+func (s *codexBatchScanner) scanRoot(root string, years map[string]bool) {
+	for _, day := range s.days {
+		if s.aborted() {
+			return
+		}
+		if !years[day.year] {
+			continue
+		}
+		s.scanDay(root, day)
 	}
+}
+
+// scanDay reads one day directory and records each entry that names a target.
+func (s *codexBatchScanner) scanDay(root string, day *codexBatchDay) {
+	dayDir := filepath.Join(root, day.relPath)
+	entries, err := s.boundedReadDir(dayDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		s.recordDayEntry(dayDir, day, entry)
+	}
+}
+
+// recordDayEntry appends a matching rollout file to its target's day bucket,
+// stopping once a session already has more than one distinct physical path.
+func (s *codexBatchScanner) recordDayEntry(dayDir string, day *codexBatchDay, entry os.DirEntry) {
+	if entry.IsDir() {
+		return
+	}
+	sessionID, ok := s.lookupEntry(entry.Name(), day.targetsBySessionID)
+	if !ok {
+		return
+	}
+	matches := day.matchesBySessionID[sessionID]
+	if matches == nil {
+		matches = &codexBatchMatches{seen: make(map[string]bool)}
+		day.matchesBySessionID[sessionID] = matches
+	}
+	if len(matches.paths) > 1 {
+		return
+	}
+	path := filepath.Join(dayDir, entry.Name())
+	appendCodexRolloutMatch(path, matches.seen, &matches.paths)
+}
+
+// collectCodexBatchMatches folds each day's per-session matches back onto the
+// originating targets, preserving the ambiguity refusal by stopping once a
+// target accumulates a second distinct path.
+func collectCodexBatchMatches(states []codexBatchTarget, days []*codexBatchDay) {
 	for _, day := range days {
 		for sessionID, matches := range day.matchesBySessionID {
 			for _, targetIndex := range day.targetsBySessionID[sessionID] {
-				state := &states[targetIndex]
-				if len(state.matches) > 1 {
-					continue
-				}
-				for _, path := range matches.paths {
-					appendCodexRolloutMatch(path, state.seen, &state.matches)
-					if len(state.matches) > 1 {
-						break
-					}
-				}
+				addCodexBatchTargetMatches(&states[targetIndex], matches.paths)
 			}
 		}
 	}
+}
 
+// addCodexBatchTargetMatches folds one day's matched paths onto a target,
+// stopping at the ambiguity threshold of a second distinct physical path.
+func addCodexBatchTargetMatches(state *codexBatchTarget, paths []string) {
+	if len(state.matches) > 1 {
+		return
+	}
+	for _, path := range paths {
+		appendCodexRolloutMatch(path, state.seen, &state.matches)
+		if len(state.matches) > 1 {
+			return
+		}
+	}
+}
+
+// resolveCodexBatchResults returns the found path for every target with exactly
+// one match whose rollout session_meta cwd equals the requested workdir. Each
+// distinct path's cwd is read at most once.
+func resolveCodexBatchResults(states []codexBatchTarget, readSessionCWD func(string) string) map[string]string {
+	found := make(map[string]string)
 	cwdByPath := make(map[string]string)
 	for i := range states {
 		state := &states[i]

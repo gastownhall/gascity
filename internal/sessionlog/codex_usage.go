@@ -68,21 +68,16 @@ func ExtractCodexTailMetaFromSearchPaths(searchPaths []string, path string) (*Ta
 }
 
 func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool) *TailMeta {
-	var (
-		latestModel         string
-		usageModel          string
-		latestUsage         *codexUsageInfo
-		latestUsageTotal    int
-		hasLatestUsageTotal bool
-		usageModelsByTotal  = make(map[int]string)
-		malformedTail       bool
-		anchorFirstTotal    = truncated
-	)
+	scan := &codexTailScan{
+		truncated:          truncated,
+		anchorFirstTotal:   truncated,
+		usageModelsByTotal: make(map[int]string),
+	}
 	for i := 0; i < len(lines); i++ {
 		var entry codexRawEntry
 		if err := json.Unmarshal(lines[i], &entry); err != nil {
 			if i == len(lines)-1 && (i != 0 || !startsMidLine) {
-				malformedTail = true
+				scan.malformedTail = true
 			}
 			continue
 		}
@@ -92,67 +87,96 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 			continue
 		}
 		if entry.Type == "turn_context" && payload.Model != "" {
-			latestModel = payload.Model
+			scan.latestModel = payload.Model
 			continue
 		}
 		if entry.Type == "event_msg" && payload.Type == "token_count" && payload.Info != nil {
-			total := payload.Info.TotalTokenUsage.TotalTokens
-			if total > 0 {
-				if firstModel, seen := usageModelsByTotal[total]; seen {
-					if hasLatestUsageTotal && total == latestUsageTotal {
-						latestUsage = payload.Info
-						usageModel = firstModel
-					}
-					continue
-				}
-				usageModelsByTotal[total] = latestModel
-				if anchorFirstTotal {
-					// A tail-only read cannot tell whether its first cumulative
-					// total is new or a re-emission of a snapshot before the
-					// window. Keep it only as a duplicate anchor; assigning its
-					// usage to the current turn_context could relabel another
-					// model's work. A later distinct total is attributable again.
-					anchorFirstTotal = false
-					latestUsage = nil
-					usageModel = ""
-					hasLatestUsageTotal = false
-					continue
-				}
-				if truncated && latestModel == "" {
-					// Distinct totals after the anchor are attributable only when
-					// their producing turn_context is present in the retained
-					// window. Recording the empty association also prevents a
-					// later duplicate from being relabeled after a model appears.
-					continue
-				}
-				latestUsageTotal = total
-				hasLatestUsageTotal = true
-			} else {
-				hasLatestUsageTotal = false
-			}
-			latestUsage = payload.Info
-			usageModel = latestModel
+			scan.observeTokenCount(payload.Info)
 		}
 	}
+	return scan.result()
+}
 
-	model := latestModel
-	if latestUsage != nil {
+// codexTailScan folds Codex rollout tail entries into the latest model and the
+// latest attributable usage. A tail-only read keeps its first positive
+// cumulative total only as an unattributable duplicate anchor; a later distinct
+// total pairs only with an in-window turn_context, so usage never relabels
+// another model's work.
+type codexTailScan struct {
+	truncated           bool
+	latestModel         string
+	usageModel          string
+	latestUsage         *codexUsageInfo
+	latestUsageTotal    int
+	hasLatestUsageTotal bool
+	usageModelsByTotal  map[int]string
+	malformedTail       bool
+	anchorFirstTotal    bool
+}
+
+// observeTokenCount folds one non-nil token_count event payload into the scan.
+func (s *codexTailScan) observeTokenCount(info *codexUsageInfo) {
+	total := info.TotalTokenUsage.TotalTokens
+	if total <= 0 {
+		s.hasLatestUsageTotal = false
+		s.latestUsage = info
+		s.usageModel = s.latestModel
+		return
+	}
+	if firstModel, seen := s.usageModelsByTotal[total]; seen {
+		if s.hasLatestUsageTotal && total == s.latestUsageTotal {
+			s.latestUsage = info
+			s.usageModel = firstModel
+		}
+		return
+	}
+	s.usageModelsByTotal[total] = s.latestModel
+	if s.anchorFirstTotal {
+		// A tail-only read cannot tell whether its first cumulative total is new
+		// or a re-emission of a snapshot before the window. Keep it only as a
+		// duplicate anchor; assigning its usage to the current turn_context could
+		// relabel another model's work. A later distinct total is attributable
+		// again.
+		s.anchorFirstTotal = false
+		s.latestUsage = nil
+		s.usageModel = ""
+		s.hasLatestUsageTotal = false
+		return
+	}
+	if s.truncated && s.latestModel == "" {
+		// Distinct totals after the anchor are attributable only when their
+		// producing turn_context is present in the retained window. Recording the
+		// empty association also prevents a later duplicate from being relabeled
+		// after a model appears.
+		return
+	}
+	s.latestUsageTotal = total
+	s.hasLatestUsageTotal = true
+	s.latestUsage = info
+	s.usageModel = s.latestModel
+}
+
+// result assembles the TailMeta from the folded scan state, pairing usage with
+// the model from the same turn and deriving bounded context occupancy.
+func (s *codexTailScan) result() *TailMeta {
+	model := s.latestModel
+	if s.latestUsage != nil {
 		// Keep usage and model from the same turn. A later turn_context may
 		// select a new model before its first token_count arrives; pairing that
 		// model with the prior turn's usage would produce inconsistent context.
-		model = usageModel
+		model = s.usageModel
 	}
-	if model == "" && latestUsage == nil && !malformedTail {
+	if model == "" && s.latestUsage == nil && !s.malformedTail {
 		return nil
 	}
-	result := &TailMeta{Model: model, MalformedTail: malformedTail}
-	if latestUsage == nil {
+	result := &TailMeta{Model: model, MalformedTail: s.malformedTail}
+	if s.latestUsage == nil {
 		return result
 	}
 
 	contextWindow := 0
-	if latestUsage.ModelContextWindow != nil {
-		contextWindow = *latestUsage.ModelContextWindow
+	if s.latestUsage.ModelContextWindow != nil {
+		contextWindow = *s.latestUsage.ModelContextWindow
 	} else {
 		contextWindow = ModelContextWindow(model)
 	}
@@ -160,7 +184,7 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 		return result
 	}
 
-	inputTokens := latestUsage.LastTokenUsage.InputTokens
+	inputTokens := s.latestUsage.LastTokenUsage.InputTokens
 	if inputTokens < 0 {
 		inputTokens = 0
 	}
