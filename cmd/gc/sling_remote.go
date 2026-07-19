@@ -31,25 +31,18 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 	if dryRun {
 		return fail("unsupported_remote", "gc sling: --dry-run is not supported for a remote city")
 	}
-	var unsupported []string
-	for _, u := range []struct {
-		set  bool
-		flag string
-	}{
-		{doNudge, "--nudge"},
-		{merge != "", "--merge"},
-		{noConvoy, "--no-convoy"},
-		{owned, "--owned"},
-		{reassign, "--reassign"},
-		{onFormula != "", "--on"},
-		{noFormula, "--no-formula"},
-	} {
-		if u.set {
-			unsupported = append(unsupported, u.flag)
-		}
+	// --nudge and --on stay refused for a remote city. --nudge needs server-side
+	// delivery wiring. --on's per-child convoy expansion is local-only: the remote
+	// handler would attach the wisp to a convoy CONTAINER instead of each child (a
+	// silent orchestration divergence a Fable red-team caught), so a clear refusal
+	// is safer until the server expands containers on the attach path. The metadata
+	// flags (--merge/--no-convoy/--owned/--no-formula) are server-expressible and
+	// forwarded below.
+	if doNudge {
+		return fail("unsupported_remote", "gc sling: --nudge delivery for a remote city lands separately; sling without --nudge")
 	}
-	if len(unsupported) > 0 {
-		return fail("unsupported_remote", "gc sling: these flags are not supported for a remote city yet: "+strings.Join(unsupported, ", "))
+	if onFormula != "" {
+		return fail("unsupported_remote", "gc sling: --on for a remote city lands separately (per-child convoy expansion is local-only); attach the formula from the local city, or sling the bead without --on")
 	}
 
 	// A remote city cannot infer the default target from local rig config, so an
@@ -77,6 +70,11 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		ScopeKind: scopeKind,
 		ScopeRef:  scopeRef,
 		Force:     force,
+		Reassign:  reassign,
+		Merge:     merge,
+		NoConvoy:  noConvoy,
+		Owned:     owned,
+		NoFormula: noFormula,
 	}
 	if isFormula {
 		req.Formula = args[1]

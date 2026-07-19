@@ -295,18 +295,19 @@ func overridesFromConfig(cfgOverrides []config.OrderOverride) []orders.Override 
 	out := make([]orders.Override, len(cfgOverrides))
 	for i, override := range cfgOverrides {
 		out[i] = orders.Override{
-			Name:       override.Name,
-			Rig:        override.Rig,
-			Enabled:    override.Enabled,
-			Trigger:    override.Trigger,
-			Interval:   override.Interval,
-			Schedule:   override.Schedule,
-			Check:      override.Check,
-			On:         override.On,
-			Pool:       override.Pool,
-			Timeout:    override.Timeout,
-			Idempotent: override.Idempotent,
-			Env:        override.Env,
+			Name:         override.Name,
+			Rig:          override.Rig,
+			Enabled:      override.Enabled,
+			Trigger:      override.Trigger,
+			Interval:     override.Interval,
+			Schedule:     override.Schedule,
+			Check:        override.Check,
+			On:           override.On,
+			Pool:         override.Pool,
+			Timeout:      override.Timeout,
+			CheckTimeout: override.CheckTimeout,
+			Idempotent:   override.Idempotent,
+			Env:          override.Env,
 		}
 	}
 	return out

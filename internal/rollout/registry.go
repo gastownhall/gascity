@@ -34,6 +34,22 @@ var specs = []Spec{
 			"concurrent peer; gated for mixed-fleet rollout while beads#4682 is untagged.",
 	},
 	{
+		Key:            keyBeadsGuardedRelease,
+		Category:       InfraRollout,
+		ConfigPath:     "beads.guarded_release",
+		EnvOverride:    envBeadsGuardedRelease,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-furrj5", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-01-15",
+		VersionAnchor:  "BD_GUARDED_RELEASE_MIN_VERSION",
+		SelectsBetween: [2]string{"unconditional bd release (owner-blind bd update/unclaim)", "fence-guarded release (bd unclaim --if-assignee/--if-fence)"},
+		Justification: "Adopt beads guarded release verbs so an orchestrator release of a " +
+			"work bead fails a lost ownership race (a stale incarnation) instead of silently " +
+			"unclaiming a bead a fresh owner already re-claimed; gated for mixed-fleet rollout " +
+			"while the guarded-verb bd pin is untagged.",
+	},
+	{
 		Key:            keyDaemonFormulaV2,
 		Category:       InfraMigration,
 		ConfigPath:     "daemon.formula_v2",
@@ -65,17 +81,22 @@ func Specs() []Spec {
 	return out
 }
 
-// beadsConditionalWritesSpec returns the canonical Spec for the beads CAS gate
-// (zero Spec if unregistered). It reads the package-private slice directly (no
-// defensive copy needed for an internal, read-only lookup) so the resolver can
-// source names/semantics from the registry. When a second gate needs a lookup,
-// generalize this back to a by-key form — with one gate, a key parameter is a
-// constant in disguise.
-func beadsConditionalWritesSpec() Spec {
+// specByKey returns the canonical Spec for a registry Key (zero Spec if
+// unregistered). It reads the package-private slice directly (no defensive copy
+// needed for an internal, read-only lookup) so the resolver can source
+// names/semantics from the registry.
+func specByKey(key string) Spec {
 	for _, s := range specs {
-		if s.Key == keyBeadsConditionalWrites {
+		if s.Key == key {
 			return s
 		}
 	}
 	return Spec{}
 }
+
+// beadsConditionalWritesSpec returns the canonical Spec for the beads CAS gate.
+func beadsConditionalWritesSpec() Spec { return specByKey(keyBeadsConditionalWrites) }
+
+// beadsGuardedReleaseSpec returns the canonical Spec for the beads
+// guarded-release gate.
+func beadsGuardedReleaseSpec() Spec { return specByKey(keyBeadsGuardedRelease) }

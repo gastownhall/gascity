@@ -1426,3 +1426,48 @@ func newTestProvider(t *testing.T, dir string) *events.FileRecorder {
 	t.Cleanup(func() { _ = rec.Close() })
 	return rec
 }
+
+// TestFetchCityEventsSinglePageChronological pins the S3 keyset contract on
+// the CLI: the server serves seq-DESC pages (newest first) with v1 sq
+// cursors; gc events fetches ONE page (recent activity, pre-S3 parity — a
+// full drain of a 100MB+ event history would blow the command timeout) and
+// prints it chronologically (ascending seq), never following next_cursor.
+func TestFetchCityEventsSinglePageChronological(t *testing.T) {
+	page1 := []cliWireEvent{
+		{Actor: "gc", Seq: 6, Type: "e.t", Ts: time.Unix(1700000060, 0).UTC()},
+		{Actor: "gc", Seq: 5, Type: "e.t", Ts: time.Unix(1700000050, 0).UTC()},
+		{Actor: "gc", Seq: 4, Type: "e.t", Ts: time.Unix(1700000040, 0).UTC()},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, r *http.Request) {
+			if c := r.URL.Query().Get("cursor"); c != "" {
+				t.Errorf("gc events must not follow cursors, requested cursor %q", c)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("X-GC-Index", "6")
+			body := cityEventsListResponse(t, page1)
+			next := "v1:eyJrIjoic3EiLCJzIjo0fQ"
+			body.NextCursor = &next
+			writeJSONResponse(t, w, body)
+		},
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "")
+	if err != nil {
+		t.Fatalf("fetchCityEvents: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d events, want 3 (one page, cursor not followed)", len(got))
+	}
+	for i, item := range got {
+		if item.Seq != int64(i+4) {
+			t.Fatalf("event[%d].Seq = %d, want %d (chronological ascending)", i, item.Seq, i+4)
+		}
+	}
+}

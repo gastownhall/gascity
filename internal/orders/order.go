@@ -56,6 +56,13 @@ type Order struct {
 	// Timeout is the per-order timeout. Go duration string (e.g., "90s").
 	// Defaults to 60s for exec, 30s for formula.
 	Timeout string `toml:"timeout,omitempty"`
+	// CheckTimeout is the deadline for a condition trigger's `check` command
+	// (distinct from Timeout, which bounds the dispatched exec/formula). Go
+	// duration string. Defaults to 10s when unset. Raise it for checks that
+	// must query a slow backing store (e.g. a managed-Dolt work store at
+	// 1-2s per read): a check killed before it can prove its condition holds
+	// makes the order silently never fire (gastownhall/gascity ga-ocypq2).
+	CheckTimeout string `toml:"check_timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
 	// Idempotent marks an order whose dispatch is safe to repeat (a sweep/
@@ -106,24 +113,25 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string                `toml:"description,omitempty"`
-	Formula     string                `toml:"formula,omitempty"`
-	Exec        string                `toml:"exec,omitempty"`
-	Scope       string                `toml:"scope,omitempty"`
-	Trigger     string                `toml:"trigger,omitempty"`
-	Gate        string                `toml:"gate,omitempty"`
-	Interval    string                `toml:"interval,omitempty"`
-	Schedule    string                `toml:"schedule,omitempty"`
-	TZ          string                `toml:"tz,omitempty"`
-	Check       string                `toml:"check,omitempty"`
-	On          string                `toml:"on,omitempty"`
-	Pool        string                `toml:"pool,omitempty"`
-	Timeout     string                `toml:"timeout,omitempty"`
-	Enabled     *bool                 `toml:"enabled,omitempty"`
-	Idempotent  bool                  `toml:"idempotent,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	Params      map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases []string              `toml:"skip_aliases,omitempty"`
+	Description  string                `toml:"description,omitempty"`
+	Formula      string                `toml:"formula,omitempty"`
+	Exec         string                `toml:"exec,omitempty"`
+	Scope        string                `toml:"scope,omitempty"`
+	Trigger      string                `toml:"trigger,omitempty"`
+	Gate         string                `toml:"gate,omitempty"`
+	Interval     string                `toml:"interval,omitempty"`
+	Schedule     string                `toml:"schedule,omitempty"`
+	TZ           string                `toml:"tz,omitempty"`
+	Check        string                `toml:"check,omitempty"`
+	On           string                `toml:"on,omitempty"`
+	Pool         string                `toml:"pool,omitempty"`
+	Timeout      string                `toml:"timeout,omitempty"`
+	CheckTimeout string                `toml:"check_timeout,omitempty"`
+	Enabled      *bool                 `toml:"enabled,omitempty"`
+	Idempotent   bool                  `toml:"idempotent,omitempty"`
+	Env          map[string]string     `toml:"env,omitempty"`
+	Params       map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases  []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -132,23 +140,24 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description: d.Description,
-		Formula:     d.Formula,
-		Exec:        d.Exec,
-		Scope:       d.Scope,
-		Trigger:     trigger,
-		Interval:    d.Interval,
-		Schedule:    d.Schedule,
-		TZ:          d.TZ,
-		Check:       d.Check,
-		On:          d.On,
-		Pool:        d.Pool,
-		Timeout:     d.Timeout,
-		Enabled:     d.Enabled,
-		Idempotent:  d.Idempotent,
-		Env:         d.Env,
-		Params:      d.Params,
-		skipAliases: d.SkipAliases,
+		Description:  d.Description,
+		Formula:      d.Formula,
+		Exec:         d.Exec,
+		Scope:        d.Scope,
+		Trigger:      trigger,
+		Interval:     d.Interval,
+		Schedule:     d.Schedule,
+		TZ:           d.TZ,
+		Check:        d.Check,
+		On:           d.On,
+		Pool:         d.Pool,
+		Timeout:      d.Timeout,
+		CheckTimeout: d.CheckTimeout,
+		Enabled:      d.Enabled,
+		Idempotent:   d.Idempotent,
+		Env:          d.Env,
+		Params:       d.Params,
+		skipAliases:  d.SkipAliases,
 	}
 }
 
@@ -190,6 +199,25 @@ func (a *Order) TimeoutOrDefault() time.Duration {
 		return 300 * time.Second
 	}
 	return 30 * time.Second
+}
+
+// defaultConditionCheckTimeout is the condition trigger's check-command
+// deadline when the order does not set check_timeout. It is the single source
+// for that fallback: checkCondition uses it when ConditionTimeout is unset and
+// CheckTimeoutOrDefault returns it for an unset or invalid check_timeout.
+const defaultConditionCheckTimeout = 10 * time.Second
+
+// CheckTimeoutOrDefault returns the condition trigger's check-command
+// deadline: the parsed check_timeout, or defaultConditionCheckTimeout when
+// unset or unparseable. Used to populate TriggerOptions.ConditionTimeout so
+// a store-backed check gets enough time to prove its condition holds.
+func (a *Order) CheckTimeoutOrDefault() time.Duration {
+	if a.CheckTimeout != "" {
+		if d, err := time.ParseDuration(a.CheckTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultConditionCheckTimeout
 }
 
 // Parse decodes TOML data into an Order.
@@ -240,6 +268,21 @@ func Validate(a Order) error {
 	if a.Timeout != "" {
 		if _, err := time.ParseDuration(a.Timeout); err != nil {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
+		}
+	}
+	// Validate check_timeout if set. Unlike timeout, a non-positive value is
+	// also rejected: CheckTimeoutOrDefault silently reverts a zero or negative
+	// check_timeout to defaultConditionCheckTimeout, which would re-create the
+	// fixed-deadline condition starvation this field exists to prevent, so a
+	// typo like "60" (missing unit) or "0s" must fail at load instead of
+	// passing silently.
+	if a.CheckTimeout != "" {
+		d, err := time.ParseDuration(a.CheckTimeout)
+		if err != nil {
+			return fmt.Errorf("order %q: invalid check_timeout %q: %w", a.Name, a.CheckTimeout, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("order %q: check_timeout %q must be a positive duration", a.Name, a.CheckTimeout)
 		}
 	}
 	// Validate tz if set. A bad zone must fail loudly at load time; a silent

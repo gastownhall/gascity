@@ -3,13 +3,16 @@ package dashboardbff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestRunCensusSourceServesOnlyWarmAggregateCounts(t *testing.T) {
@@ -44,6 +47,74 @@ func TestRunCensusSourceRejectsUnknownCity(t *testing.T) {
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{}}})
 	if _, ok := p.RunCensus(context.Background(), "ghost"); ok {
 		t.Fatal("RunCensus accepted an unknown city")
+	}
+	if _, ok := p.RunProjection(context.Background(), "ghost"); ok {
+		t.Fatal("RunProjection accepted an unknown city")
+	}
+}
+
+func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.T) {
+	dir := t.TempDir()
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	previous := readRunColdLoad
+	readRunColdLoad = func(*runproj.Projector, string) error {
+		close(started)
+		<-release
+		return nil
+	}
+	t.Cleanup(func() { readRunColdLoad = previous })
+
+	p.Start(t.Context())
+	t.Cleanup(p.Stop)
+	select {
+	case <-started:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("background cold load did not start")
+	}
+
+	done := make(chan runproj.RunProjectionSnapshot, 1)
+	go func() {
+		projection, _ := p.RunProjection(context.Background(), "alpha")
+		done <- projection
+	}()
+
+	select {
+	case projection := <-done:
+		if projection.Ready || !projection.Partial || len(projection.Beads) != 0 {
+			t.Fatalf("cold projection = %+v, want empty partial warming snapshot", projection)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("RunProjection blocked on the unfinished cold load")
+	}
+}
+
+func TestRunProjectionSourceServesWarmBeadsAndDecodeMisses(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath,
+		runMoleculeEvent(1, "run-active", "test-formula", ""),
+		events.Event{Seq: 2, Type: events.BeadCreated, Payload: json.RawMessage(`{"status":"open"}`)},
+	)
+
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	t.Cleanup(p.Stop)
+	if census, ok := p.RunCensus(context.Background(), "alpha"); !ok || !census.Ready {
+		t.Fatalf("RunCensus = %+v, %v; want ready projection", census, ok)
+	}
+
+	projection, ok := p.RunProjection(context.Background(), "alpha")
+	if !ok {
+		t.Fatal("RunProjection reported a registered city as unknown")
+	}
+	if !projection.Ready || !projection.Partial || projection.DecodeMisses != 1 {
+		t.Fatalf("projection = %+v, want ready partial with one decode miss", projection)
+	}
+	if len(projection.Beads) != 1 || projection.Beads[0].ID != "run-active" {
+		t.Fatalf("projection beads = %+v, want only run-active", projection.Beads)
 	}
 }
 
@@ -127,6 +198,42 @@ func TestRunCensusSourceUsesIncrementalTailAfterColdLoad(t *testing.T) {
 	updated := tailer.runCensus(context.Background())
 	if updated.StatusCounts.Pending != 0 || updated.StatusCounts.Active != 1 {
 		t.Fatalf("incremental census = %+v, want pending=0 active=1", updated.StatusCounts)
+	}
+	projection := tailer.runProjection()
+	if !projection.Ready || len(projection.Beads) != 2 {
+		t.Fatalf("incremental projection = %+v, want ready root+step snapshot", projection)
+	}
+}
+
+func TestRunProjectionSourceKeepsColdLoadFailurePartialAfterIncrementalBuild(t *testing.T) {
+	tailer := &cityRunTailer{name: "alpha", readyCh: make(chan struct{})}
+	projector := runproj.NewProjector()
+	tailer.build(projector, nil, errors.New("cold replay failed"))
+
+	projector.Apply([]events.Event{
+		runMoleculeEvent(1, "run-one", "test-formula", ""),
+	})
+	tailer.build(projector, nil, nil)
+
+	projection := tailer.runProjection()
+	if !projection.Ready || !projection.Partial {
+		t.Fatalf("projection = %+v, want cold-load incompleteness to remain sticky", projection)
+	}
+	if len(projection.Beads) != 1 || projection.Beads[0].ID != "run-one" {
+		t.Fatalf("projection beads = %+v, want later incremental run without clearing partial", projection.Beads)
+	}
+}
+
+func TestRunProjectionGraceSourceUsesTailerUnknownRunTracker(t *testing.T) {
+	dir := t.TempDir()
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+
+	if !p.RunProjectionMissInGrace(context.Background(), "alpha", "run-new") {
+		t.Fatal("first warm projection miss was not granted the tailer's warming grace")
+	}
+	p.ForgetRunProjectionMiss(context.Background(), "alpha", "run-new")
+	if !p.RunProjectionMissInGrace(context.Background(), "alpha", "run-new") {
+		t.Fatal("forgotten projection miss did not start a fresh grace window")
 	}
 }
 

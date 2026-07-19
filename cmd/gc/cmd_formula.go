@@ -670,7 +670,7 @@ conflicting live workflow from the same source is an error.`,
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
@@ -798,6 +798,10 @@ conflicting live workflow from the same source is an error.`,
 				return nil
 			}
 
+			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+			}
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
@@ -805,12 +809,46 @@ conflicting live workflow from the same source is an error.`,
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
-				Title: title,
-				Vars:  cookVars,
-			})
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			var result *molecule.Result
+			if isGraphFormula {
+				// Stamp the run root with its store/scope identity before
+				// instantiating, exactly as the --attach branch does via
+				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
+				// graph.v2 run root carries no gc.root_store_ref/gc.scope_kind, and
+				// the dashboard run-detail projection rejects the whole run with 422
+				// invalid_snapshot (sr-xz9f).
+				storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
+				}
+				if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
+				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("decorate formulas v2 recipe: %w", err))
+				}
+				if graphRootKey != "" {
+					unlock := graphv2.LockKey(graphRootKey)
+					defer unlock()
+				}
+				result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+					Title:          title,
+					Vars:           cookVars,
+					IdempotencyKey: graphRootKey,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+			} else {
+				result, err = molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
+					Title: title,
+					Vars:  cookVars,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
@@ -885,8 +923,18 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 	return rootKey
 }
 
-func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, cliGraphrouteDeps(cityPath))
+func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	// cook does not route the workflow root to an agent, but rig-scoped step
+	// targets still need the invocation's rig context to resolve — the same
+	// context sling derives from its entry agent's qualified name. A rig-scoped
+	// rootStoreRef already supplies that context through the store-scope
+	// fallback in DecorateGraphWorkflowRecipeWithDefaultBinding (#4175); thread
+	// the already-resolved formulaScope.rig in explicitly as well so the cook
+	// call site states the rig context directly instead of relying solely on the
+	// store-ref encoding (empty QualifiedName so the root stays unrouted;
+	// MetadataOnly mirrors the no-session default binding).
+	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
@@ -1036,6 +1084,9 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 type formulaScope struct {
 	storeRoot   string
 	searchPaths []string
+	// rig is the resolved rig name ("" for city scope). Rig-scoped formula
+	// steps need this context to resolve bare rig-scoped targets during cook.
+	rig string
 }
 
 // resolveFormulaScope determines the rig (if any) under which a formula
@@ -1074,6 +1125,7 @@ func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaS
 	return formulaScope{
 		storeRoot:   resolveStoreScopeRoot(cityPath, rig.Path),
 		searchPaths: cfg.FormulaLayers.SearchPaths(rig.Name),
+		rig:         rig.Name,
 	}
 }
 

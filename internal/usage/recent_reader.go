@@ -32,7 +32,9 @@ const (
 // and report.Truncated is set. At most recentFactMaxRecords non-empty records
 // are decoded, newest first, bounding both Fact storage and de-duplication state
 // even when the byte tail contains millions of tiny lines. Facts are returned
-// in input order and de-duplicated by idempotency key (newest occurrence wins).
+// in input order and de-duplicated by idempotency key (first durable occurrence
+// wins). A retry must not move an already-recorded fact into a later accounting
+// window or replace its original measurement.
 // Missing files are an empty, available reading.
 func ReadRecentFacts(path string, maxBytes int64) ([]Fact, RecentReadReport, error) {
 	if maxBytes <= 0 {
@@ -68,7 +70,6 @@ func ReadRecentFacts(path string, maxBytes int64) ([]Fact, RecentReadReport, err
 		data = data[newline+1:]
 	}
 
-	seen := make(map[string]struct{})
 	facts := make([]Fact, 0, min(recentFactMaxRecords, len(data)/64))
 	processed := 0
 	end := len(data)
@@ -103,14 +104,6 @@ func ReadRecentFacts(path string, maxBytes int64) ([]Fact, RecentReadReport, err
 			report.Malformed++
 			continue
 		}
-		if fact.IdempotencyKey == "" {
-			facts = append(facts, fact)
-			continue
-		}
-		if _, duplicate := seen[fact.IdempotencyKey]; duplicate {
-			continue
-		}
-		seen[fact.IdempotencyKey] = struct{}{}
 		facts = append(facts, fact)
 	}
 	if processed == recentFactMaxRecords && len(bytes.TrimSpace(data[:end])) > 0 {
@@ -119,5 +112,18 @@ func ReadRecentFacts(path string, maxBytes int64) ([]Fact, RecentReadReport, err
 	for left, right := 0, len(facts)-1; left < right; left, right = left+1, right-1 {
 		facts[left], facts[right] = facts[right], facts[left]
 	}
+	seen := make(map[string]struct{}, len(facts))
+	retained := 0
+	for _, fact := range facts {
+		if fact.IdempotencyKey != "" {
+			if _, duplicate := seen[fact.IdempotencyKey]; duplicate {
+				continue
+			}
+			seen[fact.IdempotencyKey] = struct{}{}
+		}
+		facts[retained] = fact
+		retained++
+	}
+	facts = facts[:retained]
 	return facts, report, nil
 }

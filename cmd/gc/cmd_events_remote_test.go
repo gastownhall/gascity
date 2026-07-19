@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 )
 
@@ -81,9 +82,12 @@ func TestShouldUseLocalCityEventsFallback_RemoteScopeNeverReadsJsonl(t *testing.
 	}
 }
 
-// gc events under a remote context (no --api) is refused by the capability gate
-// (via resolveDashboardContext -> resolveCity), never silently resolved local.
-func TestResolveEventsScope_RemoteContextGated(t *testing.T) {
+// gc events under a remote --context now streams from the hosted city
+// (previously refused with "does not support a remote city"). The scope carries
+// a pre-built authenticated genclient (bearer/TLS/401-remint, backed by the
+// no-timeout stream client) and the context's city name, so
+// `gc --context prod events --follow` works as the runbook documents.
+func TestResolveEventsScope_RemoteContextStreams(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	var out, errb bytes.Buffer
 	if code := doContextAdd(clientcontext.Context{Name: "prod", URL: "https://box:9443", City: "mc"}, &out, &errb); code != 0 {
@@ -93,8 +97,32 @@ func TestResolveEventsScope_RemoteContextGated(t *testing.T) {
 	contextFlag = "prod"
 	t.Cleanup(func() { contextFlag = prev })
 
-	if _, err := resolveEventsScope(""); err == nil ||
-		!strings.Contains(err.Error(), "does not support a remote city") {
-		t.Fatalf("gc events under a remote context must be gated, got %v", err)
+	scope, err := resolveEventsScope("")
+	if err != nil {
+		t.Fatalf("gc events under a remote context should now resolve, got %v", err)
+	}
+	if scope.gen == nil {
+		t.Fatal("remote events scope must carry an authenticated genclient")
+	}
+	if scope.cityName != "mc" {
+		t.Fatalf("cityName = %q, want mc", scope.cityName)
+	}
+}
+
+// TestDoEventsRotate_RefusesRemote proves rotate (a mutation) is refused under a
+// remote --context target rather than routed through the read-only events client
+// (which would 401 on a hardened city). The read events subcommands still stream.
+func TestDoEventsRotate_RefusesRemote(t *testing.T) {
+	gen, err := gcapi.NewRemoteEventsClient("https://box:9443", gcapi.RemoteOptions{})
+	if err != nil {
+		t.Fatalf("NewRemoteEventsClient: %v", err)
+	}
+	scope := eventsAPIScope{apiURL: "https://box:9443", cityName: "mc", gen: gen}
+	var out, errb bytes.Buffer
+	if code := doEventsRotate(scope, false, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "not supported for a remote city") {
+		t.Fatalf("stderr = %q, want remote-rotate refusal", errb.String())
 	}
 }

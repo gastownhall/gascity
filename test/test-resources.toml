@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 528
-baseline_files = 154
+baseline_calls = 533
+baseline_files = 158
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 441
-baseline_files = 158
+baseline_calls = 440
+baseline_files = 157
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 401
-baseline_files = 108
+baseline_calls = 405
+baseline_files = 111
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 287
-baseline_files = 113
+baseline_calls = 286
+baseline_files = 112
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4332
-baseline_files = 200
+baseline_calls = 4350
+baseline_files = 203
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-80po0c.2.3"
@@ -77,7 +77,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 284
+baseline_calls = 285
 baseline_files = 43
 reported_calls = 98
 reported_files = 13
@@ -103,8 +103,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 300
-baseline_files = 66
+baseline_calls = 318
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-80po0c.2.2"
@@ -194,6 +194,17 @@ expires = "2026-10-01"
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
+owner = "TestDockerSessionProtocol"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.23.1"
+invariant = "Docker session adapter protocol proof is a checked Medium owner"
+resource_owner = "the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake"
+migration_target = "W6"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
 owner = "TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 resources = ["subprocess"]
 owner_bead = "ga-80po0c.2.1"
@@ -239,8 +250,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 399
-baseline_files = 107
+baseline_calls = 402
+baseline_files = 109
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -252,8 +263,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 287
-baseline_files = 113
+baseline_calls = 286
+baseline_files = 112
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
@@ -265,10 +276,10 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4326
-baseline_files = 200
-reported_calls = 4339
-reported_files = 199
+baseline_calls = 4344
+baseline_files = 203
+reported_calls = 4348
+reported_files = 200
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners restore or eliminate every process-environment mutation"
@@ -278,7 +289,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 284
+baseline_calls = 285
 baseline_files = 43
 reported_calls = 284
 reported_files = 43
@@ -304,8 +315,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 300
-baseline_files = 66
+baseline_calls = 318
+baseline_files = 67
 reported_calls = 300
 reported_files = 66
 owner_bead = "ga-80po0c.2.2"

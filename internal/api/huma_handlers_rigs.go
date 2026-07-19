@@ -306,14 +306,20 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 
 	// Manifest sink: record-then-create. Each checkpoint persists the created
 	// resource onto the durable record (crash recovery) AND updates the captured
-	// manifest the rollback path tears down (runtime recovery). Persist errors
-	// are logged, not fatal — a missed persist only widens the boot-sweep's job.
+	// manifest the rollback path tears down (runtime recovery). The persist error
+	// is returned to ProvisionRigFromGit, which fails closed at the pre-clone
+	// checkpoint (a missed created_dir persist would leave an un-manifested clone
+	// the boot sweep and re-clone pre-drop cannot discover, wedging the name) and
+	// treats the post-init checkpoint as non-fatal. The reqID-tagged log stays for
+	// operability regardless of which checkpoint the caller is at.
 	var manifest RigProvisionManifest
-	onManifest := func(m RigProvisionManifest) {
+	onManifest := func(m RigProvisionManifest) error {
 		manifest = m
 		if err := persistManifest(store, entry.beadID, m); err != nil {
 			log.Printf("api: rig create %s: %v", reqID, err)
+			return err
 		}
+		return nil
 	}
 
 	rigCfg := config.Rig{

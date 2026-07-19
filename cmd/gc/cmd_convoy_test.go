@@ -2448,3 +2448,35 @@ func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
 		t.Errorf("stderr missing workflow-convoy route log:\n%s", stderr.String())
 	}
 }
+
+func TestRouteConvoyStatus_RemoteWorkflowConvoyNoLocalFallback(t *testing.T) {
+	// A REMOTE city is authoritative: a workflow/graph convoy the remote API
+	// cannot render (empty Convoy.ID) must surface as a hard remote error, never
+	// fall back to the operator's LOCAL store (gate G1). This is the regression
+	// guard for the fallbackAfterFetch sentinel bypassing the remote no-fallback
+	// gate — the local store below is fully resolvable, so a wrong fallback would
+	// render from it and exit 0.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{}) //nolint:errcheck // empty workflow-convoy body
+	}))
+	defer srv.Close()
+	c, err := api.NewRemoteCityScopedClient(srv.URL, "test-city", api.RemoteOptions{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("NewRemoteCityScopedClient: %v", err)
+	}
+
+	cityPath := writeConvoyTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	var stdout, stderr bytes.Buffer
+	code := routeConvoyStatus(cityPath, "gc-wf-1", c, "", false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("remote workflow-convoy status must not exit 0 (local fallback happened):\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "route=fallback") {
+		t.Errorf("remote client must not take the local fallback path:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api reason=error") {
+		t.Errorf("expected route=api reason=error for a remote workflow-convoy:\n%s", stderr.String())
+	}
+}

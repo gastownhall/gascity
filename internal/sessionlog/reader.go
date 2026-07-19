@@ -914,96 +914,22 @@ const codexByIDDayDirCap = 370
 // the session_meta payload.id, so a captured session id keys the file
 // directly — including resumed sessions, which APPEND to the original
 // rollout whose filename timestamp predates any later wake. Local-day dirs
-// (same year/month/day layout and one-level symlinked extra roots as
-// collectCodexRolloutsNear) from one day before notBefore through one day
-// after notAfter are enumerated newest-first, capped at codexByIDDayDirCap
-// per root; candidates match by FILENAME ONLY (no file opens), deduplicate
-// by physical identity (keeping the first lexical path so the paired
-// extractor's lexical containment validation still passes), and multiple
-// distinct physical matches are refused as ambiguous. The single match is
-// confirmed via the session_meta cwd exactly like FindCodexSessionFileNear
-// before being returned; empty inputs or a zero notAfter return "".
+// from one day before notBefore through one day after notAfter are enumerated
+// newest-first and capped at codexByIDDayDirCap per root. For a UUIDv7 session
+// ID, the encoded creation day plus or minus two local calendar days is also
+// eligible so adopted sessions whose rollout predates their bead remain
+// attributable. Candidates match by filename, deduplicate by physical
+// identity, refuse ambiguity, and require an exact session_meta cwd match.
 func FindCodexSessionFileByID(searchPaths []string, workDir, sessionID string, notBefore, notAfter time.Time) string {
-	workDir = strings.TrimSpace(workDir)
-	sessionID = strings.TrimSpace(sessionID)
-	if workDir == "" || sessionID == "" || notAfter.IsZero() {
-		return ""
-	}
-	suffix := "-" + sessionID + ".jsonl"
-	firstDay := startOfLocalDay(notBefore.In(time.Local)).AddDate(0, 0, -1)
-	lastDay := startOfLocalDay(notAfter.In(time.Local)).AddDate(0, 0, 1)
-	if lastDay.Before(firstDay) {
-		return ""
-	}
-	var matches []string
-	seen := make(map[string]bool)
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		collectCodexRolloutsByID(root, suffix, firstDay, lastDay, true, seen, &matches)
-		if len(matches) > 1 {
-			return ""
-		}
-	}
-	if len(matches) != 1 {
-		return ""
-	}
-	if codexSessionCWD(matches[0]) != workDir {
-		return ""
-	}
-	return matches[0]
-}
-
-// collectCodexRolloutsByID appends rollouts whose filename carries the
-// "rollout-" prefix and the keyed "-<sessionID>.jsonl" suffix under one
-// codex root, deduplicated by physical identity via appendCodexRolloutMatch
-// (seen is shared across roots by the caller). Day dirs are scanned newest
-// first so the per-root codexByIDDayDirCap drops the oldest days of an
-// oversized range. followExtraRoots permits one level of recursion into
-// symlinked non-date roots, mirroring collectCodexRolloutsNear.
-func collectCodexRolloutsByID(root, suffix string, firstDay, lastDay time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string) {
-	scanned := 0
-	for day := lastDay; !day.Before(firstDay) && scanned < codexByIDDayDirCap; day = day.AddDate(0, 0, -1) {
-		scanned++
-		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-		entries, err := os.ReadDir(dayDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
-				continue
-			}
-			appendCodexRolloutMatch(filepath.Join(dayDir, name), seen, matches)
-			if len(*matches) > 1 {
-				return
-			}
-		}
-	}
-	if !followExtraRoots {
-		return
-	}
-	rootEntries, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	for _, e := range rootEntries {
-		if e.Type()&os.ModeSymlink == 0 {
-			continue
-		}
-		name := e.Name()
-		if len(name) == 4 && name >= "2000" && name <= "2099" {
-			continue
-		}
-		// os.ReadDir follows the symlink on its own; non-directory or
-		// dangling links simply fail every ReadDir in the recursion.
-		collectCodexRolloutsByID(filepath.Join(root, name), suffix, firstDay, lastDay, false, seen, matches)
-		if len(*matches) > 1 {
-			return
-		}
-	}
+	const key = "session"
+	found := FindCodexSessionFilesByID(searchPaths, []CodexSessionTarget{{
+		Key:       key,
+		WorkDir:   workDir,
+		SessionID: sessionID,
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+	}})
+	return found[key]
 }
 
 // codexRolloutFilenameTime parses the local-time timestamp embedded in a

@@ -32,6 +32,44 @@ type fileData struct {
 	// any counter a prior writer could have issued (see
 	// applyBeadRevisionsSealed).
 	RevisionsSealed bool `json:"revisions_sealed,omitempty"`
+	// Fences persists each bead's ClaimFence out of band, because
+	// Bead.ClaimFence is json:"-" and never survives the on-disk []Bead. Without
+	// it every reloadFromDisk would reset all fences to 0, so a guarded release
+	// holding an older fence could no longer match. Unlike Revisions this needs
+	// no sealed/floor re-seed: a fence bumps only on ownership transitions (not
+	// on every write), so a legacy binary dropping the map resets fences to 0,
+	// which is FAIL-SAFE — a stale guard sees a mismatch and refuses, never
+	// wrongly succeeds. Absent (legacy files) ≡ all zero.
+	Fences map[string]int64 `json:"fences,omitempty"`
+}
+
+// beadFences extracts the out-of-band ClaimFence map for persistence. Zero
+// fences are omitted (absent ≡ 0 on reload), so legacy files round-trip.
+func beadFences(beads []Bead) map[string]int64 {
+	fences := make(map[string]int64, len(beads))
+	for _, b := range beads {
+		if b.ClaimFence != 0 {
+			fences[b.ID] = b.ClaimFence
+		}
+	}
+	if len(fences) == 0 {
+		return nil
+	}
+	return fences
+}
+
+// applyBeadFences stamps persisted fences back onto beads decoded from disk,
+// whose ClaimFence fields are all 0 because of the json:"-" tag. Beads with no
+// entry keep fence 0, matching files that predate the fences map.
+func applyBeadFences(beads []Bead, fences map[string]int64) {
+	if len(fences) == 0 {
+		return
+	}
+	for i := range beads {
+		if f, ok := fences[beads[i].ID]; ok {
+			beads[i].ClaimFence = f
+		}
+	}
 }
 
 // beadRevisions extracts the out-of-band revision map for persistence. Zero
@@ -166,6 +204,7 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
 	applyBeadRevisionsSealed(&fd)
+	applyBeadFences(fd.Beads, fd.Fences)
 	store := &FileStore{
 		MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps),
 		fs:       fs,
@@ -203,6 +242,7 @@ func (fs *FileStore) reloadFromDisk() error {
 		return fmt.Errorf("reloading file store: %w", err)
 	}
 	applyBeadRevisionsSealed(&fd)
+	applyBeadFences(fd.Beads, fd.Fences)
 	fs.restoreFrom(fd.Seq, fd.Beads, fd.Deps)
 	return nil
 }
@@ -671,7 +711,7 @@ func (fs *FileStore) save() error {
 	seq, beads, deps := fs.snapshot()
 	fs.mu.Unlock()
 
-	fd := fileData{Seq: seq, Beads: beads, Deps: deps, Revisions: beadRevisions(beads), RevisionsSealed: true}
+	fd := fileData{Seq: seq, Beads: beads, Deps: deps, Revisions: beadRevisions(beads), RevisionsSealed: true, Fences: beadFences(beads)}
 	data, err := json.MarshalIndent(fd, "", "  ")
 	if err != nil {
 		return fmt.Errorf("saving file store: %w", err)

@@ -565,10 +565,20 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
-func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
+func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+		}
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return nil, humaResolveError(err)
 	}
 
 	intent := input.Body.Intent
@@ -612,10 +622,20 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
-func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
+func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+		}
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return nil, humaResolveError(err)
 	}
 
 	reqID, reqIDErr := newRequestID()

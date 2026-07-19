@@ -142,6 +142,12 @@ func ensureInstanceToken(env map[string]string) (map[string]string, error) {
 		}
 		cloned["GC_INSTANCE_TOKEN"] = token
 	}
+	// Keep BEADS_HOLDER_TOKEN aligned to GC_INSTANCE_TOKEN. Managed starts set
+	// both via session.RuntimeEnv, but this backstop is the unmanaged/legacy path
+	// where GC_INSTANCE_TOKEN can be minted (or arrive) without a matching holder
+	// token — a divergent or absent holder token is a silent actor-only downgrade
+	// the template-inspecting gate cannot see (ownership-fencing DESIGN §2.4).
+	cloned["BEADS_HOLDER_TOKEN"] = cloned["GC_INSTANCE_TOKEN"]
 	return cloned, nil
 }
 

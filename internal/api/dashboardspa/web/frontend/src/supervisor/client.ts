@@ -432,14 +432,42 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         after === undefined ? undefined : { after },
       );
     },
-    listSessions(cityName) {
-      return unwrapSupervisorResult<ListBodySessionResponse>(
-        getV0CityByCityNameSessions({
-          client,
-          path: { cityName },
-        }) as Promise<SupervisorResult<ListBodySessionResponse>>,
-        'gc supervisor sessions response was empty',
-      );
+    async listSessions(cityName) {
+      // The dashboard session views want every session. Walk the keyset pages
+      // until the server stops minting next_cursor and merge them, so a fleet
+      // larger than one server-cap page is fully listed instead of silently
+      // truncated at the first page. Each page requests the 1000-row server cap.
+      // partial/partial_errors are OR-merged across pages so a backend failure
+      // on any page still trips the partial-notice consumers (entityLinks).
+      const merged: NonNullable<ListBodySessionResponse['items']> = [];
+      const partialErrors: string[] = [];
+      let total = 0;
+      let partial = false;
+      let cursor: string | undefined;
+      for (;;) {
+        const page = await unwrapSupervisorResult<ListBodySessionResponse>(
+          getV0CityByCityNameSessions({
+            client,
+            path: { cityName },
+            query: cursor === undefined ? { limit: 1000 } : { limit: 1000, cursor },
+          }) as Promise<SupervisorResult<ListBodySessionResponse>>,
+          'gc supervisor sessions response was empty',
+        );
+        if (page.items) merged.push(...page.items);
+        if (page.partial) partial = true;
+        if (page.partial_errors) partialErrors.push(...page.partial_errors);
+        total = page.total;
+        const next = page.next_cursor;
+        // Stop at the last page. The equal-cursor guard is a safety net against
+        // a server that fails to advance the cursor, so the walk can never spin
+        // forever on a degenerate response.
+        if (next === undefined || next === '' || next === cursor) break;
+        cursor = next;
+      }
+      const result: ListBodySessionResponse = { items: merged, total };
+      if (partial) result.partial = true;
+      if (partialErrors.length > 0) result.partial_errors = partialErrors;
+      return result;
     },
     sessionPending(cityName, sessionId) {
       return unwrapSupervisorResult<SessionPendingResponse>(
