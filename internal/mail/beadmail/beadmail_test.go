@@ -1406,9 +1406,18 @@ func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
 			t.Fatalf("results[%d].Err = %v", i, r.Err)
 		}
 	}
+	// Retention contract: matched messages are closed, not destroyed, so the
+	// bead stays retrievable and its body stays readable (see #4422).
 	for _, id := range []string{matchingA.ID, matchingB.ID} {
-		if _, err := base.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after archive: %v, want the bead retained", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("archived message %s status = %q, want closed", id, got.Status)
+		}
+		if got.Description == "" {
+			t.Fatalf("archived message %s lost its body, want it retained", id)
 		}
 	}
 	got, err := base.Get(other.ID)

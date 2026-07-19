@@ -409,8 +409,9 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	return matches, nil
 }
 
-// ArchiveMatching deletes open messages selected by filter without per-message
-// lookups after the candidate list has already verified them.
+// ArchiveMatching archives open messages selected by filter without per-message
+// lookups after the candidate list has already verified them. Matched beads are
+// closed rather than deleted, so their bodies stay readable.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
 	candidates, err := p.ArchiveCandidates(filter)
 	if err != nil {
@@ -426,7 +427,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Delete(id); err != nil {
+		if err := p.store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -507,7 +508,7 @@ func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
-// ArchiveMany archives a batch of messages by deleting each bead eagerly,
+// ArchiveMany archives a batch of messages by closing each bead eagerly,
 // preserving per-id error reporting that matches [Provider.Archive].
 func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(ids) == 0 {
