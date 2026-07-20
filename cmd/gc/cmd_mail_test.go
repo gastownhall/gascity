@@ -3516,20 +3516,35 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	}
 }
 
-func TestMailCheckInjectLeavesTruncatedAutoHandoffMessages(t *testing.T) {
+// TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow is the deliberate
+// invariant flip of the former TestMailCheckInjectLeavesTruncatedAutoHandoffMessages.
+// That test pinned the bug: a priority-tagged restart handoff arriving BEHIND a
+// full window of ordinary mail was clamped out of the injection preview (never
+// surfaced, never archived). With the priority-sort-before-clamp patch (handoff
+// mail tagged priority:1 at the cmd_handoff send sites + sortMailByPriority run
+// before both the display and archive clamps), a priority:1 handoff now floats
+// into the window: it is injected AND archived, while a lower-priority ordinary
+// message is the one clamped out and left open. mail.Message.Priority is
+// otherwise unwritten, so ordinary all-priority-0 mail keeps arrival order.
+func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
+	ordinaryIDs := make([]string, 0, mailInjectMaxMessages)
 	for i := 0; i < mailInjectMaxMessages; i++ {
-		if _, err := mp.Send("human", "mayor", fmt.Sprintf("ordinary-%d", i), "still open"); err != nil {
+		m, err := mp.Send("human", "mayor", fmt.Sprintf("ordinary-%d", i), "still open")
+		if err != nil {
 			t.Fatalf("Send ordinary %d: %v", i, err)
 		}
+		ordinaryIDs = append(ordinaryIDs, m.ID)
 	}
+	// A restart handoff, tagged priority:1 (as the cmd_handoff send sites now do),
+	// arriving AFTER a full window of ordinary mail.
 	auto, err := store.Create(beads.Bead{
 		Title:    "context cycle",
 		Type:     "message",
 		Assignee: "mayor",
 		From:     "mayor",
-		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel, "priority:1"},
 	})
 	if err != nil {
 		t.Fatalf("Create auto handoff: %v", err)
@@ -3540,15 +3555,22 @@ func TestMailCheckInjectLeavesTruncatedAutoHandoffMessages(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), auto.ID) {
-		t.Fatalf("auto handoff id %s should not appear in truncated injection:\n%s", auto.ID, stdout.String())
+	// The priority:1 handoff now floats into the injection window...
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("priority:1 auto handoff id %s should float into the injection window:\n%s", auto.ID, stdout.String())
 	}
-	b, err := store.Get(auto.ID)
+	// ...and is archived (deleted) after injection.
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("priority:1 auto handoff should be archived after injection, got err=%v", err)
+	}
+	// The lowest-ranked ordinary message is the one clamped out — still open.
+	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
+	b, err := store.Get(clampedOut)
 	if err != nil {
-		t.Fatalf("truncated auto handoff mail should remain: %v", err)
+		t.Fatalf("clamped-out ordinary mail should remain: %v", err)
 	}
 	if b.Status != "open" {
-		t.Fatalf("truncated auto handoff status = %q, want open", b.Status)
+		t.Fatalf("clamped-out ordinary mail status = %q, want open", b.Status)
 	}
 }
 

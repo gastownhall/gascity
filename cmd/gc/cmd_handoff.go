@@ -253,7 +253,7 @@ func doHandoff(store, sessStore beads.Store, rec events.Recorder, dops drainOps,
 func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
-	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", nil, stderr)
+	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return handoffOutcome{code: 1}
 	}
@@ -299,6 +299,7 @@ func doHandoffAuto(store, sessStore beads.Store, rec events.Recorder, sessionAdd
 	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
+		"priority:1",
 	}, stderr)
 	if !ok {
 		return 1
@@ -414,7 +415,7 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
-	b, ok := createHandoffMail(store, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", nil, stderr)
+	b, ok := createHandoffMail(store, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return 1
 	}
