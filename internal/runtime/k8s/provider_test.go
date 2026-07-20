@@ -372,18 +372,19 @@ func TestNudgePropagatesTransportError(t *testing.T) {
 	}
 }
 
-// TestSendKeysPropagatesTransportError mirrors TestNudgePropagatesTransportError
-// for SendKeys (#4389), including the ErrSessionNotFound distinction.
-func TestSendKeysPropagatesTransportError(t *testing.T) {
+// TestSendKeysMissingSessionIsNoOp verifies SendKeys honors the documented
+// best-effort contract (runtime.go SendKeys_MissingSession): a missing pod
+// (ErrSessionNotFound at the carrier) is a no-op returning nil, not an error.
+// This is the deliberate asymmetry with Nudge (#4389/#4405): SendKeys is
+// best-effort on a gone session, while a genuine transport failure to a live
+// pod still propagates (see TestSendKeysExecStreamFailureIsNotErrSessionNotFound).
+func TestSendKeysMissingSessionIsNoOp(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 
 	err := p.SendKeys("gc-missing-agent", "Down", "Enter")
-	if err == nil {
-		t.Fatal("SendKeys: expected error for missing pod, got nil")
-	}
-	if !errors.Is(err, runtime.ErrSessionNotFound) {
-		t.Errorf("SendKeys missing-pod error = %v, want errors.Is(..., runtime.ErrSessionNotFound)", err)
+	if err != nil {
+		t.Fatalf("SendKeys: expected nil for missing pod (best-effort contract), got %v", err)
 	}
 }
 

@@ -536,9 +536,14 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.carrier().Nudge(context.Background(), name, content)
 }
 
-// SendKeys sends bare keystrokes to the tmux session.
+// SendKeys sends bare keystrokes to the tmux session. Best-effort on a
+// missing session (contract: no-op), but a genuine transport failure to a
+// live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	return p.carrier().SendKeys(context.Background(), name, keys...)
+	if err := p.carrier().SendKeys(context.Background(), name, keys...); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+		return err
+	}
+	return nil
 }
 
 // RunLive re-applies session_live commands. Not yet supported for K8s.
