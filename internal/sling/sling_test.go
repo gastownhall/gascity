@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2816,6 +2817,181 @@ func TestSourceWorkflowLockScopeUsesStorePath(t *testing.T) {
 		Cfg:      cfg,
 	}); got != wantShared {
 		t.Fatalf("rig scope = %q, want shared helper scope %q", got, wantShared)
+	}
+}
+
+type sourceWorkflowListFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s sourceWorkflowListFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(t *testing.T) {
+	sourceStore := beads.NewMemStore()
+	healthyStore := beads.NewMemStore()
+	root, err := healthyStore.Create(beads.Bead{
+		ID:     "wf-existing",
+		Title:  "existing workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	var warnings []string
+	deps := SlingDeps{
+		Store:    sourceStore,
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: sourceStore, StoreRef: "city:test"},
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: errors.New("schema v54 has no revision")}, StoreRef: "rig:stale"},
+				{Store: healthyStore, StoreRef: "rig:healthy"},
+			}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(storeRef string, err error) {
+			warnings = append(warnings, storeRef+": "+err.Error())
+		},
+	}
+
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source")
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("conflicting workflow IDs = %v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "rig:stale") || !strings.Contains(warnings[0], "revision") {
+		t.Fatalf("scan warnings = %q, want one warning for rig:stale revision failure", warnings)
+	}
+}
+
+func TestListSourceWorkflowRootsKeepsSourceStoreListFailureStrict(t *testing.T) {
+	readErr := errors.New("source store read failed")
+	var warned bool
+	deps := SlingDeps{
+		Store:    sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr},
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr}, StoreRef: "city:test"},
+				{Store: beads.NewMemStore(), StoreRef: "rig:healthy"},
+			}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(string, error) { warned = true },
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want source store error %v", err, readErr)
+	}
+	if warned {
+		t.Fatal("source store failure was downgraded to a warning")
+	}
+}
+
+func TestListSourceWorkflowRootsScansAlreadyOpenSourceStoreWhenListerOmitsIt(t *testing.T) {
+	sourceStore := beads.NewMemStore()
+	root, err := sourceStore.Create(beads.Bead{
+		ID:     "wf-selected",
+		Title:  "selected-store workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	deps := SlingDeps{
+		Store:    sourceStore,
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: beads.NewMemStore(), StoreRef: "rig:healthy"}}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(string, error) {},
+	}
+
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source")
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError from already-open source store", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("conflicting workflow IDs = %v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+}
+
+func TestListSourceWorkflowRootsKeepsNonSourceFailureStrictWithoutWarningSink(t *testing.T) {
+	readErr := errors.New("unreported stale store")
+	deps := SlingDeps{
+		Store:    beads.NewMemStore(),
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: beads.NewMemStore(), StoreRef: "city:test"},
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr}, StoreRef: "rig:stale"},
+			}, nil
+		},
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want unreported scan failure %v", err, readErr)
+	}
+}
+
+func TestListSourceWorkflowRootsFailsWhenSelectedAndNonSourceScansFail(t *testing.T) {
+	selectedErr := errors.New("selected store failed")
+	var warnings []string
+	deps := SlingDeps{
+		Store:    sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: selectedErr},
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: errors.New("stale store failed")}, StoreRef: "rig:stale"},
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: selectedErr}, StoreRef: "city:test"},
+			}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(storeRef string, _ error) {
+			warnings = append(warnings, storeRef)
+		},
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want selected scan error %v", err, selectedErr)
+	}
+	if !slices.Equal(warnings, []string{"rig:stale"}) {
+		t.Fatalf("scan warnings = %v, want only the skipped non-source store", warnings)
+	}
+}
+
+func TestListSourceWorkflowRootsFailsWhenListerHasNoUsableStores(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(),
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{StoreRef: "rig:nil"}}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(string, error) {},
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if err == nil || !strings.Contains(err.Error(), "no source workflow stores") {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want no-usable-store failure", err)
 	}
 }
 

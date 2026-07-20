@@ -98,6 +98,37 @@ func TestMixedLegStoresDedupsSharedStore(t *testing.T) {
 	}
 }
 
+// Cursor reduces its rows to MaxSeqFromLabels — a max over seq, NOT over the
+// created_at sort key — so it must NOT opt into the backing's bounded
+// created-desc read. The backing breaks created_at ties by id ASC, so a bounded
+// backing read drops the newest largest-id row that carries the max seq when a
+// same-second burst exceeds the limit, regressing the event cursor into replaying
+// consumed events. The read stays exact by fetching the full candidate set and
+// letting ApplyListQuery cut the canonical (created_at DESC, id DESC) prefix.
+func TestCursorDoesNotOptIntoBackingCreatedLimit(t *testing.T) {
+	spy := &listSpyStore{Store: beads.NewMemStore()}
+	if _, err := spy.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "seq:9"}}); err != nil {
+		t.Fatal(err)
+	}
+	spy.queries = nil
+	st := NewStore(beads.OrdersStore{Store: spy})
+
+	if got := st.Cursor("digest"); got != 9 {
+		t.Fatalf("Cursor() = %d, want 9", got)
+	}
+	if len(spy.queries) == 0 {
+		t.Fatal("Cursor issued no List query")
+	}
+	for i, q := range spy.queries {
+		if q.Sort != beads.SortCreatedDesc {
+			t.Errorf("Cursor query[%d] Sort = %q, want SortCreatedDesc", i, q.Sort)
+		}
+		if q.AllowBackingCreatedLimit {
+			t.Errorf("Cursor query[%d] set AllowBackingCreatedLimit; its max(seq) reduction needs the canonical id-DESC prefix, which a bounded id-ASC backing read would truncate", i)
+		}
+	}
+}
+
 // TestRecentRunsAllOpenRunsUseLiveTier pins the read tier: the dispatch cooldown /
 // single-flight index folds MUST bypass the caching layer (Live), because the
 // cache-bypass is the duplicate-dispatch guarantee.

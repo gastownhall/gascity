@@ -364,6 +364,34 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 	}
 }
 
+func TestResolveAgentIdentityUsesRigContextForScopeUnqualifiedControlDispatcher(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: config.ControlDispatcherAgentName, BindingName: "core"},
+			{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "fixture"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name          string
+		currentRigDir string
+		want          string
+	}{
+		{name: "rig context prefers rig scope", currentRigDir: "fixture", want: "fixture/core.control-dispatcher"},
+		{name: "city context keeps city scope", want: "core.control-dispatcher"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveAgentIdentity(cfg, "core.control-dispatcher", tc.currentRigDir)
+			if !ok {
+				t.Fatal("resolveAgentIdentity() did not find the control dispatcher")
+			}
+			if got.QualifiedName() != tc.want {
+				t.Fatalf("resolveAgentIdentity() = %q, want %q", got.QualifiedName(), tc.want)
+			}
+		})
+	}
+}
+
 func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	var stderr bytes.Buffer
 	emitLoadCityConfigWarnings(&stderr, &config.Provenance{

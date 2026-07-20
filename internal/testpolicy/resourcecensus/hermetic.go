@@ -117,7 +117,7 @@ var retainedRealOwners = []retainedRealOwner{
 		retained: runnableKey{
 			packageDir:  "cmd/gc",
 			packageName: "main",
-			owner:       "TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox",
+			owner:       "TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox",
 		},
 	},
 }

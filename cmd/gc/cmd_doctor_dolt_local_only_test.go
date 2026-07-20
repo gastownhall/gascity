@@ -107,7 +107,7 @@ func TestDoDoctorRegistersLocalOnlyRemoteCheckForActiveManagedRigs(t *testing.T)
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
 
 	if len(registered) != 1 {
 		t.Fatalf("registered dolt-local-only checks = %#v, want exactly the active managed rig", registered)
@@ -191,7 +191,7 @@ prefix = "ma"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
 
 	if registered != 0 {
 		t.Fatalf("registered %d dolt-local-only checks, want 0 when GC_DOLT=skip", registered)

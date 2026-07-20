@@ -115,6 +115,14 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	if isFailedCreateSessionInfo(info) {
 		return false
 	}
+	// A draining session is being shut down (e.g. drain-ack-stop-pending) and
+	// must not occupy the desired slot. Without this exclusion the min-floor
+	// fires (draining doesn't consume demand) but the slot is filled by the
+	// existing draining bead, so no replacement is started until the bead is
+	// closed — one to several ticks later than necessary.
+	if strings.TrimSpace(info.MetadataState) == string(session.StateDraining) {
+		return false
+	}
 	if info.MetadataState == "asleep" {
 		return false
 	}
