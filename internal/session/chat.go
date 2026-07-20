@@ -626,6 +626,16 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
 	if err != nil {
+		// A wedged composer (message drafted but submit never confirmed through
+		// the provider's bounded recovery ladder, or composer state that could
+		// not be observed at all) is terminal, not transient: the session must
+		// be bounced, not nudged again. Emit the loud, distinct signal a
+		// babysitter/reconciler subscribes to so nudges don't pile up silently
+		// behind a dead composer, then surface the error so this caller stops
+		// treating the nudge as delivered.
+		if errors.Is(err, runtime.ErrNudgeUndeliverable) {
+			telemetry.RecordNudgeUndeliverable(recordCtx, sessName, err)
+		}
 		return fmt.Errorf("sending message to session: %w", err)
 	}
 	return nil

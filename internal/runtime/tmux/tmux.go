@@ -147,6 +147,20 @@ var (
 	// original server. Callers should surface this to the user instead of
 	// proceeding — see issue ga-h9z.
 	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
+	// ErrNudgeUndeliverable indicates the message was pasted into the target's
+	// composer but the submit was never observed to land — even after the
+	// bounded recovery ladder (verified re-Enter and, only when the draft is
+	// verifiably still sitting in the composer, a single verified C-u clear +
+	// re-paste). The composer is wedged: the draft sits at "❯ <text>" and
+	// neither gc's nor a human's Enter/C-m submits it (the "session composer
+	// wedge"). It is also returned when the pane cannot be captured to observe
+	// composer state — state-unknown, so recovery refuses to run a destructive
+	// clear/re-paste blind. Callers must NOT treat this as delivered; it is the
+	// loud signal a babysitter/reconciler uses to bounce the session instead of
+	// silently queueing more nudges. It wraps [runtime.ErrNudgeUndeliverable] so
+	// callers above the provider facade dispatch on the shared sentinel with
+	// errors.Is regardless of runtime.
+	ErrNudgeUndeliverable = fmt.Errorf("tmux: %w", runtime.ErrNudgeUndeliverable)
 )
 
 const (
@@ -1768,6 +1782,235 @@ func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (boo
 	return false, lastErr
 }
 
+// Recovery-ladder tuning. When bare re-Enter (submitEnterAndConfirm) fails to
+// confirm a submit, the composer may be wedged: a stuck insert/paste mode that
+// swallows even a human's Enter/C-m (the confirmed "session composer wedge").
+// The ladder escalates the stimulus — but only ever after PROVING the draft is
+// still sitting in the composer, and never blindly on an unobserved-busy alone.
+const (
+	// submitClearBackoff is the settle time after a C-u/Escape composer clear
+	// before the follow-up capture/Enter, so the TUI processes the mode reset
+	// first.
+	submitClearBackoff = 250 * time.Millisecond
+	// composerDraftProbeLen bounds the leading slice of the pasted message used
+	// to detect it in the captured composer. Long enough to be distinctive,
+	// short enough to sit on the prompt's own visual line (before the TUI wraps
+	// a long draft across bordered lines, which would split a longer probe).
+	composerDraftProbeLen = 40
+	// composerTailLines is how many trailing pane lines are treated as the
+	// composer region when the TUI paints no recognizable prompt glyph.
+	composerTailLines = 6
+)
+
+// submitLadder is the injected surface a recovery rung needs. Every side effect
+// is a func so the ladder's escalation logic is unit-testable without a live
+// tmux server (mirrors submitEnterAndConfirm).
+type submitLadder struct {
+	sendEnter  func() error           // press Enter (submit the current draft)
+	sendEscape func() error           // press Escape (clear a stuck insert/paste mode)
+	skipEscape bool                   // provider treats Escape as a semantic key (claude family): never synthesize it
+	clearInput func() error           // C-u: wipe the composer draft
+	repaste    func() error           // re-type/re-paste the original message
+	wake       func()                 // SIGWINCH the pane so a detached loop services input
+	busy       func() (bool, error)   // observe the agent's processing indicator
+	capture    func() (string, error) // capture the pane to inspect durable composer/draft state
+	message    string                 // the drafted text, to detect durable draft state
+	sleep      func(time.Duration)
+}
+
+// composerNoiseReplacer strips the prompt/border glyphs a TUI paints around a
+// drafted message so the draft text matches across wrapped lines and bordered
+// composers. Replacing with spaces (then collapsing) keeps token boundaries.
+var composerNoiseReplacer = strings.NewReplacer(
+	"❯", " ", "▶", " ", "│", " ", "┃", " ", "╭", " ", "╮", " ",
+	"╰", " ", "╯", " ", "─", " ", "━", " ", ">", " ",
+)
+
+// composerPromptGlyphs mark the start of an agent TUI's input line. A drafted
+// (unsubmitted) message sits AFTER the last such glyph; a submitted message
+// moves up into the transcript ABOVE it. Scoping the draft search to the region
+// after the last prompt glyph is what keeps a submitted turn's transcript echo
+// from reading as a still-drafted composer (the fast-completion false positive).
+var composerPromptGlyphs = []string{"❯", "▶"}
+
+// composerRegion returns the pane text belonging to the input composer — the
+// slice after the last prompt glyph, or the last few lines when no glyph is
+// present. Scoping here keeps a submitted message's transcript echo (which sits
+// ABOVE the composer) from being mistaken for a still-drafted composer.
+func composerRegion(pane string) string {
+	last := -1
+	for _, g := range composerPromptGlyphs {
+		if i := strings.LastIndex(pane, g); i > last {
+			last = i
+		}
+	}
+	if last >= 0 {
+		return pane[last:]
+	}
+	lines := strings.Split(strings.TrimRight(pane, "\n"), "\n")
+	if len(lines) > composerTailLines {
+		lines = lines[len(lines)-composerTailLines:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// normalizeComposerText strips prompt/border glyphs and collapses whitespace so
+// a drafted message can be matched regardless of the box the TUI draws it in.
+func normalizeComposerText(s string) string {
+	return strings.Join(strings.Fields(composerNoiseReplacer.Replace(s)), " ")
+}
+
+// composerContainsDraft reports whether the just-pasted message is STILL sitting
+// unsubmitted in the target pane's composer (a durable draft). It is the guard
+// that distinguishes a wedged composer (text still drafted) from a fast-
+// completed turn (text submitted, composer now empty) so recovery never clears
+// or re-pastes on an unobserved-busy alone. It searches only the composer region
+// (after the last prompt glyph) with glyphs stripped and whitespace collapsed,
+// against a bounded, distinctive leading slice of the message. It errs toward
+// "not drafted": an unrecognizable/empty composer reads as delivered, so the
+// destructive rungs only fire when the draft is verifiably present.
+func composerContainsDraft(pane, message string) bool {
+	probe := normalizeComposerText(message)
+	if len(probe) > composerDraftProbeLen {
+		probe = probe[:composerDraftProbeLen]
+	}
+	probe = strings.TrimSpace(probe)
+	if probe == "" {
+		return false
+	}
+	return strings.Contains(normalizeComposerText(composerRegion(pane)), probe)
+}
+
+// undeliverableUnknown wraps ErrNudgeUndeliverable for the state-unknown case: a
+// pane capture failed, so composer state cannot be observed. Recovery must never
+// advance the destructive ladder blind (that risks clearing/duplicating a live
+// turn) — it bounces instead.
+func undeliverableUnknown(err error) error {
+	return fmt.Errorf("%w: composer state unknown (capture failed: %v)", ErrNudgeUndeliverable, err)
+}
+
+// submitWithRecovery drives the escalation ladder for verify-eligible providers.
+// It STOPS gc assuming "send-keys == delivered": every rung confirms the submit
+// actually landed (pane goes busy) before reporting success, and it takes a
+// destructive action ONLY when the draft is verifiably still in the composer.
+// If the composer stays wedged, or its state cannot be observed, it returns
+// ErrNudgeUndeliverable so the caller surfaces a loud, actionable failure and
+// bounces the session instead of silently succeeding.
+//
+// Rungs:
+//
+//  1. re-Enter — the ga-bwm case: a submit Enter lost to a paste/wake race.
+//     Non-destructive; re-sent only while the pane stays idle.
+//  2. On unobserved busy, inspect DURABLE draft state (capture the pane):
+//     - capture error        -> ErrNudgeUndeliverable (state-unknown; no keys).
+//     - draft text absent     -> DELIVERED (submit landed / fast completion).
+//     - draft text present     -> the composer is wedged; escalate below.
+//  3. Escape + Enter — clear a stuck insert/paste mode, but ONLY for providers
+//     where Escape is a mode-reset (skipped for the claude family, which treats
+//     Escape as a semantic interrupt). Re-inspect draft state as in rung 2.
+//  4. C-u clear (VERIFIED) + re-paste + Enter, exactly once — wipe the wedged
+//     draft, re-capture to confirm it cleared (a failed clear -> undeliverable,
+//     NEVER a re-paste on top of a stuck draft), then re-paste cleanly and
+//     submit. A confirmed busy or a vanished draft -> delivered; otherwise
+//     ErrNudgeUndeliverable (bounce it).
+func submitWithRecovery(l submitLadder) error {
+	// Rung 1: the historical verified re-Enter. Confirmed submit -> done.
+	if confirmed, err := submitEnterAndConfirm(l.sendEnter, l.wake, l.busy, l.sleep); err != nil {
+		return err
+	} else if confirmed {
+		return nil
+	}
+
+	// Rung 2: busy was never observed. This is AMBIGUOUS — the submit may have
+	// landed and the turn already completed (fast completion), or the composer
+	// is wedged with the draft still unsubmitted. NEVER clear/re-paste on this
+	// alone (point 4). Inspect durable draft state.
+	drafted, err := composerStillDrafted(l)
+	if err != nil {
+		return err // state-unknown -> undeliverable, no destructive keys (point 2)
+	}
+	if !drafted {
+		return nil // draft gone -> submit landed / fast completion -> delivered
+	}
+
+	// Rung 3: the message is verifiably still in the composer. For providers
+	// where Escape resets a stuck insert/paste mode, try that first — but NOT
+	// for the claude family, where Escape is a semantic interrupt (point 3).
+	if !l.skipEscape && l.sendEscape != nil {
+		if err := l.sendEscape(); err != nil {
+			return err
+		}
+		l.sleep(submitClearBackoff)
+		l.wake()
+		if confirmed, err := submitEnterAndConfirm(l.sendEnter, l.wake, l.busy, l.sleep); err != nil {
+			return err
+		} else if confirmed {
+			return nil
+		}
+		drafted, err = composerStillDrafted(l)
+		if err != nil {
+			return err
+		}
+		if !drafted {
+			return nil
+		}
+	}
+
+	// Rung 4: still wedged. Wipe the draft (C-u), VERIFY it cleared, then
+	// re-paste cleanly and submit exactly once. A failed clear must never be
+	// followed by a re-paste (that stacks a duplicate on the stuck draft).
+	if l.clearInput == nil || l.repaste == nil {
+		return ErrNudgeUndeliverable
+	}
+	if err := l.clearInput(); err != nil {
+		return err
+	}
+	l.sleep(submitClearBackoff)
+	cleared, err := composerStillDrafted(l)
+	if err != nil {
+		return err // state-unknown after clear -> undeliverable, no re-paste
+	}
+	if cleared {
+		// C-u did not empty the composer: truly wedged. Do NOT re-paste on top
+		// of the stuck draft; bounce.
+		return fmt.Errorf("%w: composer clear (C-u) did not empty the draft", ErrNudgeUndeliverable)
+	}
+	if err := l.repaste(); err != nil {
+		return err
+	}
+	l.sleep(submitClearBackoff)
+	l.wake()
+	if confirmed, err := submitEnterAndConfirm(l.sendEnter, l.wake, l.busy, l.sleep); err != nil {
+		return err
+	} else if confirmed {
+		return nil
+	}
+	// Re-paste submitted but busy never observed: one last draft-state check.
+	drafted, err = composerStillDrafted(l)
+	if err != nil {
+		return err
+	}
+	if !drafted {
+		return nil // fast completion after the clean re-paste -> delivered
+	}
+	return ErrNudgeUndeliverable
+}
+
+// composerStillDrafted reports whether the pasted message is verifiably still
+// sitting in the composer. A capture error is state-unknown and surfaces as
+// ErrNudgeUndeliverable so callers never advance the destructive ladder blind.
+func composerStillDrafted(l submitLadder) (bool, error) {
+	if l.capture == nil {
+		// No way to observe the composer -> state-unknown. Refuse to guess.
+		return false, ErrNudgeUndeliverable
+	}
+	pane, err := l.capture()
+	if err != nil {
+		return false, undeliverableUnknown(err)
+	}
+	return composerContainsDraft(pane, l.message), nil
+}
+
 // paneBusy reports whether the target pane shows an active processing indicator
 // (Claude's live spinner / "esc to interrupt"). Used to confirm a submitted turn.
 func (t *Tmux) paneBusy(target string) (bool, error) {
@@ -1866,15 +2109,37 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	t.WakePaneIfDetached(session)
 
 	// 5. Send Enter and, for providers with a reliable busy indicator, confirm
-	// the draft actually submitted — re-sending Enter only while the pane stays
-	// idle. A lost submit Enter (raced against the paste or a detached-pane
-	// wake) is the ga-bwm "drafted but not submitted" stall; confirming here
-	// removes the town's dependence on an external observer re-kicking the
-	// session. Providers without a reliable indicator keep best-effort delivery.
+	// the draft actually submitted — escalating a bounded recovery ladder while
+	// the pane stays idle. A lost submit Enter (raced against the paste or a
+	// detached-pane wake) is the ga-bwm "drafted but not submitted" stall
+	// (rung 1). A composer stuck in a mode that swallows even a human's Enter/C-m
+	// is the "session composer wedge": the ladder takes a destructive action
+	// (verified C-u clear + one clean re-paste) ONLY after capturing the pane and
+	// confirming the draft is still there, never on an unobserved-busy alone, and
+	// never when the pane state cannot be observed. If it still cannot confirm a
+	// submit, ErrNudgeUndeliverable is returned so the caller stops reporting the
+	// nudge delivered and a babysitter can bounce the session. On that wedge we
+	// leave `delivered` false so no poke is stamped for an undelivered nudge.
+	// Providers without a reliable indicator keep best-effort delivery.
 	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
+		ladder := submitLadder{
+			sendEnter:  sendEnter,
+			sendEscape: func() error { _, err := t.run("send-keys", "-t", target, "Escape"); return err },
+			skipEscape: !t.shouldSendEscapeBeforeEnter(target),
+			clearInput: func() error { _, err := t.run("send-keys", "-t", target, "C-u"); return err },
+			repaste:    func() error { return t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout) },
+			wake:       wake,
+			busy:       func() (bool, error) { return t.paneBusy(target) },
+			capture:    func() (string, error) { return t.CapturePane(target, promptObservationLines) },
+			message:    message,
+			sleep:      time.Sleep,
+		}
+		if err := submitWithRecovery(ladder); err != nil {
+			if errors.Is(err, ErrNudgeUndeliverable) {
+				return err // surface the wedge verbatim; caller emits the loud event and bounces (delivered stays false: no poke)
+			}
 			return fmt.Errorf("failed to send Enter: %w", err)
 		}
 		delivered = true

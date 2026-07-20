@@ -1387,6 +1387,24 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
+		if errors.Is(err, runtime.ErrNudgeUndeliverable) {
+			// The composer is wedged: the message drafted but no submit ever
+			// confirmed through the provider's recovery ladder (or its state
+			// could not be observed). Re-nudging the same session is futile — it
+			// must be BOUNCED. Emit the loud, distinct signal a babysitter
+			// subscribes to, dead-letter these items now (failedQueuedNudge
+			// treats ErrNudgeUndeliverable as immediately terminal), and kill the
+			// session via the existing session-kill path so the reconciler
+			// restarts it with a fresh composer.
+			telemetry.RecordNudgeUndeliverable(context.Background(), target.agentKey(), err)
+			if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
+				return false, errors.Join(bookkeepErr, recErr)
+			}
+			if bounceErr := bounceWedgedNudgeTarget(target, store, sp); bounceErr != nil {
+				return false, errors.Join(bookkeepErr, bounceErr)
+			}
+			return false, bookkeepErr
+		}
 		if errors.Is(err, runtime.ErrSessionNotFound) {
 			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
@@ -1408,6 +1426,26 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+}
+
+// bounceWedgedNudgeTarget kills the target session so the reconciler restarts it
+// with a fresh composer. A wedged composer (ErrNudgeUndeliverable) cannot accept
+// any further nudge; killing it IS the bounce. The session is resolved the same
+// way the other cmd_nudge worker paths do — the concrete session id when known,
+// else the agent key — and an already-gone session is treated as success
+// (nothing left to bounce).
+func bounceWedgedNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) error {
+	ident := strings.TrimSpace(target.sessionID)
+	if ident == "" {
+		ident = strings.TrimSpace(target.agentKey())
+	}
+	if ident == "" {
+		return nil
+	}
+	if err := workerKillSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, ident); err != nil && !runtime.IsSessionGone(err) {
+		return err
+	}
+	return nil
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
@@ -2311,6 +2349,13 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
 	if errors.Is(cause, errNudgeSessionFenceMismatch) {
+		item.DeadAt = now.UTC()
+		return item, true
+	}
+	// A wedged composer will not accept a retry — the session is bounced
+	// instead — so an undeliverable nudge dead-letters immediately rather than
+	// burning the retry budget against a dead composer.
+	if errors.Is(cause, runtime.ErrNudgeUndeliverable) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}
