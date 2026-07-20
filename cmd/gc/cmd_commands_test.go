@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -3370,6 +3371,68 @@ func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
 		root.SetArgs([]string{"gs", "repo"})
 		if err := root.Execute(); err != nil {
 			t.Fatalf("bare nested namespace should succeed with help, got error: %v", err)
+		}
+	})
+}
+
+type okEffectiveAPIClient struct{}
+
+func (okEffectiveAPIClient) ListCities() ([]api.CityInfo, error) { return nil, nil }
+
+// TestRunDiscoveredCommand_InjectsEffectiveAPIBaseURL covers hq-fh9: pack
+// scripts reach the city API through GC_API_BASE_URL, but only sessions
+// spawned by the controller inherit it — an operator shell got the scripts'
+// hardcoded standalone-port fallback, which is wrong for a supervisor-managed
+// city. Dispatch must resolve and inject the effective URL, while an explicit
+// ambient value stays authoritative.
+func TestRunDiscoveredCommand_InjectsEffectiveAPIBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "status")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho \"apibase=$GC_API_BASE_URL\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := config.DiscoveredCommand{
+		BindingName: "gs",
+		PackName:    "mypack",
+		Command:     []string{"status"},
+		RunScript:   scriptPath,
+		PackDir:     packDir,
+		SourceDir:   sourceDir,
+	}
+
+	origHook := effectiveAPIBaseURLHook
+	origFactory := effectiveAPIClientFactory
+	t.Cleanup(func() {
+		effectiveAPIBaseURLHook = origHook
+		effectiveAPIClientFactory = origFactory
+	})
+	effectiveAPIBaseURLHook = func() (string, error) { return "http://127.0.0.1:4242", nil }
+	effectiveAPIClientFactory = func(string) effectiveAPIClient { return okEffectiveAPIClient{} }
+
+	t.Run("empty ambient env gets the resolved URL", func(t *testing.T) {
+		t.Setenv("GC_API_BASE_URL", "")
+		var stdout, stderr bytes.Buffer
+		if code := runDiscoveredCommand(entry, dir, "testcity", nil, strings.NewReader(""), &stdout, &stderr); code != 0 {
+			t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "apibase=http://127.0.0.1:4242") {
+			t.Fatalf("stdout missing injected GC_API_BASE_URL, got:\n%s", stdout.String())
+		}
+	})
+
+	t.Run("explicit ambient value stays authoritative", func(t *testing.T) {
+		t.Setenv("GC_API_BASE_URL", "http://127.0.0.1:9999")
+		var stdout, stderr bytes.Buffer
+		if code := runDiscoveredCommand(entry, dir, "testcity", nil, strings.NewReader(""), &stdout, &stderr); code != 0 {
+			t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "apibase=http://127.0.0.1:9999") {
+			t.Fatalf("stdout missing ambient GC_API_BASE_URL, got:\n%s", stdout.String())
 		}
 	})
 }

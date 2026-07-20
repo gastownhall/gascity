@@ -22,10 +22,11 @@ const csrfHeaderName = "X-GC-Request"
 // to an external HTTP service at callbackURL. Used for out-of-process
 // adapters that register via the API.
 type HTTPAdapter struct {
-	name         string
-	callbackURL  string
-	capabilities AdapterCapabilities
-	client       *http.Client
+	name              string
+	callbackURL       string
+	capabilities      AdapterCapabilities
+	replyInstructions string
+	client            *http.Client
 }
 
 // NewHTTPAdapter creates an HTTPAdapter that forwards to callbackURL.
@@ -40,11 +41,22 @@ func NewHTTPAdapter(name, callbackURL string, caps AdapterCapabilities) *HTTPAda
 	}
 }
 
+// WithReplyInstructions sets the adapter-supplied reply-instruction
+// template (see ReplyInstructionsProvider) and returns the adapter for
+// chaining at construction. Empty keeps the generic reminder fallback.
+func (a *HTTPAdapter) WithReplyInstructions(template string) *HTTPAdapter {
+	a.replyInstructions = template
+	return a
+}
+
 // Name returns the adapter name.
 func (a *HTTPAdapter) Name() string { return a.name }
 
 // Capabilities returns the adapter capabilities.
 func (a *HTTPAdapter) Capabilities() AdapterCapabilities { return a.capabilities }
+
+// ReplyInstructions implements ReplyInstructionsProvider.
+func (a *HTTPAdapter) ReplyInstructions() string { return a.replyInstructions }
 
 // VerifyAndNormalizeInbound is not used for HTTP adapters — out-of-process
 // adapters verify and normalize on their side before posting to the API.

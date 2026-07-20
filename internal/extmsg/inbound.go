@@ -96,6 +96,22 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 	return nil
 }
 
+// emitInboundDropped records that an accepted inbound message resolved to no
+// delivery target and is being dropped. Both inbound entry points call this on
+// their unrouted early-return so the drop is observable in the event log
+// rather than silent (hq-ar4: 200-accepted messages vanished without a trace).
+func emitInboundDropped(deps InboundDeps, msg ExternalInboundMessage) {
+	if deps.EmitEvent == nil {
+		return
+	}
+	deps.EmitEvent(events.ExtMsgInboundDropped, msg.Conversation.Provider+"/"+msg.Conversation.ConversationID, InboundDroppedEventPayload{
+		Provider:       msg.Conversation.Provider,
+		ConversationID: msg.Conversation.ConversationID,
+		Actor:          msg.Actor.DisplayName,
+		ExplicitTarget: msg.ExplicitTarget,
+	})
+}
+
 // resolveInboundTarget resolves the delivery target for an inbound message and
 // records it on result: an existing binding first, then a group route, then the
 // configured default route. result is left unrouted when nothing matches. Both
@@ -116,6 +132,25 @@ func resolveInboundTarget(ctx context.Context, deps InboundDeps, result *Inbound
 		result.Binding = binding
 		result.TargetSessionID = binding.SessionID
 		result.TargetAgentName = binding.AgentName
+		// An active binding must always have its transcript membership: the
+		// notify layer fans out over memberships, so a conversation whose
+		// membership record was lost (e.g. closed by a cleanup race) would
+		// otherwise accept, transcribe, and event every inbound while
+		// delivering it to nobody, forever (hq-ar4 recurrence). Re-ensuring
+		// here is a no-op when the record is intact and repairs it when it is
+		// not. Failures propagate: transient store faults surface as
+		// retryable to the adapter, and corrupt membership state is already a
+		// permanent rejection on the bind path.
+		if _, err := deps.Services.Transcript.EnsureMembership(ctx, EnsureMembershipInput{
+			Caller:         Caller{Kind: CallerController, ID: "extmsg-inbound-repair"},
+			Conversation:   binding.Conversation,
+			SessionID:      bindingMembershipKey(*binding),
+			BackfillPolicy: MembershipBackfillSinceJoin,
+			Owner:          MembershipOwnerBinding,
+			Now:            now,
+		}); err != nil {
+			return wrapTranscriptSyncError("ensure transcript membership for bound inbound", err)
+		}
 	}
 
 	// No binding — try group routing.
@@ -180,7 +215,9 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 		return nil, err
 	}
 	if !result.routed() {
-		// No binding, no group route, no default route — empty target.
+		// No binding, no group route, no default route — empty target. The
+		// message is acknowledged but delivered nowhere; make that observable.
+		emitInboundDropped(deps, *msg)
 		return result, nil
 	}
 
@@ -248,7 +285,9 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 		return nil, err
 	}
 	if !result.routed() {
-		// No binding, no group route, no default route — empty target.
+		// No binding, no group route, no default route — empty target. The
+		// message is acknowledged but delivered nowhere; make that observable.
+		emitInboundDropped(deps, msg)
 		return result, nil
 	}
 

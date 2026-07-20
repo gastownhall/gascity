@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -315,6 +316,18 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		"GC_PACK_NAME="+entry.PackName,
 		"GC_CITY_NAME="+cityName,
 	)
+	// Pack scripts reach the city API through GC_API_BASE_URL. Sessions
+	// spawned by the controller inherit it, but a plain operator shell does
+	// not — and the scripts' hardcoded fallback (the standalone default
+	// port) is wrong for a supervisor-managed city. Resolve the effective
+	// URL the same way the CLI routes its own API calls; an explicit
+	// ambient value stays authoritative, and the GC_NO_API escape hatch
+	// suppresses the injection like it suppresses API routing. (hq-fh9)
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled && os.Getenv("GC_API_BASE_URL") == "" {
+		if baseURL := packCommandAPIBaseURL(cityPath); baseURL != "" {
+			cmd.Env = append(cmd.Env, "GC_API_BASE_URL="+baseURL)
+		}
+	}
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)
 
@@ -327,6 +340,19 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		return 1
 	}
 	return 0
+}
+
+// packCommandAPIBaseURL resolves the effective city API base URL for a
+// pack command's environment: the standalone controller endpoint when one
+// is alive and configured, otherwise the reachable supervisor endpoint.
+// Returns "" when neither resolves (no controller running) — the pack
+// script then keeps its own fallback behavior.
+func packCommandAPIBaseURL(cityPath string) string {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		cfg = nil
+	}
+	return resolveEffectiveAPIURL(cityPath, cfg)
 }
 
 // mergeCanonicalScopeDoltEnv projects the city's canonical Dolt

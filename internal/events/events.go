@@ -188,6 +188,14 @@ const (
 	WebhookReceived = "webhook.received"
 	WebhookRejected = "webhook.rejected"
 
+	// ExtMsgInboundDropped fires when an accepted inbound message resolves to
+	// no binding, no group route, and no default route. The message is still
+	// acknowledged to the adapter (200, so ordered adapters do not wedge on
+	// redelivery) but is delivered to no session; this event turns that
+	// otherwise-silent drop into an observable signal (RCA hq-ar4: Slack
+	// messages 200-accepted by extmsg/inbound vanished without a trace).
+	ExtMsgInboundDropped = "extmsg.inbound_dropped"
+
 	// EventsRotated is the forensic anchor written as the first event in
 	// a freshly-rotated active log. Its payload carries the prior
 	// archive's filename and seq range so log readers can stitch back
@@ -277,6 +285,7 @@ var KnownEventTypes = []string{
 	ExtMsgInbound, ExtMsgOutbound,
 	ExtMsgOutboundChannelMismatch,
 	WebhookReceived, WebhookRejected,
+	ExtMsgInboundDropped,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
