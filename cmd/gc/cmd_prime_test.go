@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,52 @@ schema = 2
 	}
 	if got := stdout.String(); got != "Agent: ada\n" {
 		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
+	}
+}
+
+// TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake covers the
+// prime-inject-mail patch (dip-bj7pgj): an autonomous/promptless restart runs
+// the SessionStart prime hook but NOT the UserPromptSubmit mail hook, so gc
+// prime must fold unread mail into the SessionStart payload itself. With no
+// unread mail the injection is empty (never noises up a prime); once mail is
+// waiting for the self-recipient, prime surfaces the same <system-reminder>
+// block the check path produces.
+func TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+
+	// No unread mail yet: a promptless wake must inject nothing.
+	if got := primeInjectMailContent(); got != "" {
+		t.Fatalf("primeInjectMailContent with an empty inbox = %q, want empty", got)
+	}
+
+	// Seed unread mail for the self-recipient (mayor) through the real city
+	// provider so the read path is exercised end to end.
+	mp, code := openCityMailProvider(io.Discard, "test seed")
+	if mp == nil {
+		t.Fatalf("openCityMailProvider returned nil (code=%d)", code)
+	}
+	if _, err := mp.Send("worker", "mayor", "PR ready", "please review the auth PR"); err != nil {
+		t.Fatalf("seed Send: %v", err)
+	}
+
+	got := primeInjectMailContent()
+	if !strings.Contains(got, "<system-reminder>") || !strings.Contains(got, "</system-reminder>") {
+		t.Fatalf("prime mail injection missing system-reminder wrapper:\n%s", got)
+	}
+	if !strings.Contains(got, "unread message(s)") {
+		t.Fatalf("prime mail injection missing unread count:\n%s", got)
+	}
+	if !strings.Contains(got, "please review the auth PR") {
+		t.Fatalf("prime mail injection missing the seeded message body:\n%s", got)
 	}
 }
 
