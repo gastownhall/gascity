@@ -19,6 +19,16 @@ import (
 
 const hookClaimCommandName = "hook"
 
+// Drain-action reasons for the gc hook --claim result contract
+// (schemas/hook/result.schema.json). Every value here is a valid reason when
+// action is "drain": an idle store, an operational claim-write failure, or a
+// refused stale session.
+const (
+	hookClaimReasonNoWork        = "no_work"
+	hookClaimReasonClaimsErrored = "claims_errored"
+	hookClaimReasonStaleSession  = "stale_session"
+)
+
 var hookClaimMutationTimeout = 10 * time.Second
 
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
@@ -340,10 +350,32 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
 func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, stdout, stderr io.Writer) int {
-	reason := "no_work"
+	reason := hookClaimReasonNoWork
 	if claimsErrored {
-		reason = "claims_errored"
+		reason = hookClaimReasonClaimsErrored
 	}
+	return writeHookClaimDrain(reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+}
+
+// writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
+// session (closed, superseded instance token, or a dormant/terminal state) that
+// must stop instead of claiming. It preserves the gc hook --claim result
+// contract: a --json caller gets a schema-backed drain record (action "drain",
+// reason "stale_session"), and --drain-ack is honored, so a startup wrapper
+// acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
+// retrying the refusal forever.
+func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	return writeHookClaimDrain(hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+}
+
+// writeHookClaimDrain writes the single structured drain result shared by every
+// terminal no-claim outcome: an idle no-work store, a claims-errored store, and a
+// refused stale session. For a --json caller it emits the schema-backed drain
+// line; when drainAck is set it first runs drainAckFn and marks the result
+// acknowledged. The exit code mirrors the historical contract — 0 once drain is
+// acknowledged, else 1 — so a non-drain-ack caller still reports action=drain
+// (a completed drain) rather than a bare failure.
+func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookDrainAckFunc, stdout, stderr io.Writer) int {
 	result := hookClaimJSONResult{
 		SchemaVersion: "1",
 		OK:            true,
@@ -351,20 +383,20 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 		Action:        "drain",
 		Reason:        reason,
 	}
-	if opts.DrainAck {
-		if err := ops.DrainAck(stderr); err != nil {
+	if drainAck {
+		if err := drainAckFn(stderr); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: drain-ack failed: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		result.DrainAcknowledged = true
 	}
-	if opts.JSON {
+	if jsonOut {
 		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
 			return 1
 		}
 	}
-	if opts.DrainAck {
+	if drainAck {
 		return 0
 	}
 	return 1
