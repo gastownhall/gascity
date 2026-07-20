@@ -442,10 +442,9 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //
 // It is best-effort. The returned settled reports whether the interval is fully
 // accounted for and needs no retry: true when the transcript was read (even if
-// nothing new was pending) OR the miss is permanent (unregistered family, a
-// terminal codex session that never captured a session_key, or a codex rollout
-// still undiscovered past the interval end + discovery window); false when the
-// miss is transient (no transcript discovered yet, an extraction error, or a sink
+// nothing new was pending) OR the miss is permanent (unregistered family, or a
+// terminal codex session that never captured a session_key); false when the miss
+// is transient (no transcript discovered yet, an extraction error, or a sink
 // Record failure) so the caller should retry on a later tick. err is reserved for
 // a sink Record failure; the cursor is then advanced only through the last
 // successfully recorded entry so the retry resumes at the gap rather than
@@ -493,20 +492,6 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 	}
 	path := f.discoverSweepTranscript(family, id, meta, now)
 	if path == "" {
-		// A codex rollout keyed to a session that has already slept but is still
-		// undiscovered past the interval end + discovery window will never appear: no
-		// later hook fires while the session is asleep. Age that miss out to permanent
-		// so the caller stamps the sweep marker and commits the compute interval,
-		// instead of re-appending the compute fact every tick forever. The lost model
-		// facts for that interval fall within the documented keyed-miss-records-nothing
-		// / bounded-best-effort contract; unbounded growth is the worse alternative.
-		_, notAfter := sweepIntervalWindow(meta, now)
-		sleptPresent := strings.TrimSpace(meta["slept_at"]) != ""
-		if family == "codex" && sleptPresent && now.After(notAfter.Add(codexInvocationDiscoveryWindow)) {
-			slog.Debug("model-usage sweep: codex rollout past discovery window; settling without model facts",
-				slog.String("session_id", id), slog.String("provider", family))
-			return 0, true, nil
-		}
 		// Transient: the rollout may not be flushed yet at interval end, so leave the
 		// interval unsettled for a retry on a later tick.
 		slog.Debug("model-usage sweep: no transcript discovered; will retry",
