@@ -308,7 +308,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
-		register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
+		register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
@@ -674,5 +674,14 @@ func collectPackDirs(cfg *config.City) []string {
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
 		return openStoreAtForCity(dirPath, cityPath)
+	}
+}
+
+// openStoreResultForCity is openStoreForCity's counterpart for checks that
+// need the native/fallback selection diagnostic openStoreForCity discards
+// (gastownhall/gascity#4245).
+func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult, error) {
+	return func(dirPath string) (beads.StoreOpenResult, error) {
+		return openStoreResultAtForCity(dirPath, cityPath)
 	}
 }

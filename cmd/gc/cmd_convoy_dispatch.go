@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -1528,66 +1529,198 @@ func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sour
 	if err != nil {
 		return nil, skips, err
 	}
-	matchesByLabel := map[string]sourceWorkflowStoreMatch{}
-	visited := map[string]struct{}{}
-	cityName := loadedCityName(cfg, cityPath)
+	return collectSourceWorkflowMatchesFromStores(cfg, cityPath, sourceBeadID, sourceStoreRef, stores, skips)
+}
 
-	var collect func(string, string) error
-	collect = func(currentSourceID, currentSourceStoreRef string) error {
-		currentSourceID = strings.TrimSpace(currentSourceID)
-		if currentSourceID == "" {
-			return nil
-		}
-		for _, info := range stores {
-			rootStoreRef := workflowStoreRefForDir(info.path, cityPath, cityName, cfg)
-			// Downward delete-source walks key by root store plus source
-			// identity. The upward finalize walk in internal/dispatch only
-			// needs source store plus bead ID because each hop has one parent.
-			visitKey := rootStoreRef + "\x00" + currentSourceStoreRef + "\x00" + currentSourceID
-			if _, ok := visited[visitKey]; ok {
-				continue
-			}
-			visited[visitKey] = struct{}{}
-			roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
-			if err != nil {
-				return err
-			}
-			if len(roots) > 0 {
-				beadSet := make([]beads.Bead, 0, len(roots))
-				for _, root := range roots {
-					beadSet = append(beadSet, findWorkflowBeads(info.store, root.ID)...)
-				}
-				mergeSourceWorkflowMatch(matchesByLabel, sourceWorkflowStoreMatch{
-					label:  workflowDeleteStoreLabel(cfg, cityPath, info.path),
-					store:  info.store,
-					roots:  roots,
-					beads:  uniqueBeads(beadSet),
-					path:   info.path,
-					runner: workflowDeleteRunnerForPath(cfg, cityPath, info.path),
-				})
-			}
-			children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
-			if err != nil {
-				return err
-			}
-			for _, child := range children {
-				if err := collect(child.ID, rootStoreRef); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	if err := collect(sourceBeadID, sourceStoreRef); err != nil {
+func collectSourceWorkflowMatchesFromStores(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string, stores []convoyStoreView, skips []sourceWorkflowStoreSkip) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
+	cityName := loadedCityName(cfg, cityPath)
+	if err := ensureSelectedSourceStorePresent(cfg, cityPath, cityName, sourceStoreRef, stores, skips); err != nil {
 		return nil, skips, err
 	}
-	matches := make([]sourceWorkflowStoreMatch, 0, len(matchesByLabel))
-	for _, match := range matchesByLabel {
+	c := &sourceWorkflowMatchCollector{
+		cfg:            cfg,
+		cityPath:       cityPath,
+		cityName:       cityName,
+		stores:         stores,
+		skips:          skips,
+		matchesByLabel: map[string]sourceWorkflowStoreMatch{},
+		visited:        map[string]struct{}{},
+		failedStores:   map[int]struct{}{},
+	}
+	if err := c.collect(sourceBeadID, sourceStoreRef); err != nil {
+		return nil, c.skips, err
+	}
+	if !c.anyStoreScanned {
+		if c.firstScanErr != nil {
+			return nil, c.skips, c.firstScanErr
+		}
+		return nil, c.skips, fmt.Errorf("no source workflow stores were available to scan")
+	}
+	return c.matches(), c.skips, nil
+}
+
+// ensureSelectedSourceStorePresent fails when a specific source store was
+// selected but is absent from the opened stores. The selected store is always
+// strict, so its absence — or a recorded open failure for it — must abort the
+// walk rather than silently degrade singleton coverage.
+func ensureSelectedSourceStorePresent(cfg *config.City, cityPath, cityName, sourceStoreRef string, stores []convoyStoreView, skips []sourceWorkflowStoreSkip) error {
+	selectedRef := sourceworkflow.NormalizeSourceStoreRef(sourceStoreRef)
+	if selectedRef == "" {
+		return nil
+	}
+	present := slices.ContainsFunc(stores, func(info convoyStoreView) bool {
+		return info.store != nil &&
+			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.path, cityPath, cityName, cfg)) == selectedRef
+	})
+	if present {
+		return nil
+	}
+	for _, skip := range skips {
+		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
+		if skipRef == selectedRef && skip.err != nil {
+			return fmt.Errorf("selected source workflow store %s is unavailable to scan: %w", selectedRef, skip.err)
+		}
+	}
+	return fmt.Errorf("selected source workflow store %s is unavailable to scan", selectedRef)
+}
+
+// sourceWorkflowMatchCollector walks the source-workflow graph across every
+// candidate store for a delete/reopen-source operation. It tolerates unrelated
+// (non-selected) store scan failures — recording them as skips — while keeping
+// the selected source store strict, and carries the shared walk state so each
+// step reads as a small, single-purpose method.
+type sourceWorkflowMatchCollector struct {
+	cfg      *config.City
+	cityPath string
+	cityName string
+	stores   []convoyStoreView
+
+	matchesByLabel  map[string]sourceWorkflowStoreMatch
+	visited         map[string]struct{}
+	failedStores    map[int]struct{}
+	skips           []sourceWorkflowStoreSkip
+	anyStoreScanned bool
+	firstScanErr    error
+}
+
+// collect walks every store for currentSourceID, then recurses into each child
+// source discovered under it. A tolerated per-store scan failure yields no
+// children and no error so the walk continues; a selected-store failure aborts.
+func (c *sourceWorkflowMatchCollector) collect(currentSourceID, currentSourceStoreRef string) error {
+	currentSourceID = strings.TrimSpace(currentSourceID)
+	if currentSourceID == "" {
+		return nil
+	}
+	for i, info := range c.stores {
+		children, err := c.scanStore(i, info, currentSourceID, currentSourceStoreRef)
+		if err != nil {
+			return err
+		}
+		rootStoreRef := workflowStoreRefForDir(info.path, c.cityPath, c.cityName, c.cfg)
+		for _, child := range children {
+			if err := c.collect(child.ID, rootStoreRef); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// scanStore walks a single candidate store for one source identity and returns
+// the child source beads to recurse into. Nil, already-failed, or
+// already-visited stores yield no children. A ListLiveRoots, bead, or child
+// scan failure is classified by recordScanFailure: a tolerated failure returns
+// (nil, nil) so the caller skips the store; a selected-store failure returns the
+// wrapped error to abort.
+func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView, currentSourceID, currentSourceStoreRef string) ([]beads.Bead, error) {
+	if info.store == nil {
+		return nil, nil
+	}
+	if _, failed := c.failedStores[index]; failed {
+		return nil, nil
+	}
+	rootStoreRef := workflowStoreRefForDir(info.path, c.cityPath, c.cityName, c.cfg)
+	// Downward delete-source walks key by root store plus source identity. The
+	// upward finalize walk in internal/dispatch only needs source store plus
+	// bead ID because each hop has one parent.
+	visitKey := rootStoreRef + "\x00" + currentSourceStoreRef + "\x00" + currentSourceID
+	if _, ok := c.visited[visitKey]; ok {
+		return nil, nil
+	}
+	c.visited[visitKey] = struct{}{}
+
+	roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	if err != nil {
+		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
+	}
+	if err := c.mergeRootMatches(info, roots); err != nil {
+		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+	}
+	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	if err != nil {
+		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow children", err)
+	}
+	c.anyStoreScanned = true
+	return children, nil
+}
+
+// mergeRootMatches gathers every workflow bead under the given roots in one
+// store and merges them into the match set. It returns the first bead-scan
+// error (leaving the match set unmerged) so the caller can classify it as a
+// tolerated or strict scan failure.
+func (c *sourceWorkflowMatchCollector) mergeRootMatches(info convoyStoreView, roots []beads.Bead) error {
+	if len(roots) == 0 {
+		return nil
+	}
+	beadSet := make([]beads.Bead, 0, len(roots))
+	for _, root := range roots {
+		workflowBeads, err := findWorkflowBeadsFromRoot(info.store, root)
+		if err != nil {
+			return err
+		}
+		beadSet = append(beadSet, workflowBeads...)
+	}
+	mergeSourceWorkflowMatch(c.matchesByLabel, sourceWorkflowStoreMatch{
+		label:  workflowDeleteStoreLabel(c.cfg, c.cityPath, info.path),
+		store:  info.store,
+		roots:  roots,
+		beads:  uniqueBeads(beadSet),
+		path:   info.path,
+		runner: workflowDeleteRunnerForPath(c.cfg, c.cityPath, info.path),
+	})
+	return nil
+}
+
+// recordScanFailure records a store whose scan failed: it remembers the first
+// error, marks the store failed and skipped, and returns the wrapped error only
+// when the failed store is the strict selected source store (so the caller
+// aborts). Otherwise it returns nil so the walk tolerates the failure.
+func (c *sourceWorkflowMatchCollector) recordScanFailure(index int, info convoyStoreView, currentSourceStoreRef, operation string, scanErr error) error {
+	wrapped := fmt.Errorf("%s in %s: %w", operation, workflowDeleteStoreLabel(c.cfg, c.cityPath, info.path), scanErr)
+	if c.firstScanErr == nil {
+		c.firstScanErr = wrapped
+	}
+	c.failedStores[index] = struct{}{}
+	c.skips = append(c.skips, sourceWorkflowStoreSkip{path: info.path, err: wrapped})
+
+	rootStoreRef := workflowStoreRefForDir(info.path, c.cityPath, c.cityName, c.cfg)
+	selectedStore := strings.TrimSpace(currentSourceStoreRef) != "" &&
+		sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) == sourceworkflow.NormalizeSourceStoreRef(currentSourceStoreRef)
+	if selectedStore {
+		return wrapped
+	}
+	return nil
+}
+
+// matches finalizes the deduplicated per-store match set.
+func (c *sourceWorkflowMatchCollector) matches() []sourceWorkflowStoreMatch {
+	matches := make([]sourceWorkflowStoreMatch, 0, len(c.matchesByLabel))
+	for _, match := range c.matchesByLabel {
 		match.roots = uniqueBeads(match.roots)
 		match.beads = uniqueBeads(match.beads)
 		matches = append(matches, match)
 	}
-	return matches, skips, nil
+	return matches
 }
 
 func mergeSourceWorkflowMatch(matches map[string]sourceWorkflowStoreMatch, next sourceWorkflowStoreMatch) {
@@ -1672,7 +1805,7 @@ func countOpenMatchedBeads(matches []sourceWorkflowStoreMatch) (int, error) {
 }
 
 // sourceWorkflowStoreSkip records a candidate store that could not be opened
-// during a source-workflow singleton scan. Tolerating unopenable stores
+// or queried during a source-workflow singleton scan. Tolerating unavailable stores
 // avoids turning a rig-local problem into a city-wide outage, but the
 // silent skip creates a correctness hole: a cross-store live root living
 // in the broken rig is invisible to the singleton check. Callers MUST
@@ -1695,10 +1828,29 @@ func formatSourceWorkflowStoreSkips(skips []sourceWorkflowStoreSkip) string {
 		parts = append(parts, fmt.Sprintf("%s (%v)", skip.path, skip.err))
 	}
 	return fmt.Sprintf(
-		"source-workflow singleton scan skipped %d unopenable store(s); cross-store roots in those stores are invisible: %s",
+		"source-workflow singleton scan skipped %d unavailable store(s); cross-store roots in those stores are invisible: %s",
 		len(skips),
 		strings.Join(parts, "; "),
 	)
+}
+
+func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStoreRef string, skips []sourceWorkflowStoreSkip) ([]sourceWorkflowStoreSkip, bool) {
+	selectedStoreRef = sourceworkflow.NormalizeSourceStoreRef(selectedStoreRef)
+	if selectedStoreRef == "" || len(skips) == 0 {
+		return skips, false
+	}
+	cityName := loadedCityName(cfg, cityPath)
+	unscanned := make([]sourceWorkflowStoreSkip, 0, len(skips))
+	selectedRecovered := false
+	for _, skip := range skips {
+		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
+		if skipRef == selectedStoreRef {
+			selectedRecovered = true
+			continue
+		}
+		unscanned = append(unscanned, skip)
+	}
+	return unscanned, selectedRecovered
 }
 
 // openSourceWorkflowStores opens every candidate bead store used for
@@ -1878,6 +2030,20 @@ func findWorkflowBeads(store beads.Store, workflowID string) []beads.Bead {
 		}
 	}
 	return result
+}
+
+func findWorkflowBeadsFromRoot(store beads.Store, root beads.Bead) ([]beads.Bead, error) {
+	if store == nil || root.ID == "" {
+		return nil, nil
+	}
+	descendants, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing descendants of workflow %s: %w", root.ID, err)
+	}
+	return uniqueBeads(append([]beads.Bead{root}, descendants...)), nil
 }
 
 func workflowBeadIDs(bb []beads.Bead) []string {

@@ -998,10 +998,10 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if err != nil {
 		return err
 	}
-	return verifyCanonicalBdScopeStoreReady(store)
+	return verifyCanonicalBdScopeStoreReady(store, time.Sleep)
 }
 
-func verifyCanonicalBdScopeStoreReady(store beads.Store) error {
+func verifyCanonicalBdScopeStoreReady(store beads.Store, sleep func(time.Duration)) error {
 	var lastErr error
 	for attempt := 0; attempt < 20; attempt++ {
 		_, err := store.List(beads.ListQuery{AllowScan: true, Limit: 1})
@@ -1009,7 +1009,7 @@ func verifyCanonicalBdScopeStoreReady(store beads.Store) error {
 			return nil
 		}
 		lastErr = err
-		time.Sleep(500 * time.Millisecond)
+		sleep(500 * time.Millisecond)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("store verification failed")

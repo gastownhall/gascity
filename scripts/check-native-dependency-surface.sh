@@ -52,6 +52,43 @@ fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
 go build -o "$tmpdir/gc" ./cmd/gc
+
+go tool nm "$tmpdir/gc" > "$tmpdir/gc.nm"
+for forbidden_symbol in \
+	"main.runProductMetricsTesthookChild" \
+	"main.newProductMetricsTesthookRecordHelpCommand" \
+	"internal/productmetrics.OpenTesthook" \
+	"internal/productmetrics.testhookLoopbackHost"
+do
+	if grep -Fq -- "$forbidden_symbol" "$tmpdir/gc.nm"; then
+		echo "native dependency guard: normal gc contains product-metrics testhook symbol $forbidden_symbol" >&2
+		exit 1
+	fi
+done
+
+for forbidden_literal in \
+	"GC_PRODUCT_METRICS_TESTHOOK_ENDPOINT" \
+	"GC_PRODUCT_METRICS_TESTHOOK_CA_FILE" \
+	"__testhook-record-help"
+do
+	if LC_ALL=C grep -aFq -- "$forbidden_literal" "$tmpdir/gc"; then
+		echo "native dependency guard: normal gc contains product-metrics testhook literal $forbidden_literal" >&2
+		exit 1
+	fi
+done
+
+mkdir -p "$tmpdir/home" "$tmpdir/gc-home"
+if ! HOME="$tmpdir/home" GC_HOME="$tmpdir/gc-home" \
+	"$tmpdir/gc" metrics --help > "$tmpdir/metrics-help.txt" 2>&1; then
+	echo "native dependency guard: normal gc metrics --help failed" >&2
+	cat "$tmpdir/metrics-help.txt" >&2
+	exit 1
+fi
+if grep -Fq -- "__testhook-record-help" "$tmpdir/metrics-help.txt"; then
+	echo "native dependency guard: normal gc metrics --help exposes the product-metrics testhook command" >&2
+	exit 1
+fi
+
 binary_bytes="$(wc -c < "$tmpdir/gc" | tr -d ' ')"
 if [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
 	echo "native dependency guard: gc binary is $binary_bytes bytes; max is $max_binary_bytes" >&2

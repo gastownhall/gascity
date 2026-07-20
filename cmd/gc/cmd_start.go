@@ -20,12 +20,14 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/warmup"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -733,11 +735,22 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
-	warmupOpts := WarmupOpts{
+	warmupCityPath := cityPath
+	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
+		warmupCityPath = absCityPath
+	}
+	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
+		Stderr:               io.Discard,
+		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
+		SkipCityDoltCheck:    gcDoltSkip() || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+	})
+	warmupOpts := warmup.WarmupOpts{
+		Checks: warmupChecks,
 		Mailer: defaultMailProvider(cityPath),
 		Stderr: stderr,
 	}
-	_, _ = RunWarmupChecks(context.Background(), cityPath, cfg, warmupOpts)
+	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
 
 	// Materialize formula symlinks before agent startup.
 	// System formulas/orders now arrive via the core bootstrap pack.

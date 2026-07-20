@@ -182,6 +182,11 @@ func configureFSPressureForTests() {
 // an active root (ga-djbcqt).
 var testTempRootAliveSentinel *os.File
 
+// tmuxSocketAliveSentinel pins the alive-sentinel flock on this process's
+// tmux socket parent dir (tmuxtest.SocketParentDirPrefix) for the binary's
+// lifetime, for the same reason as testTempRootAliveSentinel above.
+var tmuxSocketAliveSentinel *os.File
+
 type cleanupTestingM struct {
 	m     testscript.TestingM
 	paths []string
@@ -238,10 +243,11 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	tmuxSocketRoot, tmuxSocketCleanupRoot, err := cmdGCTmuxSocketRoot(testTempRoot)
+	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot)
 	if err != nil {
 		panic(err)
 	}
+	tmuxSocketAliveSentinel = tmuxSentinel
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}

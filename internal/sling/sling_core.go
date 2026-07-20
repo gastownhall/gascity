@@ -705,59 +705,172 @@ type workflowRestoreState struct {
 func listSourceWorkflowRoots(deps SlingDeps, sourceBeadID string) ([]sourceWorkflowRoot, error) {
 	sourceStoreRef := strings.TrimSpace(deps.StoreRef)
 	if deps.SourceWorkflowStores == nil {
-		roots, err := sourceworkflow.ListLiveRoots(deps.Store, sourceBeadID, sourceStoreRef, sourceStoreRef)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]sourceWorkflowRoot, 0, len(roots))
-		for _, root := range roots {
-			out = append(out, sourceWorkflowRoot{
-				root:     root,
-				store:    deps.Store,
-				storeRef: sourceStoreRef,
-			})
-		}
-		return out, nil
+		return singleStoreSourceWorkflowRoots(deps.Store, sourceBeadID, sourceStoreRef)
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
 		return nil, err
 	}
-	roots := make([]sourceWorkflowRoot, 0)
-	seen := make(map[string]struct{}, len(stores))
+	stores, err = ensureSelectedSourceWorkflowStorePresent(stores, deps.Store, sourceStoreRef)
+	if err != nil {
+		return nil, err
+	}
+	c := &sourceWorkflowRootCollector{
+		deps:           deps,
+		sourceBeadID:   sourceBeadID,
+		sourceStoreRef: sourceStoreRef,
+		seen:           make(map[string]struct{}, len(stores)),
+	}
 	for i, info := range stores {
-		if info.Store == nil {
-			continue
-		}
-		rootStoreRef := strings.TrimSpace(info.StoreRef)
-		matches, err := sourceworkflow.ListLiveRoots(info.Store, sourceBeadID, sourceStoreRef, rootStoreRef)
-		if err != nil {
+		if err := c.scanStore(i, info); err != nil {
 			return nil, err
 		}
-		for _, root := range matches {
-			keyScope := rootStoreRef
-			if keyScope == "" {
-				keyScope = fmt.Sprintf("store#%d", i)
-			}
-			key := keyScope + "\x00" + root.ID
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			roots = append(roots, sourceWorkflowRoot{
-				root:     root,
-				store:    info.Store,
-				storeRef: rootStoreRef,
-			})
-		}
 	}
-	slices.SortFunc(roots, func(a, b sourceWorkflowRoot) int {
+	return c.result()
+}
+
+// singleStoreSourceWorkflowRoots lists live source-workflow roots when the deps
+// expose only one store (no cross-store SourceWorkflowStores enumerator). Every
+// scan failure is fatal here because there is no non-selected store to tolerate.
+func singleStoreSourceWorkflowRoots(store beads.Store, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowRoot, error) {
+	roots, err := sourceworkflow.ListLiveRoots(store, sourceBeadID, sourceStoreRef, sourceStoreRef)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]sourceWorkflowRoot, 0, len(roots))
+	for _, root := range roots {
+		out = append(out, sourceWorkflowRoot{
+			root:     root,
+			store:    store,
+			storeRef: sourceStoreRef,
+		})
+	}
+	return out, nil
+}
+
+// ensureSelectedSourceWorkflowStorePresent guarantees the selected source store
+// is scanned. When a specific source store ref was requested but is absent from
+// the enumerated stores, it prepends the deps store — the selected store is
+// always strict — or fails when no such store is available to scan.
+func ensureSelectedSourceWorkflowStorePresent(stores []SourceWorkflowStore, fallback beads.Store, sourceStoreRef string) ([]SourceWorkflowStore, error) {
+	if sourceStoreRef == "" {
+		return stores, nil
+	}
+	selectedPresent := slices.ContainsFunc(stores, func(info SourceWorkflowStore) bool {
+		return info.Store != nil &&
+			sourceworkflow.NormalizeSourceStoreRef(info.StoreRef) == sourceworkflow.NormalizeSourceStoreRef(sourceStoreRef)
+	})
+	if selectedPresent {
+		return stores, nil
+	}
+	if fallback == nil {
+		return nil, fmt.Errorf("source workflow store %s is unavailable to scan", sourceStoreRef)
+	}
+	return append([]SourceWorkflowStore{{Store: fallback, StoreRef: sourceStoreRef}}, stores...), nil
+}
+
+// sourceWorkflowRootCollector accumulates live source-workflow roots across every
+// candidate store for a running sling. It tolerates unrelated (non-selected)
+// store scan failures — warning through the deps sink — while keeping the
+// selected source store strict, and dedups roots by store scope and root ID.
+type sourceWorkflowRootCollector struct {
+	deps           SlingDeps
+	sourceBeadID   string
+	sourceStoreRef string
+
+	roots        []sourceWorkflowRoot
+	seen         map[string]struct{}
+	scanned      int
+	firstScanErr error
+}
+
+// scanStore scans one candidate store for live source-workflow roots. A nil
+// store is ignored. A tolerated non-selected scan failure warns and returns nil
+// so the walk continues; a selected-store (or otherwise non-tolerable) failure
+// returns the wrapped error to abort.
+func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowStore) error {
+	if info.Store == nil {
+		return nil
+	}
+	rootStoreRef := strings.TrimSpace(info.StoreRef)
+	matches, err := sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
+	if err != nil {
+		return c.recordScanFailure(index, rootStoreRef, err)
+	}
+	c.scanned++
+	c.appendRoots(index, info.Store, rootStoreRef, matches)
+	return nil
+}
+
+// recordScanFailure remembers the first scan error and decides whether the
+// failure may be tolerated. A tolerable failure is warned through the deps sink
+// and returns nil so the store is skipped; every other failure returns the
+// wrapped error so the caller aborts.
+func (c *sourceWorkflowRootCollector) recordScanFailure(index int, rootStoreRef string, scanErr error) error {
+	storeLabel := rootStoreRef
+	if storeLabel == "" {
+		storeLabel = fmt.Sprintf("store#%d", index)
+	}
+	wrapped := fmt.Errorf("listing live workflows in %s: %w", storeLabel, scanErr)
+	if c.firstScanErr == nil {
+		c.firstScanErr = wrapped
+	}
+	if !c.toleratesScanFailure(rootStoreRef) {
+		return wrapped
+	}
+	c.deps.SourceWorkflowStoreScanWarning(rootStoreRef, scanErr)
+	return nil
+}
+
+// toleratesScanFailure reports whether a scan failure on the given store may be
+// skipped instead of aborting the walk. Tolerance requires a configured warning
+// sink, resolved source and store refs, and a store that is not the strict
+// selected source store — so a degraded scan is never silently swallowed.
+func (c *sourceWorkflowRootCollector) toleratesScanFailure(rootStoreRef string) bool {
+	if c.deps.SourceWorkflowStoreScanWarning == nil || c.sourceStoreRef == "" || rootStoreRef == "" {
+		return false
+	}
+	return sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) !=
+		sourceworkflow.NormalizeSourceStoreRef(c.sourceStoreRef)
+}
+
+// appendRoots merges the live roots from one store into the result set, skipping
+// duplicates keyed by store scope and root ID.
+func (c *sourceWorkflowRootCollector) appendRoots(index int, store beads.Store, rootStoreRef string, matches []beads.Bead) {
+	keyScope := rootStoreRef
+	if keyScope == "" {
+		keyScope = fmt.Sprintf("store#%d", index)
+	}
+	for _, root := range matches {
+		key := keyScope + "\x00" + root.ID
+		if _, ok := c.seen[key]; ok {
+			continue
+		}
+		c.seen[key] = struct{}{}
+		c.roots = append(c.roots, sourceWorkflowRoot{
+			root:     root,
+			store:    store,
+			storeRef: rootStoreRef,
+		})
+	}
+}
+
+// result finalizes the sorted root set, applying the fail-closed fallback when
+// no store could be scanned.
+func (c *sourceWorkflowRootCollector) result() ([]sourceWorkflowRoot, error) {
+	if c.scanned == 0 {
+		if c.firstScanErr != nil {
+			return nil, c.firstScanErr
+		}
+		return nil, fmt.Errorf("no source workflow stores were available to scan")
+	}
+	slices.SortFunc(c.roots, func(a, b sourceWorkflowRoot) int {
 		if cmp := strings.Compare(a.storeRef, b.storeRef); cmp != 0 {
 			return cmp
 		}
 		return strings.Compare(a.root.ID, b.root.ID)
 	})
-	return roots, nil
+	return c.roots, nil
 }
 
 func pendingGraphWorkflowLaunch(rootID, sourceBeadID string, a config.Agent, method, formulaName string, deps SlingDeps) pendingSourceWorkflowLaunch {
