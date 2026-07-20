@@ -167,7 +167,7 @@ func TestBdBackupFreshnessCheck(t *testing.T) {
 		}
 	})
 
-	// Unmigrated scopes must keep their existing behaviour.
+	// Unmigrated scopes must keep their existing behavior.
 	t.Run("unmigrated scope still reads the legacy file", func(t *testing.T) {
 		scope := t.TempDir()
 		writeBackupStateForFreshness(t, scope, now.Add(-72*time.Hour).Format(time.RFC3339Nano))
