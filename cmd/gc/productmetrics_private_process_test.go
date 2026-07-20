@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"go/build"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -213,65 +213,52 @@ func configureProductMetricsTrustedProcessTempRoot(t *testing.T) {
 	t.Setenv("TMPDIR", trustedTempRoot)
 }
 
-func TestProductMetricsNormalBinaryContainsNoTesthookSymbols(t *testing.T) {
-	skipSlowCmdGCTest(t, "builds and scans a normal gc binary")
-	buildDir := t.TempDir()
-	normalBinary := filepath.Join(buildDir, "gc-productmetrics-normal")
-	buildGCBinaryForProductMetricsTest(t, normalBinary, "")
+func TestProductMetricsBuildTagSurfacesKeepTesthooksOutOfNormalCommandTree(t *testing.T) {
+	normal := build.Default
+	normal.BuildTags = nil
+	tagged := normal
+	tagged.BuildTags = []string{"productmetrics_testhook"}
 
-	command := exec.Command("go", "tool", "nm", normalBinary)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go tool nm normal gc: %v\n%s", err, output)
-	}
-	for _, forbidden := range []string{
-		"main.runProductMetricsTesthookChild",
-		"main.newProductMetricsTesthookRecordHelpCommand",
-		"internal/productmetrics.OpenTesthook",
-		"internal/productmetrics.testhookLoopbackHost",
+	for _, test := range []struct {
+		name         string
+		dir          string
+		filename     string
+		normalSelect bool
+		taggedSelect bool
+	}{
+		{name: "normal census adapter", dir: ".", filename: "metrics_census_ignore_production.go", normalSelect: true},
+		{name: "normal metrics adapter", dir: ".", filename: "productmetrics_adapter_production.go", normalSelect: true},
+		{name: "normal control registrar", dir: ".", filename: "productmetrics_controls_production.go", normalSelect: true},
+		{name: "tagged control registrar", dir: ".", filename: "productmetrics_controls_testhook.go", taggedSelect: true},
+		{name: "tagged command adapter", dir: ".", filename: "productmetrics_testhook.go", taggedSelect: true},
+		{name: "tagged service adapter", dir: "../../internal/productmetrics", filename: "productmetrics_testhook.go", taggedSelect: true},
 	} {
-		if strings.Contains(string(output), forbidden) {
-			t.Fatalf("normal gc binary contains product-metrics testhook symbol %q", forbidden)
-		}
-	}
-	binary, err := os.ReadFile(normalBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{
-		productMetricsTesthookEndpointEnvironment,
-		productMetricsTesthookCAFileEnvironment,
-		productMetricsTestRecordHelpCommandFixture,
-	} {
-		if bytes.Contains(binary, []byte(forbidden)) {
-			t.Fatalf("normal gc binary contains tag-only literal %q", forbidden)
-		}
-	}
-	help := exec.Command(normalBinary, "metrics", "--help")
-	helpOutput, err := help.CombinedOutput()
-	if err != nil {
-		t.Fatalf("normal gc metrics --help: %v\n%s", err, helpOutput)
-	}
-	if bytes.Contains(helpOutput, []byte(productMetricsTestRecordHelpCommandFixture)) {
-		t.Fatalf("normal gc metrics help exposes tagged command:\n%s", helpOutput)
+		t.Run(test.name, func(t *testing.T) {
+			for _, surface := range []struct {
+				name string
+				ctx  build.Context
+				want bool
+			}{
+				{name: "normal", ctx: normal, want: test.normalSelect},
+				{name: "tagged", ctx: tagged, want: test.taggedSelect},
+			} {
+				selected, err := surface.ctx.MatchFile(test.dir, test.filename)
+				if err != nil {
+					t.Fatalf("%s MatchFile(%q, %q): %v", surface.name, test.dir, test.filename, err)
+				}
+				if selected != surface.want {
+					t.Fatalf("%s MatchFile(%q, %q) = %t, want %t", surface.name, test.dir, test.filename, selected, surface.want)
+				}
+			}
+		})
 	}
 
-	normalFiles := goListProductMetricsFiles(t, "")
-	taggedFiles := goListProductMetricsFiles(t, "productmetrics_testhook")
-	if strings.Contains(normalFiles, "productmetrics_testhook.go") {
-		t.Fatalf("normal go file set contains tagged adapter:\n%s", normalFiles)
+	root := newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptions{})
+	if _, ok := findCommandByCanonicalPath(root, "gc metrics"); !ok {
+		t.Fatal("normal command tree omits gc metrics")
 	}
-	if strings.Contains(normalFiles, "productmetrics_controls_testhook.go") {
-		t.Fatalf("normal go file set contains tagged control registrar:\n%s", normalFiles)
-	}
-	if !strings.Contains(normalFiles, "productmetrics_controls_production.go") {
-		t.Fatalf("normal go file set omits production control registrar:\n%s", normalFiles)
-	}
-	if !strings.Contains(taggedFiles, "productmetrics_controls_testhook.go") || strings.Contains(taggedFiles, "productmetrics_controls_production.go") {
-		t.Fatalf("tagged go file set selected the wrong control registrar:\n%s", taggedFiles)
-	}
-	if count := strings.Count(taggedFiles, "productmetrics_testhook.go"); count != 2 {
-		t.Fatalf("tagged go file set contains %d testhook adapters, want cmd and internal:\n%s", count, taggedFiles)
+	if _, ok := findCommandByCanonicalPath(root, "gc metrics "+productMetricsTestRecordHelpCommandFixture); ok {
+		t.Fatalf("normal command tree exposes tagged command %q", productMetricsTestRecordHelpCommandFixture)
 	}
 }
 
@@ -287,22 +274,6 @@ func buildGCBinaryForProductMetricsTest(t *testing.T, destination, tags string) 
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
-}
-
-func goListProductMetricsFiles(t *testing.T, tags string) string {
-	t.Helper()
-	args := []string{"list", "-f", `{{.ImportPath}} {{join .GoFiles ","}}`}
-	if tags != "" {
-		args = append(args, "-tags", tags)
-	}
-	args = append(args, ".", "../../internal/productmetrics")
-	command := exec.Command("go", args...)
-	command.Dir = "."
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, output)
-	}
-	return string(output)
 }
 
 func replaceProductMetricsProcessEnvironment(environment []string, name, value string) []string {

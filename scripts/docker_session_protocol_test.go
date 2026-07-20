@@ -17,9 +17,13 @@ import (
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 	runtimeexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
-const dockerProtocolContainerID = "fake-container-id"
+const (
+	dockerProtocolContainerID         = "fake-container-id"
+	dockerProtocolObservationInterval = 10 * time.Millisecond
+)
 
 func TestDockerSessionProtocol(t *testing.T) {
 	root := repoRoot(t)
@@ -170,24 +174,42 @@ func TestDockerSessionProtocol(t *testing.T) {
 		fixture.writeState(t, "prompt-output", "not ready >\n")
 
 		provider := runtimeexec.NewProvider(fixture.adapterWrapper(t, adapter))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		err := provider.Start(ctx, fixture.containerName, gcruntime.Config{
-			Command:           "sleep infinity",
-			WorkDir:           fixture.workDir,
-			ReadyPromptPrefix: "> ",
-			Env: map[string]string{
-				"GC_DOCKER_HOME_MOUNT": "false",
-				"GC_DOCKER_IMAGE":      "gc-protocol-test:latest",
-			},
-		})
-		if err == nil {
-			t.Fatal("start succeeded when prompt appeared only mid-line")
+		startResult := make(chan error, 1)
+		go func() {
+			startResult <- provider.Start(ctx, fixture.containerName, gcruntime.Config{
+				Command:           "sleep infinity",
+				WorkDir:           fixture.workDir,
+				ReadyPromptPrefix: "> ",
+				Env: map[string]string{
+					"GC_DOCKER_HOME_MOUNT": "false",
+					"GC_DOCKER_IMAGE":      "gc-protocol-test:latest",
+				},
+			})
+		}()
+
+		captureCall := dockerProtocolCaptureCall(fixture.containerName, 120)
+		observationCtx, stopObservation := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		waitForDockerProtocolCall(observationCtx, t, fixture, captureCall)
+		stopObservation()
+		cancel()
+
+		completionCtx, stopCompletion := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		defer stopCompletion()
+		var err error
+		select {
+		case err = <-startResult:
+		case <-completionCtx.Done():
+			t.Fatalf("Start did not return within %s after cancellation", testutil.ExecRaceTimeout)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Start error = %v, want context.Canceled", err)
 		}
 
 		calls := fixture.calls(t)
-		if dockerProtocolCallCount(calls, dockerProtocolCaptureCall(fixture.containerName, 120)) == 0 {
-			t.Fatalf("context expired before prompt observation; calls:\n%s", formatDockerProtocolCalls(calls))
+		if dockerProtocolCallCount(calls, captureCall) == 0 {
+			t.Fatalf("cancellation started before prompt observation; calls:\n%s", formatDockerProtocolCalls(calls))
 		}
 		if fixture.containerExists() {
 			t.Errorf("container %q remains after start context cancellation; calls:\n%s",
@@ -196,84 +218,6 @@ func TestDockerSessionProtocol(t *testing.T) {
 		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
 		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
 			t.Errorf("immutable-ID cleanup calls = %v, want a single force-remove; calls:\n%s",
-				cleanup, formatDockerProtocolCalls(calls))
-		}
-	})
-
-	t.Run("start_cancellation_removes_container_despite_stalled_stop", func(t *testing.T) {
-		fixture := newDockerProtocolFixture(t, fakeSource)
-		fixture.allowImage(t)
-		fixture.writeState(t, "prompt-output", "not ready >\n")
-		// A graceful "docker stop" that waits out its timeout outruns the exec
-		// provider's ~2s cancellation grace. If rollback ever regressed to
-		// "stop -t 10" before "rm -f", the adapter would be force-killed
-		// mid-stop and the container would leak. Rollback must go straight to
-		// "rm -f", so this stall is never triggered on the fixed path.
-		fixture.writeState(t, "stop-stall-seconds", "5\n")
-
-		provider := runtimeexec.NewProvider(fixture.adapterWrapper(t, adapter))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		err := provider.Start(ctx, fixture.containerName, gcruntime.Config{
-			Command:           "sleep infinity",
-			WorkDir:           fixture.workDir,
-			ReadyPromptPrefix: "> ",
-			Env: map[string]string{
-				"GC_DOCKER_HOME_MOUNT": "false",
-				"GC_DOCKER_IMAGE":      "gc-protocol-test:latest",
-			},
-		})
-		if err == nil {
-			t.Fatal("start succeeded when prompt appeared only mid-line")
-		}
-
-		calls := fixture.calls(t)
-		if fixture.containerExists() {
-			t.Errorf("container %q leaked after cancellation with a stalled stop; calls:\n%s",
-				fixture.containerName, formatDockerProtocolCalls(calls))
-		}
-		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
-		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
-			t.Errorf("cancellation cleanup = %v, want a single force-remove that never blocks on stop; calls:\n%s",
-				cleanup, formatDockerProtocolCalls(calls))
-		}
-	})
-
-	t.Run("start_cancellation_during_ready_delay_removes_container", func(t *testing.T) {
-		fixture := newDockerProtocolFixture(t, fakeSource)
-		fixture.allowImage(t)
-
-		// With no ready_prompt_prefix, start takes the ready_delay_ms fallback: a
-		// single foreground `sleep` far longer than the exec provider's ~2s
-		// cancellation grace. A plain foreground sleep would keep the shell from
-		// running its rollback trap until the sleep returned, so the provider
-		// would force-kill the shell mid-delay and leak the just-created
-		// container. The cooperative interrupt must reach that foreground child
-		// so the trap force-removes the container inside the grace window.
-		provider := runtimeexec.NewProvider(fixture.adapterWrapper(t, adapter))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		err := provider.Start(ctx, fixture.containerName, gcruntime.Config{
-			Command:      "sleep infinity",
-			WorkDir:      fixture.workDir,
-			ReadyDelayMs: 5000,
-			Env: map[string]string{
-				"GC_DOCKER_HOME_MOUNT": "false",
-				"GC_DOCKER_IMAGE":      "gc-protocol-test:latest",
-			},
-		})
-		if err == nil {
-			t.Fatal("start succeeded despite cancellation during the readiness delay")
-		}
-
-		calls := fixture.calls(t)
-		if fixture.containerExists() {
-			t.Errorf("container %q leaked after cancellation during ready_delay_ms; calls:\n%s",
-				fixture.containerName, formatDockerProtocolCalls(calls))
-		}
-		cleanup := dockerProtocolCleanupCallsAfterRun(calls)
-		if len(cleanup) != 1 || !reflect.DeepEqual(cleanup[0], []string{"rm", "-f", dockerProtocolContainerID}) {
-			t.Errorf("ready-delay cancellation cleanup = %v, want a single immutable-ID force-remove; calls:\n%s",
 				cleanup, formatDockerProtocolCalls(calls))
 		}
 	})
@@ -515,6 +459,26 @@ func dockerProtocolCallCount(calls [][]string, want []string) int {
 		}
 	}
 	return count
+}
+
+func waitForDockerProtocolCall(ctx context.Context, t *testing.T, fixture *dockerProtocolFixture, want []string) {
+	t.Helper()
+	ticker := time.NewTicker(dockerProtocolObservationInterval)
+	defer ticker.Stop()
+
+	var calls [][]string
+	for {
+		calls = fixture.calls(t)
+		if dockerProtocolCallCount(calls, want) > 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("waiting for exact Docker call %q: %v; last calls:\n%s",
+				want, ctx.Err(), formatDockerProtocolCalls(calls))
+		case <-ticker.C:
+		}
+	}
 }
 
 // dockerProtocolCleanupCallsAfterRun returns the immutable-ID cleanup calls

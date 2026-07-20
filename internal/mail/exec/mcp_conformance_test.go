@@ -1,6 +1,7 @@
 package exec //nolint:revive // internal package, always imported with alias
 
 import (
+	"errors"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -56,6 +57,90 @@ func TestMCPMailConformance(t *testing.T) {
 
 		return NewProvider(wrapperPath)
 	})
+}
+
+// TestMCPMailReplyMissingOriginalIsNotFound is a regression guard for the mail
+// removal contract on the reply path. The recipient cache (msg-agent/<id>) can
+// outlive the message on the server: the original can be archived, deleted, or
+// purged out of band so that fetch_inbox no longer returns it, while the local
+// archived-state cache (msg-read/<id>) was never set. In that stale-cache
+// window, replying to the removed id must surface mail.ErrNotFound and must NOT
+// fall back to the cached recipient and deliver a fresh message.
+//
+// The generic runRemovalVisibilityContract does not cover this case because it
+// removes the target through the provider's own Archive/Delete, which sets the
+// local archived-state cache and short-circuits the reply path before it ever
+// consults fetch_inbox.
+func TestMCPMailReplyMissingOriginalIsNotFound(t *testing.T) {
+	if _, err := osexec.LookPath("jq"); err != nil {
+		t.Skip("jq not on PATH")
+	}
+	scriptPath, err := findMCPScript()
+	if err != nil {
+		t.Skipf("MCP mail script not found: %v", err)
+	}
+
+	dir := t.TempDir()
+
+	stateDir := filepath.Join(dir, "state")
+	for _, sub := range []string{"agents", "messages", "contacts"} {
+		if err := os.MkdirAll(filepath.Join(stateDir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "next_id"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(mcpMockCurl(stateDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wrapperPath := filepath.Join(dir, "mail-provider")
+	if err := os.WriteFile(wrapperPath, []byte(mcpWrapper(binDir, scriptPath, stateDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := NewProvider(wrapperPath)
+
+	// Deliver a message so the bridge caches its recipient (msg-agent/<id>).
+	target, err := p.Send("alice", "bob", "original", "please reply later")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	messagesDir := filepath.Join(stateDir, "messages")
+
+	// Drop the message from the mock server WITHOUT going through the provider's
+	// archive/delete, so the local archived-state cache is never written but the
+	// recipient cache still points at bob and fetch_inbox now omits the id.
+	if err := os.Remove(filepath.Join(messagesDir, target.ID+".json")); err != nil {
+		t.Fatalf("remove server-side message: %v", err)
+	}
+
+	before := countMockMessages(t, messagesDir)
+
+	if _, err := p.Reply(target.ID, "bob", "too late", "must not create"); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Reply(missing original) error = %v, want mail.ErrNotFound", err)
+	}
+
+	if after := countMockMessages(t, messagesDir); after != before {
+		t.Errorf("Reply(missing original) delivered %d new message(s); want 0", after-before)
+	}
+}
+
+// countMockMessages counts the stored message files in the mock server state
+// directory, used to assert that a rejected reply delivers nothing.
+func countMockMessages(t *testing.T, messagesDir string) int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(messagesDir, "*.json"))
+	if err != nil {
+		t.Fatalf("glob mock messages: %v", err)
+	}
+	return len(matches)
 }
 
 // TestMCPMailBridgeSourceable verifies the bridge script is safely

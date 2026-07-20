@@ -32,7 +32,9 @@
         "claimed",
         "existing_assignment",
         "ready_assignment",
-        "no_work"
+        "no_work",
+        "claims_errored",
+        "stale_session"
       ]
     },
     "bead_id": {
@@ -42,6 +44,12 @@
       "type": "string"
     },
     "route": {
+      "type": "string"
+    },
+    "root_bead_id": {
+      "type": "string"
+    },
+    "continuation_group": {
       "type": "string"
     },
     "continuation_assigned": {
@@ -87,7 +95,11 @@
       "then": {
         "properties": {
           "reason": {
-            "const": "no_work"
+            "enum": [
+              "no_work",
+              "claims_errored",
+              "stale_session"
+            ]
           }
         }
       }

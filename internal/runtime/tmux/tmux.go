@@ -225,7 +225,6 @@ type Tmux struct {
 	exec                 executor
 	interactionDedup     *approvalDedup
 	interactionDedupOnce sync.Once
-	configureOnce        sync.Once
 	hiddenAttachMu       sync.Mutex
 	hiddenAttachClients  map[string]*hiddenAttachClient
 	hiddenAttachSeq      atomic.Uint64
@@ -976,13 +975,10 @@ func (t *Tmux) KillServer() error {
 }
 
 // ConfigureServer sets tmux server options required for Gas City lifecycle
-// ownership. It is idempotent per Tmux instance.
+// ownership. It is safe to call repeatedly because the wrapper may outlive the
+// server bound to its socket.
 func (t *Tmux) ConfigureServer() error {
-	var err error
-	t.configureOnce.Do(func() {
-		err = t.SetExitEmpty(false)
-	})
-	return err
+	return t.SetExitEmpty(false)
 }
 
 // TeardownServer terminates the tmux server after all sessions are drained.
@@ -1821,6 +1817,23 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		target = agentPane
 	}
 
+	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
+	// only once delivery is actually confirmed (see delivered below). This
+	// mirrors recordPoke/GetSessionActivity (see discountPokeActivity) so gc's
+	// own nudge keystrokes don't inflate last_active, but captures prior up
+	// front and stamps `at` after the LAST keystroke: submitEnterAndConfirm's
+	// polling can burn several seconds — longer than pokeEcho — so stamping at
+	// entry would let the final Enter's echo land outside the discount window.
+	// pokePrior also carries a still-unanswered earlier poke's baseline forward
+	// so chained nudges inside pokeGrace don't record gc's own echo as prior.
+	prior := t.pokePrior(session)
+	delivered := false
+	defer func() {
+		if delivered {
+			t.recordPokeAt(session, prior, time.Now())
+		}
+	}()
+
 	// Wake a detached pane BEFORE the first send. A fully-detached pool TUI
 	// (e.g. grok, never observed by a client) may not be servicing its event
 	// loop, so the initial paste is silently dropped at the application layer
@@ -1864,6 +1877,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
 			return fmt.Errorf("failed to send Enter: %w", err)
 		}
+		delivered = true
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
@@ -1878,6 +1892,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
 		wake()
+		delivered = true
 		return nil
 	}
 	return fmt.Errorf("failed to send Enter after %d attempts: %w", submitEnterMaxSends, lastErr)
@@ -1894,6 +1909,17 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		return fmt.Errorf("nudge lock timeout for pane %q: previous nudge may be hung", pane)
 	}
 	defer releaseNudgeLock(pane)
+
+	// See NudgeSession for why prior is captured before the first keystroke
+	// (via pokePrior, which also carries a still-unanswered earlier poke's
+	// baseline forward) and the poke stamped only on confirmed delivery.
+	prior := t.pokePrior(pane)
+	delivered := false
+	defer func() {
+		if delivered {
+			t.recordPokeAt(pane, prior, time.Now())
+		}
+	}()
 
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(pane, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -1925,6 +1951,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
 		t.WakePaneIfDetached(pane)
+		delivered = true
 		return nil
 	}
 	return fmt.Errorf("failed to send Enter after 3 attempts: %w", lastErr)
@@ -2327,12 +2354,38 @@ func (t *Tmux) recordPoke(session string) {
 	if err != nil {
 		prior = time.Time{}
 	}
+	t.recordPokeAt(session, prior, time.Now())
+}
+
+// recordPokeAt stamps a poke with an explicit prior activity and timestamp,
+// for callers (NudgeSession/NudgePane) whose send spans longer than pokeEcho:
+// they capture prior BEFORE the first keystroke and stamp `at` AFTER the last,
+// so the echo window brackets the final keystroke regardless of delivery load.
+func (t *Tmux) recordPokeAt(session string, prior, at time.Time) {
 	t.pokeMu.Lock()
 	if t.pokes == nil {
 		t.pokes = make(map[string]pokeInfo)
 	}
-	t.pokes[session] = pokeInfo{at: time.Now(), prior: prior}
+	t.pokes[session] = pokeInfo{at: at, prior: prior}
 	t.pokeMu.Unlock()
+}
+
+// pokePrior snapshots the genuine session activity to record as a new poke's
+// prior. It reads raw window activity but, when an earlier unanswered poke is
+// still on record, carries that poke's prior forward (see pokePriorBaseline) so
+// chained gc nudges inside pokeGrace don't ratchet last_active up to gc's own
+// earlier keystroke echo. Returns the zero time when raw activity cannot be
+// read, matching GetSessionActivity's degradation (discountPokeActivity then
+// declines to discount a zero prior).
+func (t *Tmux) pokePrior(session string) time.Time {
+	raw, err := t.rawSessionActivity(session)
+	if err != nil {
+		return time.Time{}
+	}
+	t.pokeMu.Lock()
+	pk, ok := t.pokes[session]
+	t.pokeMu.Unlock()
+	return pokePriorBaseline(raw, pk, ok)
 }
 
 // discountPokeActivity resolves the genuine activity time from the raw tmux
@@ -2353,6 +2406,22 @@ func discountPokeActivity(wa time.Time, pk pokeInfo, now time.Time) time.Time {
 		return pk.prior
 	}
 	return wa
+}
+
+// pokePriorBaseline selects the genuine activity to record as a new poke's
+// prior. When an earlier poke is still on record and the current raw window
+// activity is only that poke's own echo (raw within pokeEcho of the earlier
+// poke, i.e. no genuine agent output since), the last genuine activity is the
+// earlier poke's prior, so it is carried forward. This stops chained unanswered
+// nudges inside pokeGrace from recording gc's own earlier nudge echo as the new
+// baseline — which discountPokeActivity would otherwise later surface as
+// last_active, masking a stalled agent. Otherwise the freshly observed raw
+// activity is genuine and becomes the new prior. Pure function for testability.
+func pokePriorBaseline(raw time.Time, pk pokeInfo, hasPoke bool) time.Time {
+	if hasPoke && !pk.at.IsZero() && !pk.prior.IsZero() && raw.Sub(pk.at).Abs() <= pokeEcho {
+		return pk.prior
+	}
+	return raw
 }
 
 func latestActivityTimestamp(out string) (int64, error) {

@@ -368,13 +368,19 @@ var remoteCacheValidationCache sync.Map // cacheDir+"\x00"+commit -> remoteCache
 type remoteCacheValidationEntry struct{ fingerprint string }
 
 // remoteCacheFingerprint is a cheap change signal for a remote cache checkout:
-// the size+mtime of the checkout root, its .git dir, and the git index. Git
-// checkout/status touch .git and the index; `gc import install` rewrites the
-// tree. A nested manual worktree edit touching none of these escapes detection
-// until the process restarts — acceptable for a pinned, gc-managed cache.
+// the size+mtime of the checkout root and the git index. `gc import install`
+// rewrites the tree (changing root mtime); git checkout/reset update the
+// index. The .git directory itself is intentionally excluded: git status
+// --porcelain creates and removes a lock file inside .git/ as a side effect,
+// updating .git dir mtime on every run and defeating the memo. .git/index
+// mtime is stable across git status (the flags we pass, including
+// -c core.untrackedCache=false, prevent any index refresh writes).
+// A nested manual worktree edit touching neither root nor the index escapes
+// detection until the process restarts — acceptable for a pinned,
+// gc-managed cache.
 func remoteCacheFingerprint(cacheDir string) string {
 	var b strings.Builder
-	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git"), filepath.Join(cacheDir, ".git", "index")} {
+	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git", "index")} {
 		if fi, err := os.Stat(p); err == nil {
 			fmt.Fprintf(&b, "%d:%d;", fi.Size(), fi.ModTime().UnixNano())
 		} else {

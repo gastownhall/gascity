@@ -922,6 +922,50 @@ func convergenceStartupComplete(cr *CityRuntime) bool {
 	return true
 }
 
+// reconcilePoolDeaths detects pool instances that stopped since the prior
+// reconciliation and runs their configured death hooks.
+func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
+	if len(cr.poolDeathHandlers) == 0 {
+		return
+	}
+	currentRunning, listErr := cr.sp.ListRunning("")
+	if listErr != nil {
+		if runtime.IsPartialListError(listErr) {
+			fmt.Fprintf(cr.stderr, "%s: pool death check skipped due to partial session listing: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(cr.stderr, "%s: pool death check skipped while listing sessions: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	currentSet := make(map[string]bool, len(currentRunning))
+	for _, name := range currentRunning {
+		currentSet[name] = true
+	}
+	if *prevPoolRunning != nil {
+		for sn, info := range cr.poolDeathHandlers {
+			if (*prevPoolRunning)[sn] && !currentSet[sn] {
+				out, err := shellRunHook(info.Command, info.Dir, info.Env)
+				if err != nil {
+					fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+				}
+				// Surface only the DEFAULT hook's gc-recovery diagnostic for
+				// a bd release it could not complete (the loop exits 0 even
+				// when a bd write fails, so this is the only signal). A user
+				// on_death override carries no marker and is left alone.
+				if strings.Contains(out, config.RecoveryHookMarker) {
+					fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
+				}
+			}
+		}
+	}
+	*prevPoolRunning = make(map[string]bool)
+	for sn := range cr.poolDeathHandlers {
+		if currentSet[sn] {
+			(*prevPoolRunning)[sn] = true
+		}
+	}
+}
+
 // tick performs one reconciliation tick: pool death detection, config
 // reload (if dirty), agent reconciliation, wisp GC, and order
 // dispatch.
@@ -954,45 +998,7 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
-	// Detect pool instance deaths since last tick.
-	if len(cr.poolDeathHandlers) > 0 {
-		currentRunning, listErr := cr.sp.ListRunning("")
-		if listErr != nil {
-			if runtime.IsPartialListError(listErr) {
-				fmt.Fprintf(cr.stderr, "%s: pool death check skipped due to partial session listing: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
-			} else {
-				fmt.Fprintf(cr.stderr, "%s: pool death check skipped while listing sessions: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
-			}
-		} else {
-			currentSet := make(map[string]bool, len(currentRunning))
-			for _, name := range currentRunning {
-				currentSet[name] = true
-			}
-			if *prevPoolRunning != nil {
-				for sn, info := range cr.poolDeathHandlers {
-					if (*prevPoolRunning)[sn] && !currentSet[sn] {
-						out, err := shellRunHook(info.Command, info.Dir, info.Env)
-						if err != nil {
-							fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-						}
-						// Surface only the DEFAULT hook's gc-recovery diagnostic for
-						// a bd release it could not complete (the loop exits 0 even
-						// when a bd write fails, so this is the only signal). A user
-						// on_death override carries no marker and is left alone.
-						if strings.Contains(out, config.RecoveryHookMarker) {
-							fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
-						}
-					}
-				}
-			}
-			*prevPoolRunning = make(map[string]bool)
-			for sn := range cr.poolDeathHandlers {
-				if currentSet[sn] {
-					(*prevPoolRunning)[sn] = true
-				}
-			}
-		}
-	}
+	cr.reconcilePoolDeaths(prevPoolRunning)
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
