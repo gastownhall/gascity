@@ -258,12 +258,10 @@ func TestWaitListJSONFiltersState(t *testing.T) {
 	}
 }
 
-func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
+func TestWaitListJSONSessionFilterWiresFileStore(t *testing.T) {
 	_, store := setupWaitJSONTestCity(t)
 	targetWait := createTestWaitBeadForSession(t, store, "target-session", waitStatePending)
-	for i := 0; i < waitLookupLimit; i++ {
-		createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
-	}
+	otherWait := createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdWaitList("", "target-session", true, &stdout, &stderr); code != 0 {
@@ -273,6 +271,9 @@ func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
 	payload := decodeWaitListJSON(t, stdout.Bytes())
 	if len(payload.Waits) != 1 || payload.Waits[0].ID != targetWait.ID || payload.Waits[0].SessionID != "target-session" {
 		t.Fatalf("waits = %+v, want only target %s", payload.Waits, targetWait.ID)
+	}
+	if strings.Contains(stdout.String(), otherWait.ID) {
+		t.Fatalf("wait list output included non-target wait %s: %s", otherWait.ID, stdout.String())
 	}
 }
 
@@ -706,60 +707,34 @@ func TestLoadWaitBeadsByLabelReportsLookupLimit(t *testing.T) {
 	}
 }
 
-func TestCmdWaitListSessionFilterUsesSessionScopedLookup(t *testing.T) {
-	cityDir := t.TempDir()
-	writePhase0InterfaceCity(t, cityDir, `[workspace]
-name = "test-city"
-
-[beads]
-provider = "file"
-`)
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_DIR", t.TempDir())
-	t.Setenv("GC_BEADS", "file")
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	targetWait, err := store.Create(beads.Bead{
-		Title:  "target wait",
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel, "session:target-session"},
-		Metadata: map[string]string{
-			"session_id": "target-session",
-			"state":      waitStatePending,
-			"kind":       "manual",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(target wait): %v", err)
-	}
-	for i := 0; i < waitLookupLimit; i++ {
-		if _, err := store.Create(beads.Bead{
-			Title:  fmt.Sprintf("other wait %d", i),
-			Type:   waitBeadType,
-			Labels: []string{waitBeadLabel, "session:other-session"},
-			Metadata: map[string]string{
-				"session_id": "other-session",
-				"state":      waitStatePending,
-				"kind":       "manual",
-			},
-		}); err != nil {
-			t.Fatalf("Create(other wait %d): %v", i, err)
-		}
-	}
+func TestDoWaitListFromSessionStoreUsesSessionScopedLookup(t *testing.T) {
+	mem := beads.NewMemStore()
+	targetWait := createTestWaitBeadForSession(t, mem, "target-session", waitStatePending)
+	otherWait := createTestWaitBeadForSession(t, mem, "other-session", waitStatePending)
+	store := &waitListQueryCaptureStore{Store: mem}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdWaitList("", "target-session", false, &stdout, &stderr)
+	code := doWaitListFromSessionStore(sessionFrontDoor(store), "/test/city", "", "target-session", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
+		t.Fatalf("doWaitListFromSessionStore = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), targetWait.ID) {
 		t.Fatalf("wait list output missing target wait %s:\nstdout=%s\nstderr=%s", targetWait.ID, stdout.String(), stderr.String())
 	}
-	if strings.Contains(stdout.String(), "other-session") {
-		t.Fatalf("wait list output included non-target session:\n%s", stdout.String())
+	if strings.Contains(stdout.String(), otherWait.ID) {
+		t.Fatalf("wait list output included non-target wait %s:\n%s", otherWait.ID, stdout.String())
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1; queries=%#v", len(store.queries), store.queries)
+	}
+	wantQuery := beads.ListQuery{
+		Status: "open",
+		Label:  "session:target-session",
+		Limit:  waitLookupLimit + 1,
+		Sort:   beads.SortCreatedDesc,
+	}
+	if !reflect.DeepEqual(store.queries[0], wantQuery) {
+		t.Fatalf("List query = %#v, want %#v", store.queries[0], wantQuery)
 	}
 }
 
