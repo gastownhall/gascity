@@ -657,29 +657,44 @@ func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
+	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, false)
+}
+
+// authoritativeBeadsProviderForScope resolves the provider for a store chosen
+// from an arbitrary bead ID rather than from the caller's current scope. An
+// unscoped GC_BEADS value describes the caller's command context and must not
+// mask the selected store's on-disk identity. Scope-pinned overrides and
+// custom exec providers remain deliberate selections and retain precedence.
+func authoritativeBeadsProviderForScope(scopeRoot, cityPath string) string {
+	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, true)
+}
+
+func resolveRawBeadsProviderForScope(scopeRoot, cityPath string, authoritative bool) string {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(scopeRoot)
 	}
 	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
-	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok {
+	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok && (!authoritative || strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "") {
 		return normalizeRawBeadsProvider(runtimeCityPath, explicit)
 	}
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
 	}
-	if samePath(resolvedScopeRoot, runtimeCityPath) {
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		return provider
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
+	if !authoritative && samePath(resolvedScopeRoot, runtimeCityPath) {
 		return provider
 	}
 	// Mixed-provider workspaces can keep legacy bd-backed rigs under a
 	// file-backed city (and vice versa). Prefer explicit scope-local store
-	// markers over the city default so scoped commands keep talking to the
-	// rig's actual beads backend. The bd routing identity is metadata.json;
-	// config.yaml is a compatibility mirror and can survive migrations.
+	// markers over the configured default so scoped commands keep talking to
+	// the actual beads backend for that scope. Authoritative arbitrary-bead
+	// resolution also applies this check at the city root. The bd routing
+	// identity is metadata.json; config.yaml is a compatibility mirror and can
+	// survive migrations.
 	if scopeUsesBdStoreContract(resolvedScopeRoot) {
 		return "bd"
 	}

@@ -2026,9 +2026,11 @@ type FormulasConfig struct {
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`
-	// MaxTimeout is an operator hard cap on per-order timeouts.
-	// No order gets more than this duration. Go duration string (e.g., "60s").
-	// Empty means uncapped (no override).
+	// MaxTimeout is an operator hard cap on the per-order dispatch timeout: no
+	// order's dispatched exec/formula runs longer than this. Go duration string
+	// (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch
+	// timeout only; a condition trigger's check_timeout is a separate probe
+	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2062,6 +2064,11 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// CheckTimeout overrides the condition trigger's check-command deadline.
+	// Go duration string. Lets a deployment tune check_timeout for a scanned
+	// shared-pack order (e.g. a slow-store queue check) without editing the
+	// pack source.
+	CheckTimeout *string `toml:"check_timeout,omitempty"`
 	// Idempotent overrides whether the order's dispatch is safe to repeat.
 	// Idempotent orders fail open when the open-work gate times out (#2893).
 	Idempotent *bool `toml:"idempotent,omitempty"`

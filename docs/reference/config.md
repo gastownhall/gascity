@@ -578,6 +578,7 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `check_timeout` | string |  |  | CheckTimeout overrides the condition trigger's check-command deadline. Go duration string. Lets a deployment tune check_timeout for a scanned shared-pack order (e.g. a slow-store queue check) without editing the pack source. |
 | `idempotent` | boolean |  |  | Idempotent overrides whether the order's dispatch is safe to repeat. Idempotent orders fail open when the open-work gate times out (#2893). |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
@@ -588,7 +589,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
-| `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on per-order timeouts. No order gets more than this duration. Go duration string (e.g., "60s"). Empty means uncapped (no override). |
+| `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults

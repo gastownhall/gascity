@@ -18,25 +18,27 @@ var (
 )
 
 type orderResponse struct {
-	Name          string            `json:"name"`
-	ScopedName    string            `json:"scoped_name"`
-	Description   string            `json:"description,omitempty"`
-	Type          string            `json:"type"`
-	Trigger       string            `json:"trigger,omitempty"`
-	Gate          string            `json:"gate,omitempty" deprecated:"true"`
-	Interval      string            `json:"interval,omitempty"`
-	Schedule      string            `json:"schedule,omitempty"`
-	Check         string            `json:"check,omitempty"`
-	On            string            `json:"on,omitempty"`
-	Formula       string            `json:"formula,omitempty"`
-	Exec          string            `json:"exec,omitempty"`
-	Pool          string            `json:"pool,omitempty"`
-	Timeout       string            `json:"timeout,omitempty"`
-	TimeoutMs     int64             `json:"timeout_ms"`
-	Enabled       bool              `json:"enabled"`
-	Rig           string            `json:"rig,omitempty"`
-	CaptureOutput bool              `json:"capture_output"`
-	Env           map[string]string `json:"env,omitempty"`
+	Name           string            `json:"name"`
+	ScopedName     string            `json:"scoped_name"`
+	Description    string            `json:"description,omitempty"`
+	Type           string            `json:"type"`
+	Trigger        string            `json:"trigger,omitempty"`
+	Gate           string            `json:"gate,omitempty" deprecated:"true"`
+	Interval       string            `json:"interval,omitempty"`
+	Schedule       string            `json:"schedule,omitempty"`
+	Check          string            `json:"check,omitempty"`
+	On             string            `json:"on,omitempty"`
+	Formula        string            `json:"formula,omitempty"`
+	Exec           string            `json:"exec,omitempty"`
+	Pool           string            `json:"pool,omitempty"`
+	Timeout        string            `json:"timeout,omitempty"`
+	TimeoutMs      int64             `json:"timeout_ms"`
+	CheckTimeout   string            `json:"check_timeout,omitempty"`
+	CheckTimeoutMs int64             `json:"check_timeout_ms,omitempty"`
+	Enabled        bool              `json:"enabled"`
+	Rig            string            `json:"rig,omitempty"`
+	CaptureOutput  bool              `json:"capture_output"`
+	Env            map[string]string `json:"env,omitempty"`
 }
 
 func resolveOrder(aa []orders.Order, name string) (*orders.Order, error) {
@@ -72,7 +74,7 @@ func toOrderResponse(a orders.Order) orderResponse {
 	if a.IsExec() {
 		typ = "exec"
 	}
-	return orderResponse{
+	resp := orderResponse{
 		Name:          a.Name,
 		ScopedName:    a.ScopedName(),
 		Description:   a.Description,
@@ -88,9 +90,17 @@ func toOrderResponse(a orders.Order) orderResponse {
 		Pool:          a.Pool,
 		Timeout:       a.Timeout,
 		TimeoutMs:     a.TimeoutOrDefault().Milliseconds(),
+		CheckTimeout:  a.CheckTimeout,
 		Enabled:       a.IsEnabled(),
 		Rig:           a.Rig,
 		CaptureOutput: a.IsExec(), // exec orders capture output
 		Env:           a.Env,
 	}
+	// check_timeout bounds only a condition trigger's check command, so surface
+	// its effective millisecond deadline only for condition orders. Other
+	// triggers have no check and would otherwise report a phantom 10s default.
+	if a.Trigger == "condition" {
+		resp.CheckTimeoutMs = a.CheckTimeoutOrDefault().Milliseconds()
+	}
+	return resp
 }

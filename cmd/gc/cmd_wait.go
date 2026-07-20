@@ -450,7 +450,14 @@ func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput 
 	// Route SESSION/wait access to the session coordination-class store; identity today.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
-	var items []sessionpkg.WaitInfo
+	return doWaitListFromSessionStore(sessFront, cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+func doWaitListFromSessionStore(sessFront *sessionpkg.Store, cityPath, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	var (
+		items []sessionpkg.WaitInfo
+		err   error
+	)
 	if sessionFilter != "" {
 		items, err = sessFront.WaitsForSession(sessionFilter)
 	} else {

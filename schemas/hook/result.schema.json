@@ -32,7 +32,9 @@
         "claimed",
         "existing_assignment",
         "ready_assignment",
-        "no_work"
+        "no_work",
+        "claims_errored",
+        "stale_session"
       ]
     },
     "bead_id": {
@@ -87,7 +89,11 @@
       "then": {
         "properties": {
           "reason": {
-            "const": "no_work"
+            "enum": [
+              "no_work",
+              "claims_errored",
+              "stale_session"
+            ]
           }
         }
       }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1574,20 +1575,52 @@ esac
 `
 }
 
-func TestExecConformance(t *testing.T) {
-	stateDir := t.TempDir()
-	dir := t.TempDir()
-	script := writeScript(t, dir, mockProviderScript(stateDir))
-	p := NewProvider(script)
-	p.timeout = 5 * time.Second
-	p.startTimeout = 5 * time.Second
+type execConformanceFixture struct {
+	once   sync.Once
+	script string
+	err    error
+}
 
+func execConformanceScript(caseT, ownerT *testing.T, fixture *execConformanceFixture) string {
+	caseT.Helper()
+	fixture.once.Do(func() {
+		fixtureRoot, err := os.MkdirTemp("", "gc-exec-conformance-")
+		if err != nil {
+			fixture.err = fmt.Errorf("create exec conformance fixture: %w", err)
+			return
+		}
+		ownerT.Cleanup(func() {
+			if err := os.RemoveAll(fixtureRoot); err != nil {
+				ownerT.Errorf("remove exec conformance fixture %q: %v", fixtureRoot, err)
+			}
+		})
+
+		stateDir := filepath.Join(fixtureRoot, "state")
+		if err := os.Mkdir(stateDir, 0o755); err != nil {
+			fixture.err = fmt.Errorf("create exec conformance state: %w", err)
+			return
+		}
+
+		fixture.script = filepath.Join(fixtureRoot, "provider")
+		content := "#!/bin/sh\n" + mockProviderScript(stateDir)
+		if err := os.WriteFile(fixture.script, []byte(content), 0o755); err != nil {
+			fixture.err = fmt.Errorf("write exec conformance provider: %w", err)
+		}
+	})
+	if fixture.err != nil {
+		caseT.Fatal(fixture.err)
+	}
+	return fixture.script
+}
+
+func TestExecConformance(t *testing.T) {
+	var fixture execConformanceFixture
 	var counter int64
 
-	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		id := atomic.AddInt64(&counter, 1)
-		name := fmt.Sprintf("exec-conform-%d", id)
-		return p, runtime.Config{WorkDir: t.TempDir()}, name
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(execConformanceScript(caseT, t, &fixture)),
+			runtime.Config{WorkDir: caseT.TempDir()},
+			fmt.Sprintf("exec-conform-%06d", atomic.AddInt64(&counter, 1))
 	})
 }
 

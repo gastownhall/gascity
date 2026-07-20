@@ -31,6 +31,15 @@ litellm>=1.84.0
 # authlib's transitive constraint carries the patched version itself.
 joserfc>=1.6.8
 
+# Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
+# transports serve session requests without verifying the authenticated
+# session, and experimental task handlers are reachable by any client) and
+# CVE-2026-59950 (HIGH, fixed 1.28.1 — WebSocket transport lacks Host/Origin
+# validation) in the mcp Python SDK < 1.28.1. mcp arrives transitively via
+# fastmcp-slim (mcp<2.0,>=1.24.0); floor at 1.28.1 to clear all three. Drop
+# once fastmcp-slim's transitive constraint carries the patched version itself.
+mcp>=1.28.1
+
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
 # v0.3.2 still caps Authlib below the fixed release.

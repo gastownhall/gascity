@@ -2032,6 +2032,10 @@
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
         },
+        "check_timeout": {
+          "type": "string",
+          "description": "CheckTimeout overrides the condition trigger's check-command deadline.\nGo duration string. Lets a deployment tune check_timeout for a scanned\nshared-pack order (e.g. a slow-store queue check) without editing the\npack source."
+        },
         "idempotent": {
           "type": "boolean",
           "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
@@ -2062,7 +2066,7 @@
         },
         "max_timeout": {
           "type": "string",
-          "description": "MaxTimeout is an operator hard cap on per-order timeouts.\nNo order gets more than this duration. Go duration string (e.g., \"60s\").\nEmpty means uncapped (no override)."
+          "description": "MaxTimeout is an operator hard cap on the per-order dispatch timeout: no\norder's dispatched exec/formula runs longer than this. Go duration string\n(e.g., \"60s\"). Empty means uncapped (no override). This bounds the dispatch\ntimeout only; a condition trigger's check_timeout is a separate probe\ndeadline and is not capped here."
         },
         "overrides": {
           "items": {

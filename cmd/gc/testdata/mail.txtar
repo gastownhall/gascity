@@ -1,157 +1,32 @@
-# Mail — send, inbox, read between human and agent
+# Mail — durable bidirectional delivery across CLI process boundaries
 #
-# Validates the full mail command surface using fake sessions.
-# Simulates both the human and session perspectives by toggling GC_ALIAS.
+# This journey owns only the composition edge: city initialization wires mail
+# to the bead store, separate gc processes observe the same messages, and both
+# human and configured-agent identities can address each other. Focused command
+# tests own output and error semantics; Tier A acceptance owns the full mail
+# lifecycle (read, peek, reply, thread, mark, count, archive, and delete).
 
 env GC_BEADS=file
 env GC_DOLT=skip
 env GC_SESSION=fake
 
-# Initialize city with a mayor agent
 exec gc init $WORK/bright-lights
 cd $WORK/bright-lights
 
-# --- Human sends a message to the mayor ---
-
+# Human sends a durable message to the configured agent.
 exec gc mail send mayor 'hey, are you still there?'
 stdout 'Sent message gc-1 to mayor'
-
-# --- Mayor checks inbox ---
 
 exec gc mail inbox mayor
 stdout 'human'
 stdout 'hey, are you still there?'
 
-# --- Mayor reads the message ---
-
-exec gc mail read gc-1
-stdout 'From:     human'
-stdout 'To:       mayor'
-stdout 'Body:     hey, are you still there?'
-
-# --- Mayor's inbox is now empty (message marked as read) ---
-
-exec gc mail inbox mayor
-stdout 'No unread messages for mayor'
-
-# --- But message is still accessible via peek ---
-
-exec gc mail peek gc-1
-stdout 'Body:     hey, are you still there?'
-
-# --- Mayor replies (agent perspective) ---
-
+# The configured agent can reply and a fresh human process sees it.
 env GC_ALIAS=mayor
-exec gc mail send human 'yes, working on gc-4'
+exec gc mail send human 'yes, still working'
 stdout 'Sent message gc-2 to human'
-
-# --- Human checks their inbox ---
 
 env GC_ALIAS=
 exec gc mail inbox
 stdout 'mayor'
-stdout 'yes, working on gc-4'
-
-# --- Human reads the reply ---
-
-exec gc mail read gc-2
-stdout 'From:     mayor'
-stdout 'To:       human'
-stdout 'Body:     yes, working on gc-4'
-
-# --- Reading again still works (already read) ---
-
-exec gc mail read gc-2
-stdout 'Body:     yes, working on gc-4'
-
-# --- Messages are beads: direct bead lookup works ---
-
-exec bd show gc-1
-stdout 'gc-1'
-
-exec bd show gc-2
-stdout 'gc-2'
-
-# --- Archive a new message ---
-
-exec gc mail send mayor 'archive me'
-stdout 'Sent message gc-3 to mayor'
-
-exec gc mail archive gc-3
-stdout 'Archived message gc-3'
-
-# --- Archived message no longer appears in inbox ---
-
-exec gc mail inbox mayor
-stdout 'No unread messages for mayor'
-
-# --- Archiving already-archived message is idempotent ---
-
-exec gc mail archive gc-3
-stdout 'Already archived gc-3'
-
-# --- Mark read / mark unread ---
-
-exec gc mail send mayor 'toggle me'
-stdout 'Sent message gc-4 to mayor'
-
-exec gc mail mark-read gc-4
-stdout 'Marked gc-4 as read'
-
-exec gc mail inbox mayor
-stdout 'No unread messages for mayor'
-
-exec gc mail mark-unread gc-4
-stdout 'Marked gc-4 as unread'
-
-exec gc mail inbox mayor
-stdout 'toggle me'
-
-# --- Delete ---
-
-exec gc mail delete gc-4
-stdout 'Deleted message gc-4'
-
-exec gc mail inbox mayor
-stdout 'No unread messages for mayor'
-
-# --- Count ---
-
-exec gc mail send mayor 'count msg 1'
-exec gc mail send mayor 'count msg 2'
-exec gc mail count mayor
-stdout '3 total, 2 unread for mayor'
-
-# --- Archive nonexistent message is idempotent ---
-
-exec gc mail archive gc-999
-stdout 'Already archived gc-999'
-
-# --- Error: archive with no args ---
-
-! exec gc mail archive
-stderr 'missing message ID'
-
-# --- Error: unknown recipient ---
-
-! exec gc mail send nobody 'hello'
-stderr 'unknown recipient "nobody"'
-
-# --- Error: missing arguments ---
-
-! exec gc mail send
-stderr 'usage:'
-
-! exec gc mail send mayor
-stderr 'usage:'
-
-! exec gc mail read
-stderr 'missing message ID'
-
-! exec gc mail read gc-999
-stderr 'bead not found'
-
-# --- Error: missing subcommand ---
-
-! exec gc mail
-stderr 'missing subcommand'
+stdout 'yes, still working'

@@ -25,6 +25,11 @@ if [ ! -f "$STATE/next_id" ]; then
 fi
 mkdir -p "$STATE/messages"
 
+not_found() {
+  echo "gc-mail-error:not-found: message \"$1\" not found" >&2
+  exit 1
+}
+
 case "$op" in
   ensure-running)
     ;; # no-op
@@ -50,13 +55,17 @@ case "$op" in
     printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$msgid" "$from" "$to" "$subject" "$body" "$ts" "open" "$thread_id" "" > "$STATE/messages/$msgid"
     printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","thread_id":"%s"}\n' "$msgid" "$from" "$to" "$subject" "$body" "$ts" "$thread_id"
     ;;
-  inbox|check)
+  inbox|check|all)
     recipient="$1"
     result=""
     for f in "$STATE"/messages/*; do
       [ -f "$f" ] || continue
       status=$(sed -n '7p' "$f")
-      [ "$status" = "open" ] || continue
+      if [ "$op" = "all" ]; then
+        [ "$status" != "archived" ] || continue
+      else
+        [ "$status" = "open" ] || continue
+      fi
       msg_to=$(sed -n '3p' "$f")
       [ "$msg_to" = "$recipient" ] || continue
       msgid=$(sed -n '1p' "$f")
@@ -66,10 +75,14 @@ case "$op" in
       ts=$(sed -n '6p' "$f")
       thread_id=$(sed -n '8p' "$f")
       reply_to=$(sed -n '9p' "$f")
+      read_flag="false"
+      if [ "$status" = "read" ]; then
+        read_flag="true"
+      fi
       if [ -n "$result" ]; then
         result="$result,"
       fi
-      result="${result}{\"id\":\"$msgid\",\"from\":\"$from\",\"to\":\"$msg_to\",\"subject\":\"$subject\",\"body\":\"$body\",\"created_at\":\"$ts\",\"thread_id\":\"$thread_id\",\"reply_to\":\"$reply_to\"}"
+      result="${result}{\"id\":\"$msgid\",\"from\":\"$from\",\"to\":\"$msg_to\",\"subject\":\"$subject\",\"body\":\"$body\",\"created_at\":\"$ts\",\"read\":$read_flag,\"thread_id\":\"$thread_id\",\"reply_to\":\"$reply_to\"}"
     done
     if [ -n "$result" ]; then
       printf '[%s]\n' "$result"
@@ -88,6 +101,9 @@ case "$op" in
     body=$(sed -n '5p' "$f")
     ts=$(sed -n '6p' "$f")
     status=$(sed -n '7p' "$f")
+    if [ "$status" = "archived" ]; then
+      not_found "$msgid"
+    fi
     thread_id=$(sed -n '8p' "$f")
     reply_to=$(sed -n '9p' "$f")
     read_flag="false"
@@ -108,6 +124,10 @@ case "$op" in
     subject=$(sed -n '4p' "$f")
     body=$(sed -n '5p' "$f")
     ts=$(sed -n '6p' "$f")
+    status=$(sed -n '7p' "$f")
+    if [ "$status" = "archived" ]; then
+      not_found "$msgid"
+    fi
     thread_id=$(sed -n '8p' "$f")
     reply_to=$(sed -n '9p' "$f")
     # Mark as read.
@@ -121,6 +141,9 @@ case "$op" in
       echo "message \"$msgid\" not found" >&2
       exit 1
     fi
+    if [ "$(sed -n '7p' "$f")" = "archived" ]; then
+      not_found "$msgid"
+    fi
     sed '7s/.*/read/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     ;;
   mark-unread)
@@ -129,6 +152,9 @@ case "$op" in
     if [ ! -f "$f" ]; then
       echo "message \"$msgid\" not found" >&2
       exit 1
+    fi
+    if [ "$(sed -n '7p' "$f")" = "archived" ]; then
+      not_found "$msgid"
     fi
     sed '7s/.*/open/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     ;;
@@ -153,6 +179,10 @@ case "$op" in
       echo "message \"$msgid\" not found" >&2
       exit 1
     fi
+    status=$(sed -n '7p' "$f")
+    if [ "$status" = "archived" ]; then
+      not_found "$msgid"
+    fi
     orig_from=$(sed -n '2p' "$f")
     orig_thread=$(sed -n '8p' "$f")
     # Read JSON from stdin.
@@ -176,12 +206,14 @@ case "$op" in
   thread)
     id="$1"
     thread_id="$id"
-    if [ -f "$STATE/messages/$id" ]; then
+    if [ -f "$STATE/messages/$id" ] && [ "$(sed -n '7p' "$STATE/messages/$id")" != "archived" ]; then
       thread_id=$(sed -n '8p' "$STATE/messages/$id")
     fi
     result=""
     for f in "$STATE"/messages/*; do
       [ -f "$f" ] || continue
+      status=$(sed -n '7p' "$f")
+      [ "$status" != "archived" ] || continue
       msg_thread=$(sed -n '8p' "$f")
       [ "$msg_thread" = "$thread_id" ] || continue
       msgid=$(sed -n '1p' "$f")

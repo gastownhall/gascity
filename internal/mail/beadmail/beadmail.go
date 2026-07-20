@@ -265,10 +265,13 @@ func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) 
 func (p *Provider) Get(id string) (mail.Message, error) {
 	b, err := p.store.Get(id)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail get: %w", err)
+		return mail.Message{}, beadmailError("get", err)
 	}
 	if b.Type != messageBeadType {
 		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
+	}
+	if isRemovedMessageBead(b) {
+		return mail.Message{}, beadmailError("get", beads.ErrNotFound)
 	}
 	return beadToMessage(b), nil
 }
@@ -278,7 +281,10 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 func (p *Provider) Read(id string) (mail.Message, error) {
 	b, err := p.store.Get(id)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail read: %w", err)
+		return mail.Message{}, beadmailError("read", err)
+	}
+	if isRemovedMessageBead(b) {
+		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
 	}
 	if !hasLabel(b.Labels, "read") {
 		if err := p.store.Update(id, beads.UpdateOpts{
@@ -295,8 +301,12 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 
 // MarkRead marks a message as read (adds "read" label).
 func (p *Provider) MarkRead(id string) error {
-	if _, err := p.store.Get(id); err != nil {
-		return fmt.Errorf("beadmail mark-read: %w", err)
+	b, err := p.store.Get(id)
+	if err != nil {
+		return beadmailError("mark-read", err)
+	}
+	if isRemovedMessageBead(b) {
+		return beadmailError("mark-read", beads.ErrNotFound)
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
@@ -306,8 +316,12 @@ func (p *Provider) MarkRead(id string) error {
 
 // MarkUnread marks a message as unread (removes "read" label).
 func (p *Provider) MarkUnread(id string) error {
-	if _, err := p.store.Get(id); err != nil {
-		return fmt.Errorf("beadmail mark-unread: %w", err)
+	b, err := p.store.Get(id)
+	if err != nil {
+		return beadmailError("mark-unread", err)
+	}
+	if isRemovedMessageBead(b) {
+		return beadmailError("mark-unread", beads.ErrNotFound)
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		RemoveLabels: []string{"read"},
@@ -530,7 +544,10 @@ func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	original, err := p.store.Get(id)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
+		return mail.Message{}, beadmailError("reply", err)
+	}
+	if isRemovedMessageBead(original) {
+		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
 	}
 	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
 	to := toSessionID
@@ -579,6 +596,46 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// beadmailError wraps a store error for the given mail operation, deliberately
+// replacing beads.ErrNotFound with mail.ErrNotFound at this bead↔mail boundary
+// so a beadmail not-found does not leak beads.ErrNotFound to mail-layer callers.
+// This confinement is intentional and differs from the exec seam, which chains
+// both errors; callers above beadmail must key on mail.ErrNotFound.
+func beadmailError(operation string, err error) error {
+	if errors.Is(err, beads.ErrNotFound) {
+		err = mail.ErrNotFound
+	}
+	return fmt.Errorf("beadmail %s: %w", operation, err)
+}
+
+// isRemovedMessageBead reports whether b is a message bead that direct-ID
+// operations must treat as removed. The eager-delete archive path removes a
+// message bead from the store outright, but a store upgraded from a release
+// that archived by closing (rather than deleting) can still hold closed
+// Type=="message" beads. Those legacy user-removed beads must not stay readable
+// or mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same "open
+// only" visibility the list views (Inbox/Check/All/Count) already enforce — even
+// though Archive can still delete one when it is called explicitly.
+//
+// Retention-swept read mail is NOT user-removed and must be excluded here. The
+// always-on nudge-mail watchdog closes read mail past its TTL (stamping
+// [RetentionSweepCloseReason]) and PurgeReadMessageWisps deletes it later;
+// between close and purge the message is only system-aged. Gating on bare
+// Status!="open" turned every retention-swept read message into a not-found the
+// moment the sweep ran — an always-on regression for any caller that holds a
+// message ID and re-reads or replies to it after the TTL (a long-latency human
+// approval reply, a persisted molecule handle). Excluding the retention reason
+// preserves that pre-sweep addressability while still hiding genuinely
+// user-removed beads.
+func isRemovedMessageBead(b beads.Bead) bool {
+	if b.Type != messageBeadType || b.Status == "open" {
+		return false
+	}
+	// Retention-swept mail is system-aged, not user-removed; it stays
+	// addressable until PurgeReadMessageWisps deletes it.
+	return b.Metadata["close_reason"] != RetentionSweepCloseReason
 }
 
 // deriveReplyTitle returns a non-empty title for a reply message. Callers
@@ -638,9 +695,18 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	if err != nil {
 		return nil, fmt.Errorf("beadmail thread: %w", err)
 	}
-	msgs := make([]mail.Message, len(bs))
-	for i, b := range bs {
-		msgs[i] = beadToMessage(b)
+	msgs := make([]mail.Message, 0, len(bs))
+	for _, b := range bs {
+		if b.Status != "open" {
+			// Thread listings show only open messages, matching the list views
+			// and the pre-removal List-without-IncludeClosed behavior: a closed
+			// message bead — whether a legacy close-on-archive remnant or a
+			// retention-swept read message — stays out of thread views. (A
+			// retention-swept message is still resolvable by direct-ID Get, but,
+			// like the list views, it is retired from these aggregate views.)
+			continue
+		}
+		msgs = append(msgs, beadToMessage(b))
 	}
 	// Note: store.List already sorts by SortCreatedAsc with an ID tie-break
 	// (see sortBeadsForQuery in internal/beads/query.go), so no post-sort here.
@@ -741,6 +807,16 @@ func readMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads
 	})
 }
 
+// RetentionSweepCloseReason is the canonical close_reason the read-mail
+// retention sweep stamps on a message bead before closing it. It is the marker
+// that tells isRemovedMessageBead a closed message bead is system-aged
+// (retention-swept, still addressable by direct ID until PurgeReadMessageWisps
+// deletes it) rather than user-removed. The production sweep — the always-on
+// cmd/gc nudge-mail watchdog — passes this constant as SweepReadMessagesBefore's
+// closeReason, keeping the writer and the direct-ID reader in lockstep. The
+// 20-character floor satisfies validation.on-close=error.
+const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retention window"
+
 // SweepReadMessagesBefore closes read message beads created before cutoff,
 // oldest first, stamping closeReason as "close_reason" metadata on each bead
 // before closing it. It is the whole read-mail retention sweep: the candidate
@@ -748,6 +824,10 @@ func readMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads
 // bead-lifecycle vocabulary the mail.Message domain object deliberately omits,
 // and because Provider.Archive/Provider.Delete mean eager delete — a different
 // operation from close-with-reason.
+//
+// Retention callers pass [RetentionSweepCloseReason] as closeReason so beadmail's
+// direct-ID gate (isRemovedMessageBead) keeps the swept beads addressable until
+// purge instead of treating them as user-removed.
 //
 // limit caps the number of beads closed (pass 0 for no cap); it bounds both the
 // candidate query and the loop so a caller sharing a cross-phase close budget

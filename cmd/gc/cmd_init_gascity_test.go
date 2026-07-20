@@ -29,7 +29,7 @@ func TestNormalizeInitTemplateDefaultUsesGascity(t *testing.T) {
 }
 
 func TestInitWizardConfigProviderFlagDefaultsToGascity(t *testing.T) {
-	wiz, err := initWizardConfig("codex", "")
+	wiz, err := initWizardConfig("codex", "", false)
 	if err != nil {
 		t.Fatalf("initWizardConfig: %v", err)
 	}

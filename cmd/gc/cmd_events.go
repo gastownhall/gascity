@@ -566,7 +566,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return printJSONLines(items, stdout, stderr)
 	}
 
-	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag)
+	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
 		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
 			if fallbackErr != nil {
@@ -868,7 +868,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 
 	resumeSeq := afterSeq
 	if resumeSeq > 0 {
-		items, err := fetchCityEvents(ctx, client, scope.cityName, "", "")
+		items, err := fetchCityEvents(ctx, client, scope.cityName, "", "", io.Discard)
 		if err != nil {
 			if shouldUseLocalCityEventsFallback(scope, err) {
 				printStreamingCityAPIRequirement("--watch", stderr)
@@ -1013,40 +1013,77 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	return eventsListError(resp.StatusCode(), resp.Body)
 }
 
-// fetchCityEvents fetches the newest page of city events (up to 500). It
-// deliberately does NOT follow next_cursor: gc events means "recent
-// activity", and a full descending drain of a large city's event history
-// (100 MB+ logs) would blow the command timeout for no user benefit. The
-// API serves the page seq-DESC (newest first); gc events prints
-// chronologically, so the page is re-sorted ascending.
-func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]cliWireEvent, error) {
-	limit := int64(500)
-	params := &genclient.GetV0CityByCityNameEventsParams{
-		Limit: &limit,
-	}
-	if strings.TrimSpace(typeFilter) != "" {
-		params.Type = &typeFilter
-	}
-	if strings.TrimSpace(sinceFlag) != "" {
-		params.Since = &sinceFlag
-	}
-	resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
-	if err != nil {
-		return nil, &eventsAPITransportError{err: err}
-	}
-	if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
-		return nil, err
-	}
-	if resp.JSON200 == nil || resp.JSON200.Items == nil {
-		return nil, nil
-	}
-	all := make([]cliWireEvent, 0, len(*resp.JSON200.Items))
-	for _, item := range *resp.JSON200.Items {
-		wire, err := cityWireEventFromTyped(item)
-		if err != nil {
-			return nil, fmt.Errorf("decoding city event list item: %w", err)
+// cityEventsPageLimit bounds one page of the city event list. The endpoint
+// serves seq-DESC pages and mints next_cursor when more matching rows exist
+// strictly below the page's oldest seq (#4194).
+const cityEventsPageLimit = int64(500)
+
+// fetchCityEvents fetches city events matching the type/since filter and
+// returns them chronologically (ascending seq). The endpoint is a keyset,
+// seq-DESC (newest first) paginated list; a truncated page carries a
+// next_cursor pointing strictly below the page's oldest seq.
+//
+// A bounded --since window is drained across pages so the requested window is
+// reported in full — otherwise any window holding more than one page of events
+// silently under-reports (the bug this fixes). Without --since the request is
+// unbounded, so the fetch stays a single page: gc events means "recent
+// activity", and a full descending drain of a 100 MB+ event history would blow
+// the command timeout for no user benefit. In that single-page case, when the
+// server signals more via next_cursor, an explicit truncation notice is written
+// to warn rather than silently dropping the older matches.
+func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string, warn io.Writer) ([]cliWireEvent, error) {
+	paginate := strings.TrimSpace(sinceFlag) != ""
+	var all []cliWireEvent
+	cursor := ""
+	for {
+		limit := cityEventsPageLimit
+		params := &genclient.GetV0CityByCityNameEventsParams{
+			Limit: &limit,
 		}
-		all = append(all, wire)
+		if strings.TrimSpace(typeFilter) != "" {
+			params.Type = &typeFilter
+		}
+		if strings.TrimSpace(sinceFlag) != "" {
+			params.Since = &sinceFlag
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+		if err != nil {
+			return nil, &eventsAPITransportError{err: err}
+		}
+		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
+			return nil, err
+		}
+		if resp.JSON200 == nil || resp.JSON200.Items == nil {
+			break
+		}
+		for _, item := range *resp.JSON200.Items {
+			wire, err := cityWireEventFromTyped(item)
+			if err != nil {
+				return nil, fmt.Errorf("decoding city event list item: %w", err)
+			}
+			all = append(all, wire)
+		}
+		next := ""
+		if resp.JSON200.NextCursor != nil {
+			next = strings.TrimSpace(*resp.JSON200.NextCursor)
+		}
+		if next == "" {
+			break // window (or the whole history) exhausted
+		}
+		if !paginate {
+			fmt.Fprintf(warn, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
+			break
+		}
+		if next == cursor {
+			// Defensive: a conforming server advances the keyset boundary
+			// strictly downward each page, so the cursor never repeats. Bail
+			// rather than spin forever on a misbehaving server.
+			break
+		}
+		cursor = next
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	return all, nil

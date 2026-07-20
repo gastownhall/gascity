@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -53,7 +54,7 @@ type agentBuildParams struct {
 	// poolSessionCreateBudget caps ordinary fresh pool session bead
 	// materialization in a single desired-state build. Existing session beads
 	// may still be reused, and dependency-floor prerequisites are exempt.
-	poolSessionCreateBudget *poolSessionCreateBudget
+	poolSessionCreateBudget *poolplan.CreateBudget
 
 	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
 	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
@@ -131,7 +132,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		sessionProvider: cfg.Session.Provider,
 	}
 	if store != nil {
-		params.poolSessionCreateBudget = newPoolSessionCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
+		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
 	// Load the shared skill catalog once per build cycle. Transient load
 	// failures (filesystem race during dolt sync / heavy I/O) used to
