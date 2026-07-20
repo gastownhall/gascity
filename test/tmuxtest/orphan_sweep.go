@@ -79,6 +79,14 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 	return true, false
 }
 
+// pidFromPrefixedDirName parses the owner PID out of a socket-parent dir name
+// of the form "<prefix><PID>-<random>" -- the shape NewSocketParentDir creates
+// via os.MkdirTemp(root, "<prefix><PID>-*"). The "-" separator after the PID is
+// required: a bare all-digit "<prefix><digits>" name is a legacy directory left
+// by the pre-sweep harness (os.MkdirTemp(root, prefix)), whose trailing digits
+// are a random suffix, not an owner PID. Parsing that random number as a PID
+// could reap a still-live legacy sibling once it aged past the sweep guard, so
+// such names are rejected here and left for a dedicated opt-in cleanup path.
 func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 	if !strings.HasPrefix(name, prefix) {
 		return 0, false
@@ -91,7 +99,7 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 	if end == 0 {
 		return 0, false
 	}
-	if end < len(suffix) && suffix[end] != '-' {
+	if end >= len(suffix) || suffix[end] != '-' {
 		return 0, false
 	}
 	pid, err := strconv.Atoi(suffix[:end])
@@ -110,10 +118,12 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 // Liveness is decided by the alive sentinel flock when present: flock state
 // is visible across PID namespaces, whereas raw PID liveness reports every
 // host PID as dead from inside a bwrap --unshare-pid sandbox that shares
-// the host /tmp (ga-djbcqt). PID liveness is only a fallback for dirs
-// without a sentinel -- e.g. ones leaked before this sweep existed. Dirs
-// younger than socketParentSweepMinAge are never touched, covering the
-// window before a sibling run's sentinel exists.
+// the host /tmp (ga-djbcqt). PID liveness is only a fallback for a
+// "<prefix><PID>-<random>" dir that crashed between MkdirTemp and
+// HoldAliveSentinel; legacy pre-sweep names with no "-" after the PID are
+// rejected by pidFromPrefixedDirName and never swept here. Dirs younger than
+// socketParentSweepMinAge are never touched, covering the window before a
+// sibling run's sentinel exists.
 func SweepOrphanPIDPrefixedDirs(root, prefix string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -144,13 +154,14 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string) {
 			// Sentinel present but unlocked: the creator is gone. Remove.
 			reason = "free sentinel"
 		default:
-			// No sentinel at all: either leaked before this sweep existed,
-			// or crashed between MkdirTemp and HoldAliveSentinel. Fall back
-			// to PID liveness.
+			// A "<prefix><PID>-<random>" dir with no sentinel: its creator
+			// crashed between MkdirTemp and HoldAliveSentinel. Fall back to
+			// PID liveness. (Legacy no-"-" names are rejected by
+			// pidFromPrefixedDirName and never reach here.)
 			if pidutil.Alive(pid) {
 				continue
 			}
-			reason = "legacy: pid dead, no sentinel"
+			reason = "pid dead, no sentinel"
 		}
 		// Name each removal so a recurrence of ga-djbcqt is attributable
 		// from run logs instead of gate-log forensics.

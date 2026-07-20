@@ -248,6 +248,18 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	tmuxSocketAliveSentinel = tmuxSentinel
+	// testscript.Main below exits via os.Exit, which skips defers, so the
+	// normal path removes the tmux socket parent through cleanupTestingM. A
+	// setup panic before testscript.Main is reached still unwinds through
+	// defers, so cover that window here or it leaks /tmp/gct-<pid>-* until a
+	// later aged sweep. cmdGCTmuxSocketRoot returns an empty cleanup root when
+	// it fell back to a dir under TMPDIR (swept separately), so only the real
+	// /tmp parent is removed here.
+	defer func() {
+		if tmuxSocketCleanupRoot != "" {
+			_ = os.RemoveAll(tmuxSocketCleanupRoot)
+		}
+	}()
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}

@@ -114,10 +114,19 @@ func TestMain(m *testing.M) {
 	// stay referenced for the process lifetime: the runtime finalizes
 	// unreachable os.Files, which would close the descriptor and release
 	// the lock, letting a concurrent sibling's sweep reclaim this still-
-	// active directory (ga-djbcqt). Cleanup below is explicit, not deferred:
-	// every exit path in this function calls os.Exit, which skips defers.
+	// active directory (ga-djbcqt). Normal and skip exits call os.Exit, which
+	// skips defers, so those paths remove the parent explicitly below; the
+	// deferred removal here additionally covers a setup panic (which unwinds
+	// through defers) so it cannot leak the parent until a later aged sweep.
 	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp")
 	tmuxSocketAliveSentinel = tmuxSentinel
+	defer func() {
+		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it
+		// below is honored and this never double-removes on a normal exit.
+		if tmuxSocketParent != "" {
+			_ = os.RemoveAll(tmuxSocketParent)
+		}
+	}()
 	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
 	if tmuxParentErr == nil {
 		tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
