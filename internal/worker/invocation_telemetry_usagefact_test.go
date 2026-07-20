@@ -492,6 +492,74 @@ func TestDiscoverSweepTranscriptCodexBoundedToInterval(t *testing.T) {
 	}
 }
 
+// TestFactorySweepSessionModelUsageAgesOutUndiscoverableCodex pins the
+// unbounded-tail boundary: a terminal codex session whose keyed rollout never
+// lands on disk stays a transient (retrying) miss only until the interval end
+// plus the discovery window; past that it settles as a permanent miss so the
+// caller stamps the sweep marker and commits the compute interval instead of
+// re-appending the compute fact every tick forever. The lost model facts for that
+// interval fall within the documented keyed-miss-records-nothing contract;
+// unbounded growth is the worse alternative.
+func TestFactorySweepSessionModelUsageAgesOutUndiscoverableCodex(t *testing.T) {
+	codexRoot := t.TempDir() // deliberately empty: no rollout is ever written
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	// UUIDv7 encoding ~mid-May 2026; the interval below is June 2026. No rollout
+	// exists anywhere under codexRoot, so keyed discovery always misses.
+	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	meta := map[string]string{
+		"provider":         "codex",
+		"builtin_ancestor": "codex",
+		"session_key":      sessionKey,
+		"work_dir":         workDir,
+		"awake_started_at": start.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+	}
+
+	// Within slept_at + discovery window: the rollout may still be flushing, so the
+	// miss is transient and the interval stays a retry candidate.
+	within := slept.Add(codexInvocationDiscoveryWindow - time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gc-codex-1", meta, within)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (within window): %v", err)
+	}
+	if settled {
+		t.Fatal("within the discovery window an undiscovered codex rollout must stay transient (settled=false) so it retries")
+	}
+	if emitted != 0 {
+		t.Fatalf("within window emitted = %d, want 0 (no rollout on disk)", emitted)
+	}
+
+	// Beyond slept_at + discovery window: the rollout will never appear (no hook
+	// fires while asleep), so the miss ages out to permanent and the interval
+	// settles — the caller commits the compute fact without re-appending forever.
+	beyond := slept.Add(codexInvocationDiscoveryWindow + time.Minute)
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), "gc-codex-1", meta, beyond)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (beyond window): %v", err)
+	}
+	if !settled2 {
+		t.Fatal("past the interval end + discovery window an undiscoverable codex rollout must settle (settled=true) to stop the re-append")
+	}
+	if emitted2 != 0 {
+		t.Fatalf("beyond window emitted = %d, want 0 (aged out, nothing recorded)", emitted2)
+	}
+}
+
 // TestFactorySweepSessionModelUsageRecordsMetrics pins P2-3: the sweep mirrors
 // the prompt-op seam's OTel metrics — every swept invocation records
 // gc.agent.tokens.* (and cost when priced) under the family provider label — so
