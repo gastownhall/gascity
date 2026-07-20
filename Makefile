@@ -1,4 +1,4 @@
-GOLANGCI_LINT_VERSION := 2.9.0
+GOLANGCI_LINT_VERSION := 2.12.0
 BUILDX_VERSION := 0.21.2
 
 # Detect OS and arch for binary download.

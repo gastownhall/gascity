@@ -54,7 +54,7 @@ func StructuredNoNativeLeakResult(profile ProfileID, history *worker.HistorySnap
 }
 
 func scanStructuredCarrier(profile ProfileID, carrier any, allowed map[string]struct{}) Result {
-	if value := reflect.ValueOf(carrier); !value.IsValid() || (value.Kind() == reflect.Ptr && value.IsNil()) {
+	if value := reflect.ValueOf(carrier); !value.IsValid() || (value.Kind() == reflect.Pointer && value.IsNil()) {
 		return Pass(profile, RequirementStructuredNoNativeLeak, "no carrier")
 	}
 	wire, err := json.Marshal(carrier)

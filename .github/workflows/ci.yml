@@ -223,9 +223,13 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/golangci-lint
+          # Exact-key-only restore (no restore-keys fallback): a broad prefix
+          # let a partial/incompatible cache (missing testing.T.Fatal no-return
+          # facts) be inherited across differing keys and re-saved forward,
+          # repeatedly re-poisoning the cache with a SA5011 false-positive
+          # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
+          # forces a fully fresh, never-poisoned recompute.
           key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-
       - name: Lint affected packages
         if: steps.static-scope.outputs.scope == 'changed'
         env:

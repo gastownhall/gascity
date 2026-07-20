@@ -562,7 +562,7 @@ func TestAgentCloneIsDeep(t *testing.T) {
 			m := reflect.MakeMapWithSize(f.Type(), 1)
 			m.SetMapIndex(reflect.New(f.Type().Key()).Elem(), reflect.New(f.Type().Elem()).Elem())
 			f.Set(m)
-		case reflect.Ptr:
+		case reflect.Pointer:
 			f.Set(reflect.New(f.Type().Elem()))
 		}
 	}
@@ -578,7 +578,7 @@ func TestAgentCloneIsDeep(t *testing.T) {
 		name := tp.Field(i).Name
 		cf := cv.Field(i)
 		switch f.Kind() {
-		case reflect.Slice, reflect.Map, reflect.Ptr:
+		case reflect.Slice, reflect.Map, reflect.Pointer:
 			if cf.IsNil() {
 				t.Errorf("Agent.Clone left reference field %q nil — add a deep copy in Clone()", name)
 				continue
