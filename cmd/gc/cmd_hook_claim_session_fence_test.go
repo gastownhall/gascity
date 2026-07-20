@@ -620,3 +620,51 @@ func TestHookCommandClaimStaleSessionSuspendedAgentDrainsBeforeSuspensionCheck(t
 		t.Fatalf("work query ran for a stale session with a suspended agent; stat error = %v", err)
 	}
 }
+
+// TestHookCommandClaimStaleSessionSuspendedCityDrainsBeforeSuspensionCheck
+// proves a stale runtime in a SUSPENDED CITY is refused as stale by the claim
+// fence BEFORE the bare "gc hook: city is suspended" early return. Before the
+// fence was hoisted ahead of the city-suspension check, a stale session in a
+// suspended city hit that bare `return 1` and its startup wrapper retried the
+// plain city-suspended failure forever instead of seeing the terminal
+// stale-session drain result and exiting. This pins the ordering so the fence
+// pre-empts the city-suspension early return for a stale session too.
+func TestHookCommandClaimStaleSessionSuspendedCityDrainsBeforeSuspensionCheck(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	// A normal, resolvable, non-suspended "worker" agent, so the only early
+	// return in play is the city-suspension one the fence must pre-empt.
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateFailedCreate, "failed-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "failed-token")
+	// Suspend the whole city via the documented GC_SUSPENDED escape hatch so
+	// citySuspendedWithState fires the "gc hook: city is suspended" early return.
+	t.Setenv("GC_SUSPENDED", "1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonStaleSession {
+		t.Fatalf("result = %+v, want action=drain reason=stale_session", result)
+	}
+	if !strings.Contains(stderr.String(), "refusing stale session") {
+		t.Fatalf("stderr = %q, want stale-session refusal", stderr.String())
+	}
+	// The reorder's whole point: the fence must pre-empt the city-suspended early
+	// return, so its "city is suspended" failure must NOT be reached.
+	if strings.Contains(stderr.String(), "city is suspended") {
+		t.Fatalf("stale session hit the city-suspended early return before the fence: %s", stderr.String())
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran for a stale session in a suspended city; stat error = %v", err)
+	}
+}
