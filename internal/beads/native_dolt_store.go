@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -31,43 +32,105 @@ type rawDBGetter interface {
 var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
 
 // repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
-// tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
-// and only issues the ALTER when the id column exists without a default.
+// tolerant of an absent table (e.g. wisp_events): it only issues the ALTER when
+// the id column exists without a default.
 //
-//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+// The probe is a single-table SHOW COLUMNS, not INFORMATION_SCHEMA.COLUMNS:
+// Dolt does not push the WHERE predicate into INFORMATION_SCHEMA, so the old
+// probe was a full catalog scan — cheap once, but it runs per store open per
+// repair table, and a fleet of concurrent gc/bd sessions firing it several
+// times a second pegged the shared Dolt server's CPU. SHOW COLUMNS returns the
+// Default cell directly, so one cheap statement replaces the scan.
 func repairIDDefault(db *sql.DB, table string) error {
-	var idCols, withDefault int
-	err := db.QueryRow(`
-		SELECT COUNT(*), COUNT(COLUMN_DEFAULT)
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE()
-		  AND TABLE_NAME = ?
-		  AND COLUMN_NAME = 'id'
-	`, table).Scan(&idCols, &withDefault)
+	// 'id' contains no LIKE wildcards, but Field is still compared exactly
+	// (matching upstream beads' SHOW COLUMNS probes) rather than trusting LIKE.
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
+	if err != nil {
+		if isTableNotExistError(err) {
+			return nil
+		}
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("checking %s.id default: %w", table, err)
 	}
-	if idCols == 0 || withDefault > 0 {
-		// Table/column absent, or the default is already present.
+	defaultIdx := -1
+	for i, col := range cols {
+		if strings.EqualFold(col, "Default") {
+			defaultIdx = i
+			break
+		}
+	}
+	if defaultIdx < 0 {
+		return fmt.Errorf("checking %s.id default: SHOW COLUMNS returned no Default column (got %v)", table, cols)
+	}
+
+	idFound, withDefault := false, false
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("checking %s.id default: %w", table, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == "id" {
+			idFound = true
+			withDefault = cells[defaultIdx] != nil
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	if !idFound || withDefault {
+		// Column absent, or the default is already present.
 		return nil
 	}
-	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table))
-	if err != nil {
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table)); err != nil {
 		return fmt.Errorf("repairing %s.id default: %w", table, err)
 	}
 	return nil
 }
 
+// isTableNotExistError reports whether err is the MySQL/Dolt "table doesn't
+// exist" error (1146). SHOW COLUMNS errors on a missing table where the old
+// INFORMATION_SCHEMA probe returned zero rows; an absent repair table (e.g.
+// wisp_events on an older schema) is not an error.
+func isTableNotExistError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1146
+	}
+	// The embedded Dolt driver surfaces the same condition without the
+	// go-sql-driver error type; match Dolt's message shape.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
+}
+
 const nativeDoltStoreActor = "gascity"
 
+// nativeDoltOpenReadyStatuses lists the upstream bd statuses Ready() queries
+// GetReadyWork for. This must match IsReadyCandidateForTier's contract of
+// "open status ... and no future defer_until": only StatusOpen (bd's own
+// status-category table marks it the sole "active" category status) and
+// StatusDeferred (kept only because IsDeferred independently re-checks
+// DeferUntil, so an expired deferral must still resurface) belong here.
+// blocked/hooked are bd's "wip" category and pinned is "frozen" — bd's own
+// ready semantics already exclude them, and Gas City has no analogous
+// re-check for them the way it does for deferred, so querying for them let
+// dependency-blocked beads erase their status to "open" via mapBdStatus and
+// pass IsReadyCandidateForTier's status gate. See ga-3mv5d3 bead notes for
+// the full investigation.
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
-	beadslib.StatusBlocked,
 	beadslib.StatusDeferred,
-	beadslib.Status("pinned"),
-	beadslib.Status("hooked"),
-	beadslib.Status("review"),
-	beadslib.Status("testing"),
 }
 
 var (
@@ -97,6 +160,25 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 		parent = context.Background()
 	}
 	return context.WithTimeout(parent, bdCommandTimeout)
+}
+
+// nativeGraphApplyDeadline scales the graph-apply transaction budget with plan
+// size. The library's AddDependency runs a recursive cycle-reachability query
+// per blocking edge, so a large molecule (67 nodes / ~100 edges on the
+// mol-adopt-pr-v2 shape) cannot finish inside the flat per-command budget: the
+// batch died at the 120s deadline mid-edges, retried into the same wall, and
+// fell back to per-bead creates — turning a single atomic pour into ~9 minutes
+// of partial work (2026-07-17 code red). Until the per-edge check is replaced
+// by one whole-graph CycleThroughEdges pass (needs a beads-side export of
+// DependencyAddOptions), give each node and edge a slice of budget on top of
+// the flat floor so the atomic path completes instead of falling back.
+func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
+	d := bdCommandTimeout
+	if plan == nil {
+		return d
+	}
+	const perItem = 2 * time.Second
+	return d + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
 }
 
 func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
@@ -667,7 +749,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	}
 	defer release()
 
-	ctx, cancel := nativeDoltOperationContext(parent)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
 	keyToID := make(map[string]string, len(plan.Nodes))
@@ -1910,13 +1995,77 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 	return &priority
 }
 
+// nativeCreatedLimitPushdown reports the row limit to forward to the backing
+// search for a ListQuery, or 0 to fetch the full candidate set and let
+// ApplyListQuery cut the exact page client-side. Created-order sorts push down
+// to the backing search (IssueFilter.SortBy drives sqlbuild.OrderBy) so the
+// caller's limit survives and the store pages instead of materializing +
+// hydrating the whole corpus (sr-dp9o: the dispatcher's RecentRunsAll(2048) was
+// scanning ~22k closed order-tracking wisps per call with the limit stripped).
+// A backing limit is exact only when the backing's ordering and tie-break match
+// the query's client-side semantics; the guards below keep every shape whose
+// exact result needs client-side work from truncating the page early.
+func nativeCreatedLimitPushdown(query ListQuery) int {
+	if query.Limit <= 0 {
+		return 0
+	}
+	// The wisp tier still needs the gc-side post-filter over the full candidate
+	// set (it can discard rows), so a backing limit would cut the page short.
+	if query.TierMode == TierWisps {
+		return 0
+	}
+	// SeekAfter, UpdatedBefore, and plural Assignees are enforced only Go-side in
+	// ApplyListQuery (q.Matches); they are not pushed to the backing search, so a
+	// backing limit applied before them would cut rows before the residual filter
+	// runs and silently drop page rows. Fetch the full candidate set for those
+	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
+	// exec.go, bdstore canApplyWispsServerLimit).
+	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+		return 0
+	}
+	switch query.Sort {
+	case SortCreatedAsc:
+		// The backing renders created-asc ties as `id ASC`, matching the
+		// canonical (created_at ASC, id ASC) order, so a bounded asc read is exact.
+		return query.Limit
+	case SortCreatedDesc:
+		// The backing renders created-desc ties as `id ASC` (upstream
+		// sqlbuild.OrderBy hardcodes the id tie-break), but Gas City's canonical
+		// order and cursor continuation break created_at ties by `id DESC`
+		// (sortBeadsForQuery / SeekBoundary.After). A bounded desc read therefore
+		// keeps the smaller-id tie members at the boundary and drops the larger-id
+		// ties, so an exact or cursor-paginated caller loses rows across the page
+		// seam. Only push the limit when the caller opted into a bounded
+		// newest-by-created_at sample (aggregates); otherwise fetch the full set
+		// and let ApplyListQuery cut the exact (created_at DESC, id DESC) prefix.
+		if query.AllowBackingCreatedLimit {
+			return query.Limit
+		}
+		return 0
+	case SortDefault:
+		// The default backing order (priority, created_at DESC, id ASC) is
+		// deterministic, so a bounded default read cuts a stable prefix.
+		return query.Limit
+	default:
+		// Non-mappable sorts can't page server-side; fetch unbounded and sort
+		// client-side in ApplyListQuery.
+		return 0
+	}
+}
+
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
-	limit := query.Limit
-	if query.Sort != SortDefault || query.TierMode == TierWisps {
-		limit = 0
+	var sortBy string
+	var sortDesc bool
+	switch query.Sort {
+	case SortCreatedDesc:
+		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
+	case SortCreatedAsc:
+		sortBy, sortDesc = "created", true // flip the DESC default
 	}
 	filter := beadslib.IssueFilter{
-		Limit:               limit,
+		Limit:               nativeCreatedLimitPushdown(query),
+		SortBy:              sortBy,
+		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
 		IncludeDependencies: true,

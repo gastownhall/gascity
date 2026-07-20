@@ -42,6 +42,7 @@ func claimOpsForRunID(beadID string, claimedMeta map[string]string, spy *recordR
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
 		ResolveWorkBranch:     func(string) string { return "" }, // suppress work_branch stamp
+		StampWorkMeta:         noopStampWorkMeta,                 // keep hermetic; identity stamp asserted elsewhere
 		RecordSessionPointers: spy.fn,
 	}
 	opts := hookClaimOptions{
@@ -156,6 +157,7 @@ func TestDoHookClaimRecordsRunIDOnExistingAssignment(t *testing.T) {
 			return beads.Bead{}, false, nil
 		},
 		ResolveWorkBranch:     func(string) string { return "" }, // suppress work_branch stamp
+		StampWorkMeta:         noopStampWorkMeta,                 // keep hermetic; identity stamp asserted elsewhere
 		RecordSessionPointers: spy.fn,
 	}
 	opts := hookClaimOptions{
@@ -195,6 +197,7 @@ func TestDoHookClaimExistingAssignmentMissingSessionBeadStillReturnsWork(t *test
 			return beads.Bead{}, false, nil
 		},
 		ResolveWorkBranch:     func(string) string { return "" },
+		StampWorkMeta:         noopStampWorkMeta, // keep hermetic; identity stamp asserted elsewhere
 		RecordSessionPointers: spy.fn,
 	}
 	opts := hookClaimOptions{

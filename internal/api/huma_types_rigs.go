@@ -25,10 +25,13 @@ type RigGetInput struct {
 // digest is computed over the exact wire body. Path is optional at the schema
 // level because a git_url clone derives it server-side; the sync (git_url
 // absent) branch enforces path presence in the handler, preserving the prior
-// 422-on-missing-path contract.
+// 422-on-missing-path contract. The Idempotency-Key header applies the S2
+// create-idempotency contract to the synchronous (git_url-absent) path; the
+// async git_url path carries its own idempotency via the request_id admission
+// state machine.
 type RigCreateInput struct {
 	CityScope
-	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries (synchronous create)."`
 	Body           RigCreateBody
 }
 

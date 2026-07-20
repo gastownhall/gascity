@@ -2014,19 +2014,21 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 }
 
 func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	// The missing-ID guard stays PRE-resolve: in the hand-written form it ran
+	// before resolveReadTarget, so on the no-args path resolution/provider side
+	// effects never happen. Keeping it here preserves that exactly.
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail peek: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		return doMailPeekFallback(args, jsonOut, stdout, stderr)
-	}
-	if isRemote {
-		return routeMailPeek("", args, remoteC, "", jsonOut, stdout, stderr)
-	}
-	c, reason := mailPeekAPIClient(cityPath)
-	return routeMailPeek(cityPath, args, c, reason, jsonOut, stdout, stderr)
+	// onResolveErr preserves mail peek's distinctive behavior: a resolve error
+	// (including a remote-client build error) falls back to the local read with
+	// no error line and no route= log — exactly the old `if err != nil` branch.
+	return routeReadCmdWithHooks("mail peek", stderr, readCmdHooks{
+		onResolveErr: func(error) int { return doMailPeekFallback(args, jsonOut, stdout, stderr) },
+	}, mailPeekAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeMailPeek(cityPath, args, c, nilReason, jsonOut, stdout, stderr)
+	})
 }
 
 // mailPeekAPIClient returns (client, "") when the API path is available,
@@ -2043,12 +2045,15 @@ var mailPeekAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local mail-provider path.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "mail peek"
 	id := args[0]
-	if c != nil {
-		cr, err := c.GetMail(id, "")
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
+	var cr api.CachedRead[mail.Message]
+	return routeRead(c, "mail peek", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetMail(id, "")
+			return err
+		},
+		func() int {
 			if jsonOut {
 				if err := writeCLIJSONLine(stdout, mailMessageJSONResult{
 					SchemaVersion: "1",
@@ -2064,17 +2069,9 @@ func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jso
 				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 			}
 			return 0
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc mail peek: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doMailPeekFallback(args, jsonOut, stdout, stderr)
+		},
+		func() int { return doMailPeekFallback(args, jsonOut, stdout, stderr) },
+	)
 }
 
 // doMailPeekFallback is the direct-bd path for `gc mail peek`.
@@ -2533,20 +2530,23 @@ var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local mail-provider path.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCount(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	const cmdName = "mail count"
 	recipient := defaultMailIdentity()
 	if len(args) > 0 {
 		recipient = strings.TrimSpace(args[0])
 	}
-	if c != nil {
-		cr, err := c.CountMail(recipient, "")
-		if err == nil {
-			if mailCountHasPartial(cr.Body) {
-				logRoute(stderr, cmdName, "api", "error")
-				fmt.Fprintf(stderr, "gc mail count: %s\n", mailCountPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
-				return 1
+	var cr api.CachedRead[api.MailCountView]
+	return routeRead(c, "mail count", nilReason, stderr,
+		func() error {
+			var err error
+			if cr, err = c.CountMail(recipient, ""); err != nil {
+				return err
 			}
-			logRoute(stderr, cmdName, "api", "")
+			if mailCountHasPartial(cr.Body) {
+				return errorAfterFetch{Detail: mailCountPartialErrorDetail(cr.Body)}
+			}
+			return nil
+		},
+		func() int {
 			if jsonOut {
 				if err := writeCLIJSONLine(stdout, mailCountJSONResult{
 					SchemaVersion: "1",
@@ -2565,17 +2565,9 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 			}
 			return 0
-		}
-		if !api.ShouldFallbackForRead(c, err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doMailCountFallback(args, jsonOut, stdout, stderr)
+		},
+		func() int { return doMailCountFallback(args, jsonOut, stdout, stderr) },
+	)
 }
 
 // doMailCountFallback is the direct-bd path for `gc mail count`.

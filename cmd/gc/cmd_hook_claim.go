@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,7 +20,19 @@ import (
 
 const hookClaimCommandName = "hook"
 
+// Drain-action reasons for the gc hook --claim result contract
+// (schemas/hook/result.schema.json). Every value here is a valid reason when
+// action is "drain": an idle store, an operational claim-write failure, or a
+// refused stale session.
+const (
+	hookClaimReasonNoWork        = "no_work"
+	hookClaimReasonClaimsErrored = "claims_errored"
+	hookClaimReasonStaleSession  = "stale_session"
+)
+
 var hookClaimMutationTimeout = 10 * time.Second
+
+var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
 
 type hookClaimOptions struct {
 	Assignee           string
@@ -39,10 +54,13 @@ type hookClaimOps struct {
 	EmitClaimRejected hookEmitClaimRejectedFunc
 	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
 	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
-	// repo / detached HEAD) skips the stamp.
+	// repo / detached HEAD) omits the branch key — the session back-reference is
+	// still stamped.
 	ResolveWorkBranch hookResolveWorkBranchFunc
-	// StampWorkBranch writes gc.work_branch onto the claimed bead. Best-effort.
-	StampWorkBranch hookStampWorkBranchFunc
+	// StampWorkMeta writes the claim-time execution-identity metadata patch
+	// (gc.work_branch and/or the durable session back-reference gc.session_id /
+	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
+	StampWorkMeta hookStampWorkMetaFunc
 	// RecordSessionPointers writes the session bead's current-pointers — gc.current_run_id
 	// AND gc.active_work_bead (the claimed work bead's gc.step_id) — in ONE update, so
 	// the (run, step) tuple stays atomically consistent. Best-effort.
@@ -57,7 +75,7 @@ type (
 	hookDrainAckFunc              func(io.Writer) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(dir string) string
-	hookStampWorkBranchFunc       func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error
+	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
 	hookRecordSessionPointersFunc func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
 )
 
@@ -70,6 +88,8 @@ type hookClaimJSONResult struct {
 	BeadID               string   `json:"bead_id,omitempty"`
 	Assignee             string   `json:"assignee,omitempty"`
 	Route                string   `json:"route,omitempty"`
+	RootBeadID           string   `json:"root_bead_id,omitempty"`
+	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
@@ -176,8 +196,8 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
-	if ops.StampWorkBranch == nil {
-		ops.StampWorkBranch = hookStampWorkBranchWithBdStore
+	if ops.StampWorkMeta == nil {
+		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
 	}
 	if ops.RecordSessionPointers == nil {
 		ops.RecordSessionPointers = hookRecordSessionPointersWithBdStore
@@ -212,6 +232,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
+			if ok {
+				// The atomic mutation committed, but its canonical readback failed.
+				// Stop immediately: trying another candidate or draining would strand
+				// the assignment while falsely reporting idle work.
+				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			// A single unclaimable candidate (a routed id whose bead was deleted,
 			// one that no longer resolves in the store this context can reach, or a
 			// transient write failure) must not wedge the whole hook. Record it and
@@ -226,8 +253,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
-		if claimed.Metadata == nil {
-			claimed.Metadata = candidate.Metadata
+		if len(candidate.Metadata) > 0 {
+			// bd update --claim can return a partial metadata projection. Retain
+			// candidate fields while preferring values returned by the mutation.
+			metadata := maps.Clone(candidate.Metadata)
+			maps.Copy(metadata, claimed.Metadata)
+			claimed.Metadata = metadata
 		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
@@ -273,6 +304,9 @@ func reportHookClaimRejected(candidate, claimed beads.Bead, opts hookClaimOption
 
 func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "in_progress") &&
 			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
 			result := hookClaimJSONResult{
@@ -289,6 +323,9 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 		}
 	}
 	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "open") &&
 			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
 			result := hookClaimJSONResult{
@@ -307,8 +344,22 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 	return hookClaimJSONResult{}, beads.Bead{}, false
 }
 
+// hookClaimCandidateIsMessage reports whether candidate is a mail message
+// bead (issue_type="message"). Mail is read, not claimed as work: a message
+// bead addressed to this session's identity has the same
+// assignee-matches-identity shape as a real existing/ready assignment, so
+// without this check it was returned by hookClaimExistingOrAssigned as work
+// ahead of any real routed work waiting in the same batch (#4419) -- not by
+// race, by construction, since this function runs before
+// claimFirstEligibleHookCandidate ever sees the routed candidates.
+func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
+	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
+}
+
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
-	stampHookWorkBranch(bead, opts, ops, dir, stderr)
+	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	recordHookClaimSessionPointers(bead, opts, ops, dir, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -333,10 +384,32 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
 func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, stdout, stderr io.Writer) int {
-	reason := "no_work"
+	reason := hookClaimReasonNoWork
 	if claimsErrored {
-		reason = "claims_errored"
+		reason = hookClaimReasonClaimsErrored
 	}
+	return writeHookClaimDrain(reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+}
+
+// writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
+// session (closed, superseded instance token, or a dormant/terminal state) that
+// must stop instead of claiming. It preserves the gc hook --claim result
+// contract: a --json caller gets a schema-backed drain record (action "drain",
+// reason "stale_session"), and --drain-ack is honored, so a startup wrapper
+// acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
+// retrying the refusal forever.
+func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	return writeHookClaimDrain(hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+}
+
+// writeHookClaimDrain writes the single structured drain result shared by every
+// terminal no-claim outcome: an idle no-work store, a claims-errored store, and a
+// refused stale session. For a --json caller it emits the schema-backed drain
+// line; when drainAck is set it first runs drainAckFn and marks the result
+// acknowledged. The exit code mirrors the historical contract — 0 once drain is
+// acknowledged, else 1 — so a non-drain-ack caller still reports action=drain
+// (a completed drain) rather than a bare failure.
+func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookDrainAckFunc, stdout, stderr io.Writer) int {
 	result := hookClaimJSONResult{
 		SchemaVersion: "1",
 		OK:            true,
@@ -344,20 +417,20 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 		Action:        "drain",
 		Reason:        reason,
 	}
-	if opts.DrainAck {
-		if err := ops.DrainAck(stderr); err != nil {
+	if drainAck {
+		if err := drainAckFn(stderr); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: drain-ack failed: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		result.DrainAcknowledged = true
 	}
-	if opts.JSON {
+	if jsonOut {
 		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
 			return 1
 		}
 	}
-	if opts.DrainAck {
+	if drainAck {
 		return 0
 	}
 	return 1
@@ -392,8 +465,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	return assigned, nil
 }
 
-func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-	store := hookClaimBdStore(dir, env, assignee)
+func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
 	claimed, ok, err := store.Claim(beadID)
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -414,32 +487,74 @@ func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, a
 		// the caller can report the rejection rather than treat it as ours.
 		return claimed, false, nil
 	}
-	return claimed, true, nil
+	canonical, err := store.Get(beadID)
+	if err != nil {
+		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
+	}
+	if !hookClaimHasIdentity(canonical.Assignee, []string{assignee}) {
+		return canonical, false, nil
+	}
+	return canonical, true, nil
 }
 
-// stampHookWorkBranch records the claiming worker's git branch on the bead as
-// gc.work_branch — the durable handle from the bead to its work that the close
-// gate later reads (ADR-0009). Idempotent (skips when already current) and
-// best-effort: a missing repo, detached HEAD, or write error never blocks the
-// claim.
-func stampHookWorkBranch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
-	branch := strings.TrimSpace(ops.ResolveWorkBranch(dir))
-	if branch == "" {
-		return
-	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == branch {
+// stampHookClaimIdentity records the claiming worker's execution identity on the
+// claimed bead in ONE metadata write: gc.work_branch (the durable handle from the
+// bead to its work that the close gate later reads, ADR-0009) plus the durable
+// session back-reference gc.session_id / gc.session_name (#2843) so the dashboard
+// run-detail can resolve which session executed a pool step after the transient
+// Assignee is cleared on close. graphroute leaves pool steps unbound at route time,
+// deferring the session binding to this claim (graphroute.go:200-203).
+//
+// The patch is compare-and-skipped against the bead's current metadata and the
+// write is issued only when at least one key actually changes: this runs again on
+// every hook tick via the existing_assignment / ready_assignment adoption paths, so
+// an unconditional write would emit a bead.updated per tick per in-progress bead
+// (the cache-reconcile flood class). Best-effort: a missing repo, detached HEAD,
+// absent session, or write error never blocks the claim.
+func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
+	if len(patch) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	if err := ops.StampWorkBranch(ctx, dir, opts.Env, bead.ID, opts.Assignee, branch); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: stamping work_branch on %s: %v\n", bead.ID, err) //nolint:errcheck
+	if err := ops.StampWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee, patch); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: stamping execution identity on %s: %v\n", bead.ID, err) //nolint:errcheck
 	}
 }
 
-func hookStampWorkBranchWithBdStore(_ context.Context, dir string, env []string, beadID, assignee, branch string) error {
+// hookClaimIdentityPatch builds the compare-and-skipped claim-time metadata patch.
+// It carries gc.work_branch when the worktree resolves a branch that differs from
+// the bead's, and the session back-reference gc.session_id / gc.session_name when
+// this is a session-run claim (GC_SESSION_ID present) of a non-control bead and the
+// values differ. Session identity is stamped even when the branch is empty — a
+// session with no worktree still needs its back-reference — but never on control
+// beads, which stay session-free by graphroute's design
+// (ApplyGraphControlRouteBinding), even when a control-dispatcher session claims one
+// through this same hook path. An empty result means every key is already current,
+// so the caller issues no write.
+func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
+	patch := map[string]string{}
+	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
+		patch[beadmeta.WorkBranchMetadataKey] = branch
+	}
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
+		!beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
+		if strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+			patch[beadmeta.SessionIDMetadataKey] = sessionID
+		}
+		if sessionName := hookClaimSessionName(opts.Env); sessionName != "" &&
+			strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+			patch[beadmeta.SessionNameMetadataKey] = sessionName
+		}
+	}
+	return patch
+}
+
+func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
-	return store.Update(beadID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkBranchMetadataKey: branch}})
+	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
 }
 
 // recordHookClaimRunID records, on the session bead named by GC_SESSION_ID, the
@@ -476,6 +591,20 @@ func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops 
 	// work has no formula step (ad-hoc/manual) — which clears any prior step.
 	runID := beadmeta.ResolveRunID(bead.Metadata, bead.ID, sessionBeadID)
 	stepID := strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey])
+	// Publish a session→run-id map file so external tools can correlate this
+	// session's activity to its run. Independent of and best-effort like the
+	// pointer write below. The session may be addressed by any of these keys, so
+	// the map is written under each.
+	if err := writeRunMap(runID, bead.ID,
+		hookClaimEnvValue(opts.Env, "GC_SESSION_NAME"),
+		sessionBeadID,
+		hookClaimEnvValue(opts.Env, "BEADS_ACTOR")); err != nil {
+		// Best-effort correlation aid: a failed publish never blocks the claim,
+		// but a persistent, systemic failure (an unwritable or unsafe run-map
+		// dir) is surfaced here rather than silently dropped, so the "map never
+		// appears" symptom is diagnosable instead of invisible.
+		fmt.Fprintf(stderr, "gc hook --claim: publishing run-map for session %s: %v\n", sessionBeadID, err) //nolint:errcheck
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	if err := ops.RecordSessionPointers(ctx, dir, opts.Env, opts.Assignee, sessionBeadID, runID, stepID); err != nil {
@@ -483,25 +612,541 @@ func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops 
 	}
 }
 
-func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error {
-	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
+func hookRecordSessionPointersWithBdStore(ctx context.Context, _ string, env []string, assignee, sessionBeadID, runID, stepID string) error {
+	cityDir, cityEnv, err := hookClaimSessionStoreContext(ctx, env)
+	if err != nil {
+		return err
+	}
+	store := hookClaimBdStoreContext(ctx, cityDir, cityEnv, assignee)
 	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{
 		beadmeta.CurrentRunIDMetadataKey:   runID,
 		beadmeta.ActiveWorkBeadMetadataKey: stepID,
 	}})
 }
 
+// hookClaimSessionStoreContext rebuilds the store environment for the city
+// scope. Claim and continuation mutations use the selected work store, but
+// session beads always live in the city store, including when work was claimed
+// through cross-store federation from a rig.
+func hookClaimSessionStoreContext(ctx context.Context, env []string) (string, []string, error) {
+	cityPath := ""
+	for _, key := range []string{"GC_CITY_PATH", "GC_CITY"} {
+		for _, entry := range env {
+			k, value, ok := strings.Cut(entry, "=")
+			if !ok || k != key {
+				continue
+			}
+			value = strings.TrimSpace(value)
+			if value != "" && filepath.IsAbs(value) {
+				cityPath = filepath.Clean(value)
+				break
+			}
+		}
+		if cityPath != "" {
+			break
+		}
+	}
+	if cityPath == "" {
+		return "", nil, errors.New("resolving city store for session pointers: missing absolute GC_CITY_PATH or GC_CITY")
+	}
+
+	overrides, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolving city store for session pointers: %w", err)
+	}
+	overrides["GC_STORE_ROOT"] = cityPath
+	overrides["GC_STORE_SCOPE"] = "city"
+	overrides["GC_RIG"] = ""
+	overrides["GC_RIG_ROOT"] = ""
+	return cityPath, mergeRuntimeEnv(env, overrides), nil
+}
+
 // hookClaimSessionID returns the session bead id (GC_SESSION_ID) from the claim
 // env, the override-sanitized value the rest of the claim path uses; it is empty
 // for a non-session run (cmd_hook.go blanks GC_SESSION_ID outside a session).
 func hookClaimSessionID(env []string) string {
-	sessionID := ""
+	return hookClaimEnvValue(env, "GC_SESSION_ID")
+}
+
+// hookClaimEnvValue returns the last value of key in the claim env (trimmed),
+// the same KEY=VALUE scan the rest of the claim path uses.
+func hookClaimEnvValue(env []string, key string) string {
+	val := ""
 	for _, entry := range env {
-		if k, v, ok := strings.Cut(entry, "="); ok && k == "GC_SESSION_ID" {
-			sessionID = v
+		if k, v, ok := strings.Cut(entry, "="); ok && k == key {
+			val = v
 		}
 	}
-	return strings.TrimSpace(sessionID)
+	return strings.TrimSpace(val)
+}
+
+// sanitizeRunMapKey maps a session key to its run-map filename stem: keep
+// [A-Za-z0-9._-], replace every other rune with '_'. It is byte-identical to
+// the manifold proxy's sanitizeSession (gc-manifold-proxy.go) — the
+// cross-process contract: runMapFileName appends ".json" to this stem and the
+// proxy opens exactly that name. The stem is intentionally lossy (distinct keys
+// such as "a/b" and "a_b" share it), which is safe because the proxy resolves a
+// session by a single structured key — the x-manifold-affinity gc session name
+// — whose realistic collision surface is nil, not by the wider key set the
+// writer also publishes.
+func sanitizeRunMapKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, s)
+}
+
+// runMapFileName is the filename (no directory) a session key publishes under.
+// It is the cross-process contract with the manifold proxy: the proxy reads
+// sanitizeSession(affinity)+".json" (gc-manifold-proxy.go), so this MUST be
+// sanitizeRunMapKey(key)+".json" byte-for-byte or the proxy's ReadFile misses
+// and X-Gc-Run-Id is never stamped. The proxy resolves exactly one key per
+// request — the x-manifold-affinity header, i.e. the gc session name — so the
+// only collision that could clobber run attribution is two live sessions whose
+// names sanitize identically, which does not happen for real structured session
+// names. A consumer that looks a session up by key MUST apply this identical
+// transform.
+func runMapFileName(key string) string {
+	return sanitizeRunMapKey(key) + ".json"
+}
+
+// runMapEntry is the session→run-id mapping payload published per session key.
+// It is a cross-process contract: the external manifold proxy decodes the same
+// JSON shape and consumes run_id to stamp X-Gc-Run-Id. Keep the field tags
+// (run_id/bead_id/ts) in lock-step with that reader (GC_PROXY_RUNMAP_DIR in
+// gc-manifold-proxy.go).
+type runMapEntry struct {
+	RunID  string `json:"run_id"`
+	BeadID string `json:"bead_id"`
+	TS     int64  `json:"ts"`
+}
+
+// runMapProxyDefaultDir is the zero-config run-map directory, kept
+// byte-identical to the manifold proxy's own default (gc-manifold-proxy.go's
+// runmapDir). The two sides MUST share a directory or the proxy never finds the
+// mapping and X-Gc-Run-Id is never stamped. The proxy runs as root and
+// provisions this path sticky 0o1777 before any agent cell starts, so a
+// non-root worker's os.MkdirAll(0o755) no-ops on it and CreateTemp succeeds
+// there; runMapDirSafeToPublish trusts that sticky root-owned handoff. Both
+// sides override in lock-step via GC_RUNMAP_DIR / GC_PROXY_RUNMAP_DIR.
+const runMapProxyDefaultDir = "/run/gc-manifold-runmap"
+
+// defaultRunMapDir returns the zero-config run-map directory used when
+// GC_RUNMAP_DIR is unset. It is the proxy-aligned default: with the proxy
+// present the dir already exists sticky 0o1777 and is worker-writable; with no
+// proxy present a non-root worker cannot create it, and writeRunMap treats that
+// absent, uncreatable default as a silent no-proxy no-op — there is no proxy
+// reading the map in that case, so nothing is lost and the hot claim path stays
+// quiet. Only an explicit GC_RUNMAP_DIR that cannot be created is surfaced.
+func defaultRunMapDir() string {
+	return runMapProxyDefaultDir
+}
+
+// runMapDirSafeToPublish reports whether the resolved run-map dir is safe to
+// publish a proxy-trusted <session>.json into. os.MkdirAll self-provisions an
+// owner-only 0o755 dir but is a no-op on a pre-existing one, so an externally
+// provisioned dir keeps its own mode and must be re-checked here.
+//
+// A dir writable by neither group nor other is always safe: owner-only (0o755),
+// or a read-only shared-group dir (0o750), where non-owners cannot create or
+// replace entries. Directory write permission is what lets a non-owner create,
+// rename, or delete entries, so group-write is gated exactly like other-write:
+// a group- or other-writable dir is trusted only as a sticky handoff owned by
+// root or this user — the manifold proxy's deliberate multi-user contract, where
+// root provisions /run/gc-manifold-runmap as 0o1777 so each agent cell drops its
+// own <session>.json and the proxy reads them (the /tmp trust model). A
+// non-sticky group- or other-writable dir, or a sticky one owned by another
+// user, is refused (CWE-732).
+//
+// This gate bounds the DIRECTORY's provisioner; it does NOT by itself make the
+// shared handoff forgery-proof. The sticky bit only stops a non-owner from
+// deleting or renaming over an EXISTING file — it does not stop first-writer
+// squatting of a not-yet-existing, predictable <session>.json. So in the shared
+// 0o1777 handoff a hostile co-uid can pre-plant a victim's file, and per-file
+// run-map authenticity is therefore the READER's responsibility: the manifold
+// proxy MUST authenticate each <session>.json by owner (st_uid), mode, and link
+// state before trusting run_id — a hard precondition of using a shared handoff.
+// writeRunMap additionally refuses to publish over a symlink or foreign-owned
+// target (see publishRunMapKey) so the writer never silently blesses a squat, but
+// a world-writable handoff cannot be made forgery-proof by the writer alone.
+//
+// Deployment trust model (verified against the deployed gc-manifold-proxy, which
+// reads <session>.json with an unauthenticated os.ReadFile and provisions the dir
+// 0o1777): the handoff lives inside a single fleet uid — every agent cell writes
+// as that uid and root reads — so the residual forgery is intra-trust-domain.
+// Exploiting it needs an already-compromised same-uid cell, and the asset is only
+// a best-effort spend-correlation header that degrades safely (a forged or missing
+// mapping mis-stamps or omits X-Gc-Run-Id; it never affects code, data, or
+// privilege). Because every cell shares that uid, even reader-side owner
+// authentication (st_uid == fleet uid) cannot separate a genuine publish from a
+// forged one; real per-session anti-forgery needs a proxy-side control the writer
+// cannot supply alone — an unguessable per-cell filename/nonce or a
+// root-authenticated private channel. That out-of-repo reader/deploy hardening is
+// tracked in ga-zzvsuls.
+func runMapDirSafeToPublish(dir string) bool {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	// Group- and other-write are gated identically: either bit lets a non-owner
+	// create, rename, or delete the <session>.json the proxy trusts, so a
+	// group-writable dir is no safer than a world-writable one (CWE-732).
+	if info.Mode().Perm()&0o022 == 0 {
+		return true
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		return false
+	}
+	return runMapDirOwnedByTrustedUser(info)
+}
+
+// writeRunMap publishes a session→run-id map file,
+// ${GC_RUNMAP_DIR:-<defaultRunMapDir>}/<runMapFileName(session)> =
+// {"run_id":...,"bead_id":...,"ts":...}, so an external tool can correlate a
+// session's activity to the run it is working. One file is written per distinct
+// non-empty session key (the session may be addressed as GC_SESSION_NAME,
+// GC_SESSION_ID, or BEADS_ACTOR). Best-effort and atomic (tmp + rename): a
+// per-key write failure is skipped and never blocks the claim.
+//
+// SECURITY CONTRACT — the run-map, and the X-Gc-Run-Id header the manifold proxy
+// stamps from it, are UNAUTHENTICATED best-effort telemetry: a spend-correlation
+// hint, never an authoritative signal. Downstream systems MUST NOT feed
+// X-Gc-Run-Id or the run-map into billing, authorization, audit, or any other
+// trust decision. The handoff is a single-fleet-uid, /tmp-style trust domain, so
+// a compromised same-uid cell can pre-plant a predictable <session>.json that the
+// proxy reads unauthenticated; because every cell shares the uid, neither this
+// writer nor reader-side owner authentication can distinguish a forgery from a
+// genuine publish (see runMapDirSafeToPublish). It degrades safely — a forged or
+// missing mapping only mis-stamps or omits the header and never affects code,
+// data, privilege, or routing. Real per-session anti-forgery needs a proxy-side
+// nonce or private channel this writer cannot supply alone, tracked in
+// ga-zzvsuls. TestRunMapEntryIsUnauthenticatedBestEffortTelemetry pins this.
+//
+// It returns a non-nil error whenever run attribution is compromised or the
+// whole map is dropped, so the caller can surface an otherwise silent symptom:
+// an unsafe directory, every attempted per-key publish failing, or a squatted
+// target (a symlink or foreign-owned <session>.json the proxy would trust). A
+// per-key hiccup that still leaves at least one file published is not reported —
+// except a squat, which is surfaced even when other keys published, because the
+// squatted session's run attribution is forged.
+//
+// When GC_RUNMAP_DIR is unset (zero-config default) and the default proxy dir is
+// absent and uncreatable by a non-root worker, no proxy is reading the map, so
+// publication is a silent no-op rather than a per-claim stderr diagnostic on the
+// hottest control-plane operation.
+func writeRunMap(runID, beadID string, sessionKeys ...string) error {
+	dir := strings.TrimSpace(os.Getenv("GC_RUNMAP_DIR"))
+	explicit := dir != ""
+	if dir == "" {
+		dir = defaultRunMapDir()
+	}
+	return writeRunMapTo(dir, explicit, runID, beadID, sessionKeys...)
+}
+
+// writeRunMapTo is writeRunMap with the directory resolution lifted out so both
+// the explicit-override and zero-config-default branches are testable. explicit
+// is true when the operator set GC_RUNMAP_DIR: only then is an uncreatable dir
+// surfaced as an error; a zero-config default that cannot be created means no
+// proxy is present and the publish is a silent no-op.
+func writeRunMapTo(dir string, explicit bool, runID, beadID string, sessionKeys ...string) error {
+	if strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	// Self-provision the dir owned by this session user (0o755). This creates a
+	// GC_RUNMAP_DIR override under a writable parent and no-ops on any
+	// pre-existing dir — including the default /run/gc-manifold-runmap, which
+	// the root proxy provisions sticky 0o1777 before workers run. A world-writable
+	// dir is deliberately NOT self-provisioned here — it would let any local user
+	// plant a forged <session>.json the proxy would trust — and 0o1777 could not
+	// be produced anyway (os.FileMode drops the sticky bit and umask strips
+	// other-write, so a self-provisioned dir is 0o755 regardless). The shared
+	// multi-uid handoff is the proxy's / systemd-tmpfiles' job.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		// Zero-config default with no proxy present: the default dir does not
+		// exist and a non-root worker cannot create it. Nothing reads the map in
+		// that case, so stay silent instead of emitting an error-shaped
+		// diagnostic on every claim. Surface the failure only when the operator
+		// explicitly opted in via GC_RUNMAP_DIR.
+		if !explicit {
+			return nil
+		}
+		return fmt.Errorf("creating run-map dir %q: %w", dir, err)
+	}
+	// MkdirAll no-ops on a pre-existing dir, so gate publish on the resolved
+	// dir's safety: a non-sticky group- or other-writable handoff would let any
+	// local process forge or clobber run attribution.
+	if !runMapDirSafeToPublish(dir) {
+		return fmt.Errorf("run-map dir %q is group/other-writable without a sticky trusted-owner handoff; refusing to publish (CWE-732)", dir)
+	}
+	body, err := json.Marshal(runMapEntry{RunID: runID, BeadID: beadID, TS: time.Now().Unix()})
+	if err != nil {
+		return fmt.Errorf("marshaling run-map entry: %w", err)
+	}
+	seen := map[string]bool{}
+	// Track publish outcomes so a dropped map or a squatted target is surfaced,
+	// not silent: per-key hiccups are best-effort as long as one file lands, but
+	// an all-keys-failed run returns its first failure, and a squat (symlink or
+	// foreign-owned target) is surfaced even when other keys published.
+	var firstErr error
+	attempted, published, squats := 0, 0, 0
+	for _, k := range sessionKeys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		attempted++
+		ok, squat, err := publishRunMapKey(dir, k, body)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if squat {
+			squats++
+		}
+		if ok {
+			published++
+		}
+	}
+	// Reap dead sessions' entries so a writer-owned dir doesn't leak one stale
+	// file per ended session on a long-uptime box (tmpfs clears /run only on
+	// reboot). pruneRunMap self-limits — it skips a shared proxy handoff and
+	// bounds its scan — so this stays cheap on the claim hot path.
+	pruneRunMap(dir, time.Now(), runMapTTL())
+	// A squatted proxy-read target forges the session's run attribution, so it is
+	// surfaced even when other keys published, never folded into best-effort nil.
+	if squats > 0 {
+		return firstErr
+	}
+	if published == 0 && attempted > 0 {
+		return firstErr
+	}
+	return nil
+}
+
+// publishRunMapKey atomically publishes body at <dir>/<runMapFileName(key)> via a
+// unique temp + rename. It returns published=true only when the file landed, and
+// squat=true when the target is a pre-existing symlink or foreign-owned file — a
+// run-attribution squat the proxy's ReadFile would trust — which the writer
+// refuses rather than following or reporting as best-effort success. In the
+// sticky handoff the writer cannot overwrite a foreign file anyway (sticky yields
+// EPERM); refusing here turns a would-be silent forgery into a surfaced error.
+func publishRunMapKey(dir, key string, body []byte) (published, squat bool, err error) {
+	fileName := runMapFileName(key)
+	finalPath := filepath.Join(dir, fileName)
+	// Lstat (does NOT follow the link) before writing: a pre-planted symlink (the
+	// proxy's os.ReadFile would follow it to an attacker-controlled file) or a
+	// foreign-owned file at the predictable name is a squat. Refuse it — surfacing
+	// a distinct error — rather than renaming over the name and reporting success.
+	// This catches the documented pre-plant attack; a squat that races in after
+	// this Lstat instead fails the sticky rename below and is reported per-key.
+	if li, lerr := os.Lstat(finalPath); lerr == nil {
+		if li.Mode()&os.ModeSymlink != 0 || !runMapExistingFileIsOurs(li) {
+			return false, true, fmt.Errorf("run-map target for %q (%s) is a symlink or foreign-owned; refusing to publish (possible run-attribution squat)", key, finalPath)
+		}
+	}
+	// Unique temp name (not a predictable "<file>.tmp"): os.CreateTemp opens
+	// O_CREATE|O_EXCL on an unpredictable name, so a pre-planted symlink at the
+	// temp path can't be followed on write. The "*" expands before the trailing
+	// ".tmp", so any leftover still ends in ".tmp" and pruneRunMap reaps it by age.
+	f, err := os.CreateTemp(dir, fileName+".*.tmp")
+	if err != nil {
+		return false, false, fmt.Errorf("creating run-map temp for %q: %w", key, err)
+	}
+	tmp := f.Name()
+	_, werr := f.Write(body)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		if werr != nil {
+			return false, false, fmt.Errorf("writing run-map for %q: %w", key, werr)
+		}
+		return false, false, fmt.Errorf("closing run-map for %q: %w", key, cerr)
+	}
+	_ = os.Chmod(tmp, 0o644)
+	if err := os.Rename(tmp, finalPath); err != nil {
+		_ = os.Remove(tmp)
+		return false, false, fmt.Errorf("publishing run-map for %q: %w", key, err)
+	}
+	return true, false, nil
+}
+
+// runMapTTL bounds how long a run-map file survives without a refreshing claim
+// before pruneRunMap reaps it. The file's mtime is refreshed on every claim, so
+// only sessions that have STOPPED claiming go stale; the default is generous
+// enough to exceed the longest a live session goes between claims (one
+// long-running work bead) so a working session is never pruned out from under
+// the proxy. The in-process reap only bounds a writer-owned dir; a shared
+// multi-uid proxy handoff is cleaned by its provisioner (systemd-tmpfiles / the
+// root proxy / tmpfs reboot), not by pruneRunMap. Overridable via GC_RUNMAP_TTL
+// (Go duration).
+func runMapTTL() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("GC_RUNMAP_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 48 * time.Hour
+}
+
+// runMapPruneScanBudget caps how many directory entries a single claim-path
+// prune scans and stats, so the reap cost is bounded regardless of how many
+// files sit in the run-map dir. Removing reaped entries frees their slots, so a
+// dir holding more than one budget of stale files drains opportunistically over
+// consecutive claims rather than stalling any single claim. Sized well above the
+// live-session count a single host realistically reaches.
+const runMapPruneScanBudget = 256
+
+// runMapDirPrunable reports whether the writer may safely reap stale files from
+// dir on the claim hot path: true only for a dir writable by neither group nor
+// other — one this user provisioned (0o755) or a read-only shared-group dir
+// (0o750), where every entry is created by this uid (or root) and os.Remove can
+// actually unlink it. It is false for the shared manifold-proxy handoff (a
+// group- or other-writable sticky dir, canonically root-owned 0o1777): a
+// non-root writer cannot unlink another uid's <session>.json there (the sticky
+// bit yields EPERM), so an in-process reap is a no-op — and scanning an
+// attacker-fillable directory on every claim would let a local co-tenant inflate
+// claim latency by filling it (CWE-400). Cleanup of the shared handoff is the
+// provisioner's job (systemd-tmpfiles / the root proxy / tmpfs reboot).
+func runMapDirPrunable(dir string) bool {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0o022 == 0
+}
+
+// runMapFileIsOwnedEntry reports whether the .json file at path is one this
+// writer published: it decodes as a runMapEntry carrying a non-empty run_id AND
+// bead_id. pruneRunMap uses it so a reap only ever unlinks the writer's own
+// <session>.json files. recordHookClaimSessionPointers always publishes both
+// fields (the resolved run id and the claimed bead id are both non-empty), so a
+// genuine entry is never mistaken for foreign; an unrelated config.json an
+// operator's explicit GC_RUNMAP_DIR happens to share a directory with fails to
+// decode or lacks the fields and is left untouched. Published files are written
+// atomically (CreateTemp + rename), so the read here always sees a complete old
+// or new entry, never a partial write.
+func runMapFileIsOwnedEntry(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var entry runMapEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return false
+	}
+	return strings.TrimSpace(entry.RunID) != "" && strings.TrimSpace(entry.BeadID) != ""
+}
+
+// runMapTempOrphanName reports whether name has the shape publishRunMapKey's
+// os.CreateTemp produces — "<stem>.json.<random>.tmp" — so a prune reaps only
+// this writer's own crash-left temp orphans, never an unrelated cache.tmp an
+// explicit GC_RUNMAP_DIR happens to share a directory with. CreateTemp expands
+// the "*" in runMapFileName+".*.tmp", so a genuine orphan is the writer's
+// "<stem>.json" filename followed by a ".<random>.tmp" suffix.
+func runMapTempOrphanName(name string) bool {
+	rest, ok := strings.CutSuffix(name, ".tmp")
+	if !ok {
+		return false
+	}
+	// Drop the ".<random>" CreateTemp inserted before ".tmp"; what precedes it
+	// must be the "<stem>.json" run-map filename the writer built the pattern from.
+	i := strings.LastIndex(rest, ".")
+	if i < 0 {
+		return false
+	}
+	return strings.HasSuffix(rest[:i], ".json")
+}
+
+// pruneRunMap best-effort removes run-map files not refreshed within ttl — the
+// files of sessions that have stopped claiming — so a writer-owned dir stays
+// bounded by the live session set rather than growing one file per session ever
+// seen. It also reaps crash-left temp orphans older than ttl: a live writer's
+// temp exists only between CreateTemp and rename, so one that old is a dead-write
+// orphan (a process killed mid-publish) the .json-only match used to leak forever.
+//
+// It reaps ONLY files this writer provably owns, never an unrelated file an
+// operator's explicit GC_RUNMAP_DIR happens to share a directory with: a stale
+// .json must decode as a runMapEntry with a non-empty run_id and bead_id
+// (runMapFileIsOwnedEntry) and a stale .tmp must have the writer's
+// "<stem>.json.<rand>.tmp" temp shape (runMapTempOrphanName). Without this an
+// owner-only GC_RUNMAP_DIR pointed at a directory that also holds a stale
+// config.json or cache.tmp would silently delete it on the claim hot path.
+//
+// It runs on the claim hot path, so it is deliberately self-limiting: it skips
+// the shared group/other-writable proxy handoff entirely (see runMapDirPrunable)
+// and, in a writer-owned dir, scans at most runMapPruneScanBudget entries per
+// call so a claim's cost never scales with the directory size. Never blocks or
+// fails the claim.
+func pruneRunMap(dir string, now time.Time, ttl time.Duration) {
+	if !runMapDirPrunable(dir) {
+		return
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer f.Close() //nolint:errcheck // read-only dir handle; close error is irrelevant
+	// ReadDir(n>0) returns at most n entries from the directory stream, so the
+	// scan+stat cost is capped at the budget rather than the directory size; an
+	// empty dir reports io.EOF, which is not a failure.
+	entries, err := f.ReadDir(runMapPruneScanBudget)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		isJSON := strings.HasSuffix(name, ".json")
+		isTmp := strings.HasSuffix(name, ".tmp")
+		if !isJSON && !isTmp {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		// Only stale files are reap candidates: a live session's .json is
+		// refreshed on every claim and a live writer's temp exists for
+		// microseconds, so neither is ever this old.
+		if now.Sub(info.ModTime()) <= ttl {
+			continue
+		}
+		// Reap only the writer's own files. The ownership check is last so the
+		// .json read is paid only for the few stale candidates, not every entry.
+		path := filepath.Join(dir, name)
+		switch {
+		case isTmp:
+			if !runMapTempOrphanName(name) {
+				continue
+			}
+		case isJSON:
+			if !runMapFileIsOwnedEntry(path) {
+				continue
+			}
+		}
+		_ = os.Remove(path)
+	}
+}
+
+// hookClaimSessionName returns the session display name (GC_SESSION_NAME) from the
+// claim env — the pool slot's session/tmux name (e.g. "gc__role-mc-xxxxx") — stamped
+// onto the work bead as the durable gc.session_name back-reference so the dashboard's
+// byName index can resolve the step's session even when the raw id fails the
+// resolver's prefix gate. Empty when the env carries no session name.
+func hookClaimSessionName(env []string) string {
+	sessionName := ""
+	for _, entry := range env {
+		if k, v, ok := strings.Cut(entry, "="); ok && k == "GC_SESSION_NAME" {
+			sessionName = v
+		}
+	}
+	return strings.TrimSpace(sessionName)
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir
@@ -576,7 +1221,7 @@ func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
 // so a best-effort claim-time write cannot outlast the caller's deadline even if
 // the underlying bd update stalls.
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
-	return beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
+	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
 }
 
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {

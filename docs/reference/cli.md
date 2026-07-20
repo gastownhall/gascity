@@ -393,12 +393,13 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format flags. --json is an
-alias for --format=json. API-path JSON output includes _cache_age_s;
-fallback-path JSON omits it.
+Supports --label, --status, --all, and --format. --format=json emits
+JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
+it). The bare --json flag is reserved by the CLI's JSON-contract layer
+and is not wired for this command; use --format=json.
 
 ```
-gc beads list
+gc beads list [flags]
 ```
 
 **Example:**
@@ -406,9 +407,15 @@ gc beads list
 ```
 gc beads list
 gc beads list --label ready-to-build
-gc beads list --status open --json
-gc beads list --format=toon
+gc beads list --status open --format=json
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | include closed beads (default: open only) |
+| `--format` | string | `text` | output format: text or json |
+| `--label` | string |  | filter to beads carrying this label |
+| `--status` | string |  | filter to beads in this status |
 
 ## gc beads show
 
@@ -416,19 +423,25 @@ Show one bead by ID, routed through the supervisor API when the
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format and --json. API-path JSON output includes
-_cache_age_s; fallback-path JSON omits it.
+Supports --format. --format=json emits JSON (API-path JSON includes
+_cache_age_s; fallback-path JSON omits it). The bare --json flag is
+reserved by the CLI's JSON-contract layer and is not wired for this
+command; use --format=json.
 
 ```
-gc beads show <bead-id>
+gc beads show <bead-id> [flags]
 ```
 
 **Example:**
 
 ```
 gc beads show ga-abc
-gc beads show ga-abc --json
+gc beads show ga-abc --format=json
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--format` | string | `text` | output format: text or json |
 
 ## gc build-image
 
@@ -1308,6 +1321,7 @@ gc doctor --explain-postgres-auth
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--explain-postgres-auth` | bool |  | after running checks, print per-scope Postgres credential resolution table (no values printed) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
@@ -1757,8 +1771,10 @@ Convenience command for context handoff.
 Self-handoff (default): sends mail to self. If the current session is
 controller-restartable, requests a restart and blocks until the controller
 stops the session. For on-demand configured named sessions, sends mail and
-returns without requesting restart because the controller cannot restart the
-user-attended process.
+returns without requesting restart: handoff intentionally leaves the
+user-attended session running instead of restarting it out from under the
+user. The controller can restart such a session via
+gc runtime request-restart; handoff deliberately does not.
 
 For controller-restartable sessions, equivalent to:
 
@@ -2778,7 +2794,15 @@ gc pack list
 
 ## gc pack registry
 
-Manage configured Gas City pack registries and inspect cached catalog entries.
+Manage configured Gas City pack registries, inspect cached catalog entries,
+authenticate to the hosted Registry, and publish packs.
+
+Native Registry login stores a per-registry API token. When no explicit,
+environment, stored native, development, or GitHub Actions credential applies,
+the canonical hosted Registry uses the existing Gasworks login through
+"gasworks credential-provider". Set GC_CREDENTIAL_PROVIDER to a JSON argv array
+to configure that command without invoking a shell. Gasworks credentials are
+never persisted by gc and are never sent to custom Registry origins.
 
 ```
 gc pack registry
@@ -2848,6 +2872,13 @@ Submit a pack publish request to Gas City Registry.
 The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
+
+--dev-auth (localhost only) replaces all other credentials. Otherwise,
+authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
+cookie and CSRF-token pair from flags or the environment, a stored native
+Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
+canonical hosted Registry. Run "gasworks login" once before using the provider,
+or use "gc pack registry login" to create a separate native Registry token.
 
 ```
 gc pack registry publish <path-to-pack-root> [flags]
@@ -2923,7 +2954,11 @@ gc pack registry show <pack-name> [flags]
 
 ## gc pack registry whoami
 
-Show the authenticated registry account
+Show the Registry account for the active credential.
+
+Explicit, environment, and stored native Registry tokens take precedence. For
+the canonical hosted Registry, gc otherwise uses the existing Gasworks login
+through the configured credential provider without storing its credential.
 
 ```
 gc pack registry whoami [flags]
@@ -3460,6 +3495,7 @@ gc runtime
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
+| [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
@@ -3568,6 +3604,31 @@ gc runtime drain-check [name] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
 
+## gc runtime heartbeat
+
+Extend the idle-timeout and max-session-age windows during a long operation.
+
+Sets held_until on the current session's bead, suppressing the idle-timeout
+and max-session-age timers until the hold expires. Call this at the start of
+slow operations that produce no terminal output and would otherwise trigger
+a false-alarm watchdog kill.
+
+The hold is automatically cleared by the reconciler once held_until passes.
+This is the agent-facing API for the held_until bead-metadata mechanism; it
+does not put the session into a suspended state or change its sleep_intent.
+
+The default duration (45m0s) covers long-running operations.
+Pass --duration to override.
+
+```
+gc runtime heartbeat [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--duration` | string |  | hold duration (e.g. 30m, 1h); default 45m0s |
+| `--json` | bool |  | Output as JSON |
+
 ## gc runtime request-restart
 
 Signal the controller to stop and restart this session.
@@ -3583,11 +3644,6 @@ runtime is already gone, or a SIGINT/SIGTERM is received, the command
 exits 0 cleanly. If the controller has not acted within a bounded
 timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
 1 with a diagnostic pointing at controller health.
-
-For on-demand configured named sessions, the controller cannot restart
-the user-attended process. In that case this command reports that
-restart was skipped and returns immediately. No session.draining event
-is emitted when restart is skipped.
 
 This command is designed to be called from within a session context.
 It emits a session.draining event before waiting.

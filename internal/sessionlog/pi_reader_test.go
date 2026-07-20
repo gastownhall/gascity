@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -39,6 +40,34 @@ func TestReadPiFileNormalizesNativeMessages(t *testing.T) {
 	}
 }
 
+func TestReadPiFilePreservesImageBlockMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	body := `{"type":"session","version":3,"id":"ses_pi_images","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/tmp/gascity/pi-images"}
+{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-02-02T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"look here"},{"type":"image","file_path":"screens/shot.png","image_url":"https://example.com/shot.png","mime_type":"image/png"},{"type":"image","file_path":"screens/local.png","image_url":"data:image/png;base64,ignored","media_type":"image/png"}],"timestamp":1770000000000}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write pi fixture: %v", err)
+	}
+
+	sess, err := ReadPiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadPiFile: %v", err)
+	}
+	blocks := sess.Messages[0].ContentBlocks()
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %#v, want text plus two image blocks", blocks)
+	}
+	if blocks[1].Type != "image" || blocks[1].FilePath != "screens/shot.png" || blocks[1].ImageURL != "https://example.com/shot.png" || blocks[1].MIMEType != "image/png" {
+		t.Fatalf("blocks[1] = %+v, want external image metadata", blocks[1])
+	}
+	if blocks[2].Type != "image" || blocks[2].FilePath != "screens/local.png" || blocks[2].MIMEType != "image/png" {
+		t.Fatalf("blocks[2] = %+v, want local image metadata", blocks[2])
+	}
+	if blocks[2].ImageURL != "" {
+		t.Fatalf("blocks[2].ImageURL = %q, want inline data URL omitted from structured block", blocks[2].ImageURL)
+	}
+}
+
 func TestReadPiFileNormalizesTools(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	body := `{"type":"session","version":3,"id":"ses_tool","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/tmp/gascity/phase2/pi"}
@@ -61,12 +90,113 @@ func TestReadPiFileNormalizesTools(t *testing.T) {
 	if len(toolUseBlocks) != 1 || toolUseBlocks[0].Type != "tool_use" || toolUseBlocks[0].ID != "call-1" {
 		t.Fatalf("tool_use blocks = %#v", toolUseBlocks)
 	}
+	var toolInput struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(toolUseBlocks[0].Input, &toolInput); err != nil {
+		t.Fatalf("unmarshal tool input: %v", err)
+	}
+	if toolInput.FilePath != "README.md" {
+		t.Fatalf("tool input file_path = %q, want README.md", toolInput.FilePath)
+	}
 	toolResultBlocks := sess.Messages[2].ContentBlocks()
 	if len(toolResultBlocks) != 1 || toolResultBlocks[0].Type != "tool_result" || toolResultBlocks[0].ToolUseID != "call-1" {
 		t.Fatalf("tool_result blocks = %#v", toolResultBlocks)
 	}
 	if len(sess.OrphanedToolUseIDs) != 0 {
 		t.Fatalf("OrphanedToolUseIDs = %#v, want none", sess.OrphanedToolUseIDs)
+	}
+}
+
+func TestReadPiFileNormalizesOMPExecutionMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	body := `{"type":"session","version":3,"id":"ses_omp","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/tmp/gascity/omp"}
+{"type":"message","id":"msg_bash","parentId":null,"timestamp":"2026-02-02T00:00:01.000Z","message":{"role":"bashExecution","command":"go test ./...","output":"ok ./internal/api","exitCode":0,"canceled":false,"truncated":true,"timestamp":1770000001000}}
+{"type":"message","id":"msg_python","parentId":"msg_bash","timestamp":"2026-02-02T00:00:02.000Z","message":{"role":"pythonExecution","code":"print('hello')","output":"hello\n","exitCode":0,"canceled":false,"timestamp":1770000002000}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write pi fixture: %v", err)
+	}
+
+	sess, err := ReadProviderFile("omp", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile(omp): %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(sess.Messages))
+	}
+
+	bashBlocks := sess.Messages[0].ContentBlocks()
+	if len(bashBlocks) != 1 || bashBlocks[0].Type != "tool_result" || bashBlocks[0].Name != "bash" {
+		t.Fatalf("bash blocks = %#v", bashBlocks)
+	}
+	assertRawMetadata(t, bashBlocks[0].Content, map[string]any{
+		"command":   "go test ./...",
+		"output":    "ok ./internal/api",
+		"exit_code": float64(0),
+		"truncated": true,
+	})
+
+	pythonBlocks := sess.Messages[1].ContentBlocks()
+	if len(pythonBlocks) != 1 || pythonBlocks[0].Type != "tool_result" || pythonBlocks[0].Name != "python" {
+		t.Fatalf("python blocks = %#v", pythonBlocks)
+	}
+	assertRawMetadata(t, pythonBlocks[0].Content, map[string]any{
+		"code":      "print('hello')",
+		"output":    "hello",
+		"exit_code": float64(0),
+	})
+}
+
+func TestReadPiFileNormalizesToolObjectsToNeutralKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	body := `{"type":"session","version":3,"id":"ses_tool","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/tmp/gascity/phase2/pi"}
+{"type":"message","id":"msg_assistant_1","parentId":null,"timestamp":"2026-02-02T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"Edit","arguments":{"filePath":"README.md","oldString":"old","newString":"new"}}],"timestamp":1770000001000}}
+{"type":"message","id":"msg_tool_1","parentId":"msg_assistant_1","timestamp":"2026-02-02T00:00:02.000Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"Edit","content":{"output":"Edited README.md","filePath":"README.md","patch":"--- README.md\n+++ README.md\n@@\n-old\n+new","exitCode":0},"isError":false,"timestamp":1770000002000}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write pi fixture: %v", err)
+	}
+
+	sess, err := ReadPiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadPiFile: %v", err)
+	}
+	toolUseBlocks := sess.Messages[0].ContentBlocks()
+	if len(toolUseBlocks) != 1 {
+		t.Fatalf("tool use blocks = %d, want 1", len(toolUseBlocks))
+	}
+	var input struct {
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+	}
+	if err := json.Unmarshal(toolUseBlocks[0].Input, &input); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	if input.FilePath != "README.md" || input.OldString != "old" || input.NewString != "new" {
+		t.Fatalf("neutral input = %+v, want README.md old/new", input)
+	}
+	toolResultBlocks := sess.Messages[1].ContentBlocks()
+	if len(toolResultBlocks) != 1 {
+		t.Fatalf("tool result blocks = %d, want 1", len(toolResultBlocks))
+	}
+	var output struct {
+		Output   string `json:"output"`
+		FilePath string `json:"file_path"`
+		Patch    string `json:"patch"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal(toolResultBlocks[0].Content, &output); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if output.Output != "Edited README.md" || output.FilePath != "README.md" || !strings.Contains(output.Patch, "+new") || output.ExitCode != 0 {
+		t.Fatalf("neutral output = %+v, want patch result", output)
+	}
+	for _, forbidden := range []string{"filePath", "oldString", "newString", "exitCode"} {
+		if strings.Contains(string(toolUseBlocks[0].Input), forbidden) || strings.Contains(string(toolResultBlocks[0].Content), forbidden) {
+			t.Fatalf("Pi normalized blocks leaked %s: input=%s content=%s", forbidden, toolUseBlocks[0].Input, toolResultBlocks[0].Content)
+		}
 	}
 }
 

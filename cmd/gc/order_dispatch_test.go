@@ -9491,6 +9491,174 @@ dolt.auto-start: false
 	assertNoDoltOrderEnv(t, got)
 }
 
+// TestOrderTriggerOptionsForTargetSetsCheckTimeout pins the wiring that carries
+// an order's check_timeout into the condition trigger's deadline: a custom
+// check_timeout must reach TriggerOptions.ConditionTimeout, and an unset one
+// must fall back to the 10s default. This is the store->dispatch half of the
+// check_timeout feature that the unit tests for CheckTimeoutOrDefault do not
+// cover on their own.
+func TestOrderTriggerOptionsForTargetSetsCheckTimeout(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+
+	custom := orders.Order{Name: "pr-merge-queue", Trigger: "condition", Check: "queue-pending", Exec: "true", CheckTimeout: "60s"}
+	opts, err := orderTriggerOptionsForTarget(cityDir, nil, target, custom)
+	if err != nil {
+		t.Fatalf("orderTriggerOptionsForTarget() error = %v", err)
+	}
+	if opts.ConditionTimeout != custom.CheckTimeoutOrDefault() {
+		t.Errorf("ConditionTimeout = %v, want CheckTimeoutOrDefault() %v", opts.ConditionTimeout, custom.CheckTimeoutOrDefault())
+	}
+	if opts.ConditionTimeout != 60*time.Second {
+		t.Errorf("ConditionTimeout = %v, want 60s", opts.ConditionTimeout)
+	}
+
+	unset := orders.Order{Name: "pr-merge-queue", Trigger: "condition", Check: "queue-pending", Exec: "true"}
+	opts, err = orderTriggerOptionsForTarget(cityDir, nil, target, unset)
+	if err != nil {
+		t.Fatalf("orderTriggerOptionsForTarget() error = %v", err)
+	}
+	if opts.ConditionTimeout != 10*time.Second {
+		t.Errorf("default ConditionTimeout = %v, want 10s", opts.ConditionTimeout)
+	}
+}
+
+// TestOrderDispatchConditionTimeoutLogsRaiseCheckTimeout pins the operator-
+// visibility half of the check_timeout fix (PR #4190, ga-ocypq2): a condition
+// check killed by its deadline never proves its condition, so the order
+// silently never fires. The dispatch tick must turn that into a distinct
+// "raise check_timeout" diagnostic instead of leaving the starvation invisible.
+func TestOrderDispatchConditionTimeoutLogsRaiseCheckTimeout(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "slow-check",
+			Trigger:      "condition",
+			Check:        "sleep 2",
+			CheckTimeout: "200ms",
+			Exec:         "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(context.Context, string, string, []string) ([]byte, error) {
+			t.Error("exec ran; a condition killed by its check_timeout must not dispatch")
+			return nil, nil
+		},
+		rec:    events.Discard,
+		stderr: stderr,
+		cfg:    &config.City{},
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now())
+
+	out := stderr.String()
+	if !strings.Contains(out, orders.ConditionCheckTimedOutMarker) {
+		t.Fatalf("stderr missing timeout marker %q:\n%s", orders.ConditionCheckTimedOutMarker, out)
+	}
+	if !strings.Contains(out, "raise check_timeout") {
+		t.Fatalf("stderr missing raise check_timeout diagnostic:\n%s", out)
+	}
+}
+
+// TestOrderDispatchCancelsConditionCheckOnContextCancel proves the dispatch tick
+// threads its own context into the condition check (PR #4190 major finding):
+// once check_timeout is operator-configurable, a slow check must not outlive a
+// canceled tick / shutdown / reload. Cancel the dispatch context as soon as the
+// check is observably running and assert dispatch returns promptly instead of
+// blocking for the full 30s check_timeout. Before the fix the check ran under
+// context.Background(), so canceling ctx had no effect and dispatch blocked for
+// the whole deadline.
+func TestOrderDispatchCancelsConditionCheckOnContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	startedPath := filepath.Join(dir, "check-started")
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "slow-check",
+			Trigger:      "condition",
+			Check:        fmt.Sprintf("touch %q; sleep 60", startedPath),
+			CheckTimeout: "30s",
+			Exec:         "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(context.Context, string, string, []string) ([]byte, error) {
+			t.Error("exec ran; a condition check canceled mid-flight must not dispatch")
+			return nil, nil
+		},
+		rec:    events.Discard,
+		stderr: stderr,
+		cfg:    &config.City{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel once the check is observably running so this exercises the
+		// running-check cancel path, not a pre-canceled gate skip. Poll with a
+		// ticker (no direct time.Sleep) and cancel unconditionally after a
+		// generous deadline so the goroutine can never leak.
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		limit := time.After(10 * time.Second)
+		for {
+			select {
+			case <-limit:
+				cancel()
+				return
+			case <-tick.C:
+				if _, err := os.Stat(startedPath); err == nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		m.dispatch(ctx, dir, time.Now())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("dispatch did not return within 20s of ctx cancel; want prompt return well under the 30s check_timeout")
+	}
+}
+
+// TestOrderDispatchConditionFalseStaysQuiet is the negative half: a normal
+// "condition false" tick must not emit the timeout diagnostic, or every idle
+// condition order would spam the dispatch log every tick.
+func TestOrderDispatchConditionFalseStaysQuiet(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    "quiet-check",
+			Trigger: "condition",
+			Check:   "false",
+			Exec:    "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: successfulExec,
+		rec:     events.Discard,
+		stderr:  stderr,
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now())
+
+	if out := stderr.String(); strings.Contains(out, "raise check_timeout") {
+		t.Fatalf("a normal false condition must not log the timeout diagnostic:\n%s", out)
+	}
+}
+
 func assertPostgresOrderEnv(t *testing.T, env map[string]string, wantPassword string) {
 	t.Helper()
 	want := map[string]string{

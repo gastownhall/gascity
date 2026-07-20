@@ -20,6 +20,7 @@ dolt-drift
 config-valid
 legacy-suspended-field
 rollout:beads.conditional_writes
+rollout:beads.guarded_release
 rollout:daemon.formula_v2
 config-refs
 stale-local-pack-dirs
@@ -57,7 +58,9 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+census-owner-liveness
 run-target-routed-to-backfill
+hold-label-routed-to
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
@@ -76,4 +79,5 @@ bd-backup-freshness
 worktree-disk-size
 nested-worktree-prune
 custom-types:city
+hold-label-conventions:city
 worktrees

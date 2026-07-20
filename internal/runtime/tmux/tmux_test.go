@@ -13,8 +13,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 )
 
 // testSocketName is the dedicated tmux socket used by this integration test
@@ -2986,4 +2989,166 @@ func TestCheckSessionHealth_ActivityCheck(t *testing.T) {
 	// With a very short maxInactivity, a recently-created session should be healthy
 	// (if the agent were actually running). This tests the activity threshold logic
 	// without needing a real Claude process.
+}
+
+func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	socket := fmt.Sprintf("gctest-handoff-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cfg := DefaultConfig()
+	cfg.SocketName = socket
+	provider := NewProviderWithConfig(cfg)
+	tmux := provider.Tmux()
+	_ = provider.TeardownServer()
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	const target = "handoff-target"
+	const sibling = "handoff-sibling"
+	start := func(name string) {
+		t.Helper()
+		if err := provider.Start(context.Background(), name, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+			t.Fatalf("start %s: %v", name, err)
+		}
+	}
+	start(target)
+	start(sibling)
+
+	serverPID := mustTmuxServerPID(t, tmux)
+	targetPID := mustPanePID(t, tmux, target)
+	siblingPID := mustPanePID(t, tmux, sibling)
+	before := handoffProcessSnapshot(t, targetPID, siblingPID, serverPID)
+	t.Logf("before handoff: socket=%s server_pid=%s target=%s/%s sibling=%s/%s exit-empty=%s\n%s", socket, serverPID, targetPID, before.pgids[targetPID], siblingPID, before.pgids[siblingPID], mustExitEmpty(t, tmux), before.text)
+
+	if err := provider.Stop(target); err != nil {
+		t.Fatalf("stop target for handoff: %v", err)
+	}
+	if provider.IsRunning(target) {
+		t.Fatalf("target session %q still running after handoff stop", target)
+	}
+	if got := mustTmuxServerPID(t, tmux); got != serverPID {
+		t.Fatalf("tmux server pid changed after target handoff: before=%s after=%s", serverPID, got)
+	}
+	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
+		t.Fatalf("sibling session/process did not survive target handoff")
+	}
+	after := handoffProcessSnapshot(t, siblingPID, serverPID)
+	t.Logf("after handoff stop: server_pid=%s sibling=%s/%s exit-empty=%s\n%s", serverPID, siblingPID, after.pgids[siblingPID], mustExitEmpty(t, tmux), after.text)
+
+	start(target)
+	if !provider.IsRunning(target) {
+		t.Fatalf("target session %q did not restart", target)
+	}
+	if got := mustTmuxServerPID(t, tmux); got != serverPID {
+		t.Fatalf("tmux server pid changed after target restart: before=%s after=%s", serverPID, got)
+	}
+	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
+		t.Fatalf("sibling session/process did not survive target restart")
+	}
+	targetAfterRestart := mustPanePID(t, tmux, target)
+	final := handoffProcessSnapshot(t, targetAfterRestart, siblingPID, serverPID)
+	t.Logf("after target restart: server_pid=%s target=%s/%s sibling=%s/%s exit-empty=%s\n%s", serverPID, targetAfterRestart, final.pgids[targetAfterRestart], siblingPID, final.pgids[siblingPID], mustExitEmpty(t, tmux), final.text)
+
+	if err := provider.Stop(target); err != nil {
+		t.Fatalf("second target stop: %v", err)
+	}
+	if err := provider.Stop(target); err != nil {
+		t.Fatalf("already-gone target stop: %v", err)
+	}
+	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
+		t.Fatalf("sibling session/process did not survive already-gone target stop")
+	}
+}
+
+func TestConfigureServerReappliesExitEmptyAfterReplacement(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	socket := fmt.Sprintf("gctest-handoff-replacement-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cfg := DefaultConfig()
+	cfg.SocketName = socket
+	provider := NewProviderWithConfig(cfg)
+	tmux := provider.Tmux()
+	_ = provider.TeardownServer()
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	if err := provider.Start(context.Background(), "replacement-before", runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start before replacement: %v", err)
+	}
+	if got := mustExitEmpty(t, tmux); got != "off" {
+		t.Fatalf("initial exit-empty=%q, want off", got)
+	}
+	if err := provider.TeardownServer(); err != nil {
+		t.Fatalf("teardown replacement server: %v", err)
+	}
+	if err := provider.Start(context.Background(), "replacement-after", runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start after replacement: %v", err)
+	}
+	if got := mustExitEmpty(t, tmux); got != "off" {
+		t.Fatalf("replacement exit-empty=%q, want off", got)
+	}
+}
+
+func mustTmuxServerPID(t *testing.T, tmux *Tmux) string {
+	t.Helper()
+	out, err := tmux.run("list-sessions", "-F", "#{pid}")
+	if err != nil {
+		t.Fatalf("list server pid: %v", err)
+	}
+	pid := strings.TrimSpace(strings.Split(out, "\n")[0])
+	if pid == "" {
+		t.Fatal("tmux server pid is empty")
+	}
+	return pid
+}
+
+func mustPanePID(t *testing.T, tmux *Tmux, session string) string {
+	t.Helper()
+	pid, err := tmux.GetPanePID(session)
+	if err != nil || strings.TrimSpace(pid) == "" {
+		t.Fatalf("pane pid %s: %v", session, err)
+	}
+	return strings.TrimSpace(pid)
+}
+
+func mustExitEmpty(t *testing.T, tmux *Tmux) string {
+	t.Helper()
+	out, err := tmux.run("show-options", "-gv", "exit-empty")
+	if err != nil {
+		t.Fatalf("show exit-empty: %v", err)
+	}
+	return strings.TrimSpace(out)
+}
+
+type handoffProcessSnapshotInfo struct {
+	pgids map[string]string
+	text  string
+}
+
+func handoffProcessSnapshot(t *testing.T, pids ...string) handoffProcessSnapshotInfo {
+	t.Helper()
+	pgids := make(map[string]string, len(pids))
+	rows := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		pgid := getProcessGroupID(pid)
+		ppid := getParentPID(pid)
+		pgids[pid] = pgid
+		rows = append(rows, fmt.Sprintf("pid=%s ppid=%s pgid=%s", pid, ppid, pgid))
+	}
+	return handoffProcessSnapshotInfo{pgids: pgids, text: strings.Join(rows, "\n")}
+}
+
+func processAlive(pid string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	if err != nil || n <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(n)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || err == syscall.EPERM
 }

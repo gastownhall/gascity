@@ -1,0 +1,23 @@
+=== exit ===
+0
+=== stdout ===
+
+Rigs in <CITY>:
+
+  chartest-city (HQ):
+    Prefix: gc
+    Beads:  not initialized
+=== stderr ===
+cmd=rig list route=fallback reason=controller-down
+warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to add the missing import(s)
+=== json_exit ===
+0
+=== json ===
+{"city_name":"chartest-city","city_path":"<CITY>","ok":true,"rigs":[{"name":"chartest-city","path":"<CITY>","prefix":"gc","hq":true,"suspended":false,"running":false,"beads":"not initialized"}],"schema_version":"1","summary":{"total":1,"suspended":0,"running":0}}
+=== json_stderr ===
+cmd=rig list route=fallback reason=controller-down
+=== events ===
+=== store ===
+=== counts ===
+api_requests_human=0
+api_requests_json=0

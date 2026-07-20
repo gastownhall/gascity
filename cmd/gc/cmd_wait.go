@@ -351,16 +351,9 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 }
 
 func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if isRemote {
-		return routeWaitList("", remoteC, "", stateFilter, sessionFilter, jsonOutput, stdout, stderr)
-	}
-	c, reason := waitListAPIClient(cityPath)
-	return routeWaitList(cityPath, c, reason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+	return routeReadCmd("wait list", stderr, waitListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeWaitList(cityPath, c, nilReason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+	})
 }
 
 // waitListAPIClient is indirected so tests inject a client pointed at
@@ -457,7 +450,14 @@ func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput 
 	// Route SESSION/wait access to the session coordination-class store; identity today.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
-	var items []sessionpkg.WaitInfo
+	return doWaitListFromSessionStore(sessFront, cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+func doWaitListFromSessionStore(sessFront *sessionpkg.Store, cityPath, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	var (
+		items []sessionpkg.WaitInfo
+		err   error
+	)
 	if sessionFilter != "" {
 		items, err = sessFront.WaitsForSession(sessionFilter)
 	} else {
@@ -514,16 +514,9 @@ func writeWaitListTable(items []sessionpkg.WaitInfo, stdout io.Writer) {
 }
 
 func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if isRemote {
-		return routeWaitInspect("", remoteC, "", waitID, jsonOutput, stdout, stderr)
-	}
-	c, reason := waitInspectAPIClient(cityPath)
-	return routeWaitInspect(cityPath, c, reason, waitID, jsonOutput, stdout, stderr)
+	return routeReadCmd("wait inspect", stderr, waitInspectAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeWaitInspect(cityPath, c, nilReason, waitID, jsonOutput, stdout, stderr)
+	})
 }
 
 var waitInspectAPIClient = func(cityPath string) (*api.Client, string) {

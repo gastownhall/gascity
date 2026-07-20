@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -218,8 +216,8 @@ func TestCmdRigAddRemote_JSONParity(t *testing.T) {
 	}
 }
 
-// A lost stream prints the CLIENT request_id and an idempotent re-attach recipe.
-// gc events is gated to a local city, so the recovery text must NOT emit one.
+// A lost stream prints the CLIENT request_id, an idempotent re-POST recipe, and
+// the body-independent passive-watch recipe lines.
 func TestCmdRigAddRemote_WaitErrorRecipe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -243,19 +241,20 @@ func TestCmdRigAddRemote_WaitErrorRecipe(t *testing.T) {
 	if !strings.Contains(s, "request_id=r-keep") {
 		t.Errorf("missing client request_id in recipe: %q", s)
 	}
-	// Idempotent re-attach recipe: same request_id, shell-quoted git URL + name.
+	// Idempotent re-POST recipe: same request_id, shell-quoted git URL + name.
 	if !strings.Contains(s, "rig add --git-url 'https://h/o/web.git' --name 'web' --request-id 'r-keep'") {
-		t.Errorf("missing idempotent re-attach recipe: %q", s)
+		t.Errorf("missing idempotent re-POST recipe: %q", s)
 	}
-	// gc events cannot target a remote city, so it must never appear.
-	if strings.Contains(s, "events --") {
-		t.Errorf("recovery emits a gated gc events recipe: %q", s)
+	// Passive-watch recipe: --payload-match, never a re-POST-only bare positional.
+	if !strings.Contains(s, "events --watch --type request.result.rig.create --payload-match 'request_id=r-keep'") ||
+		!strings.Contains(s, "events --watch --type request.failed --payload-match 'request_id=r-keep'") {
+		t.Errorf("missing gc events watch recipe lines: %q", s)
 	}
 }
 
-// A structured 409 rig_name_conflict must NOT suggest re-POSTing a body (that
-// would 409 again) and must NOT emit a gated gc events recipe. It surfaces the
-// in-flight request_id and tells the operator to wait for that provision.
+// A structured 409 in-flight conflict points at the BODY-INDEPENDENT passive
+// watch (re-POSTing your body under another request's in-flight id would 409),
+// seeded from the server-supplied event_cursor.
 func TestCmdRigAddRemote_ConflictRecipe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
@@ -283,59 +282,11 @@ func TestCmdRigAddRemote_ConflictRecipe(t *testing.T) {
 	if strings.Contains(s, "rig add --git-url") {
 		t.Errorf("conflict recipe must not re-POST a body: %q", s)
 	}
-	// gc events cannot target a remote city, so it must never appear.
-	if strings.Contains(s, "events --") {
-		t.Errorf("conflict recovery emits a gated gc events recipe: %q", s)
+	if !strings.Contains(s, "events --follow --type rig.provision.progress --payload-match 'request_id=r-inflight' --after '9'") {
+		t.Errorf("missing seeded passive-watch recipe: %q", s)
 	}
-	if !strings.Contains(s, "request_id=r-inflight") {
-		t.Errorf("conflict must surface the in-flight request_id: %q", s)
-	}
-	if !strings.Contains(s, "Wait for it to finish") {
-		t.Errorf("conflict must advise waiting for the in-flight provision: %q", s)
-	}
-}
-
-// Recipe acceptance: every recovery path a remote rig add can print must point
-// at a command the remote CLI actually accepts. gc events is gated to a local
-// city (resolveEventsScope → "does not support a remote city"), so no recovery
-// may emit a `gc <remote-flags> events` recipe; the only recovery command is the
-// idempotent `gc rig add --request-id` re-attach. Covers both
-// remoteInvocationFlags shapes (named context and ad-hoc --city-url/--city-name).
-func TestRenderRemoteRigAddError_RecipesAvoidGatedEvents(t *testing.T) {
-	targets := []*remoteTarget{
-		{Ctx: &clientcontext.Context{Name: "prod"}, Source: "flag"},
-		{BaseURL: "https://box:9443", CityName: "mc", Source: "flag"},
-	}
-	errCases := []error{
-		&api.RigCreateWaitError{RequestID: "r-1", Err: errors.New("stream lost")},
-		&api.RigCreateDeadlineError{RequestID: "r-2", Timeout: 30 * time.Minute},
-		&api.RigCreateFailedError{RequestID: "r-3", Code: "clone_failed", Message: "boom"},
-		&api.RigCreateConflictError{Code: "rig_name_conflict", Rig: "web", InFlightRequestID: "r-live", EventCursor: "9"},
-	}
-	for _, tgt := range targets {
-		for _, e := range errCases {
-			var out, errb bytes.Buffer
-			renderRemoteRigAddError(e, tgt, "https://h/o/web.git", "web", "", "", false, &out, &errb)
-			s := errb.String()
-			if strings.Contains(s, "events --") {
-				t.Errorf("recovery for %T emits a gated gc events recipe: %q", e, s)
-			}
-			// Any emitted recipe line must be a `rig add` re-attach. Recipes are
-			// indented; the column-0 "gc rig add: <error>" diagnostic and prose are
-			// not recipes, so restrict the check to indented `gc ` lines.
-			for _, line := range strings.Split(s, "\n") {
-				if !strings.HasPrefix(line, " ") {
-					continue
-				}
-				trimmed := strings.TrimSpace(line)
-				if !strings.HasPrefix(trimmed, "gc ") {
-					continue
-				}
-				if !strings.Contains(trimmed, "rig add ") {
-					t.Errorf("recovery for %T emits a non-rig-add gc recipe: %q", e, trimmed)
-				}
-			}
-		}
+	if !strings.Contains(s, "events --watch --type request.result.rig.create --payload-match 'request_id=r-inflight'") {
+		t.Errorf("missing terminal watch recipe: %q", s)
 	}
 }
 

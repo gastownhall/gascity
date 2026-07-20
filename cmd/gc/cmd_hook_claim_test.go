@@ -4,12 +4,200 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestHookClaimSessionStoreContextUsesCityScopeAfterRigClaim(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+
+	dir, env, err := hookClaimSessionStoreContext(context.Background(), []string{
+		"GC_CITY_PATH=" + cityDir,
+		"GC_CITY=" + cityDir,
+		"GC_STORE_ROOT=" + rigDir,
+		"GC_STORE_SCOPE=rig",
+		"GC_RIG=demo",
+		"GC_RIG_ROOT=" + rigDir,
+		"BEADS_DIR=" + rigBeadsDir,
+		"GC_DOLT_HOST=rig-dolt.example",
+		"GC_DOLT_PORT=3307",
+	})
+	if err != nil {
+		t.Fatalf("hookClaimSessionStoreContext: %v", err)
+	}
+	if dir != cityDir {
+		t.Fatalf("dir = %q, want city dir %q", dir, cityDir)
+	}
+
+	got := envEntriesMap(env)
+	for key, want := range map[string]string{
+		"GC_CITY_PATH":   cityDir,
+		"GC_STORE_ROOT":  cityDir,
+		"GC_STORE_SCOPE": "city",
+		"BEADS_DIR":      filepath.Join(cityDir, ".beads"),
+		"GC_RIG":         "",
+		"GC_RIG_ROOT":    "",
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+	if got["GC_DOLT_HOST"] == "rig-dolt.example" || got["GC_DOLT_PORT"] == "3307" {
+		t.Fatalf("rig Dolt endpoint leaked into city session store env: %#v", got)
+	}
+}
+
+func TestHookClaimSessionStoreContextRejectsMissingCityPath(t *testing.T) {
+	_, _, err := hookClaimSessionStoreContext(context.Background(), []string{
+		"GC_RIG_ROOT=/city/rigs/demo",
+		"BEADS_DIR=/city/rigs/demo/.beads",
+	})
+	if err == nil {
+		t.Fatal("hookClaimSessionStoreContext succeeded without a city path")
+	}
+}
+
+func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	var capturedDir string
+	var capturedEnv map[string]string
+	var capturedName string
+	var capturedArgs []string
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
+		capturedEnv = env
+		return func(dir, name string, args ...string) ([]byte, error) {
+			capturedDir = dir
+			capturedName = name
+			capturedArgs = append([]string(nil), args...)
+			return nil, nil
+		}
+	}
+
+	err := hookRecordSessionPointersWithBdStore(
+		context.Background(),
+		rigDir,
+		[]string{
+			"GC_CITY_PATH=" + cityDir,
+			"GC_STORE_ROOT=" + rigDir,
+			"GC_STORE_SCOPE=rig",
+			"GC_RIG=demo",
+			"GC_RIG_ROOT=" + rigDir,
+			"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
+		},
+		"worker-1", "session-1", "run-1", "step-1",
+	)
+	if err != nil {
+		t.Fatalf("hookRecordSessionPointersWithBdStore: %v", err)
+	}
+
+	if capturedDir != cityDir {
+		t.Fatalf("bd dir = %q, want %q", capturedDir, cityDir)
+	}
+	if capturedEnv["BEADS_DIR"] != filepath.Join(cityDir, ".beads") ||
+		capturedEnv["GC_STORE_SCOPE"] != "city" || capturedEnv["GC_RIG_ROOT"] != "" {
+		t.Fatalf("bd env did not select city scope: %#v", capturedEnv)
+	}
+	if capturedName != "bd" || len(capturedArgs) < 3 ||
+		!reflect.DeepEqual(capturedArgs[:3], []string{"update", "--json", "session-1"}) {
+		t.Fatalf("bd command = %q %#v, want bd update --json session-1", capturedName, capturedArgs)
+	}
+}
+
+func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	var calls [][]string
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandRunner {
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command name = %q, want bd", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			switch {
+			case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker"}}]`), nil
+			case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker","gc.root_bead_id":"root-1","gc.continuation_group":"review"}}]`), nil
+			default:
+				t.Fatalf("unexpected bd args: %#v", args)
+				return nil, nil
+			}
+		}
+	}
+
+	claimed, ok, err := hookClaimWithBdStore(context.Background(), "/rig", nil, "work-1", "worker-1")
+	if err != nil {
+		t.Fatalf("hookClaimWithBdStore: %v", err)
+	}
+	if !ok {
+		t.Fatal("hookClaimWithBdStore ok = false, want true")
+	}
+	if claimed.Metadata["gc.root_bead_id"] != "root-1" || claimed.Metadata["gc.continuation_group"] != "review" {
+		t.Fatalf("claimed metadata = %#v, want canonical root and continuation group", claimed.Metadata)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want claim update followed by canonical show", calls)
+	}
+}
+
+func TestDoHookClaimStopsAfterCommittedClaimReadbackFailure(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}},
+			{"id":"work-2","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts []string
+	drained := false
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{ID: beadID, Assignee: assignee}, true, errors.New("canonical read failed")
+		},
+		DrainAck: func(io.Writer) error {
+			drained = true
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1", code)
+	}
+	if got := strings.Join(attempts, ","); got != "work-1" {
+		t.Fatalf("claim attempts = %q, want only committed work-1", got)
+	}
+	if drained {
+		t.Fatal("drain acknowledged after committed claim readback failure")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") {
+		t.Fatalf("stderr = %q, want committed-claim diagnostic", stderr.String())
+	}
+}
 
 func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testing.T) {
 	var claimedDir string

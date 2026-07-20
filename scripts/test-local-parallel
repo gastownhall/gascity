@@ -145,7 +145,7 @@ if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
   log_dir="$LOCAL_TEST_LOG_DIR"
   cleanup_log_dir=0
 else
-  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/gc-local-tests.XXXXXX")"
+  log_dir="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-local-tests.XXXXXX")"
 fi
 export LOCAL_TEST_LOG_DIR="$log_dir"
 export TEST_LOCAL_GOPATH="$gopath_val"
@@ -187,7 +187,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/tmp}" \
+    TMPDIR="${TMPDIR:-/var/tmp}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \

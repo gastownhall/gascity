@@ -95,7 +95,8 @@ func (p *Plane) registerRunDetailStream() {
 // committed, commits the event-stream headers, then hands off to
 // serveRunDetailStream for the subscribe + first-frame + push loop.
 func (p *Plane) handleRunDetailStream(w http.ResponseWriter, r *http.Request) {
-	t, ok := p.cityRunTailer(r.PathValue("cityName"))
+	cityName := r.PathValue("cityName")
+	t, ok := p.cityRunTailer(cityName)
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown city")
 		return
@@ -129,7 +130,10 @@ func (p *Plane) handleRunDetailStream(w http.ResponseWriter, r *http.Request) {
 		runDetailStreamAfterPrecheck()
 	}
 
-	t.serveRunDetailStream(r.Context(), w, flusher, runID, value)
+	t.serveRunDetailStream(r.Context(), w, flusher, runID, value, func() bool {
+		current, found := p.cityRunTailer(cityName)
+		return found && current == t
+	})
 }
 
 // writeRunDetailStreamHeaders commits the SSE response headers and the 200 status.
@@ -168,6 +172,7 @@ func (t *cityRunTailer) serveRunDetailStream(
 	flusher http.Flusher,
 	runID string,
 	precheckValue runDetailMemoValue,
+	isCurrent func() bool,
 ) {
 	sub := t.subscribe()
 	defer t.unsubscribe(sub)
@@ -178,6 +183,9 @@ func (t *cityRunTailer) serveRunDetailStream(
 		// transient re-read failure just falls back to that value.
 		current = precheckValue
 	}
+	if !isCurrent() {
+		return
+	}
 	lastSent := writeDetailFrame(w, flusher, current)
 
 	heartbeat := time.NewTicker(runDetailStreamHeartbeat)
@@ -186,7 +194,15 @@ func (t *cityRunTailer) serveRunDetailStream(
 		select {
 		case <-ctx.Done():
 			return
+		case <-t.doneCh:
+			// A same-name city rebind replaces this path-bound tailer. End the
+			// stream so the browser reconnects through cityRunTailer and observes
+			// the replacement projection instead of heartbeating stale detail.
+			return
 		case <-heartbeat.C:
+			if !isCurrent() {
+				return
+			}
 			// A comment frame keeps the connection warm without perturbing the
 			// client's rendered detail.
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
@@ -194,6 +210,9 @@ func (t *cityRunTailer) serveRunDetailStream(
 			}
 			flusher.Flush()
 		case <-sub.notify:
+			if !isCurrent() {
+				return
+			}
 			rebuilt, _, rebuildErr := t.detail(ctx, runID)
 			if rebuildErr != nil {
 				// A run that vanished from the fold (rotated out) or a transient

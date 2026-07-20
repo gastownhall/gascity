@@ -570,6 +570,117 @@ func TestCatalogBindsFakeAndSubprocessWithDirAndDefersDefaultConstructor(t *test
 	}
 }
 
+func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
+	var withDirProof *ProofRef
+	var defaultWaiver *Waiver
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.acp" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"):
+				if claim.Disposition != DispositionProved {
+					t.Errorf("ACP WithDir disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				withDirProof = claim.Proof
+			case repoSymbol("internal/runtime/acp", "NewSeamBacked"):
+				if claim.Disposition != DispositionWaived {
+					t.Errorf("ACP default disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				}
+				defaultWaiver = claim.Waiver
+			}
+		}
+	}
+
+	if withDirProof == nil {
+		t.Fatal("acp.NewSeamBackedWithDir proof is missing")
+	}
+	if withDirProof.File != "internal/runtime/acp/conformance_test.go" || withDirProof.Test != "TestACPConformance" {
+		t.Errorf("ACP WithDir proof = %s#%s, want ACP conformance entrypoint", withDirProof.File, withDirProof.Test)
+	}
+	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
+		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
+	}
+	if defaultWaiver == nil || defaultWaiver.Owner != "ga-80po0c.3" {
+		t.Errorf("ACP default waiver = %+v, want ga-80po0c.3 ownership", defaultWaiver)
+	}
+}
+
+func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
+	var proof *ProofRef
+	var t3Waiver *Waiver
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.exec" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/exec", "NewSeamBacked"):
+				if claim.Disposition != DispositionProved {
+					t.Errorf("exec seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				proof = claim.Proof
+			case repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"):
+				if claim.Disposition != DispositionWaived {
+					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				}
+				t3Waiver = claim.Waiver
+			}
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("exec.NewSeamBacked proof is missing")
+	}
+	if proof.File != "internal/runtime/exec/exec_test.go" || proof.Test != "TestExecConformance" {
+		t.Errorf("exec.NewSeamBacked proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
+		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
+	}
+	if t3Waiver == nil || t3Waiver.Owner != "ga-80po0c.3" {
+		t.Errorf("legacy T3 exec-prefix waiver = %+v, want ga-80po0c.3 ownership", t3Waiver)
+	}
+}
+
+func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
+	var proof *ProofRef
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.composition.auto" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/auto", "New") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("auto composition disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			proof = claim.Proof
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("auto.New proof is missing")
+	}
+	if proof.File != "internal/runtime/auto/conformance_test.go" || proof.Test != "TestAutoConformance" {
+		t.Errorf("auto.New proof = %s#%s, want auto conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
+		t.Errorf("auto.New allowed calls = %q, want %q", got, want)
+	}
+	// The conformance factory constructs auto.New without RouteACP, so the
+	// shared contract only runs the default route; the scope keeps the rendered
+	// ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "default-route conformance; ACP route covered by focused auto routing tests"; got != want {
+		t.Errorf("auto.New proof scope = %q, want %q", got, want)
+	}
+}
+
 func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
 	dir := writeRuntimeDoubleFixture(t, map[string]string{
 		"runtime.go": `package runtime

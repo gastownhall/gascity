@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,92 +19,10 @@ import (
 )
 
 func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabaseMissing(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
-	doltPath := os.Getenv("GC_DOLT_REAL_BINARY")
-	var err error
-	if doltPath == "" {
-		doltPath, err = exec.LookPath("dolt")
-		if err != nil {
-			t.Skip("dolt not installed")
-		}
-	}
-	bdPath := waitTestRealBDPath(t)
-
 	cityDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityDir)
-
-	homeDir := filepath.Join(t.TempDir(), "home")
-	if err := os.MkdirAll(homeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	gitConfig := filepath.Join(homeDir, ".gitconfig")
-	if err := os.WriteFile(gitConfig, []byte("[user]\n\tname = Test User\n\temail = test@example.com\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GIT_CONFIG_GLOBAL", gitConfig)
-	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "")
-	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
-
-	if err := ensureBeadsProvider(cityDir); err != nil {
-		t.Fatalf("ensureBeadsProvider: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = shutdownBeadsProvider(cityDir)
-	})
-	if err := initAndHookDir(cityDir, cityDir, "gc"); err != nil {
-		t.Fatalf("initAndHookDir(city): %v", err)
-	}
-
-	portData, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port"))
-	if err != nil {
-		t.Fatalf("ReadFile(dolt-server.port): %v", err)
-	}
-	port := strings.TrimSpace(string(portData))
-	if port == "" {
-		t.Fatal("dolt-server.port empty")
-	}
-
-	metadataPath := filepath.Join(cityDir, ".beads", "metadata.json")
-	metadataData, err := os.ReadFile(metadataPath)
-	if err != nil {
-		t.Fatalf("ReadFile(metadata.json): %v", err)
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(metadataData, &meta); err != nil {
-		t.Fatalf("Unmarshal(metadata.json): %v", err)
-	}
-	delete(meta, "project_id")
-	patched, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		t.Fatalf("MarshalIndent(metadata.json): %v", err)
-	}
-	patched = append(patched, '\n')
-	if err := os.WriteFile(metadataPath, patched, 0o644); err != nil {
-		t.Fatalf("WriteFile(metadata.json): %v", err)
-	}
-	if err := os.Remove(contract.ProjectIdentityPath(cityDir)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("Remove(identity.toml): %v", err)
-	}
-
-	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/hq", port))
-	if err != nil {
-		t.Fatalf("sql.Open(hq): %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := db.ExecContext(ctx, "DELETE FROM metadata WHERE `key` = '_project_id'"); err != nil {
-		t.Fatalf("delete database _project_id: %v", err)
-	}
+	metadataPath := writeProjectIDMetadataFile(t, cityDir, "")
+	port, cleanup := startProjectIDTestServer(t)
+	defer cleanup()
 
 	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
@@ -130,11 +47,11 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 		t.Fatalf("report.ProjectID = %q, want gc-local-*", report.ProjectID)
 	}
 
-	metadataData, err = os.ReadFile(metadataPath)
+	metadataData, err := os.ReadFile(metadataPath)
 	if err != nil {
 		t.Fatalf("ReadFile(metadata.json): %v", err)
 	}
-	meta = map[string]any{}
+	meta := map[string]any{}
 	if err := json.Unmarshal(metadataData, &meta); err != nil {
 		t.Fatalf("Unmarshal(metadata.json): %v", err)
 	}
@@ -142,10 +59,15 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 		t.Fatalf("metadata project_id = %q, want %q", got, report.ProjectID)
 	}
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
+	db, err := managedDoltOpenDatabase("127.0.0.1", port, "root", "hq")
+	if err != nil {
+		t.Fatalf("managedDoltOpenDatabase(hq): %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var databaseProjectID string
-	if err := db.QueryRowContext(ctx2, "SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&databaseProjectID); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&databaseProjectID); err != nil {
 		t.Fatalf("read database _project_id: %v", err)
 	}
 	if got := strings.TrimSpace(databaseProjectID); got != report.ProjectID {
@@ -623,6 +545,7 @@ func assertDatabaseProjectID(t *testing.T, port string, want string) {
 
 func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...string) (string, int, int, func()) {
 	t.Helper()
+	skipSlowCmdGCTest(t, "requires a real Dolt server; run make test-cmd-gc-process for full coverage")
 	configureTestDoltIdentityEnv(t)
 
 	doltPath := os.Getenv("GC_DOLT_REAL_BINARY")

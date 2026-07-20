@@ -29,6 +29,11 @@ type eventsAPIScope struct {
 	explicitAPI        bool
 	localOnly          bool
 	localSupervisorAPI bool
+	// gen, when non-nil, is a pre-built AUTHENTICATED genclient for a remote
+	// --context/--city-url city (bearer + TLS + 401 re-mint, backed by the
+	// no-timeout stream client). client() returns it instead of the bare local
+	// genclient so `gc events --context` streams from a hosted city.
+	gen *genclient.ClientWithResponses
 }
 
 type eventsAPIError struct {
@@ -130,6 +135,9 @@ var eventsControllerAliveHook = controllerAlive
 func (s eventsAPIScope) isSupervisor() bool { return s.cityName == "" }
 
 func (s eventsAPIScope) client() (*genclient.ClientWithResponses, error) {
+	if s.gen != nil {
+		return s.gen, nil // authenticated remote (--context/--city-url) client
+	}
 	httpClient := &http.Client{}
 	return genclient.NewClientWithResponses(
 		s.apiURL,
@@ -359,6 +367,32 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 		}, nil
 	}
 
+	// Remote target (--context/--city-url/env/sticky default): stream events from
+	// the hosted city with its context auth. Intercept here, before the local
+	// resolveDashboardContext path (which gates a remote target loudly). A
+	// city-discovery "not in a city directory" error is NOT fatal — the local
+	// path soft-fails it into the supervisor scope, so fall through instead of
+	// breaking `gc events` run outside a city directory against a supervisor.
+	rctx, rerr := resolveContextAllowRemote()
+	if rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		return eventsAPIScope{}, rerr
+	}
+	if rerr == nil && rctx.Remote != nil {
+		opts, oerr := remoteClientOptions(rctx.Remote)
+		if oerr != nil {
+			return eventsAPIScope{}, oerr
+		}
+		gen, gerr := gcapi.NewRemoteEventsClient(rctx.Remote.BaseURL, opts)
+		if gerr != nil {
+			return eventsAPIScope{}, gerr
+		}
+		return eventsAPIScope{
+			apiURL:   strings.TrimRight(rctx.Remote.BaseURL, "/"),
+			cityName: rctx.Remote.CityName,
+			gen:      gen,
+		}, nil
+	}
+
 	cityPath, cfg, err := resolveDashboardContext()
 	if err != nil {
 		return eventsAPIScope{}, err
@@ -540,7 +574,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return printJSONLines(items, stdout, stderr)
 	}
 
-	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag)
+	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
 		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
 			if fallbackErr != nil {
@@ -879,6 +913,14 @@ func doEventsRotate(scope eventsAPIScope, wait bool, stdout, stderr io.Writer) i
 		fmt.Fprintln(stderr, "gc events: rotate requires a city in scope; run from a city directory or pass --city") //nolint:errcheck
 		return 1
 	}
+	// rotate is a MUTATION (POST /events/rotate). The remote events client is
+	// read-only (no city-write grant), so a hardened city would 401 even with a
+	// configured grant_command. Refuse it clearly rather than route a mutation
+	// through the read lane; the read events subcommands still stream remotely.
+	if scope.gen != nil {
+		fmt.Fprintln(stderr, "gc events rotate: not supported for a remote city (it mutates the events log; run it from the city's own host)") //nolint:errcheck
+		return 1
+	}
 
 	client, err := scope.client()
 	if err != nil {
@@ -979,40 +1021,77 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	return eventsListError(resp.StatusCode(), resp.Body)
 }
 
-// fetchCityEvents fetches the newest page of city events (up to 500). It
-// deliberately does NOT follow next_cursor: gc events means "recent
-// activity", and a full descending drain of a large city's event history
-// (100 MB+ logs) would blow the command timeout for no user benefit. The
-// API serves the page seq-DESC (newest first); gc events prints
-// chronologically, so the page is re-sorted ascending.
-func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]cliWireEvent, error) {
-	limit := int64(500)
-	params := &genclient.GetV0CityByCityNameEventsParams{
-		Limit: &limit,
-	}
-	if strings.TrimSpace(typeFilter) != "" {
-		params.Type = &typeFilter
-	}
-	if strings.TrimSpace(sinceFlag) != "" {
-		params.Since = &sinceFlag
-	}
-	resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
-	if err != nil {
-		return nil, &eventsAPITransportError{err: err}
-	}
-	if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
-		return nil, err
-	}
-	if resp.JSON200 == nil || resp.JSON200.Items == nil {
-		return nil, nil
-	}
-	all := make([]cliWireEvent, 0, len(*resp.JSON200.Items))
-	for _, item := range *resp.JSON200.Items {
-		wire, err := cityWireEventFromTyped(item)
-		if err != nil {
-			return nil, fmt.Errorf("decoding city event list item: %w", err)
+// cityEventsPageLimit bounds one page of the city event list. The endpoint
+// serves seq-DESC pages and mints next_cursor when more matching rows exist
+// strictly below the page's oldest seq (#4194).
+const cityEventsPageLimit = int64(500)
+
+// fetchCityEvents fetches city events matching the type/since filter and
+// returns them chronologically (ascending seq). The endpoint is a keyset,
+// seq-DESC (newest first) paginated list; a truncated page carries a
+// next_cursor pointing strictly below the page's oldest seq.
+//
+// A bounded --since window is drained across pages so the requested window is
+// reported in full — otherwise any window holding more than one page of events
+// silently under-reports (the bug this fixes). Without --since the request is
+// unbounded, so the fetch stays a single page: gc events means "recent
+// activity", and a full descending drain of a 100 MB+ event history would blow
+// the command timeout for no user benefit. In that single-page case, when the
+// server signals more via next_cursor, an explicit truncation notice is written
+// to warn rather than silently dropping the older matches.
+func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string, warn io.Writer) ([]cliWireEvent, error) {
+	paginate := strings.TrimSpace(sinceFlag) != ""
+	var all []cliWireEvent
+	cursor := ""
+	for {
+		limit := cityEventsPageLimit
+		params := &genclient.GetV0CityByCityNameEventsParams{
+			Limit: &limit,
 		}
-		all = append(all, wire)
+		if strings.TrimSpace(typeFilter) != "" {
+			params.Type = &typeFilter
+		}
+		if strings.TrimSpace(sinceFlag) != "" {
+			params.Since = &sinceFlag
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+		if err != nil {
+			return nil, &eventsAPITransportError{err: err}
+		}
+		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
+			return nil, err
+		}
+		if resp.JSON200 == nil || resp.JSON200.Items == nil {
+			break
+		}
+		for _, item := range *resp.JSON200.Items {
+			wire, err := cityWireEventFromTyped(item)
+			if err != nil {
+				return nil, fmt.Errorf("decoding city event list item: %w", err)
+			}
+			all = append(all, wire)
+		}
+		next := ""
+		if resp.JSON200.NextCursor != nil {
+			next = strings.TrimSpace(*resp.JSON200.NextCursor)
+		}
+		if next == "" {
+			break // window (or the whole history) exhausted
+		}
+		if !paginate {
+			fmt.Fprintf(warn, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
+			break
+		}
+		if next == cursor {
+			// Defensive: a conforming server advances the keyset boundary
+			// strictly downward each page, so the cursor never repeats. Bail
+			// rather than spin forever on a misbehaving server.
+			break
+		}
+		cursor = next
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	return all, nil

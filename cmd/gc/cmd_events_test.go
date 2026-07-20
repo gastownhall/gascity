@@ -1482,7 +1482,8 @@ func TestFetchCityEventsSinglePageChronological(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "")
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "", &warn)
 	if err != nil {
 		t.Fatalf("fetchCityEvents: %v", err)
 	}
@@ -1494,13 +1495,18 @@ func TestFetchCityEventsSinglePageChronological(t *testing.T) {
 			t.Fatalf("event[%d].Seq = %d, want %d (chronological ascending)", i, item.Seq, i+4)
 		}
 	}
+	// The unbounded (no --since) fetch stays single-page, but a present
+	// next_cursor must surface an explicit truncation notice, never a silent drop.
+	if !strings.Contains(warn.String(), "omitted") {
+		t.Fatalf("expected truncation notice on stderr, got %q", warn.String())
+	}
 }
 
 // pagedCityEventsHandler serves allDesc (events in seq-DESC order) as keyset
 // pages of at most pageSize, honoring the opaque `cursor` query param the same
-// way the #4194 server does: the cursor is the seq boundary, each page returns
-// events strictly below it, and next_cursor (the page's oldest seq as a decimal
-// string) is minted whenever more matching rows remain below the page.
+// way the #4194 server does: the cursor is the seq boundary and each page
+// returns events strictly below it, minting next_cursor (the page's oldest seq
+// as a decimal string) whenever more matching rows remain below the page.
 func pagedCityEventsHandler(t *testing.T, allDesc []cliWireEvent, pageSize int) func(http.ResponseWriter, *http.Request) {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1528,6 +1534,7 @@ func pagedCityEventsHandler(t *testing.T, allDesc []cliWireEvent, pageSize int) 
 		body.Total = int64(len(allDesc))
 		if len(page) > 0 {
 			oldest := page[len(page)-1].Seq
+			// More below this page?
 			for _, e := range allDesc {
 				if e.Seq < oldest {
 					next := strconv.FormatInt(oldest, 10)
@@ -1538,6 +1545,48 @@ func pagedCityEventsHandler(t *testing.T, allDesc []cliWireEvent, pageSize int) 
 		}
 		w.Header().Set("X-GC-Index", strconv.FormatInt(allDesc[0].Seq, 10))
 		writeJSONResponse(t, w, body)
+	}
+}
+
+// TestFetchCityEventsPaginatesSinceWindow pins the bug fix (workspace-l9a2): a
+// bounded --since request drains every page of the requested window, not just
+// the newest 500. Regression guard for `gc events --since <window>` silently
+// hard-capping at one page.
+func TestFetchCityEventsPaginatesSinceWindow(t *testing.T) {
+	const total = 1200 // 3 keyset pages of 500/500/200
+	allDesc := make([]cliWireEvent, 0, total)
+	for seq := total; seq >= 1; seq-- {
+		allDesc = append(allDesc, cliWireEvent{
+			Actor: "gc", Seq: int64(seq), Type: "e.t",
+			Ts: time.Unix(1700000000+int64(seq), 0).UTC(),
+		})
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: pagedCityEventsHandler(t, allDesc, 500),
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "24h", &warn)
+	if err != nil {
+		t.Fatalf("fetchCityEvents: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("got %d events, want %d (full window drained across pages)", len(got), total)
+	}
+	// Chronological ascending, contiguous, no gaps/dups across page seams.
+	for i, item := range got {
+		if item.Seq != int64(i+1) {
+			t.Fatalf("event[%d].Seq = %d, want %d (ascending, contiguous)", i, item.Seq, i+1)
+		}
+	}
+	// A drained window is complete, so no truncation notice.
+	if warn.Len() != 0 {
+		t.Fatalf("unexpected truncation notice for a fully drained window: %q", warn.String())
 	}
 }
 

@@ -412,8 +412,8 @@ func TestDoStartSession_FullSequence(t *testing.T) {
 	if create.workDir != "/proj" {
 		t.Errorf("createSession workDir = %q, want %q", create.workDir, "/proj")
 	}
-	if create.command != "claude" {
-		t.Errorf("createSession command = %q, want %q", create.command, "claude")
+	if create.command != "env -u CI -u NO_COLOR claude" {
+		t.Errorf("createSession command = %q, want %q", create.command, "env -u CI -u NO_COLOR claude")
 	}
 	if create.env["GC_AGENT"] != "mayor" {
 		t.Errorf("createSession env = %v, want GC_AGENT=mayor", create.env)
@@ -1930,8 +1930,8 @@ func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
 	if respawn.workDir != "/proj" {
 		t.Errorf("respawnAgent workDir = %q, want %q", respawn.workDir, "/proj")
 	}
-	if respawn.command != "claude" {
-		t.Errorf("respawnAgent command = %q, want %q", respawn.command, "claude")
+	if respawn.command != "env -u CI -u NO_COLOR claude" {
+		t.Errorf("respawnAgent command = %q, want %q", respawn.command, "env -u CI -u NO_COLOR claude")
 	}
 }
 
@@ -2030,8 +2030,8 @@ func TestEnsureFreshSession_Success(t *testing.T) {
 	if c.workDir != "/proj" {
 		t.Errorf("workDir = %q, want %q", c.workDir, "/proj")
 	}
-	if c.command != "claude" {
-		t.Errorf("command = %q, want %q", c.command, "claude")
+	if c.command != "env -u CI -u NO_COLOR claude" {
+		t.Errorf("command = %q, want %q", c.command, "env -u CI -u NO_COLOR claude")
 	}
 	if c.env["GC_AGENT"] != "mayor" {
 		t.Errorf("env = %v, want GC_AGENT=mayor", c.env)
@@ -2319,9 +2319,7 @@ func TestEnsureFreshSession_LongPromptSuffixUsesFileExpansion(t *testing.T) {
 
 	c := ops.calls[0]
 	// Should use sh -c with $(cat ...) expansion rather than inline.
-	if !strings.HasPrefix(c.command, "sh -c '") {
-		t.Errorf("long prompt should use sh -c wrapper, got %q", c.command)
-	}
+	_ = longPromptScriptFromCommand(t, c.command)
 	if !strings.Contains(c.command, "$(cat ") {
 		t.Errorf("long prompt should use $(cat ...) file expansion, got %q", c.command)
 	}
@@ -2360,6 +2358,9 @@ func TestEnsureFreshSession_LongPromptWithFlagUsesFileExpansion(t *testing.T) {
 func longPromptScriptFromCommand(t *testing.T, command string) string {
 	t.Helper()
 	args := shellquote.Split(command)
+	if len(args) >= 5 && args[0] == "env" && args[1] == "-u" && args[2] == "CI" && args[3] == "-u" && args[4] == "NO_COLOR" {
+		args = args[5:]
+	}
 	if len(args) != 3 || args[0] != "sh" || args[1] != "-c" {
 		t.Fatalf("long-prompt command should be sh -c <script>, got args %#v from %q", args, command)
 	}
@@ -2598,11 +2599,9 @@ func TestEnsureFreshSession_LongPromptEmptyWorkDirFallsBackToOSTemp(t *testing.T
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	c := ops.calls[0]
-	if !strings.HasPrefix(c.command, "sh -c '") {
-		t.Fatalf("long prompt with empty workdir should use sh -c wrapper, got %q", c.command)
-	}
+
+	_ = longPromptScriptFromCommand(t, c.command)
 	if strings.Contains(c.command, longPromptRaw) {
 		t.Errorf("raw prompt leaked into tmux command, command = %q", c.command)
 	}

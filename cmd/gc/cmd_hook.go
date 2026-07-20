@@ -14,8 +14,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -421,6 +423,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	if opts.Claim {
 		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
+		if code, handled := fenceHookClaimSession(cityPath, cfg, sessionID, opts, stdout, stderr); handled {
+			return code
+		}
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
@@ -451,6 +456,128 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+}
+
+// hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
+// work, as decided by the pre-work-query identity fence in gc hook --claim.
+type hookClaimSessionVerdict int
+
+const (
+	// hookClaimSessionEligible: the session bead is the current incarnation
+	// (matching instance token) and in a state where a live worker legitimately
+	// claims work — proceed to the work query.
+	hookClaimSessionEligible hookClaimSessionVerdict = iota
+	// hookClaimSessionStale: the session is closed, superseded (its instance token
+	// was reminted onto a newer incarnation), or in a dormant/terminal state. The
+	// incarnation must stop rather than claim, so the caller emits a structured
+	// terminal drain result instead of a bare exit 1 the startup wrapper retries.
+	hookClaimSessionStale
+	// hookClaimSessionStoreUnavailable: the session store could not be opened, or
+	// its read failed for a reason other than a confirmed-missing or non-session
+	// bead. That is a transient infrastructure fault, not a definitive
+	// ineligibility, so the caller fails open into the normal claim path (whose
+	// runner surfaces and escalates its own store errors) rather than mislabeling
+	// the fault as a stale session. A bead that is confirmed absent or resolves to
+	// a non-session bead is NOT this verdict — it is a definitive identity failure
+	// and classified stale.
+	hookClaimSessionStoreUnavailable
+)
+
+// fenceHookClaimSession applies the runtime-identity fence that gates
+// gc hook --claim before it runs the work query. It returns (code, handled):
+// handled is true only for a definitively stale session, whose terminal drain
+// result the caller must return as-is. An un-fenceable context (no session id or
+// no instance token), an eligible session, or a transient session-store fault all
+// return handled=false so the normal claim path runs — the fence never turns an
+// infrastructure hiccup or an in-progress start into a false refusal.
+func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool) {
+	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
+	if sessionID == "" || instanceToken == "" {
+		return 0, false
+	}
+	switch verdict, reason := classifyHookClaimSession(cityPath, cfg, sessionID, instanceToken); verdict {
+	case hookClaimSessionStale:
+		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
+		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true
+	case hookClaimSessionStoreUnavailable:
+		// Fail open: let the claim path run and surface/escalate its own store
+		// error rather than reporting a false stale session. Name the fault
+		// without the alarming "stale session" wording.
+		fmt.Fprintf(stderr, "gc hook --claim: session fence unavailable for %s: %s; proceeding to claim\n", sessionID, reason) //nolint:errcheck
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+// classifyHookClaimSession loads the session bead named by sessionID and reports
+// whether the runtime holding instanceToken may claim. A confirmed identity
+// failure — the session bead is absent, or resolves to a non-session bead — is a
+// stale verdict: the incarnation can no longer prove its identity and must drain
+// rather than claim. Only a genuine store-open or read fault yields
+// hookClaimSessionStoreUnavailable (transient, fails open), so an infrastructure
+// hiccup is not mislabeled as staleness AND a vanished session is not laundered
+// into an infrastructure hiccup that lets a stale runtime reach the claim path.
+func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
+	}
+	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
+	if err != nil {
+		return classifyHookClaimSessionLookupError(err)
+	}
+	return hookClaimSessionEligibility(info, instanceToken)
+}
+
+// classifyHookClaimSessionLookupError maps a session Store.Get error to a fence
+// verdict. session.Store.Get reports a CONFIRMED-absent id as the store not-found
+// error wrapped around beads.ErrNotFound, and a present-but-non-session id (the
+// id resolves to a bead that is not a session) as session.ErrSessionNotFound.
+// Both are definitive identity failures — the runtime's session no longer exists
+// in the store — so the incarnation is stale and must drain. Any other error is a
+// genuine store open/read fault the fence fails open on, letting the normal claim
+// path surface and escalate its own store error rather than refusing a healthy
+// worker over an infrastructure hiccup.
+func classifyHookClaimSessionLookupError(err error) (hookClaimSessionVerdict, string) {
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return hookClaimSessionStale, fmt.Sprintf("session bead not found: %v", err)
+	case errors.Is(err, session.ErrSessionNotFound):
+		return hookClaimSessionStale, fmt.Sprintf("session id resolves to a non-session bead: %v", err)
+	default:
+		return hookClaimSessionStoreUnavailable, fmt.Sprintf("loading session bead: %v", err)
+	}
+}
+
+// hookClaimSessionEligibility is the pure eligibility decision over a session Info
+// snapshot. The instance-token arm proves whether this is the current
+// incarnation; the state arm then admits only the states in which a live worker
+// legitimately claims: active/awake plus the in-startup states creating/
+// start-pending that the deferred-start path passes through before its async
+// active commit lands (refusing those rejects a healthy first claim). An empty
+// MetadataState (session.StateNone) is a pre-metadata legacy bead mid-upgrade,
+// not a dormant state: the session lifecycle canonicalizes empty state to
+// StateActive (canonicalLifecycleState in internal/session/manager.go), so once
+// Closed is false and the instance token matches — proving this is the live
+// current incarnation — it is admitted with the active states, or a healthy
+// upgraded legacy runtime would be drained before claiming its routed work.
+// Every other state — failed-create, draining, drained, asleep, suspended,
+// archived, quarantined — is dormant or terminal and classified stale.
+func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookClaimSessionVerdict, string) {
+	if info.Closed {
+		return hookClaimSessionStale, "session bead is closed"
+	}
+	storedToken := strings.TrimSpace(info.InstanceToken)
+	if storedToken == "" || storedToken != strings.TrimSpace(instanceToken) {
+		return hookClaimSessionStale, "runtime instance token does not match the session bead"
+	}
+	switch state := session.State(strings.TrimSpace(info.MetadataState)); state {
+	case session.StateNone, session.StateActive, session.StateAwake, session.StateCreating, session.StateStartPending:
+		return hookClaimSessionEligible, ""
+	default:
+		return hookClaimSessionStale, fmt.Sprintf("session state %q is not claim-eligible", state)
+	}
 }
 
 // claimHookWork claims routed work for gc hook --claim from the federated store

@@ -900,7 +900,14 @@ func (cs *controllerState) noteRolloutDrift(next *config.City) {
 		sig     string // drift signature; "" means in sync
 		logLine string
 	)
-	if nextFlags, err := rollout.Resolve(next, rollout.ResolveOptions{}); err != nil {
+	// Resolve ONLY the conditional_writes gate. next carries every [beads] key,
+	// so an invalid SIBLING gate (e.g. a guarded_release typo) would fail
+	// rollout.Resolve(next) and be misattributed here as a conditional_writes
+	// failure — falsely flagging a valid conditional_writes as invalid on
+	// reload. A CW-scoped view isolates this notice to its own gate; the CW env
+	// override still applies (Resolve reads it regardless of config).
+	cwOnly := &config.City{Beads: config.BeadsConfig{ConditionalWrites: next.Beads.ConditionalWrites}}
+	if nextFlags, err := rollout.Resolve(cwOnly, rollout.ResolveOptions{}); err != nil {
 		sig = "invalid:" + err.Error()
 		notice = &rollout.Notice{
 			Kind:        rollout.NoticePendingRestart,

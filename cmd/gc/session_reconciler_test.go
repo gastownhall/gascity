@@ -1140,7 +1140,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1181,14 +1181,14 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", firstTracker, &stderr)
+	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", secondTracker, &stderr)
+	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1214,7 +1214,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1257,7 +1257,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1294,7 +1294,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1338,7 +1338,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1371,7 +1371,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1380,6 +1380,51 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 	}
 	if got := stderr.String(); strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, unexpected mismatch on matching token", got)
+	}
+}
+
+// TestQueueDrainAckAsyncStopConfirmsRuntimeDead verifies that the async
+// drain-ack stop re-observes liveness after its kill and keeps re-issuing the
+// kill until the runtime is confirmed dead (or a bounded deadline passes),
+// instead of assuming a single Stop call was sufficient. A survivor runtime
+// (one that ignores SIGHUP, reparents, or races the kill grace period) stays
+// observably alive after Stop returns nil; without confirm-dead, the pool
+// slot it occupies never frees and the reassigned next step stays
+// runtime-missing forever (root cause under investigation in this change).
+func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 300 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Survivor: Stop reports success but the fake leaves the session (and thus
+	// IsRunning/ProcessAlive) observably alive, mirroring a claude process that
+	// ignores SIGHUP / reparents / races the kill grace period.
+	sp.StopLeavesRunning["worker"] = true
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	stopCalls := 0
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "worker" {
+			stopCalls++
+		}
+	}
+	if stopCalls < 2 {
+		t.Fatalf("Stop call count = %d, want >= 2 (confirm-dead must re-issue the kill on a survivor)", stopCalls)
 	}
 }
 
@@ -1398,7 +1443,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", &cr.asyncStops, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -1454,6 +1499,162 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	}
 	if got.Metadata["state"] != "drained" {
 		t.Fatalf("state = %q, want drained", got.Metadata["state"])
+	}
+}
+
+// reparentSurvivorProvider models PR #4181's finalizer finding: at the
+// finalizer's first observation the runtime pane is still live, so the
+// stop-pending session is queued for async stop; the first kill then takes out
+// the pane (IsRunning=false) while the drain-ack target's agent process is
+// reparented and survives — observable only through process-name liveness. The
+// embedded fake's StopLeavesRunning keeps the session, so ProcessAlive stays
+// true. Without the resolved process hints the queued confirm-dead loop reads
+// the pane alone and never checks the surviving process.
+type reparentSurvivorProvider struct {
+	*runtime.Fake
+	stopMu  sync.Mutex
+	stopped bool
+}
+
+func (p *reparentSurvivorProvider) Stop(name string) error {
+	p.stopMu.Lock()
+	p.stopped = true
+	p.stopMu.Unlock()
+	return p.Fake.Stop(name)
+}
+
+func (p *reparentSurvivorProvider) IsRunning(name string) bool {
+	p.stopMu.Lock()
+	stopped := p.stopped
+	p.stopMu.Unlock()
+	if stopped {
+		// Pane gone after the first kill; only the reparented process survives.
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+// TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor pins the
+// finalizer-only regression for PR #4181: a persisted stop-pending pool session
+// whose agent process outlives its runtime pane must be confirm-dead-killed with
+// the configured process-name hints, not misread as dead and freed. The finalizer
+// has no resolved TemplateParams, so it must recover the hints from config. With
+// nil hints the queued confirm-dead loop never observes process liveness at all.
+func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 200 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
+	oldPoke := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string) error { return nil }
+	t.Cleanup(func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+		drainAckAsyncStopPokeController = oldPoke
+	})
+
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", ProcessNames: []string{"claude"}}},
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Survivor: the agent process outlives the pane-killing Stop.
+	env.sp.StopLeavesRunning["worker"] = true
+	sp := &reparentSurvivorProvider{Fake: env.sp}
+
+	session := env.createSessionBead("worker", "worker")
+	patch := sessionpkg.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	patch[poolManagedMetadataKey] = boolMetadata(true)
+	if err := env.store.SetMetadataBatch(session.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	session.Metadata = patch.Apply(session.Metadata)
+
+	tracker := &asyncStartTracker{}
+	finalized := finalizeDrainAckStopPendingSessions(
+		"", env.cfg, sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		newFakeDrainOps(), env.dt, tracker, env.clk, env.rec, &env.stderr,
+	)
+	if finalized != 0 {
+		t.Fatalf("finalized = %d, want 0 (a process-name survivor must not free the pool slot)", finalized)
+	}
+	if !tracker.wait(2 * time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	// tracker.wait establishes happens-before with the async goroutine, so
+	// reading the fake's recorded calls here is race-free (mirrors the sibling
+	// confirm-dead test). ProcessAlive is called only when the queued stop was
+	// given process hints; with the pre-fix nil hints the loop never checks it.
+	processAliveCalls, stopCalls := 0, 0
+	for _, call := range env.sp.Calls {
+		switch call.Method {
+		case "ProcessAlive":
+			if call.Name == "worker" {
+				processAliveCalls++
+			}
+		case "Stop":
+			if call.Name == "worker" {
+				stopCalls++
+			}
+		}
+	}
+	if processAliveCalls == 0 {
+		t.Fatal("confirm-dead never checked process-name liveness; the finalizer queued the stop with nil hints")
+	}
+	if stopCalls < 2 {
+		t.Fatalf("Stop call count = %d, want >= 2 (confirm-dead must keep re-killing the process-name survivor)", stopCalls)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("status = closed, but the surviving agent process must keep the pool bead open")
+	}
+}
+
+// TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement pins PR #4181's
+// concurrency regression: the confirm-dead re-kill loop targets the session by
+// name, and names are reused across incarnations. Once a re-woken same-name
+// replacement owns the name (a different GC_INSTANCE_TOKEN), the loop must treat
+// the original target as gone and stop, rather than kill the live replacement.
+func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 300 * time.Millisecond
+	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// A re-woken same-name replacement now owns the name with a fresh token.
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	if !dead {
+		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "worker" {
+			t.Fatal("confirm-dead re-killed a name-reused replacement instead of stopping on the token mismatch")
+		}
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("confirm-dead killed the live replacement session")
+	}
+	if got := stderr.String(); !strings.Contains(got, "instance token mismatch") {
+		t.Fatalf("stderr = %q, want token mismatch diagnostic", got)
 	}
 }
 
@@ -8992,6 +9193,185 @@ func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testin
 	if got := b.Metadata["held_until"]; got != heldUntil {
 		t.Fatalf("held_until = %q, want preserved %q", got, heldUntil)
 	}
+}
+
+// TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout guards the
+// session_reconciler.go wake/drain block against the `gc runtime heartbeat`
+// regression (PR #3994). Heartbeat sets held_until only — no sleep_intent and
+// no suspended state — to keep a live session alive through a long, silent
+// operation. Before the fix, ComputeAwakeSet's hold suppression drove the live
+// session into a "no-wake-reason" drain that force-stopped it after
+// defaultDrainTimeout: the exact opposite of the heartbeat's purpose. The
+// session must survive past the drain deadline, and a suspend (which sets
+// sleep_intent) must still drain — see
+// TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain.
+func TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	heldUntil := env.clk.Now().Add(45 * time.Minute).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"held_until": heldUntil,
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	rec := events.NewFake()
+	env.rec = rec
+
+	runTick := func() {
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		reconcileSessionBeads(
+			context.Background(), []beads.Bead{got}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+			it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		)
+	}
+
+	// Tick 1: a heartbeat hold must not begin a no-wake-reason drain on a live
+	// session — that drain would force-stop it once the deadline elapses.
+	runTick()
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("heartbeat hold must not begin a drain, got reason=%q", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("heartbeat-held worker must stay running on the first tick")
+	}
+
+	// Tick 2: cross the drain deadline. The regression force-stopped the
+	// session here; the fix keeps it alive because the idle/max-age timers are
+	// deferred by the same hold and no drain was ever started.
+	env.clk.Time = env.clk.Now().Add(defaultDrainTimeout + time.Minute)
+	runTick()
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("heartbeat-held worker must survive past defaultDrainTimeout")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("heartbeat hold must not leave a drain pending, got reason=%q", ds.reason)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Errorf("heartbeat hold must not set GC_DRAIN_ACK, got %q", ack)
+	}
+	if got := env.sessionInfo(session.ID); got.HeldUntil != heldUntil {
+		t.Errorf("held_until = %q, want preserved %q", got.HeldUntil, heldUntil)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			t.Error("SessionIdleKilled must not fire for a heartbeat hold")
+		}
+	}
+}
+
+// TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns guards the
+// heartbeat crash-recovery gap surfaced in PR #3994 review iteration 2. A
+// heartbeat hold (held_until only, no sleep_intent) defers idle/max-age timers
+// for a LIVE session, but must not blind crash recovery: when a heartbeat-held
+// session's runtime dies while it still has assigned work, ComputeAwakeSet's
+// hold suppression drives ShouldWake=false, so before the fix the respawn arm
+// (shouldWake && !alive) was skipped and the session stayed down for the whole
+// agent-chosen, unbounded hold — precisely the long unattended operation the
+// heartbeat exists to protect. The reconciler must respawn it during the hold
+// window and preserve the hold so it stays protected until held_until expires.
+// A suspend hold (sleep_intent="user-hold") is the intentional-park case and
+// must stay down.
+func TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns(t *testing.T) {
+	// buildDeadHeldSessionWithWork creates a desired "worker" whose runtime has
+	// died (state=active, not running in the provider) while holding a future
+	// held_until plus an in_progress work bead assigned to it. sleepIntent
+	// selects heartbeat ("") vs suspend ("user-hold").
+	buildDeadHeldSessionWithWork := func(sleepIntent string) (*reconcilerTestEnv, beads.Bead, []beads.Bead) {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		env.addDesired("worker", "worker", false) // desired, but NOT started: the runtime is dead
+		session := env.createSessionBead("worker", "worker")
+		env.markSessionActive(&session) // it was alive before it crashed mid-hold
+		meta := map[string]string{
+			"held_until": env.clk.Now().Add(45 * time.Minute).UTC().Format(time.RFC3339),
+			// Woke well before this tick (mid-hold death), so the session is past
+			// the rapid-crash (30s) and churn-productivity (5m) windows and reaches
+			// the wake/respawn loop as a plain dead-but-desired session rather than
+			// a crash-loop capture.
+			"last_woke_at": env.clk.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+		}
+		if sleepIntent != "" {
+			meta["sleep_intent"] = sleepIntent
+		}
+		env.setSessionMetadata(&session, meta)
+
+		task, err := env.store.Create(beads.Bead{Title: "assigned task", Type: "task"})
+		if err != nil {
+			t.Fatalf("Create(task): %v", err)
+		}
+		status := "in_progress"
+		assignee := session.ID
+		if err := env.store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatalf("Update(task): %v", err)
+		}
+		task, err = env.store.Get(task.ID)
+		if err != nil {
+			t.Fatalf("Get(task): %v", err)
+		}
+		return env, session, []beads.Bead{task}
+	}
+
+	runTick := func(env *reconcilerTestEnv, session beads.Bead, work []beads.Bead) int {
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		return reconcileSessionBeads(
+			context.Background(), []beads.Bead{got}, env.desiredState,
+			configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+			nil, work, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+			nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...,
+		)
+	}
+
+	t.Run("heartbeat hold respawns dead session with work", func(t *testing.T) {
+		env, session, work := buildDeadHeldSessionWithWork("")
+		heldUntil := env.sessionInfo(session.ID).HeldUntil
+		if woken := runTick(env, session, work); woken != 1 {
+			t.Fatalf("woken = %d, want 1 (heartbeat-held dead session with work must respawn); stderr=%s", woken, env.stderr.String())
+		}
+		if !env.sp.IsRunning("worker") {
+			t.Fatal("heartbeat-held dead worker with assigned work must be respawned within the hold window")
+		}
+		// The hold is preserved, so the recovered session stays protected until
+		// held_until expires; the fix only restores respawn eligibility, it does
+		// not tear down the ongoing heartbeat.
+		if got := env.sessionInfo(session.ID).HeldUntil; got != heldUntil {
+			t.Errorf("held_until = %q, want preserved %q across the respawn", got, heldUntil)
+		}
+		// Second tick: the respawned session is now alive, so the crash-recovery
+		// arm must NOT fire again (its !alive guard) — no respawn storm — while
+		// the live keep-alive guard holds it up.
+		if woken := runTick(env, session, work); woken != 0 {
+			t.Fatalf("second tick woken = %d, want 0 (an already-alive held session must not respawn again); stderr=%s", woken, env.stderr.String())
+		}
+		if !env.sp.IsRunning("worker") {
+			t.Fatal("respawned heartbeat-held worker must stay running on the next tick")
+		}
+	})
+
+	t.Run("suspend hold keeps dead session down", func(t *testing.T) {
+		env, session, work := buildDeadHeldSessionWithWork("user-hold")
+		woken := runTick(env, session, work)
+		if woken != 0 {
+			t.Fatalf("woken = %d, want 0 (a suspend hold must not be crash-recovered); stderr=%s", woken, env.stderr.String())
+		}
+		if env.sp.IsRunning("worker") {
+			t.Error("a suspended (sleep_intent=user-hold) dead session must stay down, not respawn")
+		}
+	})
 }
 
 func TestReconcileSessionBeads_IdleTimeoutRespectsQuarantineBlocker(t *testing.T) {
