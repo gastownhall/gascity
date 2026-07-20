@@ -138,6 +138,16 @@ func TestResolveGlobalStreamCursors(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit zero replays every current provider from zero", func(t *testing.T) {
+		cursors, err := resolveGlobalStreamCursors(newMux(), "0")
+		if err != nil {
+			t.Fatalf("resolveGlobalStreamCursors: %v", err)
+		}
+		if cursors["alpha"] != 0 || cursors["beta"] != 0 {
+			t.Fatalf("cursors = %v, want alpha=0 beta=0", cursors)
+		}
+	})
+
 	t.Run("resume preserves present cities and floors omitted cities to latest", func(t *testing.T) {
 		// A resume cursor that names alpha at 2 but omits the registered beta.
 		resume := events.FormatCursor(map[string]uint64{"alpha": 2})
@@ -150,6 +160,16 @@ func TestResolveGlobalStreamCursors(t *testing.T) {
 		}
 		if cursors["beta"] != 3 {
 			t.Errorf("beta = %d, want 3 (omitted city floored to latest, not Watch(0))", cursors["beta"])
+		}
+	})
+
+	t.Run("malformed sequences floor providers to latest instead of replaying from zero", func(t *testing.T) {
+		cursors, err := resolveGlobalStreamCursors(newMux(), "alpha:nope,beta:nope")
+		if err != nil {
+			t.Fatalf("resolveGlobalStreamCursors: %v", err)
+		}
+		if cursors["alpha"] != 5 || cursors["beta"] != 3 {
+			t.Fatalf("cursors = %v, want alpha=5 beta=3", cursors)
 		}
 	})
 

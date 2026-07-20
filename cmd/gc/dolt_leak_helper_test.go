@@ -586,6 +586,7 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		func() int { return 0 },
 		enumerate,
 		func(string) bool { return false },
+		func() {},
 		func() { registeredReaped = true },
 		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
 	)
@@ -598,5 +599,36 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 	}
 	if !registeredReaped {
 		t.Fatal("registered process reaper was not called after leak detection")
+	}
+}
+
+func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
+	// ga-ntbpyb.2 acceptance criterion 2: the symptom-based directory sweep
+	// runs at test-suite startup, alongside the existing stale-process
+	// sweep, before the tests themselves run.
+	tempRoot := filepath.Join(t.TempDir(), "gct-current")
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	var order []string
+	code := g.runWith(
+		func() int {
+			order = append(order, "runTests")
+			return 0
+		},
+		func() ([]DoltProcInfo, error) { return nil, nil },
+		func(string) bool {
+			order = append(order, "sweepStale")
+			return false
+		},
+		func() { order = append(order, "sweepOrphanDirs") },
+		func() {},
+		func([]DoltProcInfo) {},
+	)
+
+	if code != 0 {
+		t.Fatalf("guard returned code %d, want 0 for a clean run", code)
+	}
+	if len(order) < 3 || order[0] != "sweepStale" || order[1] != "sweepOrphanDirs" || order[2] != "runTests" {
+		t.Fatalf("call order = %v, want [sweepStale sweepOrphanDirs runTests ...]", order)
 	}
 }

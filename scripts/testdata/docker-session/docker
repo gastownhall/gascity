@@ -24,12 +24,14 @@ fi
 call_number=$((call_number + 1))
 printf '%d\n' "$call_number" > "$state_dir/call-counter"
 call_path=$(printf '%s/%08d.argv' "$calls_dir" "$call_number")
+call_tmp_path="$call_path.tmp.$$"
 {
     printf '%d\n' "$#"
     if [[ $# -gt 0 ]]; then
         printf '%s\0' "$@"
     fi
-} > "$call_path"
+} > "$call_tmp_path"
+mv -f -- "$call_tmp_path" "$call_path"
 
 unsupported() {
     printf 'fake docker: unsupported argv:' >&2
@@ -217,16 +219,6 @@ fi
 if [[ $# -eq 4 && "$1" == "stop" && "$2" == "-t" && "$3" == "10" ]]; then
     target="$4"
     cname=$(resolve_container_name "$target") || unsupported
-    # Simulate a graceful stop that outruns the caller's cancellation grace: a
-    # container whose PID 1 ignores SIGTERM makes "docker stop" block until its
-    # timeout. Tests inject this to prove failed-start rollback removes the
-    # container without first waiting on a slow stop.
-    if [[ -r "$state_dir/stop-stall-seconds" ]]; then
-        IFS= read -r stall_seconds < "$state_dir/stop-stall-seconds" || true
-        if [[ "$stall_seconds" =~ ^[0-9]+$ ]]; then
-            sleep "$stall_seconds"
-        fi
-    fi
     if [[ -e "$containers_dir/$cname" ]]; then
         printf 'stopped\n' > "$containers_dir/$cname"
     fi

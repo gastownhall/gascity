@@ -64,6 +64,10 @@ var (
 	// client cannot today distinguish "pick a different name" from "resume/stop
 	// first" by code or prefix.
 	SessionConflict = Register(ProblemType{Code: "session-conflict", Status: http.StatusConflict, Title: "Session State Conflict"})
+	// TranscriptCursorInvalidated means a stable transcript entry cursor no
+	// longer exists in the provider's current transcript view. Clients recover
+	// by discarding the cursor and fetching a fresh snapshot.
+	TranscriptCursorInvalidated = Register(ProblemType{Code: "transcript-cursor-invalidated", Status: http.StatusConflict, Title: "Transcript Cursor Invalidated"})
 
 	// AmbiguousReference is a name/reference that matched more than one resource;
 	// the client should re-address with a scoped/qualified name, not retry or wait.

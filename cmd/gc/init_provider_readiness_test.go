@@ -802,6 +802,43 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	}
 }
 
+// TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe verifies that
+// --skip-provider-readiness lets --default-provider select any builtin
+// provider, not just the subset with a readiness probe. "pi" is a real
+// builtin (internal/worker/builtin/profiles.go) with no readiness probe
+// registered, so normalizeInitProvider's readiness-only allowlist rejects
+// it even when the caller explicitly asked to skip readiness checks (#4392).
+func TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	if api.SupportsProviderReadiness("pi") {
+		t.Fatal("test assumption broken: \"pi\" now has a readiness probe, pick a different probe-less builtin")
+	}
+	found := false
+	for _, name := range config.BuiltinProviderOrder() {
+		if name == "pi" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("test assumption broken: \"pi\" is no longer a builtin provider")
+	}
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--default-provider", "pi", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc init --default-provider pi --skip-provider-readiness = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stderr.String(), "unknown provider") {
+		t.Fatalf("stderr = %q, want no unknown-provider rejection for a skipped-readiness builtin", stderr.String())
+	}
+}
+
 func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")

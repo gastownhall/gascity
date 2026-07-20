@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -375,20 +377,115 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 
 // --- Session Transcript ---
 
-// sessionTranscriptGetResponse is the union of conversation/text and raw
-// transcript response shapes. When Format is "conversation" or "text",
-// Turns is populated. When Format is "raw", Messages carries pre-decoded
-// provider-native frames as generic JSON values. The spec describes the
-// items as arbitrary JSON (any) — clients interpret shapes based on the
-// session's provider.
+// sessionTranscriptGetResponse is the runtime container for conversation,
+// raw, and structured transcript responses. Its OpenAPI schema is a
+// discriminated union so generated clients never see raw provider frames on
+// the structured response branch.
 type sessionTranscriptGetResponse struct {
+	ID                 string                      `json:"id"`
+	Template           string                      `json:"template"`
+	Provider           string                      `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format             string                      `json:"format" doc:"conversation, text, raw, or structured."`
+	SchemaVersion      string                      `json:"schema_version,omitempty" doc:"Structured session transcript schema version when format is structured."`
+	Operation          string                      `json:"operation,omitempty" doc:"Structured response application mode. REST structured transcripts are snapshots."`
+	ResetReason        string                      `json:"reset_reason,omitempty" doc:"Structured reset reason when operation is reset."`
+	History            *SessionStructuredHistory   `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
+	Turns              []outputTurn                `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
+	Messages           []SessionRawMessageFrame    `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
+	Pagination         *sessionlog.PaginationInfo  `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptConversationResponse struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
-	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
-	Format     string                     `json:"format" doc:"conversation, text, or raw."`
-	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages   []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
+	Format     string                     `json:"format" enum:"conversation,text" doc:"Conversation or text transcript format."`
+	Turns      []outputTurn               `json:"turns,omitempty" doc:"Conversation/text transcript turns."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptRawResponse struct {
+	ID         string                     `json:"id"`
+	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format     string                     `json:"format" enum:"raw" doc:"Raw provider-native transcript format."`
+	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames emitted only for raw format."`
+	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptStructuredResponse struct {
+	ID                 string                     `json:"id"`
+	Template           string                     `json:"template"`
+	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
+	Format             string                     `json:"format" enum:"structured" doc:"Structured provider-neutral transcript format."`
+	SchemaVersion      string                     `json:"schema_version" enum:"session.structured.v1" doc:"Structured session transcript schema version."`
+	Operation          string                     `json:"operation" enum:"snapshot" doc:"Always snapshot for a REST structured transcript."`
+	History            *SessionStructuredHistory  `json:"history" doc:"Normalized worker-history envelope when format is structured."`
+	StructuredMessages []SessionStructuredMessage `json:"structured_messages" doc:"Provider-normalized structured messages."`
+	Pagination         *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+func nonNilStructuredMessages(messages []SessionStructuredMessage) []SessionStructuredMessage {
+	if messages == nil {
+		return []SessionStructuredMessage{}
+	}
+	return messages
+}
+
+func structuredMessagesField(messages []SessionStructuredMessage) *[]SessionStructuredMessage {
+	messages = nonNilStructuredMessages(messages)
+	return &messages
+}
+
+func structuredTranscriptMessages(response sessionTranscriptGetResponse) []SessionStructuredMessage {
+	if response.StructuredMessages == nil {
+		return nil
+	}
+	return *response.StructuredMessages
+}
+
+// Schema publishes session transcript responses as a discriminated union over
+// the format field, keeping provider-native raw frames out of the structured
+// response schema while preserving the compact runtime container above.
+func (sessionTranscriptGetResponse) Schema(r huma.Registry) *huma.Schema {
+	const name = "SessionTranscriptGetResponse"
+	if _, ok := r.Map()[name]; !ok {
+		variants := []struct {
+			format string
+			name   string
+			typ    reflect.Type
+		}{
+			{format: "conversation", name: "SessionTranscriptConversationResponse", typ: reflect.TypeOf(sessionTranscriptConversationResponse{})},
+			{format: "text", name: "SessionTranscriptConversationResponse", typ: reflect.TypeOf(sessionTranscriptConversationResponse{})},
+			{format: "raw", name: "SessionTranscriptRawResponse", typ: reflect.TypeOf(sessionTranscriptRawResponse{})},
+			{format: "structured", name: "SessionTranscriptStructuredResponse", typ: reflect.TypeOf(sessionTranscriptStructuredResponse{})},
+		}
+		oneOf := make([]*huma.Schema, 0, 3)
+		mapping := make(map[string]string, len(variants))
+		seen := make(map[string]bool, 3)
+		for _, variant := range variants {
+			ref := schemaRefPrefix + variant.name
+			if _, ok := r.Map()[variant.name]; !ok {
+				r.Schema(variant.typ, true, variant.name)
+			}
+			if !seen[variant.name] {
+				oneOf = append(oneOf, &huma.Schema{Ref: ref})
+				seen[variant.name] = true
+			}
+			mapping[variant.format] = ref
+		}
+		r.Map()[name] = &huma.Schema{
+			Title:       "Session transcript response",
+			Description: "Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.",
+			OneOf:       oneOf,
+			Discriminator: &huma.Discriminator{
+				PropertyName: "format",
+				Mapping:      mapping,
+			},
+		}
+	}
+	return &huma.Schema{Ref: schemaRefPrefix + name}
 }
 
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.

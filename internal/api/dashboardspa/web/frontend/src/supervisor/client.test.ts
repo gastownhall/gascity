@@ -919,6 +919,9 @@ describe('supervisor client wrapper', () => {
     expect(streamApi.sessionStreamUrl('test-city', 'gc-session-1')).toBe(
       'http://gc-supervisor.test/v0/city/test-city/session/gc-session-1/stream',
     );
+    expect(api.sessionStreamUrl('test-city', 'gc-session-1', 'st1.snapshot', 'structured')).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/session/gc-session-1/stream?after_cursor=st1.snapshot&format=structured',
+    );
   });
 
   it('calls supervisor session transcripts through the generated SDK', async () => {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,7 +96,7 @@ func TestDiscoverFallbackPathUsesNewestClaudeLatestSessionAcrossAliases(t *testi
 	}
 }
 
-func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
+func TestDiscoverPathCodexFallsBackByWorkDirWithoutSessionID(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "codex-project")
 
@@ -126,7 +127,7 @@ func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := DiscoverPath([]string{codexRoot}, "codex/tmux-cli", workDir, "gc-123")
+	got := DiscoverPath([]string{codexRoot}, "codex/tmux-cli", workDir, "")
 	if got != codexPath {
 		t.Fatalf("DiscoverPath() = %q, want %q", got, codexPath)
 	}
@@ -180,6 +181,37 @@ func TestDiscoverPathCodexPrefersProviderSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathGeminiPrefersProviderSessionID(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "tmp")
+	workDir := filepath.Join(t.TempDir(), "city")
+	projectDir := filepath.Join(root, "city")
+	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := filepath.Join(projectDir, "chats", "session-2026-06-21T17-00-other.jsonl")
+	if err := os.WriteFile(oldPath, []byte(`{"sessionId":"other-session","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newerButWrong := filepath.Join(projectDir, "chats", "session-2026-06-21T17-10-wrong.jsonl")
+	if err := os.WriteFile(newerButWrong, []byte(`{"sessionId":"wrong-session","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(projectDir, "chats", "session-2026-06-21T17-08-f0323691.jsonl")
+	if err := os.WriteFile(want, []byte(`{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","kind":"main"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{root}, "gemini/tmux-cli", workDir, "f0323691-2967-4d1e-a6f4-6266077f42c6")
+	if got != want {
+		t.Fatalf("DiscoverPath() = %q, want keyed Gemini path %q", got, want)
+	}
+}
+
 func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 	base := t.TempDir()
 	workDir := "/tmp/gascity/phase1/kimi"
@@ -206,6 +238,184 @@ func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 	got := DiscoverPath([]string{base}, "kimi/tmux-cli", workDir, "session-key")
 	if !samePath(got, keyed) {
 		t.Fatalf("DiscoverPath() = %q, want keyed Kimi transcript %q", got, keyed)
+	}
+}
+
+func TestDiscoverPathKiroPrefersProviderSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "kiro-project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target-session.jsonl")
+	other := filepath.Join(base, "other-session.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		sidecar := strings.TrimSuffix(item.path, filepath.Ext(item.path)) + ".json"
+		if err := os.WriteFile(sidecar, []byte(`{"id":"`+item.id+`","cwd":`+quoteJSONString(workDir)+`}`), 0o644); err != nil {
+			t.Fatalf("write sidecar: %v", err)
+		}
+		if err := os.WriteFile(item.path, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"`+item.id+`","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello"}}}}`+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "kiro/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+}
+
+func TestDiscoverPathAmpPrefersCapturedSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "amp-project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target-session.jsonl")
+	other := filepath.Join(base, "other-session.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		body := `{"type":"system","subtype":"init","cwd":` + quoteJSONString(workDir) + `,"session_id":"` + item.id + `","tools":[],"mcp_servers":[]}` + "\n"
+		if err := os.WriteFile(item.path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "amp/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+	gotMiss := DiscoverPath([]string{base}, "amp/tmux-cli", workDir, "missing-session")
+	if gotMiss != "" {
+		t.Fatalf("DiscoverPath() missing Amp session = %q, want empty", gotMiss)
+	}
+}
+
+func TestDiscoverPathCursorPrefersCapturedSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "cursor-project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target-session.jsonl")
+	other := filepath.Join(base, "other-session.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		body := `{"type":"system","subtype":"init","cwd":` + quoteJSONString(workDir) + `,"session_id":"` + item.id + `"}` + "\n"
+		if err := os.WriteFile(item.path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "cursor/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+	gotMiss := DiscoverPath([]string{base}, "cursor/tmux-cli", workDir, "missing-session")
+	if gotMiss != "" {
+		t.Fatalf("DiscoverPath() missing Cursor session = %q, want empty", gotMiss)
+	}
+	gotFallback := DiscoverFallbackPath([]string{base}, "cursor/tmux-cli", workDir, "missing-session")
+	if gotFallback != "" {
+		t.Fatalf("DiscoverFallbackPath() missing Cursor session = %q, want empty", gotFallback)
+	}
+}
+
+func TestDiscoverPathGrokPrefersCapturedSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "grok-project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target-session.jsonl")
+	other := filepath.Join(base, "other-session.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		body := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"sessionId":"` + item.id + `","cwd":` + quoteJSONString(workDir) + `}}` + "\n"
+		if err := os.WriteFile(item.path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "grok/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+	gotMiss := DiscoverPath([]string{base}, "grok/tmux-cli", workDir, "missing-session")
+	if gotMiss != "" {
+		t.Fatalf("DiscoverPath() missing Grok session = %q, want empty", gotMiss)
+	}
+}
+
+func TestDiscoverPathAuggiePrefersCapturedSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "auggie-project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target-session.jsonl")
+	other := filepath.Join(base, "other-session.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		body := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"sessionId":"` + item.id + `","cwd":` + quoteJSONString(workDir) + `}}` + "\n"
+		if err := os.WriteFile(item.path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "auggie/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+	gotMiss := DiscoverPath([]string{base}, "auggie/tmux-cli", workDir, "missing-session")
+	if gotMiss != "" {
+		t.Fatalf("DiscoverPath() missing Auggie session = %q, want empty", gotMiss)
 	}
 }
 
@@ -376,12 +586,17 @@ func TestSupportsIDLookup(t *testing.T) {
 	}{
 		{provider: "claude/tmux-cli", want: true},
 		{provider: "codex/tmux-cli", want: false},
+		{provider: "auggie/tmux-cli", want: true},
+		{provider: "copilot/tmux-cli", want: true},
 		{provider: "gemini/tmux-cli", want: false},
+		{provider: "grok/tmux-cli", want: true},
+		{provider: "kiro/tmux-cli", want: true},
 		{provider: "kimi/tmux-cli", want: true},
 		{provider: "opencode/tmux-cli", want: false},
 		{provider: "mimocode/tmux-cli", want: false},
 		{provider: "pi/tmux-cli", want: true},
 		{provider: "antigravity/tmux-cli", want: true},
+		{provider: "amp/tmux-cli", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {
@@ -427,6 +642,69 @@ func TestHasKeyedTranscript(t *testing.T) {
 		}
 	})
 
+	t.Run("copilot present", func(t *testing.T) {
+		copilotRoot := t.TempDir()
+		copilotWorkDir := filepath.Join(t.TempDir(), "copilot-project")
+		if err := os.MkdirAll(copilotWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sessionDir := filepath.Join(copilotRoot, "gc-present")
+		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		eventsPath := filepath.Join(sessionDir, "events.jsonl")
+		if err := os.WriteFile(eventsPath, []byte(`{"type":"session.start","data":{"sessionId":"gc-present","context":{"cwd":`+quoteJSONString(copilotWorkDir)+`}}}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{copilotRoot}, "copilot/tmux-cli", copilotWorkDir, "gc-present")
+		if !probeable || !exists {
+			t.Fatalf("HasKeyedTranscript(copilot) = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+		}
+	})
+
+	t.Run("copilot missing", func(t *testing.T) {
+		copilotRoot := t.TempDir()
+		copilotWorkDir := filepath.Join(t.TempDir(), "copilot-project")
+		if err := os.MkdirAll(copilotWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{copilotRoot}, "copilot/tmux-cli", copilotWorkDir, "gc-missing")
+		if !probeable || exists {
+			t.Fatalf("HasKeyedTranscript(copilot missing) = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
+		}
+	})
+
+	t.Run("kiro present", func(t *testing.T) {
+		kiroRoot := t.TempDir()
+		kiroWorkDir := filepath.Join(t.TempDir(), "kiro-project")
+		if err := os.MkdirAll(kiroWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(kiroRoot, "gc-present.jsonl")
+		if err := os.WriteFile(strings.TrimSuffix(path, filepath.Ext(path))+".json", []byte(`{"id":"gc-present","cwd":`+quoteJSONString(kiroWorkDir)+`}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gc-present","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello"}}}}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{kiroRoot}, "kiro/tmux-cli", kiroWorkDir, "gc-present")
+		if !probeable || !exists {
+			t.Fatalf("HasKeyedTranscript(kiro) = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+		}
+	})
+
+	t.Run("kiro missing", func(t *testing.T) {
+		kiroRoot := t.TempDir()
+		kiroWorkDir := filepath.Join(t.TempDir(), "kiro-project")
+		if err := os.MkdirAll(kiroWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{kiroRoot}, "kiro/tmux-cli", kiroWorkDir, "gc-missing")
+		if !probeable || exists {
+			t.Fatalf("HasKeyedTranscript(kiro missing) = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
+		}
+	})
+
 	t.Run("unknown provider not probeable", func(t *testing.T) {
 		// Unknown/custom providers must not be probed: we cannot assume their
 		// on-disk layout, so absence is not a reliable stale-resume signal.
@@ -434,6 +712,54 @@ func TestHasKeyedTranscript(t *testing.T) {
 			if _, probeable := HasKeyedTranscript([]string{base}, p, workDir, "gc-present"); probeable {
 				t.Fatalf("HasKeyedTranscript(%q) probeable = true, want false", p)
 			}
+		}
+	})
+
+	t.Run("amp not probeable", func(t *testing.T) {
+		ampRoot := t.TempDir()
+		ampWorkDir := filepath.Join(t.TempDir(), "amp-project")
+		if err := os.MkdirAll(ampWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(ampRoot, "gc-present.jsonl")
+		if err := os.WriteFile(path, []byte(`{"type":"system","subtype":"init","cwd":`+quoteJSONString(ampWorkDir)+`,"session_id":"gc-present","tools":[],"mcp_servers":[]}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{ampRoot}, "amp/tmux-cli", ampWorkDir, "gc-present")
+		if exists || probeable {
+			t.Fatalf("HasKeyedTranscript(amp) = (exists=%v, probeable=%v), want (false, false)", exists, probeable)
+		}
+	})
+
+	t.Run("grok not probeable", func(t *testing.T) {
+		grokRoot := t.TempDir()
+		grokWorkDir := filepath.Join(t.TempDir(), "grok-project")
+		if err := os.MkdirAll(grokWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(grokRoot, "gc-present.jsonl")
+		if err := os.WriteFile(path, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"sessionId":"gc-present","cwd":`+quoteJSONString(grokWorkDir)+`}}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{grokRoot}, "grok/tmux-cli", grokWorkDir, "gc-present")
+		if exists || probeable {
+			t.Fatalf("HasKeyedTranscript(grok) = (exists=%v, probeable=%v), want (false, false)", exists, probeable)
+		}
+	})
+
+	t.Run("auggie not probeable", func(t *testing.T) {
+		auggieRoot := t.TempDir()
+		auggieWorkDir := filepath.Join(t.TempDir(), "auggie-project")
+		if err := os.MkdirAll(auggieWorkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(auggieRoot, "gc-present.jsonl")
+		if err := os.WriteFile(path, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"sessionId":"gc-present","cwd":`+quoteJSONString(auggieWorkDir)+`}}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{auggieRoot}, "auggie/tmux-cli", auggieWorkDir, "gc-present")
+		if exists || probeable {
+			t.Fatalf("HasKeyedTranscript(auggie) = (exists=%v, probeable=%v), want (false, false)", exists, probeable)
 		}
 	})
 
@@ -477,4 +803,12 @@ func TestHasKeyedTranscript(t *testing.T) {
 func md5Hex(value string) string {
 	sum := md5.Sum([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func quoteJSONString(value string) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
 }

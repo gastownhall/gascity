@@ -60,7 +60,7 @@ func TestFirstRootCommandMatchesPersistentScopeGrammar(t *testing.T) {
 	}
 }
 
-func TestRootCommandOptionsSkipPackDiscoveryOnlyForMetrics(t *testing.T) {
+func TestRootCommandOptionsSkipPackDiscoveryForPrivateHelpersAndMetrics(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -72,6 +72,10 @@ func TestRootCommandOptionsSkipPackDiscoveryOnlyForMetrics(t *testing.T) {
 		{name: "scoped metrics", args: []string{"--city", "/tmp/city", "--rig=tower", "metrics", "status"}, skip: true},
 		{name: "remote context metrics", args: []string{"--context=prod", "metrics", "status"}, skip: true},
 		{name: "remote URL metrics", args: []string{"--city-url", "https://city.example", "--city-name=remote", "metrics", "status"}, skip: true},
+		{name: "credential helper", args: []string{"git-credential", "get"}, skip: true},
+		{name: "dolt state helper", args: []string{"dolt-state", "allocate-port", "--city", "/tmp/city"}, skip: true},
+		{name: "scoped dolt config helper", args: []string{"--city", "/tmp/city", "dolt-config", "normalize-scope"}, skip: true},
+		{name: "beads store bridge helper", args: []string{"bd-store-bridge", "--dir", "/tmp/rig", "list"}, skip: true},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
 		{name: "after terminator", args: []string{"--", "metrics"}},

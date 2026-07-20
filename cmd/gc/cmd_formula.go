@@ -798,6 +798,10 @@ conflicting live workflow from the same source is an error.`,
 				return nil
 			}
 
+			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+			}
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
@@ -805,12 +809,46 @@ conflicting live workflow from the same source is an error.`,
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
-				Title: title,
-				Vars:  cookVars,
-			})
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			var result *molecule.Result
+			if isGraphFormula {
+				// Stamp the run root with its store/scope identity before
+				// instantiating, exactly as the --attach branch does via
+				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
+				// graph.v2 run root carries no gc.root_store_ref/gc.scope_kind, and
+				// the dashboard run-detail projection rejects the whole run with 422
+				// invalid_snapshot (sr-xz9f).
+				storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
+				}
+				if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
+				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("decorate formulas v2 recipe: %w", err))
+				}
+				if graphRootKey != "" {
+					unlock := graphv2.LockKey(graphRootKey)
+					defer unlock()
+				}
+				result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+					Title:          title,
+					Vars:           cookVars,
+					IdempotencyKey: graphRootKey,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+			} else {
+				result, err = molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
+					Title: title,
+					Vars:  cookVars,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)

@@ -25,7 +25,6 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 		"TestCapstoneIntegrationRealMinter",
 		"TestControllerDiscoversAddedCronOrderWithoutRestart",
 		"TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",
-		"TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof",
 		"TestPhase2WorkerCoreRealTransportProof",
 	} {
 		if !strings.Contains(invocation, testName) {
@@ -69,7 +68,6 @@ func newIntegrationShardFixture(t *testing.T, extraTaggedTests []string) integra
 		"TestCapstoneIntegrationRealMinter",
 		"TestControllerDiscoversAddedCronOrderWithoutRestart",
 		"TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",
-		"TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof",
 		"TestPhase2WorkerCoreRealTransportProof",
 	}, extraTaggedTests...)
 	var taggedOutput strings.Builder
