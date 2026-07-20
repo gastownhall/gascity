@@ -153,6 +153,20 @@ don't sling these manually:
 - **mol-digest-generate** — Periodic activity digest mailed to the mayor
 - **mol-shutdown-dance** — Due process for stuck agents (interrogate → execute → epitaph)
 
+### Core pack formulas (other)
+
+These ship in the core pack alongside the formulas above but are not part of
+the built-in work-lifecycle or patrol-loop groups:
+
+- **mol-prompt-synth** — Generates an agent prompt template from a pre-rendered
+  meta-prompt; the formula side of `gc prompt synth --writer-agent <name>`.
+- **mol-review-quorum** — Review quorum scaffold: fans out read-only reviewer
+  lanes (variable-configured providers/models/targets) and routes a synthesis
+  agent over their durable structured outputs.
+- **mol-scoped-work** — Graph-first worktree lifecycle: an explicit work DAG
+  with a durable body scope bead, first-class independently-routable step
+  beads, and continuation metadata for same-session execution.
+
 ## Convoys (grouped work)
 
 ```
@@ -163,9 +177,9 @@ gc convoy list                                        # List active convoys
 gc convoy status <id>                                 # Show convoy progress + metadata
 gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy
-gc convoy check <id>                                  # Check if all beads done
+gc convoy check                                       # MUTATES: scan all open convoys city-wide and auto-close any where all children are resolved
 gc convoy stranded                                    # Find convoys with no progress
-gc convoy autoclose                                   # Close convoys where all beads done
+gc convoy autoclose <bead-id>                         # Auto-close completed convoys for one closed bead (scoped)
 ```
 
 Migration note:
@@ -177,6 +191,6 @@ Migration note:
 gc order list                     # List order rules
 gc order show <name>              # Show order definition
 gc order run <name>               # Manually trigger an order
-gc order check <name>             # Check if trigger conditions are met
+gc order check                    # Evaluate trigger conditions for ALL orders, show which are due
 gc order history <name>           # Show order run history
 ```

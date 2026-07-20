@@ -10,8 +10,10 @@ convoys, agents, mail, rigs, sessions, and events in real time.
 
 ## Prerequisites
 
-The dashboard is a separate web server. It needs a GC API server to talk to,
-but it no longer has to be launched from inside a city directory.
+The dashboard SPA is embedded in the `gc` binary and served same-origin by a
+GC API server — it is no longer a separate static server. It needs a GC API
+server to talk to, but it no longer has to be launched from inside a city
+directory.
 
 ### Standalone city mode
 
@@ -25,7 +27,9 @@ port = 9443
 ```
 
 Then start the city normally with `gc start`. The API server starts with the
-controller on that port.
+controller on that port. This `[api]` port is the CITY's API server, not a
+dashboard port — the dashboard itself has no port flag (see below); it only
+needs to know which API server to talk to.
 
 ### Supervisor mode
 
@@ -43,12 +47,16 @@ routes requests through `/v0/city/{name}/...`.
 ## Starting the dashboard
 
 ```
-gc dashboard                               # Supervisor-only view from anywhere
-gc dashboard --port 3000                  # Same, custom dashboard port
-gc dashboard serve                        # Explicit subcommand; same discovery
+gc dashboard                               # Resolve + open the dashboard in your browser
+gc dashboard --no-open                    # Print the dashboard URL instead of opening a browser
+gc dashboard serve                        # Print where the web dashboard is served
 gc dashboard --city /path/to/city         # Optional city context for standalone discovery
-gc dashboard --api http://127.0.0.1:8372 # Optional override
+gc dashboard --api http://127.0.0.1:8372 # Optional API server override
 ```
+
+There is no `--port` flag: the dashboard SPA is embedded in the `gc` binary and
+served same-origin by the API server (supervisor or standalone), not by a
+separate server with its own port.
 
 `gc dashboard` auto-discovers the right API server in this order:
 
