@@ -596,11 +596,12 @@ var (
 	waitTestRealBDCached   string
 	waitTestRealBDErr      error
 
-	managedBdWaitTemplateOnce sync.Once
-	managedBdWaitTemplatePath string
-	managedBdWaitTemplateErr  error
+	managedBdWaitTemplateOnce sync.Once //nolint:unused // exercised by native_dolt_rebind_integration_test.go
+	managedBdWaitTemplatePath string    //nolint:unused // exercised by native_dolt_rebind_integration_test.go
+	managedBdWaitTemplateErr  error     //nolint:unused // exercised by native_dolt_rebind_integration_test.go
 )
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func waitTestEnv(overrides map[string]string) []string {
 	env := map[string]string{}
 	for _, entry := range sanitizedBaseEnv() {
@@ -806,6 +807,7 @@ prefix = "fe"
 	return rigPath, nil
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 	t.Helper()
 	managedBdWaitTemplateOnce.Do(func() {
@@ -2750,6 +2752,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	return cityPath
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd/dolt lifecycle city; run make test-cmd-gc-process for full coverage")

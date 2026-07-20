@@ -9,6 +9,7 @@ import (
 	"testing"
 )
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 var (
 	testGCBinaryOnce sync.Once
 	testGCBinaryPath string
@@ -31,6 +32,7 @@ func reexecGCTestBinaryForTests(t *testing.T) string {
 	return gcPath
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func currentGCBinaryForTests(t *testing.T) string {
 	t.Helper()
 	testGCBinaryOnce.Do(func() {
