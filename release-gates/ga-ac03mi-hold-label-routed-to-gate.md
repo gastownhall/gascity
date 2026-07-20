@@ -2,7 +2,7 @@
 
 Bead: ga-ac03mi
 Branch: builder/ga-fm2vgd.1-hold-label-routing-doctor-check
-Head: cc35c4658ed5b6f1140e09ef4bc0299f9b73ee5b
+Head: 0e8641d5908d6746269df5906ecd7b1afe1d9967
 Base: origin/main b7d312eb5ae026d87ed655908de9d090e7a4f07a
 Date: 2026-07-18
 
@@ -34,6 +34,7 @@ tests plus the repo fast baseline.
 - `cmd/gc/doctor_hold_label_routed_to.go`
 - `cmd/gc/doctor_hold_label_routed_to_test.go`
 - `cmd/gc/testdata/doctor_check_names.golden`
+- `release-gates/ga-ac03mi-hold-label-routed-to-gate.md`
 
 ## Commands Run
 
