@@ -106,6 +106,15 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 func (o *providerDrainOps) isDrainAcked(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_DRAIN_ACK")
 	if err != nil {
+		if runtime.IsSessionGone(err) {
+			// The session called drain-ack and exited before this read —
+			// the ack lives only in ephemeral runtime metadata that died
+			// with the process. Treat a gone session as acked so the
+			// reconciler's drain-ack fast path still closes the bead
+			// instead of leaving a dead session counted toward pool
+			// demand (#4448).
+			return true, nil
+		}
 		return false, fmt.Errorf("reading GC_DRAIN_ACK: %w", err)
 	}
 	return val == "1", nil

@@ -1103,6 +1103,27 @@ func TestProviderDrainOpsIsRestartRequestedTreatsGoneSessionAsCleared(t *testing
 	}
 }
 
+// TestProviderDrainOpsIsDrainAckedTreatsGoneSessionAsAcked pins issue #4448:
+// a session that calls "gc runtime drain-ack" and then exits before the
+// reconciler's next tick leaves GC_DRAIN_ACK unreadable (the metadata dies
+// with the process). isDrainAcked must treat that as acked — mirroring
+// isRestartRequested's existing gone-session handling — so the reconciler's
+// drain-ack fast path still closes the bead instead of silently skipping it
+// and leaving a dead session counted toward pool demand.
+func TestProviderDrainOpsIsDrainAckedTreatsGoneSessionAsAcked(t *testing.T) {
+	dops := newDrainOps(&getMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  runtime.ErrSessionNotFound,
+	})
+	acked, err := dops.isDrainAcked("worker")
+	if err != nil {
+		t.Fatalf("isDrainAcked returned gone-session error: %v", err)
+	}
+	if !acked {
+		t.Fatal("isDrainAcked = false, want true for gone session")
+	}
+}
+
 func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	// Verify the cobra command accepts no args.
 	var stdout, stderr bytes.Buffer
