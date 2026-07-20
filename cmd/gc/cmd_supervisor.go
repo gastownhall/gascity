@@ -1627,6 +1627,44 @@ type initFailRecord struct {
 
 const staleCityDirAbsentThreshold = 3
 
+// structuralInitFailureBackoff is the retry interval for init failures
+// classified as structural (see isStructuralInitFailureMessage) -- far
+// longer than the transient-failure ceiling, since retrying sooner cannot
+// help: the failure requires an out-of-band fix no in-city action can
+// trigger (#4484).
+const structuralInitFailureBackoff = time.Hour
+
+// isStructuralInitFailureMessage reports whether msg indicates an init
+// failure that no amount of retrying -- or editing city.toml -- can ever
+// resolve, e.g. a bd schema-version gate ("database is at vN, binary
+// knows up to vM"), which requires an out-of-band bd binary upgrade.
+// Mirrors runtime.IsSessionGone's message-substring classification style
+// for external-subprocess errors with no typed sentinel available.
+func isStructuralInitFailureMessage(msg string) bool {
+	return strings.Contains(msg, "schema version mismatch")
+}
+
+// initFailureBackoffDelay computes the retry backoff for the count-th
+// consecutive init failure. Transient failures use capped exponential
+// backoff (10s doubling to a 5-minute ceiling, unchanged from before
+// #4484); structural failures (see isStructuralInitFailureMessage) back
+// off to structuralInitFailureBackoff immediately, since the standard
+// escalation cannot help a failure retrying will never resolve.
+func initFailureBackoffDelay(count int, msg string) time.Duration {
+	if isStructuralInitFailureMessage(msg) {
+		return structuralInitFailureBackoff
+	}
+	exp := count - 1
+	if exp > 5 {
+		exp = 5
+	}
+	delay := time.Duration(10<<exp) * time.Second
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	return delay
+}
+
 // reconcileCities compares the registry against running cities and
 // starts/stops as needed. All state access goes through the cityRegistry.
 func reconcileCities(
@@ -1893,18 +1931,15 @@ func reconcileCities(
 				}
 				ifrec.count++
 				ifrec.dirAbsent = 0
-				exp := ifrec.count - 1
-				if exp > 5 {
-					exp = 5
-				}
-				delay := time.Duration(10<<exp) * time.Second
-				if delay > 5*time.Minute {
-					delay = 5 * time.Minute
-				}
+				delay := initFailureBackoffDelay(ifrec.count, msg)
 				ifrec.backoff = time.Now().Add(delay)
 				ifrec.configMod = configMod
 				ifrec.lastError = msg
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': init failure #%d, next retry in %s\n", cityName, ifrec.count, delay) //nolint:errcheck
+				if isStructuralInitFailureMessage(msg) {
+					fmt.Fprintf(stderr, "gc supervisor: city '%s': STRUCTURAL init failure (retrying cannot resolve this — needs an out-of-band fix), next check in %s\n", cityName, delay) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "gc supervisor: city '%s': init failure #%d, next retry in %s\n", cityName, ifrec.count, delay) //nolint:errcheck
+				}
 			})
 		}
 
