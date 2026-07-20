@@ -153,11 +153,13 @@ func TestMain(m *testing.M) {
 		}
 		// Pre-sweep: kill this run's root plus stale sibling orphans.
 		tmuxtest.KillAllTestSessions(&mainTB{})
-	} else {
-		// Best-effort pre-sweep of stale subprocess integration cities and
-		// their descendant pollers from prior interrupted runs.
-		sweepSubprocessTestProcesses()
 	}
+	// Best-effort pre-sweep of stale "gc supervisor run" / control-dispatcher
+	// processes left by a prior interrupted or timed-out run. This is not
+	// gated to the subprocess provider: both providers boot the same shared
+	// TestMain supervisor via gcBinary/testGCHome, and a `go test -timeout`
+	// panic bypasses per-test t.Cleanup for either one.
+	sweepSubprocessTestProcesses()
 	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
 	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
 	// concurrent runs are spared (issue #3640).
@@ -255,9 +257,8 @@ func TestMain(m *testing.M) {
 	// Post-sweep: clean up any sessions that survived individual test cleanup.
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})
-	} else {
-		sweepSubprocessTestProcesses()
 	}
+	sweepSubprocessTestProcesses()
 
 	_ = os.RemoveAll(tmpDir)
 	if tmuxSocketParent != "" {
@@ -269,8 +270,15 @@ func TestMain(m *testing.M) {
 func installIntegrationSignalSweeper(subprocess bool) func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	// SIGQUIT is what `go test -timeout` raises; without it a timed-out run
-	// would leak its dolt sql-server (issue #3640).
+	// Catches an external interrupt (Ctrl-C, `kill`, a CI job cancellation)
+	// so the run's supervisor/dolt/tmux state gets swept before the process
+	// exits. NOTE: `go test -timeout` does NOT deliver SIGQUIT (or any other
+	// signal) to this process — it fires a panic() from an internal timer
+	// goroutine and the runtime calls os.Exit(2) directly, so this handler
+	// never runs on a timeout (verified: a SIGQUIT/SIGTERM/SIGINT listener
+	// registered in a test process does not fire when that same process is
+	// run under `-timeout` and the deadline elapses). A timed-out run's
+	// orphans are only caught by the next run's pre-sweep in TestMain.
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		select {
@@ -299,7 +307,6 @@ func sweepIntegrationProcesses(subprocess bool) {
 	}
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})
-		return
 	}
 	sweepSubprocessTestProcesses()
 }
@@ -610,7 +617,21 @@ func waitForPIDsReaped(killSet map[int]bool) {
 	}
 }
 
+// readProcessSnapshot returns the live process table. /proc gives an exact,
+// dependency-free read on Linux (CI); macOS has no /proc, so readProcessSnapshot
+// falls back to shelling out to `ps` there. Without the fallback, every sweep
+// built on this snapshot (sweepSubprocessTestProcesses, subprocessTestKillSet)
+// silently no-ops on macOS dev boxes: orphaned "gc supervisor run" processes
+// from a timed-out or killed run are never reaped, on that run or any later
+// one (issue: orphan supervisor from rest-full ran 49+ minutes in a temp city).
 func readProcessSnapshot() map[int]procSnapshot {
+	if procs := readProcessSnapshotProc(); procs != nil {
+		return procs
+	}
+	return readProcessSnapshotPS()
+}
+
+func readProcessSnapshotProc() map[int]procSnapshot {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
@@ -643,6 +664,59 @@ func readProcessSnapshot() map[int]procSnapshot {
 		procs[pid] = procSnapshot{pid: pid, ppid: ppid, cmd: cmd}
 	}
 	return procs
+}
+
+// readProcessSnapshotPS shells out to `ps` (BSD/macOS and Linux both support
+// this invocation) to build the same pid->{ppid,cmd} view /proc gives for
+// free on Linux. Best-effort: a `ps` failure returns nil, same as a missing
+// /proc, so callers treat "can't determine the process table" uniformly.
+func readProcessSnapshotPS() map[int]procSnapshot {
+	out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return nil
+	}
+	procs := make(map[int]procSnapshot)
+	for _, line := range strings.Split(string(out), "\n") {
+		pid, ppid, cmd, ok := parsePSLine(line)
+		if !ok {
+			continue
+		}
+		procs[pid] = procSnapshot{pid: pid, ppid: ppid, cmd: cmd}
+	}
+	return procs
+}
+
+// parsePSLine parses one line of `ps -axwwo pid=,ppid=,command=` output.
+// It scans by whitespace runs for the first two fields (pid, ppid) rather
+// than splitting the whole line, so internal spaces in the command string
+// (arguments, paths) survive intact.
+func parsePSLine(line string) (pid, ppid int, cmd string, ok bool) {
+	rest := strings.TrimLeft(line, " \t")
+	pidStr, rest := nextPSField(rest)
+	ppidStr, rest := nextPSField(rest)
+	cmd = strings.TrimSpace(rest)
+	if pidStr == "" || ppidStr == "" || cmd == "" {
+		return 0, 0, "", false
+	}
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	ppid, err = strconv.Atoi(ppidStr)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	return pid, ppid, cmd, true
+}
+
+// nextPSField splits s on the first run of whitespace, returning the field
+// before it and the remainder (with leading whitespace trimmed).
+func nextPSField(s string) (field, rest string) {
+	i := strings.IndexAny(s, " \t")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], strings.TrimLeft(s[i:], " \t")
 }
 
 func parsePPid(status string) int {
@@ -2020,6 +2094,82 @@ func TestSubprocessTestKillSetIncludesRootsDescendantsAndLeaves(t *testing.T) {
 	}
 	if got[40] {
 		t.Fatalf("kill set unexpectedly included unrelated pid 40: %#v", got)
+	}
+}
+
+// TestParsePSLineSurvivesInternalWhitespaceAndRejectsMalformedInput is the
+// falsifiable-floor check for the macOS ps(1) fallback: it must parse real
+// `ps -axwwo pid=,ppid=,command=` rows (including a multi-arg orphaned
+// supervisor command, the exact shape reported for issue's orphan pid) and
+// must reject rows that don't have the pid/ppid/command shape, so a future
+// ps(1) output-format change fails loudly instead of silently returning an
+// empty, "looks clean" process table.
+func TestParsePSLineSurvivesInternalWhitespaceAndRejectsMalformedInput(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		wantOK   bool
+		wantPID  int
+		wantPPID int
+		wantCmd  string
+	}{
+		{
+			name:     "orphaned supervisor with args and spaces",
+			line:     "62765     1 /var/folders/2t/xxx/T/gc-integration-49858-3331992158/bin/gc supervisor run",
+			wantOK:   true,
+			wantPID:  62765,
+			wantPPID: 1,
+			wantCmd:  "/var/folders/2t/xxx/T/gc-integration-49858-3331992158/bin/gc supervisor run",
+		},
+		{
+			name:     "leading whitespace from column padding",
+			line:     "   104     1 /usr/libexec/logd",
+			wantOK:   true,
+			wantPID:  104,
+			wantPPID: 1,
+			wantCmd:  "/usr/libexec/logd",
+		},
+		{name: "empty line", line: "", wantOK: false},
+		{name: "header-only garbage", line: "PID PPID COMMAND", wantOK: false},
+		{name: "missing command", line: "10 1", wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pid, ppid, cmd, ok := parsePSLine(c.line)
+			if ok != c.wantOK {
+				t.Fatalf("parsePSLine(%q) ok = %v, want %v", c.line, ok, c.wantOK)
+			}
+			if !c.wantOK {
+				return
+			}
+			if pid != c.wantPID || ppid != c.wantPPID || cmd != c.wantCmd {
+				t.Fatalf("parsePSLine(%q) = (%d, %d, %q), want (%d, %d, %q)",
+					c.line, pid, ppid, cmd, c.wantPID, c.wantPPID, c.wantCmd)
+			}
+		})
+	}
+}
+
+// TestReadProcessSnapshotFallsBackToPSAndFindsRealProcesses is the
+// known-positive control for the fallback path added by this change: on a
+// host with no /proc (every macOS dev box, including CI running locally
+// here), readProcessSnapshotProc must return nil, and readProcessSnapshot's
+// ps(1) fallback must come back non-empty and contain this test binary's own
+// pid — proving the query is not a silently-blind zero.
+func TestReadProcessSnapshotFallsBackToPSAndFindsRealProcesses(t *testing.T) {
+	if _, err := os.Stat("/proc"); err == nil {
+		t.Skip("host has /proc; this test targets the no-/proc (macOS) fallback path")
+	}
+	if procs := readProcessSnapshotProc(); procs != nil {
+		t.Fatalf("readProcessSnapshotProc() = %v entries on a host with no /proc, want nil", len(procs))
+	}
+	procs := readProcessSnapshot()
+	if len(procs) == 0 {
+		t.Fatal("readProcessSnapshot() returned no processes via the ps(1) fallback; known-positive control failed")
+	}
+	self := os.Getpid()
+	if _, ok := procs[self]; !ok {
+		t.Fatalf("readProcessSnapshot() via ps(1) fallback did not include this process's own pid %d among %d entries", self, len(procs))
 	}
 }
 
