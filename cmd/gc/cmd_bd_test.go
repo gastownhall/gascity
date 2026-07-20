@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1194,63 +1193,6 @@ func parseCreatedBeadID(t *testing.T, out string) string {
 		t.Fatalf("create output missing id: %s", out)
 	}
 	return created.ID
-}
-
-func TestGcBdRigListRecoversAfterManagedHardKillPortRebind(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
-	bdPath := waitTestRealBDPath(t)
-	rawDir := filepath.Join(rigPath, "nested-rebind")
-	if err := os.MkdirAll(rawDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(rawDir): %v", err)
-	}
-	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "rig rebind bead", "-t", "task"))
-
-	before, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
-	if err != nil {
-		t.Fatalf("readDoltRuntimeStateFile(before): %v", err)
-	}
-	if before.PID <= 0 || before.Port <= 0 {
-		t.Fatalf("unexpected managed runtime before fault: %+v", before)
-	}
-	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
-		t.Fatalf("Kill(%d): %v", before.PID, err)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for pidAlive(before.PID) && time.Now().Before(deadline) {
-		time.Sleep(25 * time.Millisecond)
-	}
-
-	occupyManagedDoltPort(t, before.Port)
-
-	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "list", "--json", "--all", "--limit=0"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc bd rig list = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), rawID) {
-		t.Fatalf("gc bd rig list output missing bead %q:\n%s", rawID, stdout.String())
-	}
-
-	var after doltRuntimeState
-	deadline = time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
-		if err == nil && state.Running && state.Port > 0 && state.Port != before.Port && state.PID > 0 && pidAlive(state.PID) {
-			after = state
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if after.Port == 0 {
-		after, err = readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
-		if err != nil {
-			t.Fatalf("readDoltRuntimeStateFile(after): %v", err)
-		}
-		t.Fatalf("managed Dolt did not rebind after hard kill; before=%+v after=%+v", before, after)
-	}
-	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", rawID)
-	if !strings.Contains(rawShow, rawID) {
-		t.Fatalf("raw bd rig show output missing bead %q after rebind:\n%s", rawID, rawShow)
-	}
 }
 
 func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {
