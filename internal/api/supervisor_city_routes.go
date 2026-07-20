@@ -14,11 +14,13 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":      SessionStreamMessageEvent{},
-		"message":   SessionStreamRawMessageEvent{},
-		"activity":  SessionActivityEvent{},
-		"pending":   runtime.PendingInteraction{},
-		"heartbeat": HeartbeatEvent{},
+		"turn":            SessionStreamMessageEvent{},
+		"message":         SessionStreamRawMessageEvent{},
+		"structured":      SessionStreamStructuredMessageEvent{},
+		"activity":        SessionActivityEvent{},
+		"pending":         runtime.PendingInteraction{},
+		"pending_cleared": SessionPendingClearedEvent{},
+		"heartbeat":       HeartbeatEvent{},
 	}
 }
 
@@ -379,7 +381,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/submit",
 		Summary:       "Submit a message to a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionSubmit)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "send-session-message",
@@ -387,7 +389,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/session/{id}/messages",
 		Summary:       "Send a message to a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
@@ -411,19 +413,19 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// Session SSE stream.
-	registerSSE(sm.humaAPI, huma.Operation{
+	registerSSEStringID(sm.humaAPI, huma.Operation{
 		OperationID: "stream-session",
 		Method:      http.MethodGet,
 		Path:        cityScopePrefix + "/session/{id}/stream",
 		Summary:     "Stream session output in real time",
 		Description: "Server-Sent Events stream of session transcript updates. " +
-			"Streams turns (conversation format) or raw messages (JSONL format) " +
+			"Streams turns (conversation format), raw messages (JSONL format), or structured messages " +
 			"based on the format query parameter. Emits activity and pending events " +
 			"for tool approval prompts.",
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),
 	}, sessionStreamEventMap(),
 		sseCityPrecheck(sm, (*Server).checkSessionStream),
-		sseCityStream(sm, (*Server).streamSession))
+		sseCityStringIDStream(sm, (*Server).streamSession))
 
 	// Event SSE stream (per-city).
 	registerSSE(sm.humaAPI, huma.Operation{

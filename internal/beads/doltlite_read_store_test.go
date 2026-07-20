@@ -12,10 +12,12 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	sqlite "modernc.org/sqlite"
 )
 
 func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
@@ -1918,5 +1920,178 @@ func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
 	w, diag, err = ResolveConditionalWriter(store)
 	if w != nil || diag == nil || !IsConditionalWritesRequired(err) {
 		t.Fatalf("require over doltlite = (%v, %v, %v), want (nil, diag, typed refusal)", w, diag, err)
+	}
+}
+
+// TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
+// mechanism must execute a real SQLite REINDEX against the physical
+// .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not
+// satisfy, since it speaks Dolt/MySQL). After the rebuild the store stays a
+// valid SQLite database whose secondary index returns correct results.
+func TestDoltliteReindexStore(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT)`,
+		`CREATE INDEX idx_issues_status ON issues(status)`,
+		`INSERT INTO issues (id, status) VALUES ('a','open'),('b','open'),('c','closed')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	check, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer check.Close() //nolint:errcheck // test cleanup
+
+	var integrity string
+	if err := check.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check = %q, want ok", integrity)
+	}
+
+	var openCount int
+	if err := check.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'open'").Scan(&openCount); err != nil {
+		t.Fatalf("indexed count: %v", err)
+	}
+	if openCount != 2 {
+		t.Fatalf("open issues via index = %d, want 2", openCount)
+	}
+}
+
+// reindexStaleCollSeq gives each stale-index fixture a unique collation name.
+// modernc.org/sqlite registers collations globally for the whole process, so a
+// reused name would let a prior run's closure (and its flipped ordering) leak
+// into the next, making the fixture non-deterministic under -count>1.
+var reindexStaleCollSeq atomic.Int64
+
+// TestDoltliteReindexStoreHealsStaleIndex is the regression proof ga-7hei
+// actually needs: it fails unless ReindexDoltliteStore executes a real SQLite
+// REINDEX. It builds a genuinely stale secondary index — the exact condition
+// REINDEX exists to repair, per SQLite's docs: an index built under one
+// collation definition goes stale when that definition changes. We register a
+// collation whose ordering flips after the index is populated, so the persisted
+// index is ordered per the old definition while SQLite now compares per the new
+// one. `PRAGMA integrity_check` then reports the index as corrupt, and only a
+// real REINDEX rebuilds it. Had ReindexDoltliteStore opened the database and
+// skipped db.Exec("REINDEX"), the corruption would survive and the final
+// assertion would fail — the gap the previous healthy-fixture test could not
+// catch.
+func TestDoltliteReindexStoreHealsStaleIndex(t *testing.T) {
+	collName := fmt.Sprintf("gasstalecoll%d", reindexStaleCollSeq.Add(1))
+	var reversed atomic.Bool
+	if err := sqlite.RegisterCollationUtf8(collName, func(a, b string) int {
+		c := strings.Compare(a, b)
+		if reversed.Load() {
+			return -c
+		}
+		return c
+	}); err != nil {
+		t.Fatalf("register collation: %v", err)
+	}
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+
+	// Build the index while the collation sorts ascending.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT COLLATE ` + collName + `)`,
+		`CREATE INDEX idx_issues_status ON issues(status COLLATE ` + collName + `)`,
+		`INSERT INTO issues (id, status) VALUES ('a','alpha'),('b','bravo'),('c','charlie'),('d','delta'),('e','echo')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	// Change the collation's definition. The persisted index is now ordered per
+	// the old ascending definition, but SQLite compares per the new one.
+	reversed.Store(true)
+
+	integrityCheck := func(tag string) string {
+		c, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+		if err != nil {
+			t.Fatalf("%s open: %v", tag, err)
+		}
+		defer c.Close() //nolint:errcheck // test cleanup
+		var result string
+		if err := c.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+			t.Fatalf("%s integrity_check: %v", tag, err)
+		}
+		return result
+	}
+
+	// Precondition: the fixture is genuinely stale. Without this guard, a future
+	// change that stops producing staleness would let the post-reindex "ok"
+	// assertion pass trivially, silently regressing this back to the toothless
+	// healthy-store check it strengthens.
+	if before := integrityCheck("before"); before == "ok" {
+		t.Fatalf("precondition failed: expected a stale index before reindex, got integrity_check=ok")
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	if after := integrityCheck("after"); after != "ok" {
+		t.Fatalf("integrity_check after reindex = %q, want ok (REINDEX must rebuild the stale index)", after)
+	}
+}
+
+// TestDoltliteReindexStoreRejectsNonDoltlite proves the reindex path refuses a
+// store that metadata.json does not identify as DoltLite, rather than silently
+// operating on the wrong backend.
+func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	meta := []byte(`{"backend":"dolt","database":"ga"}`)
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if err := ReindexDoltliteStore(dir); err == nil {
+		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
 	}
 }

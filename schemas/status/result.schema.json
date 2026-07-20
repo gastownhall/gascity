@@ -236,6 +236,17 @@
           "type": "integer"
         }
       }
+    },
+    "partial": {
+      "type": "boolean",
+      "description": "True when the result is intentionally degraded because one or more live status probes timed out or otherwise failed."
+    },
+    "partial_errors": {
+      "type": "array",
+      "description": "Human-readable diagnostics explaining omitted or unknown portions of a partial status result.",
+      "items": {
+        "type": "string"
+      }
     }
   }
 }

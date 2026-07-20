@@ -3026,7 +3026,7 @@ func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
 	defer func() { nudgeObserveTarget = origObserve }()
 
 	var stdout, stderr bytes.Buffer
-	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, &stdout, &stderr)
+	code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdNudgePoll = %d, want 0 (transient observe error with queued work pending must not kill the poller); stderr=%s", code, stderr.String())
 	}
@@ -5090,4 +5090,50 @@ func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveNudgePollInterval(t *testing.T) {
+	writeCity := func(t *testing.T, sessionBlock string) string {
+		t.Helper()
+		dir := t.TempDir()
+		toml := "[workspace]\nname = \"test\"\n" + sessionBlock + "\n[[agent]]\nname = \"a\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatalf("write city.toml: %v", err)
+		}
+		return dir
+	}
+
+	t.Run("config knob applies when flag not explicit", func(t *testing.T) {
+		dir := writeCity(t, "[session]\nnudge_poll_interval = \"15s\"\n")
+		if got := resolveNudgePollInterval(dir, defaultNudgePollInterval, false); got != 15*time.Second {
+			t.Fatalf("resolveNudgePollInterval = %v, want 15s", got)
+		}
+	})
+
+	t.Run("explicit flag wins over config", func(t *testing.T) {
+		dir := writeCity(t, "[session]\nnudge_poll_interval = \"15s\"\n")
+		if got := resolveNudgePollInterval(dir, 7*time.Second, true); got != 7*time.Second {
+			t.Fatalf("resolveNudgePollInterval = %v, want 7s (explicit flag)", got)
+		}
+	})
+
+	t.Run("default when config unset", func(t *testing.T) {
+		dir := writeCity(t, "")
+		if got := resolveNudgePollInterval(dir, defaultNudgePollInterval, false); got != defaultNudgePollInterval {
+			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
+		}
+	})
+
+	t.Run("default when config invalid", func(t *testing.T) {
+		dir := writeCity(t, "[session]\nnudge_poll_interval = \"banana\"\n")
+		if got := resolveNudgePollInterval(dir, defaultNudgePollInterval, false); got != defaultNudgePollInterval {
+			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
+		}
+	})
+
+	t.Run("default when city config unloadable", func(t *testing.T) {
+		if got := resolveNudgePollInterval(t.TempDir(), defaultNudgePollInterval, false); got != defaultNudgePollInterval {
+			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
+		}
+	})
 }

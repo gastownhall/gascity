@@ -1,10 +1,8 @@
-cmd/gc/feature_flags.go: SetFormulaV2Enabled
-cmd/gc/feature_flags.go: SetGraphApplyEnabled
-internal/api/server.go: IsFormulaV2Enabled
-internal/api/server.go: IsGraphApplyEnabled
-internal/api/server.go: SetFormulaV2Enabled
-internal/api/server.go: SetGraphApplyEnabled
 internal/dispatch/ralph.go: IsGraphApplyEnabled
+internal/featureflags/featureflags.go: IsFormulaV2Enabled
+internal/featureflags/featureflags.go: IsGraphApplyEnabled
+internal/featureflags/featureflags.go: SetFormulaV2Enabled
+internal/featureflags/featureflags.go: SetGraphApplyEnabled
 internal/formula/compile.go: IsFormulaV2Enabled
 internal/formula/compile.go: SetFormulaV2Enabled
 internal/formula/compile.go: formulaV2Enabled

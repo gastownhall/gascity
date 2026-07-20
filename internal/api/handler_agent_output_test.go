@@ -15,7 +15,25 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
+
+func TestHistorySnapshotRawMessagesEmitsEachProviderRecordOnce(t *testing.T) {
+	repeated := json.RawMessage(`{"type":"ToolResults"}`)
+	snapshot := &worker.HistorySnapshot{Entries: []worker.HistoryEntry{
+		{ID: "child-1", Provenance: worker.Provenance{Raw: repeated, RawRecordID: "record-1"}},
+		{ID: "child-2", Provenance: worker.Provenance{Raw: repeated, RawRecordID: "record-1"}},
+		{ID: "child-3", Provenance: worker.Provenance{Raw: repeated, RawRecordID: "record-2"}},
+	}}
+
+	rawMessages, ids := historySnapshotRawMessages(snapshot)
+	if len(rawMessages) != 2 {
+		t.Fatalf("raw messages = %d, want two repeated source records", len(rawMessages))
+	}
+	if got, want := strings.Join(ids, ","), "child-2,child-3"; got != want {
+		t.Fatalf("raw cursor IDs = %q, want final child of each source record %q", got, want)
+	}
+}
 
 // writeSessionJSONL creates a JSONL session file at the slug path for
 // the given workDir.

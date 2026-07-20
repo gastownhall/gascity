@@ -70,12 +70,20 @@ func TestCmdGCTestTempRootPrefixUsesShardPrefix(t *testing.T) {
 func TestCmdGCTmuxSocketRootUsesShortPath(t *testing.T) {
 	longMacRoot := filepath.Join("/private/var/folders/pm/cmklcsfj60nd7nfc79g8xmbc0000gn/T", "gcx12345-1234567890")
 
-	root, cleanupRoot, err := cmdGCTmuxSocketRoot(longMacRoot)
+	root, cleanupRoot, sentinel, err := cmdGCTmuxSocketRoot(longMacRoot)
 	if err != nil {
 		t.Fatalf("cmdGCTmuxSocketRoot: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(cleanupRoot) })
+	t.Cleanup(func() {
+		if sentinel != nil {
+			_ = sentinel.Close()
+		}
+		_ = os.RemoveAll(cleanupRoot)
+	})
 
+	if sentinel == nil {
+		t.Fatal("cmdGCTmuxSocketRoot: sentinel = nil, want held alive sentinel")
+	}
 	if !strings.HasPrefix(root, "/tmp/gct-") {
 		t.Fatalf("tmux socket root = %q, want short /tmp/gct-* root", root)
 	}

@@ -260,6 +260,12 @@ func (f *Factory) TailMeta(path string) (*TranscriptTailMeta, error) {
 	return f.Adapter().TailMeta(path)
 }
 
+// TailMetaForProvider reads model/context metadata using the provider's
+// transcript schema while preserving TailMeta as the compatibility path.
+func (f *Factory) TailMetaForProvider(provider, path string) (*TranscriptTailMeta, error) {
+	return f.Adapter().TailMetaForProvider(provider, path)
+}
+
 // AgentMappings lists subagent transcript mappings for a parent transcript.
 func (f *Factory) AgentMappings(path string) ([]AgentMapping, error) {
 	return f.Adapter().AgentMappings(path)

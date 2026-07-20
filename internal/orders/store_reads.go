@@ -98,6 +98,11 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 		Limit:         limit,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
+		// Aggregate read: the rows fold into entries[order] = max(CreatedAt), so
+		// the backing's created-desc tie-break at the limit boundary is
+		// irrelevant. Opt into the bounded backing limit to keep the fetch off
+		// the full retained corpus (sr-dp9o).
+		AllowBackingCreatedLimit: true,
 	})
 	return decodeTrackingRuns(list), err
 }
@@ -353,6 +358,9 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
 			TierMode:      beads.TierBoth,
+			// Aggregate read: reduces to max(CreatedAt), so the backing tie-break
+			// at the boundary is irrelevant. Opt into the bounded backing limit.
+			AllowBackingCreatedLimit: true,
 		})
 		if err != nil {
 			if len(results) == 0 {
@@ -385,6 +393,16 @@ func (s *Store) Cursor(name string) EventCursor {
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
 			TierMode:      beads.TierBoth,
+			// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces
+			// to MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
+			// created_at sort key. The backing breaks created_at ties by id ASC, so a
+			// bounded backing created-desc read keeps the smaller-id members of the
+			// newest second and drops the larger ids; because seq is forward-only the
+			// max-seq run is exactly that newest largest-id row, so a bounded backing
+			// read could omit it and regress the event cursor into replaying consumed
+			// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
+			// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
+			// front (the Limit above is an exact client-side cap).
 		})
 		if err != nil {
 			if len(results) == 0 {

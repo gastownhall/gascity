@@ -78,7 +78,15 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
-	orderTrackingHistoryIndexLimit   = 2048
+	// orderTrackingHistoryIndexLimit bounds the per-tick cooldown-history
+	// index read (RecentRunsAll). Since created-order sorts push their limit
+	// to the backing search, this is the number of rows fetched AND hydrated
+	// every tick per store — 2048 cost ~0.64s/store/tick on a 22k-run
+	// retention corpus (sr-dp9o). 256 covers ~1h of runs at the srv city's
+	// peak cadence; an order whose last run is older than the window misses
+	// the index and pays one LIMIT-1 LastRun fallback (itself limit-pushed
+	// now), after which cachedLastRun remembers it across ticks and rebuilds.
+	orderTrackingHistoryIndexLimit   = 256
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 
@@ -594,12 +602,24 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			continue
 		}
+		// Thread the dispatch tick's context into the condition check so a
+		// shutdown, reload, or canceled tick interrupts a slow check promptly
+		// instead of waiting out its (now operator-configurable) check_timeout.
+		triggerOpts.ConditionCtx = ctx
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue
 		}
 		if !result.Due {
+			// A condition check killed by its deadline never proves its
+			// condition, so the order silently never fires. Surface that
+			// distinctly (normal "condition false" is not logged) so a check
+			// outgrowing its budget is diagnosable instead of invisible
+			// (ga-ocypq2). Raise the order's check_timeout to fix.
+			if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
+				logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
+			}
 			continue
 		}
 		if lastRunFromCache && orderTriggerUsesLastRun(a) {

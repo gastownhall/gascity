@@ -64,6 +64,12 @@ type RemoteOptions struct {
 	// Token, when non-nil, supplies the Authorization: Bearer <token> credential
 	// (consumed by an edge/proxy; the controller ignores Authorization).
 	Token TokenSource
+	// RefreshToken, when non-nil, force-mints a fresh bearer (bypassing any
+	// expiry cache). The transport calls it once on a 401 and retries the request
+	// with the new bearer, so an edge that rejects a still-unexpired token (key
+	// rotation, early revocation) recovers without a fresh gc invocation. Only
+	// applied to requests that carry no single-use X-GC-City-Write grant.
+	RefreshToken TokenSource
 	// Grant, when non-nil, mints an X-GC-City-Write grant for each mutating
 	// request (a direct hardened self-host). Reads never carry a grant.
 	Grant GrantSource
@@ -115,6 +121,42 @@ func NewRemoteCityScopedClient(baseURL, cityName string, opts RemoteOptions) (*C
 	}
 	c.cw = cw
 	return c, nil
+}
+
+// NewRemoteEventsClient builds a genclient for the events feed against a remote
+// city. It is backed by the NO-TIMEOUT stream HTTP client — a --follow SSE
+// stream must not be cut by the bounded REST timeout — and carries the same auth
+// as the REST client: the X-GC-Request CSRF header, an Authorization bearer from
+// opts.Token, and a 401 re-mint via opts.RefreshToken (wrapped into the stream
+// transport by newRemoteHTTPClients). It is the events path's authenticated
+// client for a --context/--city-url remote target. No X-GC-City-Write grant: the
+// events feed is read-only.
+func NewRemoteEventsClient(baseURL string, opts RemoteOptions) (*genclient.ClientWithResponses, error) {
+	_, stream, err := newRemoteHTTPClients(opts)
+	if err != nil {
+		return nil, err
+	}
+	genOpts := []genclient.ClientOption{
+		genclient.WithHTTPClient(stream),
+		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-GC-Request", "true")
+			return nil
+		}),
+	}
+	if opts.Token != nil {
+		tok := opts.Token
+		genOpts = append(genOpts, genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			t, terr := tok()
+			if terr != nil {
+				return terr
+			}
+			if t != "" {
+				req.Header.Set("Authorization", "Bearer "+t)
+			}
+			return nil
+		}))
+	}
+	return genclient.NewClientWithResponses(baseURL, genOpts...)
 }
 
 // remoteAuthEditor returns a genclient request editor that attaches a fresh
@@ -227,17 +269,67 @@ func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err er
 	if restTimeout <= 0 {
 		restTimeout = remoteRESTTimeout
 	}
+	// Wrap both transports so a 401 triggers one bearer re-mint + retry when a
+	// RefreshToken is supplied (no-op otherwise).
+	wrap := func(base http.RoundTripper) http.RoundTripper {
+		if opts.RefreshToken == nil {
+			return base
+		}
+		return &reauthRoundTripper{base: base, refresh: opts.RefreshToken}
+	}
 	rest = &http.Client{
 		Timeout:       restTimeout,
-		Transport:     newTransport(),
+		Transport:     wrap(newTransport()),
 		CheckRedirect: remoteCheckRedirect,
 	}
 	stream = &http.Client{
 		Timeout:       0, // never cap a long-lived SSE stream; see remoteStreamIdleTimeout
-		Transport:     newTransport(),
+		Transport:     wrap(newTransport()),
 		CheckRedirect: remoteCheckRedirect,
 	}
 	return rest, stream, nil
+}
+
+// reauthRoundTripper retries a request ONCE on a 401 after force-minting a fresh
+// bearer, so an edge that rejects a still-unexpired token (key rotation, early
+// revocation) recovers transparently. It deliberately does NOT retry a request
+// carrying an X-GC-City-Write grant: that grant is single-use and bound to the
+// exact bytes, and the request editors (which mint it) do not re-run at the
+// transport layer — a fresh grant needs a fresh gc invocation. A body without
+// GetBody (non-replayable) is also left alone.
+type reauthRoundTripper struct {
+	base    http.RoundTripper
+	refresh TokenSource
+}
+
+func (rt *reauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
+		return resp, err
+	}
+	if req.Header.Get("X-GC-City-Write") != "" {
+		return resp, err // single-use grant; cannot re-mint here
+	}
+	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
+		return resp, err // non-replayable body
+	}
+	tok, rerr := rt.refresh()
+	if rerr != nil || strings.TrimSpace(tok) == "" {
+		return resp, err // keep the original 401
+	}
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, gerr := req.GetBody()
+		if gerr != nil {
+			return resp, err // cannot replay; keep the original 401 (untouched)
+		}
+		retry.Body = body
+	}
+	retry.Header.Set("Authorization", "Bearer "+tok)
+	// Committed to the retry: drain + close the first response, then re-send.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return rt.base.RoundTrip(retry)
 }
 
 // remoteTLSConfig builds the client TLS config from the options: a custom CA

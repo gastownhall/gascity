@@ -271,8 +271,9 @@ func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target exec
 		return orders.TriggerOptions{}, err
 	}
 	return orders.TriggerOptions{
-		ConditionDir: target.ScopeRoot,
-		ConditionEnv: env,
+		ConditionDir:     target.ScopeRoot,
+		ConditionEnv:     env,
+		ConditionTimeout: a.CheckTimeoutOrDefault(),
 	}, nil
 }
 

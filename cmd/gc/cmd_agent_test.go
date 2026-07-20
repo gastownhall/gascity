@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -360,6 +361,34 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 	}
 	if _, ok := resolveAgentIdentity(cfg, "worker-1", ""); ok {
 		t.Fatal("resolveAgentIdentity(worker-1) = true, want false for canonical singleton pool")
+	}
+}
+
+func TestResolveAgentIdentityUsesRigContextForScopeUnqualifiedControlDispatcher(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: config.ControlDispatcherAgentName, BindingName: "core"},
+			{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "fixture"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name          string
+		currentRigDir string
+		want          string
+	}{
+		{name: "rig context prefers rig scope", currentRigDir: "fixture", want: "fixture/core.control-dispatcher"},
+		{name: "city context keeps city scope", want: "core.control-dispatcher"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveAgentIdentity(cfg, "core.control-dispatcher", tc.currentRigDir)
+			if !ok {
+				t.Fatal("resolveAgentIdentity() did not find the control dispatcher")
+			}
+			if got.QualifiedName() != tc.want {
+				t.Fatalf("resolveAgentIdentity() = %q, want %q", got.QualifiedName(), tc.want)
+			}
+		})
 	}
 }
 
@@ -1534,5 +1563,17 @@ knob = "keep-me"
 	}
 	if string(data) != src {
 		t.Fatalf("pack.toml was rewritten despite refusal:\n%s", data)
+	}
+}
+
+// TestConfigWarnWriter verifies advisory config warnings are discarded in JSON
+// mode and passed to stderr otherwise (the C5 uniform-suppression rule).
+func TestConfigWarnWriter(t *testing.T) {
+	var stderr bytes.Buffer
+	if w := configWarnWriter(true, &stderr); w != io.Discard {
+		t.Fatalf("json mode: writer = %v, want io.Discard", w)
+	}
+	if w := configWarnWriter(false, &stderr); w != io.Writer(&stderr) {
+		t.Fatalf("human mode: writer must be stderr")
 	}
 }

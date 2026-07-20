@@ -13,8 +13,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
 
@@ -393,5 +395,92 @@ func TestRemoteClient_RefusesCrossHostRedirect(t *testing.T) {
 	}
 	if reachedSecond {
 		t.Fatal("request must NOT reach the cross-host redirect target")
+	}
+}
+
+// rtFunc adapts a function to an http.RoundTripper for reauth tests.
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestReauthRoundTripper_RetriesOn401 proves a 401 triggers one re-mint + retry
+// with the fresh bearer, recovering a token rejected before its expiry.
+func TestReauthRoundTripper_RetriesOn401(t *testing.T) {
+	var calls int
+	var sawAuth []string
+	base := rtFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		sawAuth = append(sawAuth, req.Header.Get("Authorization"))
+		code := http.StatusOK
+		if calls == 1 {
+			code = http.StatusUnauthorized
+		}
+		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader("x")), Header: http.Header{}}, nil
+	})
+	rt := &reauthRoundTripper{base: base, refresh: func() (string, error) { return "fresh", nil }}
+	req, _ := http.NewRequest("GET", "https://example/y", nil)
+	req.Header.Set("Authorization", "Bearer stale")
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (retry once)", calls)
+	}
+	if sawAuth[0] != "Bearer stale" || sawAuth[1] != "Bearer fresh" {
+		t.Fatalf("auth seq = %v, want [Bearer stale, Bearer fresh]", sawAuth)
+	}
+}
+
+// TestReauthRoundTripper_SkipsGrantedRequest proves a request carrying a
+// single-use X-GC-City-Write grant is NOT retried (the grant cannot be re-minted
+// at the transport layer).
+func TestReauthRoundTripper_SkipsGrantedRequest(t *testing.T) {
+	var calls int
+	base := rtFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+	})
+	rt := &reauthRoundTripper{base: base, refresh: func() (string, error) { return "fresh", nil }}
+	req, _ := http.NewRequest("POST", "https://example/y", nil)
+	req.Header.Set("X-GC-City-Write", "grant")
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (granted request must not retry)", calls)
+	}
+}
+
+// TestNewRemoteEventsClientAttachesAuth proves the events client (used by
+// `gc events --context`) carries the X-GC-Request CSRF header and an
+// Authorization bearer from opts.Token — so the events feed authenticates to a
+// remote edge like the REST client does.
+func TestNewRemoteEventsClientAttachesAuth(t *testing.T) {
+	var gotAuth, gotCSRF string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCSRF = r.Header.Get("X-GC-Request")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	gen, err := NewRemoteEventsClient(srv.URL, RemoteOptions{
+		Token: func() (string, error) { return "tok", nil },
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteEventsClient: %v", err)
+	}
+	if _, err := gen.StreamEvents(context.Background(), "mc", &genclient.StreamEventsParams{}); err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want Bearer tok", gotAuth)
+	}
+	if gotCSRF != "true" {
+		t.Fatalf("X-GC-Request = %q, want true", gotCSRF)
 	}
 }

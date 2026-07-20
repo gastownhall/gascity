@@ -13,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 func canonicalTestPath(path string) string {
@@ -31,21 +33,29 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
-func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, error) {
-	parent, err := os.MkdirTemp("/tmp", "gct-")
+// cmdGCTmuxSocketRoot returns a short-path tmux socket root under /tmp (not
+// testTempRoot, which can be an arbitrarily long macOS $TMPDIR path that
+// blows Unix socket path limits), plus the parent dir to remove at teardown
+// and the *os.File holding its alive sentinel. The sentinel must stay
+// referenced by the caller for the process lifetime so a concurrent sibling
+// run's orphan sweep (tmuxtest.SweepOrphanPIDPrefixedDirs, invoked inside
+// NewSocketParentDir) does not reclaim this still-active directory.
+func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, *os.File, error) {
+	parent, sentinel, err := tmuxtest.NewSocketParentDir("/tmp")
 	if err != nil {
 		root := filepath.Join(testTempRoot, "tmux")
 		if err := os.MkdirAll(root, 0o700); err != nil {
-			return "", "", fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
+			return "", "", nil, fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
 		}
-		return root, "", nil
+		return root, "", nil, nil
 	}
 	root := filepath.Join(parent, "tmux")
 	if err := os.MkdirAll(root, 0o700); err != nil {
+		_ = sentinel.Close()
 		_ = os.RemoveAll(parent)
-		return "", "", fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
+		return "", "", nil, fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
 	}
-	return root, parent, nil
+	return root, parent, sentinel, nil
 }
 
 // clearInheritedBeadsEnv prevents tests that explicitly write
@@ -104,17 +114,19 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
 	runTests func() int,
 	enumerate func() ([]DoltProcInfo, error),
 	sweepStale func(string) bool,
+	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
 ) int {
 	_ = sweepStale("startup")
+	sweepOrphanDirs()
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
@@ -227,6 +239,24 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	writeDoltLeakReport(os.Stderr, leaked)
 	reapDoltLeakProcesses(leaked)
 	return true
+}
+
+// sweepOrphanDoltStoreDirs runs the symptom-based fallback sweep
+// (internal/doltorphan.Sweep) over os.TempDir(), removing stray dolt store
+// directories regardless of what created them (ga-ntbpyb.2 acceptance
+// criterion 2). It composes with, but does not replace,
+// sweepStaleCmdGCTestDoltProcesses above: that reaps stale *processes* by
+// config-path heuristics; this catches the *directory* left behind when a
+// process is already gone by the time any process-level sweep runs (e.g. a
+// SIGKILLed test binary whose pid was later reused).
+func sweepOrphanDoltStoreDirs() {
+	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: os.TempDir()})
+	for _, dir := range result.Removed {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir %s\n", dir) //nolint:errcheck
+	}
+	for _, err := range result.Errors {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep error: %v\n", err) //nolint:errcheck
+	}
 }
 
 func cmdGCTestActiveRoots(currentRoot string) []string {

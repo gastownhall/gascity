@@ -612,11 +612,9 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 	}
 
 	var issuesTable string
-	if err := db.QueryRowContext(ctx, "SHOW TABLES LIKE 'issues'").Scan(&issuesTable); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
-		}
-		return fmt.Errorf("beads store not usable on external endpoint: %w", err)
+	issuesScanErr := db.QueryRowContext(ctx, "SHOW TABLES LIKE 'issues'").Scan(&issuesTable)
+	if err := validateExternalDoltIssuesTableScan(database, issuesScanErr); err != nil {
+		return err
 	}
 
 	databaseProjectID, ok, err := readDatabaseProjectID(ctx, db)
@@ -640,6 +638,16 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 		)
 	}
 	return nil
+}
+
+func validateExternalDoltIssuesTableScan(database string, scanErr error) error {
+	if scanErr == nil {
+		return nil
+	}
+	if scanErr == sql.ErrNoRows { //nolint:errorlint // Preserve the pre-extraction exact-sentinel contract.
+		return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
+	}
+	return fmt.Errorf("beads store not usable on external endpoint: %w", scanErr)
 }
 
 func readCanonicalProjectID(metadataPath string) (string, error) {

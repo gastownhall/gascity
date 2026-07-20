@@ -48,11 +48,33 @@ func ValidateDurations(cfg *City, source string) []string {
 				source, context, field, value, SessionSleepOff, err))
 		}
 	}
+	// checkPositive warns on both unparseable and non-positive values. Used for
+	// knobs where a zero or negative duration silently reverts to a default at
+	// runtime instead of failing loudly (e.g. an order override's
+	// check_timeout).
+	checkPositive := func(context, field, value string) {
+		if value == "" {
+			return
+		}
+		dur, err := time.ParseDuration(value)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %s %s = %q is not a valid duration: %v",
+				source, context, field, value, err))
+			return
+		}
+		if dur <= 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %s %s = %q must be a positive duration",
+				source, context, field, value))
+		}
+	}
 
 	// Session config durations.
 	check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
 	check("[session]", "nudge_ready_timeout", cfg.Session.NudgeReadyTimeout)
 	check("[session]", "nudge_retry_interval", cfg.Session.NudgeRetryInterval)
+	check("[session]", "nudge_poll_interval", cfg.Session.NudgePollInterval)
 	check("[session]", "nudge_lock_timeout", cfg.Session.NudgeLockTimeout)
 	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
 	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
@@ -73,6 +95,17 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
+	for i := range cfg.Orders.Overrides {
+		ov := cfg.Orders.Overrides[i]
+		if ov.CheckTimeout != nil {
+			// A non-positive check_timeout override parses cleanly but reverts
+			// the condition probe to the 10s default at dispatch, so surface it
+			// at config load like an unparseable typo.
+			checkPositive(
+				fmt.Sprintf("[[orders.overrides]] %q", ov.Name),
+				"check_timeout", *ov.CheckTimeout)
+		}
+	}
 
 	// Mail config durations.
 	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)

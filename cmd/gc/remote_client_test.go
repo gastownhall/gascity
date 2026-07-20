@@ -98,12 +98,53 @@ func TestCmdBeadsList_RemoteRoutesToServerNoFallback(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	_ = cmdBeadsList(nil, &out, &errb)
+	_ = cmdBeadsList("text", beadFilters{}, &out, &errb)
 
 	if !strings.Contains(gotPath, "/v0/city/mc/beads") {
 		t.Errorf("remote server path = %q, want it to include /v0/city/mc/beads", gotPath)
 	}
 	if gotReq != "true" {
 		t.Errorf("X-GC-Request = %q, want true", gotReq)
+	}
+}
+
+// TestRun_BeadsListContextFlagRoutesRemote proves the OTHER persistent remote
+// flag the DisableFlagParsing bug dropped — --context — now parses on a beads
+// command and routes remote. Unlike TestCmdBeadsList_RemoteRoutesToServerNoFallback
+// (which sets contextFlag directly, bypassing cobra), this drives --context
+// through run()'s real argv parsing — the path the fix repairs. --context takes
+// a different resolver branch (contexts.toml → targetFromContext) than --city-url,
+// so it needs its own end-to-end coverage.
+func TestRun_BeadsListContextFlagRoutesRemote(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	var gotPath string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var seed, seedErr bytes.Buffer
+	if code := doContextAdd(clientcontext.Context{Name: "prod", URL: srv.URL, City: "mc", InsecureSkipVerify: true}, &seed, &seedErr); code != 0 {
+		t.Fatalf("seed context: %q", seedErr.String())
+	}
+
+	prev := beadsListAPIClient
+	beadsListAPIClient = func(string) (*api.Client, string) {
+		t.Fatal("local beadsListAPIClient must not run under --context")
+		return nil, ""
+	}
+	t.Cleanup(func() { beadsListAPIClient = prev })
+
+	var out, errb bytes.Buffer
+	code := run([]string{"--context", "prod", "beads", "list"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(gotPath, "/v0/city/mc/beads") {
+		t.Fatalf("remote path = %q, want /v0/city/mc/beads", gotPath)
 	}
 }

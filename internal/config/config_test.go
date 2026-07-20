@@ -5995,6 +5995,46 @@ name = "a"
 	}
 }
 
+func TestParseSessionNudgePollInterval(t *testing.T) {
+	toml := `
+[workspace]
+name = "test"
+
+[session]
+nudge_poll_interval = "15s"
+
+[[agent]]
+name = "a"
+`
+	cfg, err := Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.NudgePollIntervalDuration(); got != 15*time.Second {
+		t.Errorf("NudgePollIntervalDuration() = %v, want 15s", got)
+	}
+}
+
+func TestNudgePollIntervalDurationUnsetOrInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"unset", ""},
+		{"unparseable", "banana"},
+		{"zero", "0s"},
+		{"negative", "-5s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SessionConfig{NudgePollInterval: tc.value}
+			if got := s.NudgePollIntervalDuration(); got != 0 {
+				t.Errorf("NudgePollIntervalDuration() = %v, want 0 (unconfigured)", got)
+			}
+		})
+	}
+}
+
 func TestAPIConfigParsing(t *testing.T) {
 	toml := `
 [workspace]

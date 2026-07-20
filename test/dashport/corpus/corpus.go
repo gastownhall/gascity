@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // Well-known ids/values the corpus seeds. Both layers assert against these, so
@@ -50,6 +51,22 @@ const (
 
 	// AnchorStepID is the seeded in-progress step bead under the run root.
 	AnchorStepID = "run-anchor.preflight"
+
+	// AnchorStepTitle is AnchorStepID's title (its beads.json Title). It is the
+	// assigned-bead title the agent-detail AgentBeadsAssigned panel renders and
+	// the dependency-line title the bead-detail modal renders for the edge into
+	// this step.
+	AnchorStepTitle = "preflight"
+
+	// AnchorReviewStepID is the second step under the run root, an OPEN task that
+	// "needs" AnchorStepID. The bead-detail modal renders that single upstream
+	// dependency ("Needs 1" → AnchorStepID · AnchorStepTitle), so it is the seeded
+	// bead whose modal proves the populated BeadDependencies branch.
+	AnchorReviewStepID = "run-anchor.review"
+
+	// AnchorReviewStepTitle is AnchorReviewStepID's title; it is the bead-detail
+	// modal heading when that bead's row is opened.
+	AnchorReviewStepTitle = "review"
 
 	// AnchorFormula is the seeded run's formula name; it is the run-detail
 	// title the run view renders.
@@ -106,6 +123,43 @@ const (
 	// MailFrom and MailTo are the seeded mail message's participants.
 	MailFrom = "builder"
 	MailTo   = "reviewer"
+
+	// AgentSessionSlug is the seeded session's alias AND session_name; it is the
+	// {slug} segment the agent-detail route resolves against (session_name → alias
+	// → id, in that order). It equals AgentName so the pool agent and its live
+	// session share one identity, and it matches the assignee on AnchorStepID so
+	// AgentBeadsAssigned renders that in-progress bead.
+	AgentSessionSlug = AgentName
+
+	// AgentSessionTemplate is the seeded session's template ("<rig>/<agent>"). The
+	// session-response rig is parsed from it (config.ParseQualifiedName), so the
+	// agent-detail AgentMetadata block renders Rig = RigName from this value.
+	AgentSessionTemplate = RigName + "/" + AgentName
+
+	// AgentSessionState is the seeded session's runtime state; it is the
+	// StatusBadge label the agent-detail header renders. "active" is the in-flight
+	// presentation state (a non-closed session with work on its hook).
+	AgentSessionState = "active"
+
+	// OperatorMailSubject is the subject of the seeded operator↔agent thread (two
+	// messages: an operator handoff and the agent's reply). It drives BOTH the
+	// mail thread-detail view (a two-message thread body render) and the
+	// agent-detail Chat thread pane (messages between the operator alias and the
+	// seeded agent). Distinct from MailSubject so each thread is individually
+	// addressable.
+	OperatorMailSubject = "adopt PR #42"
+
+	// OperatorMailFrom is the operator wire alias the dashboard treats as "me"
+	// (OperatorConfig.operatorWireAlias default). The agent-detail chat pane only
+	// surfaces messages between this alias (or "operator") and the agent, so the
+	// seeded thread uses it as the operator participant.
+	OperatorMailFrom = "human"
+
+	// OperatorMailBody and AgentReplyBody are the two message bodies in the
+	// operator↔agent thread; both the mail thread-detail render and the
+	// agent-detail chat pane assert these verbatim.
+	OperatorMailBody = "Please take the seeded adopt-pr run to completion and report back here."
+	AgentReplyBody   = "On it. The preflight step is running now; I will report when the review step opens."
 )
 
 // Fixtures is the loaded, seeded corpus plus the stores and providers a harness
@@ -156,6 +210,9 @@ type corpusBeads struct {
 func Load(dataDir, cityPath string) (*Fixtures, error) {
 	store, err := seedBeadStore(dataDir)
 	if err != nil {
+		return nil, err
+	}
+	if err := seedSession(store); err != nil {
 		return nil, err
 	}
 	rec, closeRec, err := seedEventLog(dataDir, cityPath)
@@ -259,12 +316,52 @@ func seedEventLog(dataDir, cityPath string) (events.Provider, func() error, erro
 	return rec, rec.Close, nil
 }
 
-// seedMail sends one message through the city bead store's mail provider so the
-// /mail feed and a thread read project a real message bead.
+// seedSession creates one active session bead in the city store so the sessions
+// list projects a live agent the agent-detail view (/agents/{slug}) can resolve.
+// Without a matching session, that route renders only its not-found shell.
+//
+// The session's alias/session_name is AgentSessionSlug (== AgentName), which is
+// both the route slug and the assignee on the in-progress AnchorStepID bead, so
+// AgentBeadsAssigned renders a real in-flight assignment. Its template encodes
+// the rig (config.ParseQualifiedName → RigName) for the AgentMetadata block, and
+// the operator↔agent thread seedMail sends drives the chat pane.
+func seedSession(store beads.Store) error {
+	sessStore := session.NewStore(beads.SessionStore{Store: store})
+	if _, err := sessStore.CreateSessionInfo(session.CreateSpec{
+		Title:     AgentName,
+		AgentName: AgentName,
+		Metadata: map[string]string{
+			"alias":        AgentSessionSlug,
+			"session_name": AgentSessionSlug,
+			"template":     AgentSessionTemplate,
+			"provider":     "test-agent",
+			"state":        AgentSessionState,
+		},
+	}); err != nil {
+		return fmt.Errorf("seed session: %w", err)
+	}
+	return nil
+}
+
+// seedMail sends messages through the city bead store's mail provider so the
+// /mail feed, a thread read, and the agent-detail chat pane project real message
+// beads. Two threads are seeded:
+//   - a single builder→reviewer handoff (MailSubject), the mail-list row; and
+//   - a two-message operator↔agent thread (OperatorMailSubject): an operator
+//     handoff plus the agent's reply, sharing one thread label. The pair backs
+//     the mail thread-detail render (both bodies) and the agent-detail chat pane
+//     (messages between the operator alias and the seeded agent).
 func seedMail(store beads.Store) (*beadmail.Provider, error) {
 	mp := beadmail.New(store)
 	if _, err := mp.Send(MailFrom, MailTo, MailSubject, "please adopt the seeded PR"); err != nil {
 		return nil, fmt.Errorf("seed mail: %w", err)
+	}
+	handoff, err := mp.Send(OperatorMailFrom, AgentSessionSlug, OperatorMailSubject, OperatorMailBody)
+	if err != nil {
+		return nil, fmt.Errorf("seed operator handoff mail: %w", err)
+	}
+	if _, err := mp.Reply(handoff.ID, AgentSessionSlug, OperatorMailSubject, AgentReplyBody); err != nil {
+		return nil, fmt.Errorf("seed agent reply mail: %w", err)
 	}
 	return mp, nil
 }

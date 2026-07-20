@@ -36,6 +36,9 @@ func remoteClientOptions(target *remoteTarget) (api.RemoteOptions, error) {
 				return api.RemoteOptions{}, err
 			}
 			opts.Token = cs.Token
+			// Force-mint on a 401 so a token rejected before its expiry (edge key
+			// rotation / early revocation) recovers without a fresh gc invocation.
+			opts.RefreshToken = cs.Refresh
 		}
 	}
 	if target.Token != "" {

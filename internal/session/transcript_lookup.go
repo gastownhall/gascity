@@ -1,13 +1,83 @@
 package session
 
 import (
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
+
+// ResolveKeyedTranscriptPath returns a transcript only when info carries a
+// stable provider session key that resolves to one exact file. It never uses a
+// workdir/newest-file fallback, so callers may safely attribute the result to
+// this session. The Info-based input lets list/read-model callers reuse their
+// already-loaded projection without issuing a per-session store Get.
+//
+// Codex needs a stricter path than workertranscript.DiscoverKeyedPath: copied
+// rollouts can share a UUID and workdir, so the bounded lookup refuses multiple
+// physical matches instead of choosing the newest. Gemini has no exact by-key
+// transcript lookup and therefore remains unsupported here.
+func ResolveKeyedTranscriptPath(info Info, searchPaths []string) string {
+	return ResolveKeyedTranscriptPaths([]Info{info}, searchPaths, "")[info.ID]
+}
+
+// ResolveKeyedTranscriptPaths is the page-oriented form of
+// ResolveKeyedTranscriptPath. Codex targets share one batched date-directory
+// scan, while providers with cheap direct keyed layouts resolve individually.
+// The returned map contains exact matches only, keyed by Info.ID; keyless,
+// unsupported, missing, and ambiguous rows are absent. fallbackProvider is
+// consulted only when an Info row has no persisted provider identity, which
+// preserves workspace-default behavior for legacy session rows.
+func ResolveKeyedTranscriptPaths(infos []Info, searchPaths []string, fallbackProvider string) map[string]string {
+	paths := make(map[string]string)
+	if len(searchPaths) == 0 {
+		searchPaths = sessionlog.DefaultSearchPaths()
+	}
+
+	var codexTargets []sessionlog.CodexSessionTarget
+	codexInfoIDs := make(map[string]string)
+	for i, info := range infos {
+		workDir := strings.TrimSpace(info.WorkDir)
+		sessionKey := strings.TrimSpace(info.SessionKey)
+		if workDir == "" || sessionKey == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(workDir); err == nil {
+			workDir = abs
+		}
+		provider := ProviderFamilyFromInfo(info, fallbackProvider)
+		switch sessionlog.ProviderFamily(provider) {
+		case "codex":
+			anchor := info.CreatedAt
+			if woke := parseTranscriptAnchorTime(info.LastWokeAt); !woke.IsZero() {
+				anchor = woke
+			}
+			key := strconv.Itoa(i)
+			codexTargets = append(codexTargets, sessionlog.CodexSessionTarget{
+				Key:       key,
+				WorkDir:   workDir,
+				SessionID: sessionKey,
+				NotBefore: info.CreatedAt,
+				NotAfter:  anchor,
+			})
+			codexInfoIDs[key] = info.ID
+		case "gemini":
+			continue
+		default:
+			if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey); path != "" {
+				paths[info.ID] = path
+			}
+		}
+	}
+	for key, path := range sessionlog.FindCodexSessionFilesByID(searchPaths, codexTargets) {
+		paths[codexInfoIDs[key]] = path
+	}
+	return paths
+}
 
 // anchoredCodexSession is a same-workdir Codex session paired with its resolved
 // start-time anchor and the tiebreak key used to order equal-start sessions.
