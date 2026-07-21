@@ -80,11 +80,11 @@ title = "Work {i}"
 
 	// Without the var the required compile-time range var is unresolved and
 	// compilation fails — proving the var is what makes the recipe compile.
-	if _, err := prepareOrderWispRecipe(context.Background(), store, a, []string{dir}, nil); err == nil {
+	if _, _, err := prepareOrderWispRecipe(context.Background(), store, a, []string{dir}, nil, ""); err == nil {
 		t.Fatal("prepareOrderWispRecipe with nil vars: expected failure for missing required range var n")
 	}
 
-	recipe, err := prepareOrderWispRecipe(context.Background(), store, a, []string{dir}, map[string]string{"n": "3"})
+	recipe, _, err := prepareOrderWispRecipe(context.Background(), store, a, []string{dir}, map[string]string{"n": "3"}, "")
 	if err != nil {
 		t.Fatalf("prepareOrderWispRecipe with vars: %v", err)
 	}
