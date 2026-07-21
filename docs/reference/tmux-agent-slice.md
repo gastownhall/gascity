@@ -50,13 +50,15 @@ reachable user manager, or an invalid slice — that instance logs one
 warning and every pane command it spawns runs unwrapped:
 
 ```
-tmux agent slice: GC_AGENT_SLICE="..." set but transient user scopes are unavailable; pane commands run unwrapped: ...
+systemd scope: GC_AGENT_SLICE="..." set but transient user scopes are unavailable; command runs unwrapped: ...
 ```
 
 Because operations like template session starts construct fresh provider
 instances, a persistently broken host repeats this warning as new
-instances probe, while long-lived instances (the orchestrator's reconcile
-loop) keep their first verdict until restart.
+instances probe. A long-lived instance (the orchestrator's reconcile loop)
+keeps a successful verdict for its lifetime, but re-probes after a failure
+once the retry window elapses, so a transient user-bus outage does not
+disable wrapping until restart.
 
 The probe runs in the gc process's environment, while pane commands execute
 with the tmux server's environment. gc normally spawns the tmux server

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The supervisor now keeps its ambient Dolt port aligned on the adopt path.**
+  `gc supervisor run` previously exported `GC_DOLT_PORT` /
+  `BEADS_DOLT_SERVER_PORT` only when it started the managed Dolt itself, so a
+  restart that adopted a surviving server left the fresh supervisor process with
+  no ambient port and children could transiently resolve bd at `127.0.0.1:0`.
+  The export now also runs when the port resolves without a start, and follows
+  the live port across respawns. Deployments that pinned a static port through a
+  systemd drop-in as a workaround can drop that drop-in.
+
+- **The tmux agent-slice warning changed prefix.** The probe moved into a shared
+  package, so the one-line fallback warning now reads `systemd scope: ...;
+  command runs unwrapped` rather than `tmux agent slice: ...; pane commands run
+  unwrapped`. A failed probe is also retried after a delay instead of latching
+  off for the life of the process. Update any log-scraping that matched the old
+  string.
+
+- **Managed Dolt servers are now placed in their own systemd user slice.**
+  Previously the managed `dolt sql-server` inherited the cgroup of whichever
+  process happened to trigger auto-start, so resource limits applied to a
+  shared, long-lived bead store by accident. gc now spawns it into
+  `gcdolt.slice` by default via a transient systemd scope, and the scope
+  watchdog clears the `oom_score_adj` the server inherits from systemd's user
+  manager. On hosts without `systemd-run` or a reachable user bus, gc warns once
+  and spawns unwrapped exactly as before, so this cannot prevent the server from
+  starting. Set `GC_DOLT_SLICE=""` to disable placement, or point it at a
+  different slice. Note that systemd nests `a-b.slice` under `a.slice`: a dolt
+  slice named as a child of your agent slice stays subject to that cgroup's
+  limits and defeats the purpose. See `docs/reference/managed-dolt-slice.md`.
+
 - **Every graph-owning store scope needs a `Dir`-matched `control-dispatcher`
   agent.** Control beads now route to the dispatcher that owns their store scope
   (city vs. rig) rather than falling back to the city dispatcher, and that

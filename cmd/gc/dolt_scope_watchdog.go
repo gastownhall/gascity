@@ -46,8 +46,13 @@ const (
 	managedDoltScopeWatchdogArg = "__gc-managed-dolt-scope-watchdog"
 
 	// managedDoltScopeWatchdogEnv disables the production scope watchdog
-	// when set to "0" (the managed server is then spawned directly, exactly
-	// the pre-watchdog behavior).
+	// when set to "0"; the managed server is then spawned directly by
+	// startManagedDoltSQLServer.
+	//
+	// That is no longer quite the pre-watchdog behavior: the direct spawn is
+	// still placed in the managed-dolt slice (see dolt_slice.go). What it
+	// loses is the oom_score_adj hardening window, which only a process
+	// dedicated to supervising dolt can hold open safely.
 	managedDoltScopeWatchdogEnv = "GC_DOLT_SCOPE_WATCHDOG"
 
 	// managedDoltScopeWatchdogIntervalEnv overrides the scope poll interval
@@ -134,7 +139,17 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	cmd := exec.Command(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
+	// Place the watchdog in the managed-dolt slice. Placing the watchdog is
+	// enough to place the server: the watchdog spawns dolt by fork, and cgroup
+	// membership is inherited, so both land in the same slice — which is also
+	// what we want operationally, since a watchdog is only useful while it
+	// shares the fate of the server it guards. `systemd-run --scope` execs in
+	// place, so cmd.Process.Pid below is still the watchdog's own PID and the
+	// WatchdogPID bookkeeping is unaffected.
+	argv := wrapManagedDoltArgv([]string{
+		watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath,
+	})
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
@@ -194,6 +209,26 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 	defer logFile.Close() //nolint:errcheck
+
+	// Clear the badness bonus this process inherited from systemd's user
+	// manager before forking the server, which inherits whatever we hold now.
+	// The watchdog exists only to supervise this one dolt server, so rewriting
+	// its own adjustment has no blast radius beyond the pair. Best-effort:
+	// unavailable on non-Linux and in restricted sandboxes, and never a reason
+	// to refuse to start.
+	switch previous, changed, err := applyManagedDoltOOMScoreAdj(); {
+	case err != nil:
+		// Logged, never fatal. An operator reading a future OOM kill needs to
+		// know the server was left at the inherited value rather than assume
+		// the hardening applied.
+		fmt.Fprintf(logFile, "gc scope watchdog: could not clear inherited oom_score_adj (%v); the dolt sql-server keeps the inherited value\n", err) //nolint:errcheck
+	case changed:
+		fmt.Fprintf(logFile, "gc scope watchdog: cleared inherited oom_score_adj %d -> %d for the dolt sql-server\n", //nolint:errcheck
+			previous, managedDoltOOMScoreAdj)
+	default:
+		fmt.Fprintf(logFile, "gc scope watchdog: oom_score_adj already at or below %d; the dolt sql-server inherits it unchanged\n", //nolint:errcheck
+			managedDoltOOMScoreAdj)
+	}
 
 	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile

@@ -19,8 +19,8 @@ func newSliceTestTmux(t *testing.T) (*Tmux, *fakeExecutor) {
 	exec := &fakeExecutor{}
 	tm := NewTmux()
 	tm.exec = exec
-	tm.agentSlice.probe = func(string) error { return nil }
-	tm.agentSlice.warn = &strings.Builder{}
+	tm.agentSlice.Probe = func(string) error { return nil }
+	tm.agentSlice.Warn = &strings.Builder{}
 	return tm, exec
 }
 
@@ -111,11 +111,11 @@ func TestAgentSliceProbeFailureFallsBackPlainWithWarning(t *testing.T) {
 	tm := NewTmux()
 	tm.exec = exec
 	var warnings strings.Builder
-	tm.agentSlice.probe = func(string) error {
+	tm.agentSlice.Probe = func(string) error {
 		probeCalls++
 		return errors.New("user manager not responding")
 	}
-	tm.agentSlice.warn = &warnings
+	tm.agentSlice.Warn = &warnings
 
 	if err := tm.NewSessionWithCommand("gc-test-fallback", "/work", "claude"); err != nil {
 		t.Fatalf("NewSessionWithCommand: %v", err)

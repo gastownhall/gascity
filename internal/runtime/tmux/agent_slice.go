@@ -1,16 +1,9 @@
 package tmux
 
 import (
-	"context"
-	"fmt"
-	"io"
-	"log"
 	"os"
-	"os/exec"
-	"strings"
-	"sync"
-	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime/systemdscope"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -27,10 +20,6 @@ import (
 // slice where resource weights can be applied. Default-off: when unset, pane
 // commands run unwrapped exactly as before.
 const AgentSliceEnv = "GC_AGENT_SLICE"
-
-// agentSliceProbeTimeout bounds the one-time systemd-run availability probe.
-// Test-overridable.
-var agentSliceProbeTimeout = 5 * time.Second
 
 // wrapperCommands lists pane-root wrapper binaries produced by pane-command
 // wrapping. A wrapped pane reports the wrapper as pane_current_command for
@@ -50,76 +39,31 @@ func isWrapperCommand(cmd string) bool {
 	return false
 }
 
-// probeAgentSliceSupport verifies that systemd-run exists and the systemd
-// user manager responds by running a no-op command in a transient scope on
-// the target slice. The probe runs in the gc process's environment, while
-// pane commands execute with the tmux server's environment. gc normally
-// spawns the tmux server itself, so the server inherits gc's environment
-// and the probe is representative — but a pre-existing server whose global
-// environment lacks a reachable user bus (XDG_RUNTIME_DIR,
-// DBUS_SESSION_BUS_ADDRESS) can still fail wrapped spawns after a
-// successful probe here.
-func probeAgentSliceSupport(slice string) error {
-	if _, err := exec.LookPath("systemd-run"); err != nil {
-		return fmt.Errorf("systemd-run not found: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), agentSliceProbeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "systemd-run",
-		"--user", "--scope", "--slice="+slice, "--collect", "--quiet", "--", "true")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return fmt.Errorf("systemd user manager probe failed: %w: %s", err, msg)
-		}
-		return fmt.Errorf("systemd user manager probe failed: %w", err)
-	}
-	return nil
-}
-
 // agentSliceWrapper decides whether pane commands are wrapped in a transient
-// systemd user scope. The availability probe runs at most once per Tmux
-// instance; on failure it warns once and all subsequent commands run
-// unwrapped (graceful fallback).
+// systemd user scope, deferring the systemd-run mechanics and the once-only
+// availability probe to systemdscope. Panes need the wrapper as a shell string
+// rather than argv, so the scope is built here from the shared constructor
+// instead of through systemdscope.Wrapper.Wrap.
+//
+// The probe caveat it inherits: the probe runs in the gc process's
+// environment, while pane commands execute with the tmux server's environment.
+// gc normally spawns the tmux server itself, so the server inherits gc's
+// environment and the probe is representative — but a pre-existing server
+// whose global environment lacks a reachable user bus (XDG_RUNTIME_DIR,
+// DBUS_SESSION_BUS_ADDRESS) can still fail wrapped spawns after a successful
+// probe here.
 type agentSliceWrapper struct {
-	probe func(slice string) error // test seam; nil means probeAgentSliceSupport
-	warn  io.Writer                // test seam; nil means the standard logger
-	once  sync.Once
-	ok    bool
+	systemdscope.Wrapper
 }
 
 // wrap returns command wrapped for the given slice, or command unchanged
 // when slice is empty, command is empty, or transient user scopes are
 // unavailable on this host.
 func (w *agentSliceWrapper) wrap(slice, command string) string {
-	if slice == "" || command == "" {
+	if command == "" || !w.Available(slice) {
 		return command
 	}
-	w.once.Do(func() {
-		probe := w.probe
-		if probe == nil {
-			probe = probeAgentSliceSupport
-		}
-		if err := probe(slice); err != nil {
-			msg := fmt.Sprintf("%s=%q set but transient user scopes are unavailable; pane commands run unwrapped: %v",
-				AgentSliceEnv, slice, err)
-			if w.warn != nil {
-				_, _ = fmt.Fprintln(w.warn, "gc: "+msg)
-			} else {
-				log.Printf("tmux agent slice: %s", msg)
-			}
-			return
-		}
-		w.ok = true
-	})
-	if !w.ok {
-		return command
-	}
-	return shellquote.Join([]string{
-		"systemd-run", "--user", "--scope", "--slice=" + slice,
-		"--collect", "--quiet", "--", "sh", "-c", command,
-	})
+	return shellquote.Join(systemdscope.Argv(slice, []string{"sh", "-c", command}))
 }
 
 // wrapPaneCommand applies the GC_AGENT_SLICE systemd user-scope wrapper to a

@@ -31,6 +31,7 @@ pages.
 | [Exec Session Provider](/reference/exec-session-provider) | The `exec` session runtime provider contract |
 | [Exec Beads Provider](/reference/exec-beads-provider) | The `exec` beads backend contract |
 | [Tmux Agent Slice](/reference/tmux-agent-slice) | `GC_AGENT_SLICE` systemd scoping for tmux panes |
+| [Managed Dolt Slice](/reference/managed-dolt-slice) | `GC_DOLT_SLICE` systemd scoping and OOM hardening for managed Dolt |
 
 ## Sibling Sections
 

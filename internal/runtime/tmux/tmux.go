@@ -271,12 +271,20 @@ type hiddenAttachClient struct {
 
 // NewTmux creates a new Tmux wrapper with default configuration.
 func NewTmux() *Tmux {
-	return &Tmux{cfg: DefaultConfig(), exec: realExecutor{}}
+	return newTmux(DefaultConfig())
+}
+
+// newTmux builds a Tmux with the agent-slice wrapper labeled, so a probe
+// failure names the knob an operator would have to change.
+func newTmux(cfg Config) *Tmux {
+	t := &Tmux{cfg: cfg, exec: realExecutor{}}
+	t.agentSlice.Label = AgentSliceEnv
+	return t
 }
 
 // NewTmuxWithConfig creates a new Tmux wrapper with the given configuration.
 func NewTmuxWithConfig(cfg Config) *Tmux {
-	return &Tmux{cfg: cfg, exec: realExecutor{}}
+	return newTmux(cfg)
 }
 
 func (t *Tmux) approvalDedup() *approvalDedup {

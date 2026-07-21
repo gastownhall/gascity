@@ -236,6 +236,7 @@
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
               "reference/tmux-agent-slice",
+              "reference/managed-dolt-slice",
               "reference/herdr-provider"
             ]
           },
