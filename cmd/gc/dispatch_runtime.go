@@ -599,8 +599,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
-	return runWorkflowServeFollowScopes(agentCfg, cityPath, []workflowServeScope{{storePath: storePath, workEnv: workEnv}}, workQuery, stderr)
+func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, stderr io.Writer) error {
+	return runWorkflowServeFollowScopes(agentCfg, cityPath, []workflowServeScope{{storePath: storePath}}, workQuery, stderr)
 }
 
 func runWorkflowServeFollowScopes(agentCfg config.Agent, cityPath string, scopes []workflowServeScope, workQuery string, stderr io.Writer) error {
