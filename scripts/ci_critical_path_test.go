@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,6 +59,8 @@ type ciCriticalPathStep struct {
 const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
 
 const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
+
+const productMetricsTesthookExtraTestEnv = `OBSERVABLE_TIMING_FILE="$${OBSERVABLE_TIMING_FILE}" OBSERVABLE_SHARD_ID="$${OBSERVABLE_SHARD_ID}" OBSERVABLE_VARIANT="$${OBSERVABLE_VARIANT}" OBSERVABLE_RUNNER_LABEL="$${OBSERVABLE_RUNNER_LABEL}" OBSERVABLE_COMMIT_SHA="$${GITHUB_SHA}" OBSERVABLE_WORKFLOW="$${GITHUB_WORKFLOW}" OBSERVABLE_RUN_ID="$${GITHUB_RUN_ID}" OBSERVABLE_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" OBSERVABLE_JOB="$${GITHUB_JOB}" OBSERVABLE_RUNNER_NAME="$${RUNNER_NAME}" OBSERVABLE_RUNNER_OS="$${RUNNER_OS}" OBSERVABLE_RUNNER_ARCH="$${RUNNER_ARCH}"`
 
 func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
@@ -168,6 +171,119 @@ func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 	}
 }
 
+func TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable(t *testing.T) {
+	root := repoRoot(t)
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const owners = "TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow"
+	focusedRecipe := regexp.MustCompile(`(?m)^test-productmetrics-testhook:\n\t([^\n]+)$`).FindStringSubmatch(string(makefile))
+	if len(focusedRecipe) != 2 {
+		t.Fatal("Makefile has no single-command test-productmetrics-testhook target")
+	}
+	for _, marker := range []string{
+		"scripts/go-test-observable test-productmetrics-testhook --",
+		"-tags productmetrics_testhook",
+		"-count=1",
+		"-run '^(" + owners + ")$$'",
+		"./cmd/gc",
+	} {
+		if !strings.Contains(focusedRecipe[1], marker) {
+			t.Errorf("test-productmetrics-testhook recipe missing %q:\n%s", marker, focusedRecipe[1])
+		}
+	}
+	serialRecipe := regexp.MustCompile(`(?m)^test-cmd-gc-process:\n((?:\t[^\n]+\n)+)`).FindStringSubmatch(string(makefile))
+	if len(serialRecipe) != 2 || !strings.Contains(serialRecipe[1], "$(MAKE) test-productmetrics-testhook") {
+		t.Errorf("serial test-cmd-gc-process must retain the focused tagged profile")
+	}
+
+	localRunner, err := os.ReadFile(filepath.Join(root, "scripts", "test-local-parallel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	localText := string(localRunner)
+	if !strings.Contains(localText, `add_job "productmetrics-testhook" "make test-productmetrics-testhook"`) {
+		t.Error("local parallel runner has no focused productmetrics-testhook jobspec")
+	}
+	if got := strings.Count(localText, "add_productmetrics_testhook_job"); got != 3 {
+		t.Errorf("local productmetrics-testhook helper references = %d, want definition plus cmd-gc-process and full", got)
+	}
+
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job, ok := wf.Jobs["cmd-gc-productmetrics-testhook"]
+	if !ok {
+		t.Fatal("CI workflow has no cmd-gc-productmetrics-testhook job")
+	}
+	if job.RunsOn != cmdGCProcessRunner || job.If != wf.Jobs["cmd-gc-process"].If {
+		t.Errorf("tagged job runner/route = (%q, %q), want (%q, %q)", job.RunsOn, job.If, cmdGCProcessRunner, wf.Jobs["cmd-gc-process"].If)
+	}
+	if !slices.Equal(job.Needs, []string{"runner-policy", "changes"}) {
+		t.Errorf("tagged job needs = %v", job.Needs)
+	}
+	var runStep, uploadStep *ciCriticalPathStep
+	var setupGo, setupJQ bool
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if strings.Contains(step.Uses, "setup-gascity-ubuntu") {
+			t.Error("focused tagged job must not install the full runtime/provider stack")
+		}
+		if strings.Contains(step.Uses, "actions/setup-go@") {
+			setupGo = true
+		}
+		if strings.TrimSpace(step.Run) == "command -v jq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq)" {
+			setupJQ = true
+		}
+		if strings.Contains(step.Run, "make test-productmetrics-testhook") {
+			runStep = step
+		}
+		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+			uploadStep = step
+		}
+	}
+	if !setupGo || !setupJQ || runStep == nil || uploadStep == nil {
+		t.Fatalf("tagged job Go/jq/run/upload = (%t, %t, %v, %v)", setupGo, setupJQ, runStep != nil, uploadStep != nil)
+	}
+	wantEnv := map[string]string{
+		"OBSERVABLE_TIMING_FILE":  "${{ runner.temp }}/cmd-gc-productmetrics-testhook.json",
+		"OBSERVABLE_SHARD_ID":     "cmd-gc-productmetrics-testhook",
+		"OBSERVABLE_VARIANT":      "linux-productmetrics-testhook",
+		"OBSERVABLE_RUNNER_LABEL": cmdGCProcessRunner,
+		"EXTRA_TEST_ENV":          productMetricsTesthookExtraTestEnv,
+	}
+	if !maps.Equal(runStep.Env, wantEnv) {
+		t.Errorf("tagged run env = %v, want %v", runStep.Env, wantEnv)
+	}
+	if strings.TrimSpace(runStep.Run) != `make test-productmetrics-testhook EXTRA_TEST_ENV="$EXTRA_TEST_ENV"` {
+		t.Errorf("tagged run command = %q", runStep.Run)
+	}
+	if uploadStep.If != "${{ always() }}" || uploadStep.With["path"] != wantEnv["OBSERVABLE_TIMING_FILE"] {
+		t.Errorf("tagged timing upload = if %q with %v", uploadStep.If, uploadStep.With)
+	}
+	required := wf.Jobs["ci-required"]
+	if !slices.Contains(required.Needs, "cmd-gc-productmetrics-testhook") {
+		t.Errorf("ci-required needs = %v, want tagged profile", required.Needs)
+	}
+	var permitsSkip bool
+	for _, step := range required.Steps {
+		permitsSkip = permitsSkip || (strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"cmd-gc-productmetrics-testhook"`))
+	}
+	if !permitsSkip {
+		t.Error("ci-required must allow the path-gated tagged profile to skip")
+	}
+
+	macJob := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cmd-gc-process"]
+	var macTaggedSteps []ciCriticalPathStep
+	for _, step := range macJob.Steps {
+		if strings.TrimSpace(step.Run) == "make test-productmetrics-testhook" {
+			macTaggedSteps = append(macTaggedSteps, step)
+		}
+	}
+	if len(macTaggedSteps) != 1 || macTaggedSteps[0].If != "${{ matrix.shard == 6 }}" {
+		t.Errorf("Mac tagged profile steps = %v, want one execution on historical shard 6", macTaggedSteps)
+	}
+}
+
 func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 	fixture := newGoTestShardFixture(t)
 	timingDir := filepath.Join(fixture.tmpDir, "timing artifacts")
@@ -235,7 +351,7 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
-	for _, jobName := range []string{"cmd-gc-process", "integration-shards", "docker-session"} {
+	for _, jobName := range []string{"cmd-gc-process", "cmd-gc-productmetrics-testhook", "integration-shards", "docker-session"} {
 		job, ok := wf.Jobs[jobName]
 		if !ok {
 			t.Errorf("CI workflow has no %s job", jobName)
@@ -253,6 +369,7 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 		"contract-acceptance-current",
 		"contract-radar-bd-head",
 		"cmd-gc-process",
+		"cmd-gc-productmetrics-testhook",
 		"integration-shards",
 	} {
 		job := wf.Jobs[jobName]

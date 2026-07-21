@@ -234,6 +234,9 @@ jobs:
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
         run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
+      - name: Run product metrics testhook profile
+        if: ${{ matrix.shard == 6 }}
+        run: make test-productmetrics-testhook
 
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:

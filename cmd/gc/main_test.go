@@ -214,7 +214,7 @@ func TestMain(m *testing.M) {
 		testscript.Main(m, map[string]func(){
 			"gc": func() {
 				configureTestscriptEnvDefaults()
-				os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+				os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 			},
 			"bd": bdTestCmd,
 		})
@@ -305,7 +305,7 @@ func TestMain(m *testing.M) {
 	testscript.Main(testRunner, map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
-			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+			os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 		},
 		"bd": bdTestCmd,
 	})

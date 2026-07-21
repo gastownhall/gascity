@@ -596,6 +596,50 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  cmd-gc-productmetrics-testhook:
+    name: cmd/gc product metrics testhook
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.cmd_gc_process == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Ensure timing renderer is available
+        run: command -v jq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq)
+      - name: Run product metrics testhook profile
+        env:
+          OBSERVABLE_TIMING_FILE: ${{ runner.temp }}/cmd-gc-productmetrics-testhook.json
+          OBSERVABLE_SHARD_ID: cmd-gc-productmetrics-testhook
+          OBSERVABLE_VARIANT: linux-productmetrics-testhook
+          OBSERVABLE_RUNNER_LABEL: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+          EXTRA_TEST_ENV: >-
+            OBSERVABLE_TIMING_FILE="$${OBSERVABLE_TIMING_FILE}"
+            OBSERVABLE_SHARD_ID="$${OBSERVABLE_SHARD_ID}"
+            OBSERVABLE_VARIANT="$${OBSERVABLE_VARIANT}"
+            OBSERVABLE_RUNNER_LABEL="$${OBSERVABLE_RUNNER_LABEL}"
+            OBSERVABLE_COMMIT_SHA="$${GITHUB_SHA}"
+            OBSERVABLE_WORKFLOW="$${GITHUB_WORKFLOW}"
+            OBSERVABLE_RUN_ID="$${GITHUB_RUN_ID}"
+            OBSERVABLE_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}"
+            OBSERVABLE_JOB="$${GITHUB_JOB}"
+            OBSERVABLE_RUNNER_NAME="$${RUNNER_NAME}"
+            OBSERVABLE_RUNNER_OS="$${RUNNER_OS}"
+            OBSERVABLE_RUNNER_ARCH="$${RUNNER_ARCH}"
+        run: make test-productmetrics-testhook EXTRA_TEST_ENV="$EXTRA_TEST_ENV"
+      - name: Upload product metrics testhook timing
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: timing-cmd-gc-productmetrics-testhook-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cmd-gc-productmetrics-testhook.json
+          if-no-files-found: error
+          retention-days: 7
+
   credential-provider-windows:
     name: Credential provider / Windows process tree
     needs:
@@ -1450,6 +1494,7 @@ jobs:
       - ci-preflight
       - ci-integration
       - cmd-gc-process
+      - cmd-gc-productmetrics-testhook
       - credential-provider-windows
       - worker-core-summary
       - worker-core-phase2-summary
@@ -1472,6 +1517,7 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           allow_skipped = {
               "cmd-gc-process",
+              "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",
               "pack-gate",
               "docker-session",
